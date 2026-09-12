@@ -73,6 +73,7 @@ const timeControl: JsonSchema = {
   additionalProperties: false,
 };
 
+/** Shared OpenAPI component schemas used by route contracts and generated API documentation. */
 export const COMPONENT_SCHEMAS: ComponentSchemas = {
   Error: {
     type: 'object',
@@ -182,6 +183,7 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
     required: [
       'id',
       'creatorId',
+      'creatorHandle',
       'variant',
       'speed',
       'timeControl',
@@ -194,6 +196,7 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
     properties: {
       id: { type: 'string', format: 'uuid' },
       creatorId: { type: 'string', format: 'uuid' },
+      creatorHandle: nullableString,
       variant: { type: 'string', enum: [...VARIANTS] },
       speed: { type: 'string' },
       timeControl: { $ref: '#/components/schemas/TimeControl' },

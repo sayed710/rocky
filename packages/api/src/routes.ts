@@ -10,7 +10,7 @@ import type { Variant } from '@chess-platform/core';
 import { FenError } from '@chess-platform/core';
 import { coreFenValidator } from './analysis/fen-validator.js';
 import type { TiebreakKey } from '@chess-platform/tournament';
-import type { RatingRow, TournamentsRepository } from '@chess-platform/persistence';
+import { type RatingRow, type TournamentsRepository } from '@chess-platform/persistence';
 import { AuthService } from './auth/service';
 import type { RequestMeta } from './auth/service';
 import { EMAIL_ADDRESS_PATTERN } from './email/address.js';
@@ -1192,6 +1192,14 @@ export function buildRouter(deps: RouteDeps): Router {
       }
 
       const seeks = await repos.seeks.listOpen(limit, ctx.auth?.userId);
+      // Fallback: If any seek lacks creatorHandle (e.g. custom or legacy repository), batch-resolve from users
+      const missingCreatorIds = [...new Set(seeks.filter((s) => !s.creatorHandle).map((s) => s.creatorId))];
+      if (missingCreatorIds.length > 0) {
+        const users = await repos.users.findByIds(missingCreatorIds);
+        const userMap = new Map(users.map((u) => [u.id, u.handle]));
+        const enrichedSeeks = seeks.map((s) => s.creatorHandle ? s : { ...s, creatorHandle: userMap.get(s.creatorId) ?? null });
+        return json(200, enrichedSeeks.map(seekView));
+      }
       return json(200, seeks.map(seekView));
     },
   );
@@ -1223,6 +1231,7 @@ export function buildRouter(deps: RouteDeps): Router {
       const seek = await repos.seeks.create({
         id: ids.next(),
         creatorId: identity.userId,
+        creatorHandle: identity.handle,
         variant,
         timeControl,
         rated,
@@ -1230,7 +1239,7 @@ export function buildRouter(deps: RouteDeps): Router {
         minRating: minRating ?? null,
         maxRating: maxRating ?? null,
       });
-      return json(201, seekView(seek));
+      return json(201, seekView({ ...seek, creatorHandle: seek.creatorHandle ?? identity.handle }));
     },
   );
 
@@ -1277,7 +1286,9 @@ export function buildRouter(deps: RouteDeps): Router {
     async (ctx) => {
       const identity = requireAuth(ctx);
       const seek = await repos.seeks.findById(ctx.params['id']!);
-      if (!seek || seek.gameId !== null) throw HttpError.notFound('seek not found or already accepted');
+      if (!seek || seek.gameId !== null) {
+        throw HttpError.notFound('seek not found or already accepted');
+      }
       if (seek.creatorId === identity.userId) throw HttpError.badRequest('cannot accept own seek');
 
       // Before the rating checks, deliberately. This variant comes from a stored row rather than from
@@ -1369,7 +1380,8 @@ export function buildRouter(deps: RouteDeps): Router {
       });
 
       if (!updatedSeek) throw HttpError.notFound('seek not found or already accepted');
-      return json(200, seekView(updatedSeek));
+      const creatorHandle = updatedSeek.creatorHandle ?? seek.creatorHandle ?? (await repos.users.findById(seek.creatorId))?.handle ?? null;
+      return json(200, seekView({ ...updatedSeek, creatorHandle }));
     },
   );
 

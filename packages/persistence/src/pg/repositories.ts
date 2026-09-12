@@ -44,8 +44,11 @@ import type {
   NewWebAuthnLoginChallenge,
   WebAuthnLoginChallengesRepository,
 } from '../repositories';
+import { SEEK_TTL_MS } from '../repositories';
 import { CURRENT_EVENT_VERSION } from '../event-store.js';
 import { DuplicateUserError, VersionConflictError } from '../errors';
+
+const SEEK_TTL_INTERVAL = `${Math.floor(SEEK_TTL_MS / 1000)} seconds`;
 
 // --- row shapes as returned by pg ------------------------------------------
 
@@ -102,6 +105,7 @@ interface GameDbRow {
 interface SeekDbRow {
   id: string;
   creator_id: string;
+  creator_handle?: string | null;
   variant: string;
   time_control: TimeControl;
   rated: boolean;
@@ -182,10 +186,17 @@ function toGame(r: GameDbRow): GameSummaryRow {
   };
 }
 
+/**
+ * Converts a database seek row with optional joined user handle into a domain SeekRow.
+ *
+ * @param r - The raw database seek row
+ * @returns Domain SeekRow with creatorHandle populated
+ */
 function toSeek(r: SeekDbRow): SeekRow {
   return {
     id: r.id,
     creatorId: r.creator_id,
+    creatorHandle: r.creator_handle ?? null,
     variant: r.variant as Variant,
     timeControl: r.time_control,
     rated: r.rated,
@@ -540,18 +551,34 @@ export class PgGamesRepository implements GamesRepository {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Return whether a repository identifier is a canonical hyphenated UUID. */
 function isCanonicalUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
 
+/**
+ * PostgreSQL implementation of SeeksRepository.
+ * Performs database-level joins to include creator handles in seek rows.
+ */
 export class PgSeeksRepository implements SeeksRepository {
   constructor(private readonly pool: Pool) {}
 
+  /**
+   * Inserts a new seek row and returns it with the creator's handle joined from users.
+   *
+   * @param seek - Parameters for the new seek
+   * @returns The newly created SeekRow
+   */
   async create(seek: NewSeek): Promise<SeekRow> {
     const res = await this.pool.query<SeekDbRow>(
-      `INSERT INTO seeks (id, creator_id, variant, time_control, rated, color, min_rating, max_rating)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)
-       RETURNING id, creator_id, variant, time_control, rated, color, min_rating, max_rating, created_at, game_id, accepted_at`,
+      `WITH inserted AS (
+         INSERT INTO seeks (id, creator_id, variant, time_control, rated, color, min_rating, max_rating)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+         RETURNING id, creator_id, variant, time_control, rated, color, min_rating, max_rating, created_at, game_id, accepted_at
+       )
+       SELECT i.id, i.creator_id, u.handle AS creator_handle, i.variant, i.time_control, i.rated, i.color, i.min_rating, i.max_rating, i.created_at, i.game_id, i.accepted_at
+       FROM inserted i
+       LEFT JOIN users u ON u.id = i.creator_id`,
       [
         seek.id,
         seek.creatorId,
@@ -566,38 +593,63 @@ export class PgSeeksRepository implements SeeksRepository {
     return toSeek(res.rows[0]!);
   }
 
+  /**
+   * Finds a seek by id, joining creator handle.
+   *
+   * @param id - The seek ID
+   * @returns The SeekRow if found, or null
+   */
   async findById(id: string): Promise<SeekRow | null> {
     const res = await this.pool.query<SeekDbRow>(
-      `SELECT id, creator_id, variant, time_control, rated, color, min_rating, max_rating, created_at, game_id, accepted_at
-       FROM seeks WHERE id = $1`,
+      `SELECT s.id, s.creator_id, u.handle AS creator_handle, s.variant, s.time_control, s.rated, s.color, s.min_rating, s.max_rating, s.created_at, s.game_id, s.accepted_at
+       FROM seeks s
+       LEFT JOIN users u ON u.id = s.creator_id
+       WHERE s.id = $1`,
       [id],
     );
     return res.rows[0] ? toSeek(res.rows[0]) : null;
   }
 
+  /**
+   * Lists unaccepted seeks within TTL and optionally the requesting creator's latest match receipt.
+   * Joins creator handles directly in SQL.
+   *
+   * @param limit - Maximum number of open seeks to return
+   * @param creatorId - Optional user ID of the requesting player
+   * @returns List of open SeekRow entities
+   */
   async listOpen(limit: number, creatorId?: string): Promise<SeekRow[]> {
     const cid = creatorId ?? '00000000-0000-0000-0000-000000000000';
     const res = await this.pool.query<SeekDbRow>(
       `(
-         SELECT id, creator_id, variant, time_control, rated, color, min_rating, max_rating, created_at, game_id, accepted_at
-         FROM seeks
-         WHERE creator_id = $2 AND game_id IS NOT NULL AND accepted_at > NOW() - interval '5 minutes'
-         ORDER BY accepted_at DESC, created_at DESC
+         SELECT s.id, s.creator_id, u.handle AS creator_handle, s.variant, s.time_control, s.rated, s.color, s.min_rating, s.max_rating, s.created_at, s.game_id, s.accepted_at
+         FROM seeks s
+         LEFT JOIN users u ON u.id = s.creator_id
+         LEFT JOIN games g ON g.id = s.game_id
+         WHERE s.creator_id = $2 AND s.game_id IS NOT NULL AND s.accepted_at > NOW() - interval '5 minutes' AND (g.id IS NULL OR g.ended_at IS NULL)
+         ORDER BY s.accepted_at DESC, s.created_at DESC
          LIMIT 1
        )
        UNION ALL
        (
-         SELECT id, creator_id, variant, time_control, rated, color, min_rating, max_rating, created_at, game_id, accepted_at
-         FROM seeks
-         WHERE game_id IS NULL
-         ORDER BY created_at ASC
+         SELECT s.id, s.creator_id, u.handle AS creator_handle, s.variant, s.time_control, s.rated, s.color, s.min_rating, s.max_rating, s.created_at, s.game_id, s.accepted_at
+         FROM seeks s
+         LEFT JOIN users u ON u.id = s.creator_id
+         WHERE s.game_id IS NULL AND s.created_at > NOW() - $3::interval
+         ORDER BY s.created_at ASC
          LIMIT $1
        )`,
-      [limit, cid],
+      [limit, cid, SEEK_TTL_INTERVAL],
     );
     return res.rows.map(toSeek);
   }
 
+  /**
+   * Removes an open seek by id.
+   *
+   * @param id - The seek ID
+   * @returns True if deleted, false if missing or already accepted
+   */
   async remove(id: string): Promise<boolean> {
     const res = await this.pool.query(
       'DELETE FROM seeks WHERE id = $1 AND game_id IS NULL RETURNING id',
@@ -606,25 +658,50 @@ export class PgSeeksRepository implements SeeksRepository {
     return res.rowCount === 1;
   }
 
+  /**
+   * Purges expired open seeks past SEEK_TTL_INTERVAL and old accepted receipts.
+   *
+   * @param at - Current timestamp for cleanup comparison
+   */
   async cleanup(at: Date): Promise<void> {
     await this.pool.query(
-      `DELETE FROM seeks WHERE game_id IS NOT NULL AND accepted_at <= $1 - interval '5 minutes'`,
-      [at]
+      `DELETE FROM seeks
+       WHERE (game_id IS NOT NULL AND accepted_at <= $1 - interval '5 minutes')
+          OR (game_id IS NULL AND created_at <= $1 - $2::interval)`,
+      [at, SEEK_TTL_INTERVAL],
     );
   }
 }
 
+/**
+ * PostgreSQL transaction coordinator for atomically accepting seeks.
+ */
 export class PgSeekAcceptor implements SeekAcceptor {
   constructor(private readonly pool: Pool) {}
 
+  /**
+   * Atomically claims a seek, creates game rows, and records initial game events.
+   *
+   * @param seekId - ID of seek being accepted
+   * @param gameId - ID of the new game
+   * @param events - Initial events to append
+   * @param gameStart - Metadata for game creation
+   * @returns The updated SeekRow with creator handle, or null if seek not available
+   */
   async accept(seekId: string, gameId: string, events: readonly GameEvent[], gameStart: GameStart): Promise<SeekRow | null> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       const seekRes = await client.query<SeekDbRow>(
-        `UPDATE seeks SET game_id = $1, accepted_at = NOW() WHERE id = $2 AND game_id IS NULL
-         RETURNING id, creator_id, variant, time_control, rated, color, min_rating, max_rating, created_at, game_id, accepted_at`,
-        [gameId, seekId]
+        `WITH updated AS (
+           UPDATE seeks SET game_id = $1, accepted_at = NOW()
+           WHERE id = $2 AND game_id IS NULL AND created_at > NOW() - $3::interval
+           RETURNING id, creator_id, variant, time_control, rated, color, min_rating, max_rating, created_at, game_id, accepted_at
+         )
+         SELECT u_seek.id, u_seek.creator_id, u.handle AS creator_handle, u_seek.variant, u_seek.time_control, u_seek.rated, u_seek.color, u_seek.min_rating, u_seek.max_rating, u_seek.created_at, u_seek.game_id, u_seek.accepted_at
+         FROM updated u_seek
+         LEFT JOIN users u ON u.id = u_seek.creator_id`,
+        [gameId, seekId, SEEK_TTL_INTERVAL],
       );
       if (seekRes.rowCount === 0) {
         await client.query('ROLLBACK');

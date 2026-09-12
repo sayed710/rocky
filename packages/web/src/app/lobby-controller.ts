@@ -19,6 +19,7 @@ import type {
   SeekColor,
   BotLevel,
   CreateBotGameRequest,
+  SocialPlayer,
 } from '../api/models.js';
 
 /** The outcome of a bot-game create: the new game's id, or why it failed. */
@@ -29,7 +30,7 @@ export type BotGameResult =
 /** Callbacks the bootstrap wires to DOM elements. */
 export interface LobbyCallbacks {
   /** Called when the seek list is refreshed (full replacement). */
-  onSeeks: (seeks: readonly SeekView[]) => void;
+  onSeeks: (seeks: readonly SeekView[], names?: ReadonlyMap<string, SocialPlayer>) => void;
   /** Called when a seek is being created (for UI spinner/disabled state). */
   onCreatePending: (pending: boolean) => void;
   /** Called when an error occurs (for UI error display). */
@@ -38,6 +39,7 @@ export interface LobbyCallbacks {
   onGameMatched?: (gameId: string) => void;
 }
 
+/** Construction-time wiring for {@link LobbyController}. */
 export interface LobbyControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: LobbyCallbacks;
@@ -69,8 +71,10 @@ export class LobbyController {
   private readonly _clearInterval: (id: ReturnType<typeof setInterval>) => void;
   private timerId: ReturnType<typeof setInterval> | null = null;
   private seeks: readonly SeekView[] = [];
+  private requestGeneration = 0;
   private disposed = false;
 
+  /** Wire up a new controller from options; does not start the refresh timer. */
   constructor(opts: LobbyControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
@@ -81,17 +85,34 @@ export class LobbyController {
     this._clearInterval = opts.clearInterval ?? ((id) => clearInterval(id));
   }
 
+  /** Returns true when this generation is still the live request and the controller is alive. */
+  private isCurrent(generation: number): boolean {
+    return !this.disposed && generation === this.requestGeneration;
+  }
+
   /** Current seek list (snapshot). */
   get currentSeeks(): readonly SeekView[] {
     return this.seeks;
   }
 
-  /** Fetch the seek list once and notify callbacks. */
+  /** Fetch and publish the seek list, then optionally enrich unresolved creator names. */
   async refresh(): Promise<void> {
     if (this.disposed) return;
+    const generation = ++this.requestGeneration;
     try {
       const seeks = await this.client.seeks.list();
-      if (this.disposed) return;
+      if (!this.isCurrent(generation)) return;
+
+      const openSeeks = seeks.filter((s) => s.gameId === null);
+      const namesMap = new Map<string, SocialPlayer>();
+
+      // Populate from REST seek.creatorHandle so normal runtime never depends on GraphQL
+      for (const seek of openSeeks) {
+        if (seek.creatorHandle) {
+          namesMap.set(seek.creatorId, { id: seek.creatorId, handle: seek.creatorHandle });
+        }
+      }
+
       this.seeks = seeks;
 
       // Look for a matched seek (our backend only returns them if we are the creator)
@@ -101,9 +122,37 @@ export class LobbyController {
       }
 
       // Filter out matched seeks before passing to the UI
-      this.callbacks.onSeeks(this.seeks.filter((s) => s.gameId === null));
+      this.callbacks.onSeeks(openSeeks, namesMap);
+
+      const unresolvedIds = [
+        ...new Set(openSeeks.filter((s) => !namesMap.has(s.creatorId)).map((s) => s.creatorId)),
+      ];
+      const graphql = this.client.graphql;
+      if (unresolvedIds.length > 0 && graphql?.resolvePlayers) {
+        void (async () => {
+          let gqlNames: ReadonlyMap<string, SocialPlayer>;
+          try {
+            gqlNames = await graphql.resolvePlayers(unresolvedIds);
+          } catch {
+            return;
+          }
+          if (!this.isCurrent(generation)) return;
+
+          const enrichedNames = new Map(namesMap);
+          for (const [id, player] of gqlNames) {
+            enrichedNames.set(id, player);
+          }
+          if (enrichedNames.size > namesMap.size) {
+            this.callbacks.onSeeks(openSeeks, enrichedNames);
+          }
+        })().catch((err: unknown) => {
+          if (this.isCurrent(generation)) {
+            this.callbacks.onError(err instanceof Error ? err.message : String(err));
+          }
+        });
+      }
     } catch (err) {
-      if (!this.disposed) {
+      if (this.isCurrent(generation)) {
         this.callbacks.onError(err instanceof Error ? err.message : String(err));
       }
     }
@@ -243,6 +292,7 @@ export class LobbyController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.requestGeneration++;
     this.stop();
     this.onDispose();
   }

@@ -276,9 +276,22 @@ export interface GamesRepository {
  */
 export type SeekColor = 'white' | 'black' | 'random';
 
+/**
+ * Deterministic TTL for open seeks (10 minutes). An unaccepted seek past this age
+ * expires, is omitted from open-seek listings, cannot be accepted, and is purged by cleanup.
+ */
+export const SEEK_TTL_MS = 10 * 60 * 1000;
+
+/** Persisted seek plus its optional acceptance receipt and denormalized creator handle. */
 export interface SeekRow {
   readonly id: string;
   readonly creatorId: string;
+  /**
+   * Human-readable handle of the seek creator. Resolved from user repository or database
+   * join, ensuring opponent identity is available without relying on optional GraphQL.
+   * Null when the creator is missing, unresolvable, or deleted.
+   */
+  readonly creatorHandle?: string | null;
   readonly variant: Variant;
   readonly timeControl: TimeControl;
   readonly rated: boolean;
@@ -290,9 +303,12 @@ export interface SeekRow {
   readonly acceptedAt: Date | null;
 }
 
+/** Values required to publish a new open seek before any acceptance receipt exists. */
 export interface NewSeek {
   readonly id: string;
   readonly creatorId: string;
+  /** Optional creator handle if known at seek creation time. */
+  readonly creatorHandle?: string | null;
   readonly variant: Variant;
   readonly timeControl: TimeControl;
   readonly rated: boolean;

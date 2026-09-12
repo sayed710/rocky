@@ -119,10 +119,15 @@ export function sessionView(row: SessionRow): SessionView {
   };
 }
 
-/** A lobby seek view, enriched with the derived speed bucket. */
+/** A lobby seek view, enriched with the derived speed bucket and creator display identity. */
 export interface SeekView {
   readonly id: string;
   readonly creatorId: string;
+  /**
+   * Human-readable handle of the seek creator. Allows the lobby UI to render opponent identity
+   * without relying on an optional GraphQL read layer. Null for unresolvable/deleted users.
+   */
+  readonly creatorHandle: string | null;
   readonly variant: string;
   readonly speed: string;
   readonly timeControl: SeekRow['timeControl'];
@@ -135,10 +140,17 @@ export interface SeekView {
   readonly acceptedAt: string | null;
 }
 
+/**
+ * Presenter projecting a database SeekRow into a JSON-serializable SeekView.
+ *
+ * @param row - The seek persistence row to project
+ * @returns Serialized seek view for HTTP responses
+ */
 export function seekView(row: SeekRow): SeekView {
   return {
     id: row.id,
     creatorId: row.creatorId,
+    creatorHandle: row.creatorHandle ?? null,
     variant: row.variant,
     speed: classifySpeed(row.timeControl),
     timeControl: row.timeControl,
