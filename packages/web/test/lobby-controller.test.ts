@@ -395,12 +395,17 @@ test('refresh delivers opponent handle in seeks and names when graphql is absent
 });
 
 test('refresh delivers opponent handle in seeks when graphql fails', async () => {
-  const seeks = [makeSeek({ id: 's1', creatorId: 'p1', creatorHandle: 'handle-p1' })];
+  const seeks = [
+    makeSeek({ id: 's1', creatorId: 'p1', creatorHandle: 'handle-p1' }),
+    makeSeek({ id: 's2', creatorId: 'p2', creatorHandle: null }),
+  ];
   const fake = makeFakeClient(seeks);
+  let resolvePlayersCalls = 0;
   const fakeWithFailingGql = {
     ...fake,
     graphql: {
       resolvePlayers: async () => {
+        resolvePlayersCalls += 1;
         throw new Error('GraphQL service 503 unavailable');
       },
     },
@@ -422,10 +427,12 @@ test('refresh delivers opponent handle in seeks when graphql fails', async () =>
   });
 
   await ctrl.refresh();
-  assert.equal(receivedSeeks.length, 1);
+  assert.equal(resolvePlayersCalls, 1);
+  assert.equal(receivedSeeks.length, 2);
   assert.equal(receivedSeeks[0]?.creatorHandle, 'handle-p1');
   assert.ok(receivedNames);
   assert.equal(receivedNames.get('p1')?.handle, 'handle-p1');
+  assert.equal(receivedNames.has('p2'), false);
 });
 
 
