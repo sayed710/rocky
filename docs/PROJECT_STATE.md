@@ -6,7 +6,7 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-cache cold-race test._
+_Last updated: 2026-09-07 — PR #51: backup/restore drill safety regressions._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
@@ -4122,6 +4122,13 @@ Per package: `cd packages/<pkg> && npm install && npm run build && npm test`.
 - **Tests**: `social-controller.test.ts` (15) plus 3 a11y assertions; 305/305 web tests pass. Eight rules mutation-tested, 8/8 caught — the pass caught a stale-load test that proved nothing (identical fakes on both loads meant it passed with the generation guard removed) and it was rewritten with a gated slow response.
 - **Recorded gaps**: GraphQL `Player` has no `teams` field despite ADR-0073's Context claiming it; five pre-existing design-system findings in `style.css` are reported, not repaired (fixing drift inside a feature PR is how a design-system change ships unreviewed).
 - Detailed in `docs/adr/0074-social-ui-profile.md`.
+
+## PR #51 — Backup/restore drill safety regressions — 2026-09-07
+
+- Fixed the restore tooling scope error and made every nonzero restore exit fatal. Both dump formats require the baseline's exported snapshot; unreadable tables fail the baseline instead of losing count coverage.
+- Bounded generated target names to 63 ASCII bytes, reject oversized explicit names and connection query overrides, escape catalog-derived table identifiers, and preserve row counts for special property names.
+- Reserve backup files exclusively and clean up only resources created by the drill. Preserve restore and cleanup errors together while continuing other cleanup. Redact connection secrets from diagnostics, including CLI argument errors.
+- Verify append-only protection and valid, ready HNSW indexes on their specific public-schema relations. Added database-boundary and disposable-file regressions for native/Docker custom/plain orchestration and failure paths; live integration remains opt-in and was not run against an existing database.
 
 
 

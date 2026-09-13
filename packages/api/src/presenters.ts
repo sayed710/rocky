@@ -119,10 +119,15 @@ export function sessionView(row: SessionRow): SessionView {
   };
 }
 
-/** A lobby seek view, enriched with the derived speed bucket. */
+/** A lobby seek view, enriched with the derived speed bucket and creator display identity. */
 export interface SeekView {
   readonly id: string;
   readonly creatorId: string;
+  /**
+   * Human-readable handle of the seek creator. Allows the lobby UI to render opponent identity
+   * without relying on an optional GraphQL read layer. Null for unresolvable/deleted users.
+   */
+  readonly creatorHandle: string | null;
   readonly variant: string;
   readonly speed: string;
   readonly timeControl: SeekRow['timeControl'];
@@ -135,10 +140,17 @@ export interface SeekView {
   readonly acceptedAt: string | null;
 }
 
+/**
+ * Presenter projecting a database SeekRow into a JSON-serializable SeekView.
+ *
+ * @param row - The seek persistence row to project
+ * @returns Serialized seek view for HTTP responses
+ */
 export function seekView(row: SeekRow): SeekView {
   return {
     id: row.id,
     creatorId: row.creatorId,
+    creatorHandle: row.creatorHandle ?? null,
     variant: row.variant,
     speed: classifySpeed(row.timeControl),
     timeControl: row.timeControl,
@@ -1469,6 +1481,12 @@ export interface MistakePredictionView {
   readonly depth: number;
 }
 
+/**
+ * Present one engine-backed mistake prediction through the public wire contract.
+ *
+ * Explicit `null` values are preserved, while `bestLine` is copied so the response does not share
+ * the source outcome's analysis array.
+ */
 export function mistakePredictionView(
   outcome: import('./analysis/mistake-prediction-service.js').MistakePredictionOutcome,
 ): MistakePredictionView {
@@ -1490,7 +1508,13 @@ export function mistakePredictionView(
   };
 }
 
-export interface GameReviewView {
+/**
+ * Stable wire representation of a completed-game review.
+ *
+ * Move counts cover only the requesting player's moves. A partial response contains the analyzed
+ * prefix and requires the `move_limit` cutoff reason; a complete response cannot expose one.
+ */
+export type GameReviewView = {
   readonly gameId: string;
   readonly variant: string;
   readonly playerColor: 'white' | 'black';
@@ -1505,13 +1529,18 @@ export interface GameReviewView {
     readonly classification: GameReviewClassification;
   }[];
   readonly summary: GameReviewSummary;
-}
+  readonly totalPlayerMoves: number;
+  readonly analyzedPlayerMoves: number;
+} & (
+  | { readonly isPartial: false; readonly cutoffReason?: never }
+  | { readonly isPartial: true; readonly cutoffReason: 'move_limit' }
+);
 
 /** Present the private service outcome through the stable public Game Review contract. */
 export function gameReviewView(
   outcome: import('./game-review/service.js').GameReviewOutcome,
 ): GameReviewView {
-  return {
+  const base = {
     gameId: outcome.gameId,
     variant: outcome.variant,
     playerColor: outcome.playerColor,
@@ -1526,7 +1555,13 @@ export function gameReviewView(
       classification: move.classification,
     })),
     summary: { ...outcome.summary },
+    totalPlayerMoves: outcome.totalPlayerMoves,
+    analyzedPlayerMoves: outcome.analyzedPlayerMoves,
   };
+
+  return outcome.isPartial
+    ? { ...base, isPartial: true, cutoffReason: outcome.cutoffReason }
+    : { ...base, isPartial: false };
 }
 
 export function moveExplanationView(

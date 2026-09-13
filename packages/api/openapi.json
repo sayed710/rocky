@@ -13333,6 +13333,7 @@
         "required": [
           "id",
           "creatorId",
+          "creatorHandle",
           "variant",
           "speed",
           "timeControl",
@@ -13350,6 +13351,12 @@
           "creatorId": {
             "type": "string",
             "format": "uuid"
+          },
+          "creatorHandle": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "variant": {
             "type": "string",
@@ -18119,166 +18126,373 @@
         "additionalProperties": false
       },
       "GameReviewResponse": {
-        "type": "object",
-        "required": [
-          "gameId",
-          "variant",
-          "playerColor",
-          "result",
-          "termination",
-          "moves",
-          "summary"
-        ],
-        "properties": {
-          "gameId": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "variant": {
-            "type": "string",
-            "enum": [
-              "standard",
-              "chess960",
-              "kingofthehill",
-              "atomic",
-              "crazyhouse",
-              "threecheck",
-              "horde",
-              "racingkings"
-            ]
-          },
-          "playerColor": {
-            "type": "string",
-            "enum": [
-              "white",
-              "black"
-            ]
-          },
-          "result": {
-            "type": "string",
-            "enum": [
-              "1-0",
-              "0-1",
-              "1/2-1/2"
-            ]
-          },
-          "termination": {
-            "type": "string"
-          },
-          "moves": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "required": [
-                "ply",
-                "san",
-                "move",
-                "fenBefore",
-                "assessment",
-                "classification"
-              ],
-              "properties": {
-                "ply": {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                "san": {
-                  "type": "string"
-                },
-                "move": {
-                  "type": "string"
-                },
-                "fenBefore": {
-                  "type": "string"
-                },
-                "assessment": {
-                  "$ref": "#/components/schemas/MistakePredictionResponse"
-                },
-                "classification": {
-                  "type": "string",
-                  "enum": [
-                    "brilliant",
-                    "great",
-                    "best",
-                    "excellent",
-                    "good",
-                    "book",
-                    "inaccuracy",
-                    "mistake",
-                    "miss",
-                    "blunder",
-                    "missed_win"
-                  ]
-                }
-              },
-              "additionalProperties": false
-            }
-          },
-          "summary": {
+        "oneOf": [
+          {
             "type": "object",
             "required": [
-              "brilliant",
-              "great",
-              "best",
-              "excellent",
-              "good",
-              "book",
-              "inaccuracy",
-              "mistake",
-              "miss",
-              "blunder",
-              "missed_win"
+              "gameId",
+              "variant",
+              "playerColor",
+              "result",
+              "termination",
+              "moves",
+              "summary",
+              "isPartial",
+              "totalPlayerMoves",
+              "analyzedPlayerMoves"
             ],
             "properties": {
-              "brilliant": {
+              "gameId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "variant": {
+                "type": "string",
+                "enum": [
+                  "standard",
+                  "chess960",
+                  "kingofthehill",
+                  "atomic",
+                  "crazyhouse",
+                  "threecheck",
+                  "horde",
+                  "racingkings"
+                ]
+              },
+              "playerColor": {
+                "type": "string",
+                "enum": [
+                  "white",
+                  "black"
+                ]
+              },
+              "result": {
+                "type": "string",
+                "enum": [
+                  "1-0",
+                  "0-1",
+                  "1/2-1/2"
+                ]
+              },
+              "termination": {
+                "type": "string"
+              },
+              "moves": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "ply",
+                    "san",
+                    "move",
+                    "fenBefore",
+                    "assessment",
+                    "classification"
+                  ],
+                  "properties": {
+                    "ply": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "san": {
+                      "type": "string"
+                    },
+                    "move": {
+                      "type": "string"
+                    },
+                    "fenBefore": {
+                      "type": "string"
+                    },
+                    "assessment": {
+                      "$ref": "#/components/schemas/MistakePredictionResponse"
+                    },
+                    "classification": {
+                      "type": "string",
+                      "enum": [
+                        "brilliant",
+                        "great",
+                        "best",
+                        "excellent",
+                        "good",
+                        "book",
+                        "inaccuracy",
+                        "mistake",
+                        "miss",
+                        "blunder",
+                        "missed_win"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "summary": {
+                "type": "object",
+                "required": [
+                  "brilliant",
+                  "great",
+                  "best",
+                  "excellent",
+                  "good",
+                  "book",
+                  "inaccuracy",
+                  "mistake",
+                  "miss",
+                  "blunder",
+                  "missed_win"
+                ],
+                "properties": {
+                  "brilliant": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "great": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "best": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "excellent": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "good": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "book": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "inaccuracy": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "mistake": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "miss": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "blunder": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "missed_win": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              },
+              "isPartial": {
+                "type": "boolean",
+                "enum": [
+                  false
+                ]
+              },
+              "totalPlayerMoves": {
                 "type": "integer",
                 "minimum": 0
               },
-              "great": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "best": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "excellent": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "good": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "book": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "inaccuracy": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "mistake": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "miss": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "blunder": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "missed_win": {
+              "analyzedPlayerMoves": {
                 "type": "integer",
                 "minimum": 0
               }
             },
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "gameId",
+              "variant",
+              "playerColor",
+              "result",
+              "termination",
+              "moves",
+              "summary",
+              "isPartial",
+              "totalPlayerMoves",
+              "analyzedPlayerMoves",
+              "cutoffReason"
+            ],
+            "properties": {
+              "gameId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "variant": {
+                "type": "string",
+                "enum": [
+                  "standard",
+                  "chess960",
+                  "kingofthehill",
+                  "atomic",
+                  "crazyhouse",
+                  "threecheck",
+                  "horde",
+                  "racingkings"
+                ]
+              },
+              "playerColor": {
+                "type": "string",
+                "enum": [
+                  "white",
+                  "black"
+                ]
+              },
+              "result": {
+                "type": "string",
+                "enum": [
+                  "1-0",
+                  "0-1",
+                  "1/2-1/2"
+                ]
+              },
+              "termination": {
+                "type": "string"
+              },
+              "moves": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "ply",
+                    "san",
+                    "move",
+                    "fenBefore",
+                    "assessment",
+                    "classification"
+                  ],
+                  "properties": {
+                    "ply": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "san": {
+                      "type": "string"
+                    },
+                    "move": {
+                      "type": "string"
+                    },
+                    "fenBefore": {
+                      "type": "string"
+                    },
+                    "assessment": {
+                      "$ref": "#/components/schemas/MistakePredictionResponse"
+                    },
+                    "classification": {
+                      "type": "string",
+                      "enum": [
+                        "brilliant",
+                        "great",
+                        "best",
+                        "excellent",
+                        "good",
+                        "book",
+                        "inaccuracy",
+                        "mistake",
+                        "miss",
+                        "blunder",
+                        "missed_win"
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "summary": {
+                "type": "object",
+                "required": [
+                  "brilliant",
+                  "great",
+                  "best",
+                  "excellent",
+                  "good",
+                  "book",
+                  "inaccuracy",
+                  "mistake",
+                  "miss",
+                  "blunder",
+                  "missed_win"
+                ],
+                "properties": {
+                  "brilliant": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "great": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "best": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "excellent": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "good": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "book": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "inaccuracy": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "mistake": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "miss": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "blunder": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "missed_win": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": false
+              },
+              "isPartial": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              },
+              "totalPlayerMoves": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "analyzedPlayerMoves": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cutoffReason": {
+                "type": "string",
+                "enum": [
+                  "move_limit"
+                ]
+              }
+            },
+            "additionalProperties": false
           }
-        },
-        "additionalProperties": false
+        ]
       },
       "CoachPuzzleView": {
         "type": "object",

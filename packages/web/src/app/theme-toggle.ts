@@ -5,24 +5,31 @@
  * key-value store (localStorage in production, a fake in tests). The
  * controller exposes callbacks for theme changes and provides the current
  * theme as a value. It never touches the DOM directly; the bootstrap layer
- * applies the `dark` class to the document element.
+ * applies the active theme class to the document element.
  */
 import type { KeyValueStorage } from '../net/session.js';
 
+/**
+ * Represents the available themes.
+ */
 export type Theme = 'light' | 'dark';
 
 /** Callbacks the bootstrap wires to DOM elements. */
 export interface ThemeCallbacks {
+  /** Invoked when the theme changes. */
   onTheme: (theme: Theme) => void;
 }
 
+/**
+ * Configuration options for the theme toggle controller.
+ */
 export interface ThemeToggleOptions {
   readonly callbacks: ThemeCallbacks;
   /** Injected storage (defaults to localStorage). */
   readonly storage?: KeyValueStorage;
   /** Storage key for the theme preference. */
   readonly storageKey?: string;
-  /** Initial theme override (takes precedence over storage/system). */
+  /** Initial theme override (takes precedence over storage and the product default). */
   readonly initial?: Theme;
 }
 
@@ -32,9 +39,9 @@ const DEFAULT_KEY = 'gambit-theme';
  * Manages the light/dark theme preference.
  *
  * The controller is framework-independent and DOM-free. It reads the initial
- * theme from (1) an explicit override, (2) the persisted preference, or
- * (3) the system's `prefers-color-scheme`. It persists changes to the
- * injected storage and notifies via callbacks.
+ * theme from (1) an explicit override, (2) the persisted user preference, or
+ * (3) the product's dark-first default. It persists changes to the injected
+ * storage and notifies via callbacks.
  */
 export class ThemeToggle {
   private readonly callbacks: ThemeCallbacks;
@@ -42,6 +49,11 @@ export class ThemeToggle {
   private readonly storageKey: string;
   private theme: Theme;
 
+  /**
+   * Initializes a new ThemeToggle instance.
+   *
+   * @param opts - Options including callbacks, storage, and initial overrides.
+   */
   constructor(opts: ThemeToggleOptions) {
     this.callbacks = opts.callbacks;
     this.storage = opts.storage;
@@ -77,6 +89,15 @@ export class ThemeToggle {
     this.callbacks.onTheme(this.theme);
   }
 
+  /**
+   * Resolves the initial theme.
+   *
+   * Explicit previously stored user choice wins. Otherwise, new and default
+   * users start in dark mode per the approved Rookzen dark-first product
+   * direction; system light preference does not override the dark default.
+   *
+   * @returns The resolved initial theme ('dark' or 'light').
+   */
   private resolveInitial(): Theme {
     // 1. Check persisted preference.
     if (this.storage) {
@@ -87,15 +108,7 @@ export class ThemeToggle {
         // Storage unavailable — fall through.
       }
     }
-    // 2. Check system preference.
-    if (typeof matchMedia !== 'undefined') {
-      try {
-        return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      } catch {
-        // matchMedia unavailable — fall through.
-      }
-    }
-    // 3. Default.
+    // 2. Rookzen is DARK-FIRST: system light preference must NOT override dark default.
     return 'dark';
   }
 }

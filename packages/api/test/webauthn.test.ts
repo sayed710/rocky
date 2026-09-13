@@ -129,6 +129,7 @@ test('WebAuthn registration and login', async (t) => {
     const optRes = await harness.json('POST', '/v1/auth/webauthn/register/options', { token });
     assert.strictEqual(optRes.status, 200);
     const options = optRes.body;
+    assert.strictEqual(options.rp.name, 'Rookzen');
     assert.strictEqual(options.rp.id, rpId);
     assert.strictEqual(options.authenticatorSelection.residentKey, 'required');
 

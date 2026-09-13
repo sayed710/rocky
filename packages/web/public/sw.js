@@ -1,5 +1,5 @@
 /**
- * Gambit service worker — app-shell caching for PWA installability.
+ * Rookzen service worker — app-shell caching for PWA installability.
  *
  * Strategy (option b — runtime caching, no build-time precache injection):
  * - Precache: only the manifest and index.html are precached on install.
@@ -25,9 +25,13 @@ const APP_SHELL = [
   '/',
   '/index.html',
   '/manifest.webmanifest',
+  '/icon.svg',
+  '/icon-192.png',
+  '/icon-512.png',
 ];
 
-const CACHE_VERSION = 'gambit-v3';
+// Retain the established internal prefix while invalidating pre-Rookzen cached static assets.
+const CACHE_VERSION = 'gambit-v4';
 const CACHE_NAME = CACHE_VERSION;
 
 self.addEventListener('install', (event) => {

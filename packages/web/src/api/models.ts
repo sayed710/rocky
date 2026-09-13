@@ -295,6 +295,11 @@ export interface CapabilitiesResponse {
 export interface SeekView {
   readonly id: string;
   readonly creatorId: string;
+  /**
+   * Human-readable handle of the seek creator. Allows the lobby UI to render opponent identity
+   * directly without requiring an optional GraphQL read layer. Null for unresolvable/deleted users.
+   */
+  readonly creatorHandle: string | null;
   readonly variant: Variant;
   readonly speed: string;
   readonly timeControl: TimeControl;
@@ -1232,6 +1237,7 @@ export type GameReviewClassification =
   | 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'book'
   | 'inaccuracy' | 'mistake' | 'miss' | 'blunder' | 'missed_win';
 
+/** A single assessed player move as returned by the game-review API. */
 export interface GameReviewMove {
   readonly ply: number;
   readonly san: string;
@@ -1241,7 +1247,13 @@ export interface GameReviewMove {
   readonly classification: GameReviewClassification;
 }
 
-export interface GameReviewResponse {
+/**
+ * The complete or partial game-review API response.
+ *
+ * Discriminated on `isPartial`: when false the review covers every player move; when true it was
+ * capped at the server move limit and `cutoffReason` names the cause.
+ */
+export type GameReviewResponse = {
   readonly gameId: string;
   readonly variant: string;
   readonly playerColor: 'white' | 'black';
@@ -1249,7 +1261,12 @@ export interface GameReviewResponse {
   readonly termination: string;
   readonly moves: readonly GameReviewMove[];
   readonly summary: Readonly<Record<GameReviewClassification, number>>;
-}
+  readonly totalPlayerMoves: number;
+  readonly analyzedPlayerMoves: number;
+} & (
+  | { readonly isPartial: false; readonly cutoffReason?: never }
+  | { readonly isPartial: true; readonly cutoffReason: 'move_limit' }
+);
 
 // --- Study Partner v1 -------------------------------------------------------
 

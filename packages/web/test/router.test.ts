@@ -32,6 +32,20 @@ test('parseRoute: unknown path → not-found', () => {
   assert.equal(parseRoute('/leaderboard/atomic').name, 'not-found');
 });
 
+test('parseRoute: supported routes reject unsupported extra segments', () => {
+  for (const pathname of [
+    '/game/g1/extra',
+    '/profile/alice/extra',
+    '/tournaments/t1/extra',
+    '/search/extra',
+    '/messages/c1/extra',
+    '/courses/openings/extra',
+    '/lessons/l1/extra',
+  ]) {
+    assert.deepEqual(parseRoute(pathname), { name: 'not-found' }, pathname);
+  }
+});
+
 test('routeToPath: lobby → /', () => {
   assert.equal(routeToPath({ name: 'lobby' }), '/');
 });

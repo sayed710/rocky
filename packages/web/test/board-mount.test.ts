@@ -62,6 +62,12 @@ test('remounting a board does not stack listeners on the same element', () => {
   assert.equal(flip.liveCount('click'), 0);
 });
 
+/**
+ * Extract the visible text from every coordinate label of the given kind
+ * (`"rank"` or `"file"`) from a rendered board's HTML string.
+ * Used to verify that coordinate labels appear in the correct order after
+ * board orientation changes.
+ */
 function coordinateValues(html: string, kind: 'rank' | 'file'): string[] {
   return [...html.matchAll(new RegExp(`cb-coordinate cb-${kind}[^>]*>([^<]+)<`, 'g'))]
     .map((match) => match[1]!);
@@ -192,6 +198,10 @@ function promotionBoardHarness() {
 }
 
 test('promotion cancellation stays lifecycle-safe across Escape, position sync, and destroy', () => {
+  const hadDocument = 'document' in globalThis;
+  const originalDocumentDesc = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const hadHTMLElement = 'HTMLElement' in globalThis;
+  const originalHTMLElementDesc = Object.getOwnPropertyDescriptor(globalThis, 'HTMLElement');
   const previousDocument = globalThis.document;
   const previousHTMLElement = globalThis.HTMLElement;
   const fen = '4k3/4P3/8/8/8/8/8/4K3 w - - 0 1';
@@ -288,7 +298,19 @@ test('promotion cancellation stays lifecycle-safe across Escape, position sync, 
     assert.equal(finalOverlay.removed, true);
   } finally {
     mounted.destroy();
-    Object.defineProperty(globalThis, 'document', { configurable: true, value: previousDocument });
-    Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: previousHTMLElement });
+    if (hadDocument && originalDocumentDesc) {
+      Object.defineProperty(globalThis, 'document', originalDocumentDesc);
+    } else if (hadDocument) {
+      (globalThis as Record<string, unknown>).document = previousDocument;
+    } else {
+      Reflect.deleteProperty(globalThis, 'document');
+    }
+    if (hadHTMLElement && originalHTMLElementDesc) {
+      Object.defineProperty(globalThis, 'HTMLElement', originalHTMLElementDesc);
+    } else if (hadHTMLElement) {
+      (globalThis as Record<string, unknown>).HTMLElement = previousHTMLElement;
+    } else {
+      Reflect.deleteProperty(globalThis, 'HTMLElement');
+    }
   }
 });

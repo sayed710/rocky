@@ -398,6 +398,23 @@ test('bootstrap without board element returns null board', () => {
   assert.equal(result.controller, null);
 });
 
+test('bootstrap does not mount the hidden fallback board on a not-found route', () => {
+  const originalLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', {
+    configurable: true,
+    value: { pathname: '/missing-page', search: '', hash: '' },
+  });
+
+  try {
+    const result = bootstrap(makeDoc(), makeDeps());
+    assert.equal(result.board, null);
+    assert.equal(result.controller, null);
+  } finally {
+    if (originalLocation) Object.defineProperty(globalThis, 'location', originalLocation);
+    else delete (globalThis as { location?: unknown }).location;
+  }
+});
+
 // ── bootstrap with game ID ──────────────────────────────────────────────
 
 test('bootstrap with game ID creates a GameController', () => {

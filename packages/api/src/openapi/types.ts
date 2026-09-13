@@ -25,7 +25,7 @@ export interface JsonSchema {
   readonly format?: string;
   readonly description?: string;
   /** `null` is admissible so a nullable enum can list it — see {@link nullable}. */
-  readonly enum?: readonly (string | number | null)[];
+  readonly enum?: readonly (string | number | boolean | null)[];
   readonly items?: JsonSchema;
   readonly properties?: Readonly<Record<string, JsonSchema>>;
   readonly required?: readonly string[];

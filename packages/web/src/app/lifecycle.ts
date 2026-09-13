@@ -86,7 +86,7 @@ export function createLifecycle(
           // bootstrap — so a single throw turns a navigation into a blank page *and* the leak this
           // module exists to prevent. Reported rather than swallowed: the failure is real, it is
           // just not the caller's to recover from mid-navigation.
-          console.error(`[Gambit] teardown failed for "${key}":`, err);
+          console.error(`[Rookzen] teardown failed for "${key}":`, err);
         }
       }
     }

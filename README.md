@@ -1,4 +1,4 @@
-# Gambit — an open-source chess platform
+# Rookzen — an open-source chess platform
 
 > **Product and brand context:** [Rookzen decision record and complete research archive (Arabic)](docs/PRODUCT_BRAND_CONTEXT_AR.md). Captures the owner's current direction, provisional identity, rejected alternatives, and the distinction between local implementation and shipped work.
 

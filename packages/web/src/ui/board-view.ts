@@ -24,6 +24,32 @@ import type { Premove } from '../core/premove.js';
 
 const PROMO_ROLES: readonly PromotionRole[] = ['q', 'r', 'b', 'n'];
 
+const PIECE_NAMES: Record<string, string> = {
+  p: 'pawn',
+  n: 'knight',
+  b: 'bishop',
+  r: 'rook',
+  q: 'queen',
+  k: 'king',
+};
+
+const COLOR_NAMES: Record<string, string> = {
+  w: 'white',
+  b: 'black',
+};
+
+/**
+ * Build the accessible label for a grid cell: square name plus piece description,
+ * or `"<sq>, empty"` when there is no piece. Screen readers announce this as the
+ * cell's name, so it must unambiguously identify both location and occupant.
+ */
+function squareAccessibleLabel(sq: Square, piece?: Piece): string {
+  if (!piece) return `${sq}, empty`;
+  const color = COLOR_NAMES[piece.color] ?? piece.color;
+  const role = PIECE_NAMES[piece.role] ?? piece.role;
+  return `${sq}, ${color} ${role}`;
+}
+
 /**
  * CSS class carrying a piece's image, e.g. `cb-p-wk`. The artwork itself (the
  * Cburnett SVG set) is bound to these classes in `style.css`; the renderer only
@@ -34,16 +60,26 @@ function pieceClass(color: string, role: string): string {
 }
 const DRAG_THRESHOLD = 6;
 
+/** A resolved user gesture: either a committed move or a queued premove. */
 export type ResolvedMove =
   | { readonly kind: 'move'; readonly move: Premove }
   | { readonly kind: 'premove'; readonly premove: Premove };
 
+/** Construction-time options for {@link BoardView}. */
 export interface BoardViewOptions {
   readonly interaction: BoardInteraction;
   readonly orientation?: Color;
   readonly onResult?: (result: ResolvedMove) => void;
 }
 
+/**
+ * DOM-rendering layer for the interactive chess board.
+ *
+ * Turns {@link BoardInteraction} state into a grid of ARIA-annotated cells and converts
+ * pointer/keyboard gestures back into interaction calls. All decisions (legality,
+ * promotion, premoves) live in the injected `BoardInteraction`; this class is
+ * presentation-only. Emits resolved moves/premoves via `onResult`.
+ */
 export class BoardView {
   private readonly root: HTMLElement;
   private readonly interaction: BoardInteraction;
@@ -72,6 +108,7 @@ export class BoardView {
     this.cancelPromotion();
   };
 
+  /** Mount the board into `root`, attaching all pointer and keyboard listeners. */
   constructor(root: HTMLElement, options: BoardViewOptions) {
     this.root = root;
     this.interaction = options.interaction;
@@ -80,6 +117,8 @@ export class BoardView {
     this.root.classList.add('cb-board');
     this.root.setAttribute('role', 'grid');
     this.root.setAttribute('aria-label', 'Chess board');
+    this.root.setAttribute('aria-rowcount', '8');
+    this.root.setAttribute('aria-colcount', '8');
     this.root.addEventListener('click', this.onClick);
     this.root.addEventListener('pointerdown', this.onPointerDown);
     this.root.addEventListener('keydown', this.onKeyDown);
@@ -118,15 +157,18 @@ export class BoardView {
     this.render();
   }
 
+  /** Inform the interaction layer whose turn it is, enabling or disabling move input. */
   setTurn(myTurn: boolean): void {
     this.interaction.setTurn(myTurn);
   }
 
+  /** Toggle the board between white-at-bottom and black-at-bottom orientations. */
   flip(): void {
     this.orientation = this.orientation === 'white' ? 'black' : 'white';
     this.render();
   }
 
+  /** The color whose pieces appear at the bottom of the board. */
   get orientationColor(): Color {
     return this.orientation;
   }
@@ -184,6 +226,28 @@ export class BoardView {
       case 'ArrowDown': nextRow += 1; break;
       case 'ArrowLeft': nextColumn -= 1; break;
       case 'ArrowRight': nextColumn += 1; break;
+      case 'Home':
+        if (event.ctrlKey) {
+          nextRow = 0;
+          nextColumn = 0;
+        } else {
+          nextColumn = 0;
+        }
+        break;
+      case 'End':
+        if (event.ctrlKey) {
+          nextRow = 7;
+          nextColumn = 7;
+        } else {
+          nextColumn = 7;
+        }
+        break;
+      case 'PageUp':
+        nextRow = 0;
+        break;
+      case 'PageDown':
+        nextRow = 7;
+        break;
       default: return;
     }
 
@@ -312,7 +376,8 @@ export class BoardView {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = `cb-promo-choice ${pieceClass(color, role)}`;
-      btn.setAttribute('aria-label', `Promote to ${role}`);
+      const roleName = PIECE_NAMES[role] ?? role;
+      btn.setAttribute('aria-label', `Promote to ${roleName}`);
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         this.closeOverlay();
@@ -366,19 +431,26 @@ export class BoardView {
     const legal = new Set(hl.legal);
     const premove = new Set(hl.premove);
     const last = new Set<Square>(hl.lastMove ?? []);
+    const lastMoveTo = hl.lastMove ? hl.lastMove[1] : null;
     const ranks = ranksForOrientation(this.orientation);
     const files = filesForOrientation(this.orientation);
     this.focusedSquare ??= toSquare(files[0]!, ranks[0]!);
     const activeElement = this.root.ownerDocument?.activeElement;
     const restoreSquareFocus = activeElement !== undefined
       && activeElement !== null
+      && typeof HTMLElement !== 'undefined'
       && activeElement instanceof HTMLElement
       && this.root.contains(activeElement)
       && activeElement.matches('.cb-sq[data-square]');
 
-    const cells: string[] = [];
-    for (const rank of ranks) {
-      for (const file of files) {
+    const rowElements: string[] = [];
+    for (let r = 0; r < ranks.length; r++) {
+      const rank = ranks[r]!;
+      const rowIndex = r + 1;
+      const cellElements: string[] = [];
+      for (let c = 0; c < files.length; c++) {
+        const file = files[c]!;
+        const colIndex = c + 1;
         const sq = toSquare(file, rank);
         const piece = this.pieces.get(sq);
         const classes = ['cb-sq', `cb-${squareShade(sq)}`];
@@ -386,7 +458,7 @@ export class BoardView {
         if (last.has(sq)) classes.push('cb-last');
         if (premove.has(sq)) classes.push('cb-premove');
         if (legal.has(sq)) classes.push(piece ? 'cb-capture' : 'cb-legal');
-        const label = piece ? `${sq} ${piece.color}${piece.role}` : sq;
+        const label = squareAccessibleLabel(sq, piece);
         const dragged = this.dragging && sq === this.dragFrom ? ' cb-dragging' : '';
         const inner = piece
           ? `<span class="cb-piece ${pieceClass(piece.color, piece.role)}${dragged}" aria-hidden="true"></span>`
@@ -400,13 +472,32 @@ export class BoardView {
         const fileCoordinate = rank === ranks[7]
           ? `<span class="cb-coordinate cb-file" aria-hidden="true">${String.fromCharCode(97 + file)}</span>`
           : '';
-        cells.push(
-          `<div class="${classes.join(' ')}" role="gridcell" data-square="${sq}" aria-label="${label}" aria-selected="${sq === hl.selected}" tabindex="${sq === this.focusedSquare ? '0' : '-1'}">${rankCoordinate}${fileCoordinate}${inner}</div>`,
+
+        const states: string[] = [];
+        if (legal.has(sq)) {
+          states.push(piece ? 'capture' : 'legal move');
+        }
+        if (last.has(sq)) {
+          states.push('last move');
+        }
+        if (premove.has(sq)) {
+          states.push('premove');
+        }
+        
+        const descAttr = states.length > 0 ? ` aria-description="${states.join(', ')}"` : '';
+
+        const currentAttr = sq === lastMoveTo ? ' aria-current="true"' : '';
+
+        cellElements.push(
+          `<div class="${classes.join(' ')}" role="gridcell" data-square="${sq}" aria-label="${label}" aria-selected="${sq === hl.selected}" aria-rowindex="${rowIndex}" aria-colindex="${colIndex}" tabindex="${sq === this.focusedSquare ? '0' : '-1'}"${descAttr}${currentAttr}>${rankCoordinate}${fileCoordinate}${inner}</div>`,
         );
       }
+      rowElements.push(
+        `<div class="cb-row" role="row" aria-rowindex="${rowIndex}">${cellElements.join('')}</div>`,
+      );
     }
     // Preserve the overlay across re-renders.
-    this.root.innerHTML = cells.join('');
+    this.root.innerHTML = rowElements.join('');
     if (this.overlay) this.root.appendChild(this.overlay);
     if (restoreSquareFocus) {
       this.root.querySelector<HTMLElement>(`[data-square="${this.focusedSquare}"]`)?.focus();

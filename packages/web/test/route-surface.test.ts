@@ -26,6 +26,7 @@ const SURFACE_IDS = [
   'study-chapter',
   'password-reset',
   'email-verify',
+  'not-found',
 ] as const;
 
 interface RouteCase {
@@ -62,7 +63,7 @@ const ROUTE_CASES: Readonly<Record<Route['name'], RouteCase>> = {
   },
   'password-reset': { route: { name: 'password-reset' }, activeSurfaceId: 'password-reset' },
   'email-verify': { route: { name: 'email-verify' }, activeSurfaceId: 'email-verify' },
-  'not-found': { route: { name: 'not-found' }, activeSurfaceId: null },
+  'not-found': { route: { name: 'not-found' }, activeSurfaceId: 'not-found' },
 };
 
 interface SurfaceDocument {

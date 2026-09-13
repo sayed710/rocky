@@ -75,8 +75,8 @@ test('the board supports roving focus, compatible Space activation, and keyboard
   await expect(board.locator('[data-square="e4"]')).toBeFocused();
   await page.keyboard.press('Space');
 
-  await expect(board.locator('[data-square="e4"]')).toHaveAttribute('aria-label', 'e4 wp');
-  await expect(board.locator('[data-square="e2"]')).toHaveAttribute('aria-label', 'e2');
+  await expect(board.locator('[data-square="e4"]')).toHaveAttribute('aria-label', 'e4, white pawn');
+  await expect(board.locator('[data-square="e2"]')).toHaveAttribute('aria-label', 'e2, empty');
   await expect(board.locator('[tabindex="0"]')).toHaveCount(1);
 
   await page.locator('#flip').click();

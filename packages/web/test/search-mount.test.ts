@@ -334,7 +334,7 @@ test('search on with an empty query prompts rather than searching', async () => 
     const mode = h.elements.get('search-mode');
     assert.ok(results);
     assert.ok(mode);
-    assert.match(resultsText(results), /Search Gambit/);
+    assert.match(resultsText(results), /Search Rookzen/);
     assert.deepEqual(renderedModes(mode), ['keyword', 'semantic', 'hybrid']);
     controller.dispose();
   } finally {

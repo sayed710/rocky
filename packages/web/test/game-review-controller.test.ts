@@ -30,6 +30,9 @@ function review(gameId: string): GameReviewResponse {
       blunder: 0,
       missed_win: 0,
     },
+    isPartial: false,
+    totalPlayerMoves: 0,
+    analyzedPlayerMoves: 0,
   };
 }
 

@@ -568,7 +568,7 @@ export class AuthService {
 
     return {
       challenge: challengeBase64,
-      rp: { name: 'Gambit', id: this.webauthn.rpId },
+      rp: { name: 'Rookzen', id: this.webauthn.rpId },
       user: { id: user.id, name: user.handle, displayName: user.handle },
       pubKeyCredParams: [
         { type: 'public-key', alg: -7 }

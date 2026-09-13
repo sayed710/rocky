@@ -1358,7 +1358,15 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         return row;
       }));
     }
-    if (gameReviewNoteEl) gameReviewNoteEl.textContent = 'Select a move to see the position before it was played.';
+    if (gameReviewNoteEl) {
+      if (review.isPartial) {
+        const analyzed = review.analyzedPlayerMoves ?? review.moves.length;
+        const total = review.totalPlayerMoves ?? analyzed;
+        gameReviewNoteEl.textContent = `Partial review: first ${analyzed} of ${total} player moves analyzed due to move limit. Select a move to see the position before it was played.`;
+      } else {
+        gameReviewNoteEl.textContent = 'Select a move to see the position before it was played.';
+      }
+    }
   };
 
   const gameReviewController = new GameReviewController({

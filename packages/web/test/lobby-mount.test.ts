@@ -40,7 +40,7 @@ class FakeDOMElement {
   checked = false;
   selected = false;
   name = '';
-  innerHTML = '';
+  private _innerHTML = '';
   dataset: Record<string, string> = {};
   readonly attributes = new Map<string, string>();
   readonly children: FakeDOMElement[] = [];
@@ -51,6 +51,18 @@ class FakeDOMElement {
 
   constructor(tagName: string) {
     this.tagName = tagName.toUpperCase();
+  }
+
+  get innerHTML(): string {
+    return this._innerHTML;
+  }
+
+  set innerHTML(value: string) {
+    this._innerHTML = value;
+    if (value === '') {
+      this.children.length = 0;
+      this._textContent = '';
+    }
   }
 
   get textContent(): string {
@@ -254,6 +266,7 @@ class FakeDOMElement {
   }
 }
 
+/** Match the limited selector grammar exercised by the lobby mount's fake DOM. */
 function matchesSelector(node: FakeDOMElement, selector: string): boolean {
   if (selector.startsWith('input[name="') && selector.endsWith('"]:checked')) {
     const name = selector.slice('input[name="'.length, -'"]:checked'.length);
@@ -266,8 +279,10 @@ function matchesSelector(node: FakeDOMElement, selector: string): boolean {
   if (selector === 'button') {
     return node.tagName === 'BUTTON';
   }
-  if (selector.startsWith('.')) {
-    return node.classList.contains(selector.slice(1));
+  if (selector.includes('.')) {
+    const [tag, ...classes] = selector.split('.');
+    if (tag && node.tagName.toLowerCase() !== tag.toLowerCase()) return false;
+    return classes.every((c) => node.classList.contains(c));
   }
   if (selector.startsWith('#')) {
     return node.id === selector.slice(1);
@@ -333,10 +348,12 @@ function createTestDoc(): {
   return { doc, elements };
 }
 
+/** Build a valid lobby seek fixture with concise per-test overrides. */
 function makeSeek(overrides: Partial<SeekView> = {}): SeekView {
   return {
     id: 'seek-1',
     creatorId: 'user-1',
+    creatorHandle: null,
     variant: 'standard' as Variant,
     speed: 'blitz',
     timeControl: { initialMs: 180_000, incrementMs: 2_000, delayMs: 0, kind: 'increment' },
@@ -582,7 +599,214 @@ test('renderSeeks: renders other player seek with accept Play button', () => {
   assert.ok(acceptBtn.classList.contains('primary'));
   assert.equal(acceptBtn.textContent, 'Play');
   assert.equal(acceptBtn.dataset['seekId'], 's-other');
-  assert.equal(acceptBtn.getAttribute('aria-label'), 'Accept seek');
+  assert.equal(acceptBtn.getAttribute('aria-label'), 'Play — accept seek');
+});
+
+test('renderSeeks: renders opponent identity with handle link when resolved', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const seek = makeSeek({
+    id: 's-other',
+    creatorId: 'user-them',
+    variant: 'standard',
+    speed: 'rapid',
+    color: 'white',
+    minRating: 1500,
+    maxRating: 1800,
+  });
+  const names = new Map([['user-them', { id: 'user-them', handle: 'grandmaster1' }]]);
+
+  renderSeeks(container, [seek], 'user-me', names);
+
+  const row = container.children[0];
+  assert.ok(row);
+  const opponent = row.querySelector('.seek-opponent');
+  assert.ok(opponent, 'seek row must render opponent identity');
+  const link = opponent.querySelector('a.row-link');
+  assert.ok(link, 'opponent handle should be a profile link');
+  assert.equal(link.textContent, 'grandmaster1');
+  assert.equal(link.getAttribute('href'), '/profile/grandmaster1');
+  assert.equal(link.getAttribute('data-route'), 'profile');
+
+  const details = row.querySelector('.seek-details');
+  assert.ok(details);
+  assert.ok(details.textContent?.includes('plays White'));
+  assert.ok(details.textContent?.includes('1500–1800'));
+
+  const acceptBtn = row.querySelector<FakeDOMElement>('.seek-accept');
+  assert.equal(acceptBtn?.getAttribute('aria-label'), 'Play — accept seek from grandmaster1');
+});
+
+test('renderSeeks: falls back to shortId when opponent handle is unresolved', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const seek = makeSeek({
+    id: 's-other',
+    creatorId: '01a073ad-6e90-7000-8f14-45b38ea957c1',
+    creatorHandle: null,
+  });
+
+  renderSeeks(container, [seek], 'user-me', new Map());
+
+  const row = container.children[0];
+  assert.ok(row);
+  const opponent = row.querySelector('.seek-opponent');
+  assert.ok(opponent);
+  assert.ok(opponent.textContent?.includes('01a073ad'));
+  const acceptBtn = row.querySelector<FakeDOMElement>('.seek-accept');
+  assert.equal(acceptBtn?.getAttribute('aria-label'), 'Play — accept seek');
+});
+
+test('renderSeeks: renders opponent handle directly from seek.creatorHandle when GraphQL is unavailable (empty names)', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const seek = makeSeek({
+    id: 's-other',
+    creatorId: 'user-them',
+    creatorHandle: 'challenger99',
+  });
+
+  // No names map passed (GraphQL unavailable or unconfigured)
+  renderSeeks(container, [seek], 'user-me');
+
+  const row = container.children[0];
+  assert.ok(row);
+  const opponent = row.querySelector('.seek-opponent');
+  assert.ok(opponent, 'seek row must render opponent identity');
+  const link = opponent.querySelector('a.row-link');
+  assert.ok(link, 'opponent handle should be a profile link');
+  assert.equal(link.textContent, 'challenger99');
+  assert.equal(link.getAttribute('href'), '/profile/challenger99');
+  assert.equal(link.getAttribute('data-route'), 'profile');
+
+  const acceptBtn = row.querySelector<FakeDOMElement>('.seek-accept');
+  assert.equal(acceptBtn?.getAttribute('aria-label'), 'Play — accept seek from challenger99');
+});
+
+test('renderSeeks: preserves the focused seek action across asynchronous name enrichment', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const seek = makeSeek({ id: 'focus-seek', creatorId: 'focus-opponent', creatorHandle: null });
+
+  renderSeeks(container, [seek], 'user-me');
+  const originalButton = container.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(originalButton);
+  originalButton.focus();
+
+  renderSeeks(
+    container,
+    [seek],
+    'user-me',
+    new Map([['focus-opponent', { id: 'focus-opponent', handle: 'resolved-player' }]]),
+  );
+
+  const replacementButton = container.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(replacementButton);
+  assert.notEqual(replacementButton, originalButton, 'enrichment performs a replacement render');
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    replacementButton,
+    'the equivalent action must regain focus after replacement',
+  );
+});
+
+test('renderSeeks: moves focus to the next row when the focused seek disappears', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const first = makeSeek({ id: 'seek-first', creatorId: 'opponent-first' });
+  const middle = makeSeek({ id: 'seek-middle', creatorId: 'opponent-middle' });
+  const last = makeSeek({ id: 'seek-last', creatorId: 'opponent-last' });
+
+  renderSeeks(container, [first, middle, last], 'user-me');
+  const middleButton = container.children[1]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(middleButton);
+  middleButton.focus();
+
+  renderSeeks(container, [first, last], 'user-me');
+
+  const nextButton = container.children[1]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(nextButton);
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    nextButton,
+  );
+});
+
+test('renderSeeks: moves focus to the previous row when the focused last seek disappears', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const first = makeSeek({ id: 'seek-first', creatorId: 'opponent-first' });
+  const last = makeSeek({ id: 'seek-last', creatorId: 'opponent-last' });
+
+  renderSeeks(container, [first, last], 'user-me');
+  const lastButton = container.children[1]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(lastButton);
+  lastButton.focus();
+
+  renderSeeks(container, [first], 'user-me');
+
+  const previousButton = container.children[0]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(previousButton);
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    previousButton,
+  );
+});
+
+test('renderSeeks: focuses the empty state only when list focus loses its final seek', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const seek = makeSeek({ id: 'seek-final', creatorId: 'opponent-final' });
+
+  renderSeeks(container, [seek], 'user-me');
+  const button = container.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(button);
+  button.focus();
+
+  renderSeeks(container, [], 'user-me');
+
+  assert.equal(container.getAttribute('role'), 'status');
+  assert.equal(container.getAttribute('tabindex'), '-1');
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    container,
+  );
+});
+
+test('renderSeeks: does not steal focus that was outside the seek list', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const outside = doc.createElement('button') as unknown as FakeDOMElement;
+  outside.focus();
+
+  renderSeeks(container, [makeSeek()], 'user-me');
+
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    outside,
+  );
+  assert.equal(outside.focusCount, 1);
+});
+
+test('renderSeeks: exposes valid list and listitem semantics when seeks exist', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+
+  renderSeeks(
+    container,
+    [
+      makeSeek({ id: 'seek-owned', creatorId: 'user-me' }),
+      makeSeek({ id: 'seek-other', creatorId: 'user-them' }),
+    ],
+    'user-me',
+  );
+
+  assert.equal(container.getAttribute('role'), 'list');
+  assert.equal(container.getAttribute('tabindex'), null);
+  assert.equal(container.children.length, 2);
+  for (const row of container.children) {
+    assert.equal(row.getAttribute('role'), 'listitem');
+  }
 });
 
 test('mountLobby: wires delegated cancel button click to lobby.cancelSeek', async () => {
@@ -707,6 +931,27 @@ test('mountLobby: session changes update PlayBotDialog without changing create-p
   assert.equal(playBotBtn.disabled, true);
   assert.equal(playBotBtn.title, 'Sign in to play the computer');
 
+});
+
+test('mountLobby: session restoration rerenders the latest seek list with correct ownership', async () => {
+  const { doc, elements } = createTestDoc();
+  const { client } = makeFakeClient({
+    seeks: [makeSeek({ id: 'owned-after-restore', creatorId: 'restored-user' })],
+    userId: null,
+  });
+  const mounted = mountTestLobby({ doc, client, isAuthenticated: () => client.session.current !== null });
+  await mounted.lobby.refresh();
+
+  const seekList = elements.get('seek-list')!;
+  assert.ok(seekList.querySelector('.seek-accept'), 'anonymous first render treats the row as another player');
+
+  (client.session as unknown as { current: unknown }).current = {
+    user: { id: 'restored-user', handle: 'restored-player' },
+  };
+  (mounted as unknown as { onSessionChange: () => void }).onSessionChange();
+
+  assert.ok(seekList.querySelector('.seek-cancel'), 'restored owner sees the cancel affordance');
+  assert.equal(seekList.querySelector('.seek-accept'), null, 'restored owner must not see a Play action');
 });
 
 test('mountLobby: failed play-bot submission keeps the dialog open with its error', async () => {

@@ -225,6 +225,9 @@ test('games.review posts to the completed-game review endpoint with authenticati
       brilliant: 0, great: 0, best: 1, excellent: 1, good: 0, book: 0,
       inaccuracy: 1, mistake: 0, miss: 0, blunder: 0, missed_win: 0,
     },
+    isPartial: false,
+    totalPlayerMoves: 0,
+    analyzedPlayerMoves: 0,
   };
   const t = new FakeTransport(
     () => json(200, auth('tok-A')),

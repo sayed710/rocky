@@ -34,6 +34,20 @@ const TERMINAL_REASONS = [
 ] as const;
 const RESULT_STRINGS = ['1-0', '0-1', '1/2-1/2'] as const;
 
+/** Build the strict all-classification summary shared by complete and partial review variants. */
+function gameReviewSummarySchema(): JsonSchema {
+  const properties: Record<string, JsonSchema> = {};
+  for (const classification of GAME_REVIEW_CLASSIFICATIONS) {
+    properties[classification] = { type: 'integer', minimum: 0 };
+  }
+  return {
+    type: 'object',
+    required: [...GAME_REVIEW_CLASSIFICATIONS],
+    properties,
+    additionalProperties: false,
+  };
+}
+
 /** Shared shape for a decided position's outcome. */
 const terminalOutcomeSchema: JsonSchema = {
   type: 'object',
@@ -59,6 +73,7 @@ const timeControl: JsonSchema = {
   additionalProperties: false,
 };
 
+/** Shared OpenAPI component schemas used by route contracts and generated API documentation. */
 export const COMPONENT_SCHEMAS: ComponentSchemas = {
   Error: {
     type: 'object',
@@ -168,6 +183,7 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
     required: [
       'id',
       'creatorId',
+      'creatorHandle',
       'variant',
       'speed',
       'timeControl',
@@ -180,6 +196,7 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
     properties: {
       id: { type: 'string', format: 'uuid' },
       creatorId: { type: 'string', format: 'uuid' },
+      creatorHandle: nullableString,
       variant: { type: 'string', enum: [...VARIANTS] },
       speed: { type: 'string' },
       timeControl: { $ref: '#/components/schemas/TimeControl' },
@@ -2162,43 +2179,96 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
   },
 
   GameReviewResponse: {
-    type: 'object',
-    required: ['gameId', 'variant', 'playerColor', 'result', 'termination', 'moves', 'summary'],
-    properties: {
-      gameId: { type: 'string', format: 'uuid' },
-      variant: { type: 'string', enum: [...VARIANTS] },
-      playerColor: { type: 'string', enum: ['white', 'black'] },
-      result: { type: 'string', enum: [...RESULT_STRINGS] },
-      termination: { type: 'string' },
-      moves: {
-        type: 'array',
-        items: {
-          type: 'object',
-          required: ['ply', 'san', 'move', 'fenBefore', 'assessment', 'classification'],
-          properties: {
-            ply: { type: 'integer', minimum: 1 },
-            san: { type: 'string' },
-            move: { type: 'string' },
-            fenBefore: { type: 'string' },
-            assessment: { $ref: '#/components/schemas/MistakePredictionResponse' },
-            classification: { type: 'string', enum: [...GAME_REVIEW_CLASSIFICATIONS] },
-          },
-          additionalProperties: false,
-        },
-      },
-      summary: {
+    oneOf: [
+      {
         type: 'object',
-        required: [...GAME_REVIEW_CLASSIFICATIONS],
-        properties: Object.fromEntries(
-          GAME_REVIEW_CLASSIFICATIONS.map((classification) => [
-            classification,
-            { type: 'integer', minimum: 0 },
-          ]),
-        ),
+        required: [
+          'gameId',
+          'variant',
+          'playerColor',
+          'result',
+          'termination',
+          'moves',
+          'summary',
+          'isPartial',
+          'totalPlayerMoves',
+          'analyzedPlayerMoves',
+        ],
+        properties: {
+          gameId: { type: 'string', format: 'uuid' },
+          variant: { type: 'string', enum: [...VARIANTS] },
+          playerColor: { type: 'string', enum: ['white', 'black'] },
+          result: { type: 'string', enum: [...RESULT_STRINGS] },
+          termination: { type: 'string' },
+          moves: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['ply', 'san', 'move', 'fenBefore', 'assessment', 'classification'],
+              properties: {
+                ply: { type: 'integer', minimum: 1 },
+                san: { type: 'string' },
+                move: { type: 'string' },
+                fenBefore: { type: 'string' },
+                assessment: { $ref: '#/components/schemas/MistakePredictionResponse' },
+                classification: { type: 'string', enum: [...GAME_REVIEW_CLASSIFICATIONS] },
+              },
+              additionalProperties: false,
+            },
+          },
+          summary: gameReviewSummarySchema(),
+          isPartial: { type: 'boolean', enum: [false] },
+          totalPlayerMoves: { type: 'integer', minimum: 0 },
+          analyzedPlayerMoves: { type: 'integer', minimum: 0 },
+        },
         additionalProperties: false,
       },
-    },
-    additionalProperties: false,
+      {
+        type: 'object',
+        required: [
+          'gameId',
+          'variant',
+          'playerColor',
+          'result',
+          'termination',
+          'moves',
+          'summary',
+          'isPartial',
+          'totalPlayerMoves',
+          'analyzedPlayerMoves',
+          'cutoffReason',
+        ],
+        properties: {
+          gameId: { type: 'string', format: 'uuid' },
+          variant: { type: 'string', enum: [...VARIANTS] },
+          playerColor: { type: 'string', enum: ['white', 'black'] },
+          result: { type: 'string', enum: [...RESULT_STRINGS] },
+          termination: { type: 'string' },
+          moves: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['ply', 'san', 'move', 'fenBefore', 'assessment', 'classification'],
+              properties: {
+                ply: { type: 'integer', minimum: 1 },
+                san: { type: 'string' },
+                move: { type: 'string' },
+                fenBefore: { type: 'string' },
+                assessment: { $ref: '#/components/schemas/MistakePredictionResponse' },
+                classification: { type: 'string', enum: [...GAME_REVIEW_CLASSIFICATIONS] },
+              },
+              additionalProperties: false,
+            },
+          },
+          summary: gameReviewSummarySchema(),
+          isPartial: { type: 'boolean', enum: [true] },
+          totalPlayerMoves: { type: 'integer', minimum: 0 },
+          analyzedPlayerMoves: { type: 'integer', minimum: 0 },
+          cutoffReason: { type: 'string', enum: ['move_limit'] },
+        },
+        additionalProperties: false,
+      },
+    ],
   },
 
   // --- Coach orchestration (ADR-0129) ---
