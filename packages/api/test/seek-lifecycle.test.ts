@@ -343,6 +343,51 @@ test('resolved null creator handles do not trigger repeated user lookups', async
   }
 });
 
+test('listOpen caches lazily resolved legacy creator handles', async () => {
+  const h = await startHarness();
+  try {
+    const creator = await h.makeUser('legacy-seek-creator', ['user']);
+    const known = await h.repos.seeks.create({
+      id: '018f0000-0000-7000-8000-000000000003',
+      creatorId: creator.userId,
+      creatorHandle: null,
+      variant: 'standard',
+      timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      rated: false,
+    });
+    const unknown = await h.repos.seeks.create({
+      id: '018f0000-0000-7000-8000-000000000004',
+      creatorId: '018f0000-0000-7000-8000-000000000097',
+      creatorHandle: null,
+      variant: 'standard',
+      timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      rated: false,
+    });
+
+    const storage = h.repos.seeks as unknown as { byId: Map<string, typeof known> };
+    storage.byId.set(known.id, { ...known, creatorHandle: undefined });
+    storage.byId.set(unknown.id, { ...unknown, creatorHandle: undefined });
+
+    let findByIdsCalls = 0;
+    const originalFindByIds = h.repos.users.findByIds.bind(h.repos.users);
+    h.repos.users.findByIds = async (ids) => {
+      findByIdsCalls += 1;
+      return originalFindByIds(ids);
+    };
+
+    const first = await h.repos.seeks.listOpen(10);
+    const second = await h.repos.seeks.listOpen(10);
+
+    assert.equal(findByIdsCalls, 1, 'legacy handle resolution must be cached after the first list');
+    for (const rows of [first, second]) {
+      assert.equal(rows.find((seek) => seek.id === known.id)?.creatorHandle, 'legacy-seek-creator');
+      assert.equal(rows.find((seek) => seek.id === unknown.id)?.creatorHandle, null);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
 test('accept defers entirely to storage layer to avoid split-brain under clock skew', async () => {
   const h = await startHarness();
   try {

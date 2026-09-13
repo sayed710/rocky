@@ -510,7 +510,9 @@ export class InMemorySeeksRepository implements SeeksRepository {
     const enrich = (s: SeekRow): SeekRow => {
       if (s.creatorHandle !== undefined) return s;
       const handle = userMap.get(s.creatorId);
-      return { ...s, creatorHandle: handle ?? null };
+      const enriched = { ...s, creatorHandle: handle ?? null };
+      this.byId.set(enriched.id, enriched);
+      return enriched;
     };
 
     const enrichedOpen = open.map(enrich);
