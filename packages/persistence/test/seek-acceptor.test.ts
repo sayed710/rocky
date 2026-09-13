@@ -17,8 +17,8 @@ test('PgSeeksRepository cleanup uses the database clock for expiry decisions', a
 
   await seeks.cleanup(new Date('2999-01-01T00:00:00.000Z'));
 
-  assert.match(capturedSql, /NOW\(\)/);
-  assert.equal(capturedValues.length, 1);
+  assert.match(capturedSql, /created_at\s*<=\s*NOW\(\)\s*-\s*\$1::interval/);
+  assert.deepEqual(capturedValues, ['600 seconds']);
 });
 
 test('PgSeekAcceptor preserves the transaction failure when rollback also fails', async () => {

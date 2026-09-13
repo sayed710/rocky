@@ -377,6 +377,10 @@ export class InMemorySeeksRepository implements SeeksRepository {
    * Build the deterministic seek store used by tests and local development.
    * The supplied clock owns every lifecycle timestamp; optional game and user
    * repositories enable receipt filtering and creator-handle enrichment.
+   *
+   * @param clock - Source of lifecycle time for creation, expiry, and claims
+   * @param games - Optional game lookup used to suppress receipts for ended games
+   * @param users - Optional user lookup used to enrich creator handles
    */
   constructor(
     private readonly clock: Clock = systemClock,
@@ -385,10 +389,12 @@ export class InMemorySeeksRepository implements SeeksRepository {
   ) {}
 
   /**
-   * Creates a new in-memory seek, resolving creatorHandle from the users repository if available.
+   * Create and persist a seek using the injected clock for its creation time.
+   * When the caller omits `creatorHandle`, the optional user repository resolves it;
+   * an unknown creator is stored explicitly as `null`.
    *
-   * @param seek - The seek specification
-   * @returns The created SeekRow with creatorHandle
+   * @param seek - Immutable seek attributes supplied by the caller
+   * @returns The stored row with lifecycle fields and a normalized creator handle
    */
   async create(seek: NewSeek): Promise<SeekRow> {
     let creatorHandle = seek.creatorHandle;
@@ -416,10 +422,11 @@ export class InMemorySeeksRepository implements SeeksRepository {
   }
 
   /**
-   * Looks up a seek by id, lazily enriching creatorHandle from the users repository if missing.
+   * Look up a seek by id and normalize legacy rows whose creator handle is undefined.
+   * Successful lazy resolution is cached, including an explicit `null` for an unknown user.
    *
    * @param id - Seek identifier
-   * @returns SeekRow if found, or null
+   * @returns The stored seek, or `null` when the id is absent
    */
   async findById(id: string): Promise<SeekRow | null> {
     const existing = this.byId.get(id);
@@ -434,11 +441,13 @@ export class InMemorySeeksRepository implements SeeksRepository {
   }
 
   /**
-   * Lists active unaccepted seeks within TTL, enriching with creatorHandle.
+   * List active unaccepted seeks in insertion order and enrich their creator handles.
+   * When `creatorId` is supplied, the creator's newest still-active acceptance receipt
+   * is prepended; expired seeks and receipts for ended games are excluded.
    *
    * @param limit - Maximum number of open seeks to return
-   * @param creatorId - Optional user ID of the requesting creator
-   * @returns Active open seeks, including latest match receipt for creatorId if active
+   * @param creatorId - Optional requesting creator whose latest receipt should be included
+   * @returns Active open seeks, optionally preceded by the creator's latest valid receipt
    */
   async listOpen(limit: number, creatorId?: string): Promise<SeekRow[]> {
     const now = this.clock.now();
@@ -510,6 +519,12 @@ export class InMemorySeeksRepository implements SeeksRepository {
     return [enrich(latestCandidate), ...enrichedOpen];
   }
 
+  /**
+   * Remove an unaccepted seek while preserving accepted rows as match receipts.
+   *
+   * @param id - Seek identifier
+   * @returns `true` only when an open seek existed and was removed
+   */
   async remove(id: string): Promise<boolean> {
     const existing = this.byId.get(id);
     if (!existing || existing.gameId !== null) return false;
