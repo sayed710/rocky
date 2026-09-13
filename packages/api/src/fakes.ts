@@ -433,7 +433,10 @@ export class InMemorySeeksRepository implements SeeksRepository {
     if (!existing) return null;
     if (existing.creatorHandle === undefined && this.users) {
       const user = await this.users.findById(existing.creatorId);
-      const enriched = { ...existing, creatorHandle: user?.handle ?? null };
+      const current = this.byId.get(id);
+      if (!current) return null;
+      if (current.creatorHandle !== undefined) return current;
+      const enriched = { ...current, creatorHandle: user?.handle ?? null };
       this.byId.set(id, enriched);
       return enriched;
     }

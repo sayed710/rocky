@@ -388,10 +388,10 @@ test('listOpen caches lazily resolved legacy creator handles', async () => {
   }
 });
 
-test('lazy handle resolution cannot resurrect a concurrently removed seek', async () => {
+test('findById lazy handle resolution cannot resurrect a concurrently removed seek', async () => {
   const h = await startHarness();
   try {
-    const creator = await h.makeUser('removed-legacy-seek-creator', ['user']);
+    const creator = await h.makeUser('removed-find-legacy-seek-creator', ['user']);
     const seek = await h.repos.seeks.create({
       id: '018f0000-0000-7000-8000-000000000005',
       creatorId: creator.userId,
@@ -407,6 +407,53 @@ test('lazy handle resolution cannot resurrect a concurrently removed seek', asyn
     const lookupStarted = new Promise<void>((resolve) => { signalLookupStarted = resolve; });
     let releaseLookup!: () => void;
     const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const originalFindById = h.repos.users.findById.bind(h.repos.users);
+    h.repos.users.findById = async (id) => {
+      signalLookupStarted();
+      await lookupGate;
+      return originalFindById(id);
+    };
+
+    const pendingFind = h.repos.seeks.findById(seek.id);
+    await lookupStarted;
+    assert.equal(await h.repos.seeks.remove(seek.id), true);
+    releaseLookup();
+
+    assert.equal(await pendingFind, null);
+    assert.equal(storage.byId.has(seek.id), false);
+  } finally {
+    await h.close();
+  }
+});
+
+test('listOpen lazy handle resolution preserves concurrent lifecycle changes', async () => {
+  const h = await startHarness();
+  try {
+    const creator = await h.makeUser('removed-legacy-seek-creator', ['user']);
+    const removedSeek = await h.repos.seeks.create({
+      id: '018f0000-0000-7000-8000-000000000006',
+      creatorId: creator.userId,
+      creatorHandle: null,
+      variant: 'standard',
+      timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      rated: false,
+    });
+    const claimedSeek = await h.repos.seeks.create({
+      id: '018f0000-0000-7000-8000-000000000007',
+      creatorId: creator.userId,
+      creatorHandle: null,
+      variant: 'standard',
+      timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      rated: false,
+    });
+    const storage = h.repos.seeks as unknown as { byId: Map<string, typeof removedSeek> };
+    storage.byId.set(removedSeek.id, { ...removedSeek, creatorHandle: undefined });
+    storage.byId.set(claimedSeek.id, { ...claimedSeek, creatorHandle: undefined });
+
+    let signalLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => { signalLookupStarted = resolve; });
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
     const originalFindByIds = h.repos.users.findByIds.bind(h.repos.users);
     h.repos.users.findByIds = async (ids) => {
       signalLookupStarted();
@@ -416,11 +463,17 @@ test('lazy handle resolution cannot resurrect a concurrently removed seek', asyn
 
     const pendingList = h.repos.seeks.listOpen(10);
     await lookupStarted;
-    assert.equal(await h.repos.seeks.remove(seek.id), true);
+    assert.equal(await h.repos.seeks.remove(removedSeek.id), true);
+    const acceptedAt = new Date(h.clock.now());
+    const gameId = '018f0000-0000-7000-8000-000000000008';
+    assert.ok(h.repos.seeks._claim(claimedSeek.id, gameId, acceptedAt));
     releaseLookup();
     await pendingList;
 
-    assert.equal(await h.repos.seeks.findById(seek.id), null);
+    assert.equal(storage.byId.has(removedSeek.id), false);
+    const storedClaim = storage.byId.get(claimedSeek.id);
+    assert.equal(storedClaim?.gameId, gameId);
+    assert.deepEqual(storedClaim?.acceptedAt, acceptedAt);
   } finally {
     await h.close();
   }
