@@ -2,7 +2,7 @@
 
 ## Current status
 
-The audit and direction phase is complete. Production implementation has not started, and no permanent visual direction has been approved.
+The audit and direction phase is complete. General Rookzen production implementation has begun with foundational branding, design tokens, and the play-first web shell. The specific hybrid proposed here has neither been approved as the permanent visual direction nor started as a dedicated implementation.
 
 ## Explored directions
 
