@@ -13333,6 +13333,7 @@
         "required": [
           "id",
           "creatorId",
+          "creatorHandle",
           "variant",
           "speed",
           "timeControl",
@@ -13350,6 +13351,12 @@
           "creatorId": {
             "type": "string",
             "format": "uuid"
+          },
+          "creatorHandle": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "variant": {
             "type": "string",

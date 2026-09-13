@@ -247,6 +247,7 @@ export function bootstrap(
   let selfProfileSessionHandler: ((session: AuthSession | null) => void) | null = null;
   let setCreateGameAuthenticated: ((authenticated: boolean) => void) | null = null;
   let setPlayBotAuthenticated: ((authenticated: boolean) => void) | null = null;
+  let lobbySessionHandler: (() => void) | null = null;
   let gameSessionHandler: ((session: AuthSession | null) => void) | null = null;
   let endgameSessionHandler: (() => void) | null = null;
   let commentarySessionHandler: ((signedIn: boolean) => void) | null = null;
@@ -269,6 +270,7 @@ export function bootstrap(
         }
         setCreateGameAuthenticated?.(session !== null);
         setPlayBotAuthenticated?.(session !== null);
+        lobbySessionHandler?.();
         selfProfileSessionHandler?.(session);
         gameSessionHandler?.(session);
         endgameSessionHandler?.();
@@ -391,6 +393,7 @@ export function bootstrap(
     });
     setCreateGameAuthenticated = mountedLobby.setCreateGameAuthenticated;
     setPlayBotAuthenticated = mountedLobby.setPlayBotAuthenticated;
+    lobbySessionHandler = mountedLobby.onSessionChange;
 
     return createBootstrapped(app, auth, theme, { lobby: mountedLobby.lobby });
   }

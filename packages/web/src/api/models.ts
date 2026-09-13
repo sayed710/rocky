@@ -295,6 +295,11 @@ export interface CapabilitiesResponse {
 export interface SeekView {
   readonly id: string;
   readonly creatorId: string;
+  /**
+   * Human-readable handle of the seek creator. Allows the lobby UI to render opponent identity
+   * directly without requiring an optional GraphQL read layer. Null for unresolvable/deleted users.
+   */
+  readonly creatorHandle: string | null;
   readonly variant: Variant;
   readonly speed: string;
   readonly timeControl: TimeControl;

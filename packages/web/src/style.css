@@ -815,6 +815,21 @@ a.button.primary:active {
 /* Your own open seek reads as yours (and carries the cancel affordance). */
 .seek-row-own { background: color-mix(in srgb, var(--sel) 10%, var(--panel)); }
 .seek-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.seek-opponent {
+  color: var(--fg);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+.seek-details {
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+.seek-opponent .row-link:focus-visible {
+  outline: 3px solid var(--sel);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 /* "Live and waiting" status on your own seek. */
 .seek-waiting {
   display: inline-flex;
@@ -1032,6 +1047,11 @@ a.button.primary:active {
     align-items: center;
     justify-content: center;
     min-width: 44px;
+  }
+  .seek-opponent .row-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
   }
 }
 

@@ -603,6 +603,30 @@ test('auth metadata links have a visible focus ring and coarse-pointer touch tar
   assert.match(layout.body, /align-items\s*:\s*center/);
 });
 
+test('seek identity and constraint text are legible, focus-visible, and touch reachable', () => {
+  const all = rules();
+  const opponent = all.find((rule) => rule.selectors.includes('.seek-opponent'));
+  assert.ok(opponent, 'missing seek opponent typography rule');
+  assert.match(opponent.body, /color\s*:\s*var\(--fg\)/);
+
+  const details = all.find((rule) => rule.selectors.includes('.seek-details'));
+  assert.ok(details, 'missing seek details typography rule');
+  assert.match(details.body, /color\s*:\s*var\(--muted\)/);
+  assert.match(details.body, /font-size\s*:\s*0\.75rem/);
+
+  const focus = all.find((rule) => rule.selectors.includes('.seek-opponent .row-link:focus-visible'));
+  assert.ok(focus, 'missing explicit focus ring for seek opponent links');
+  assert.match(focus.body, /outline\s*:\s*3px solid var\(--sel\)/);
+
+  const coarse = rules(atRuleBody('@media (pointer: coarse)')).find(
+    (rule) => rule.selectors.includes('.seek-opponent .row-link'),
+  );
+  assert.ok(coarse, 'missing coarse-pointer geometry for seek opponent links');
+  assert.match(coarse.body, /min-height\s*:\s*44px/);
+  assert.match(coarse.body, /display\s*:\s*inline-flex/);
+  assert.match(coarse.body, /align-items\s*:\s*center/);
+});
+
 test('semantic alignment and indentation rules use logical properties', () => {
   const all = rules();
   const physicalHorizontal = /(^|[\s;{])(float|clear)\s*:|(margin|padding|border)-(left|right)\s*:|(^|[\s;])text-align\s*:\s*(left|right)/;

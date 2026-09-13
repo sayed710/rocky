@@ -80,8 +80,16 @@ test('atomic matching flow: Player A creates a seek, Player B accepts', async ({
     // 4. Player 2 should see Player 1's seek and accept it
     // Lobby polling runs every 10 seconds, so allow one complete refresh cycle
     // and target this test's seek rather than any stale row from a retry.
-    const acceptBtn = page2.locator(`.seek-accept[data-seek-id="${seekId}"]`);
+    const opponentRow = page2.locator(`.seek-row[data-seek-id="${seekId}"]`);
+    await expect(opponentRow).toBeVisible({ timeout: 15_000 });
+    const opponentLink = opponentRow.locator('a.row-link');
+    await expect(opponentLink).toHaveText(handle1);
+    await expect(opponentLink).toHaveAttribute('href', `/profile/${handle1}`);
+    await expect(opponentLink).toHaveAttribute('data-route', 'profile');
+
+    const acceptBtn = opponentRow.locator('.seek-accept');
     await expect(acceptBtn).toBeVisible({ timeout: 15_000 });
+    await expect(acceptBtn).toHaveAccessibleName(`Play — accept seek from ${handle1}`);
     await acceptBtn.click();
 
     // 5. Both should be automatically routed to the game page
