@@ -497,6 +497,7 @@ export class InMemorySeeksRepository implements SeeksRepository {
       }
     }
 
+    /** Preserve resolved handles and cache an unresolvable creator as explicit `null`. */
     const enrich = (s: SeekRow): SeekRow => {
       if (s.creatorHandle !== undefined) return s;
       const handle = userMap.get(s.creatorId);
