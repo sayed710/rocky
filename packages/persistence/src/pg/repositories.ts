@@ -624,24 +624,28 @@ export class PgSeeksRepository implements SeeksRepository {
   async listOpen(limit: number, creatorId?: string): Promise<SeekRow[]> {
     const cid = creatorId ?? '00000000-0000-0000-0000-000000000000';
     const res = await this.pool.query<SeekDbRow>(
-      `(
-         SELECT s.id, s.creator_id, u.handle AS creator_handle, s.variant, s.time_control, s.rated, s.color, s.min_rating, s.max_rating, s.created_at, s.game_id, s.accepted_at
-         FROM seeks s
-         LEFT JOIN users u ON u.id = s.creator_id
-         LEFT JOIN games g ON g.id = s.game_id
-         WHERE s.creator_id = $2 AND s.game_id IS NOT NULL AND s.accepted_at > NOW() - interval '5 minutes' AND (g.id IS NULL OR g.ended_at IS NULL)
-         ORDER BY s.accepted_at DESC, s.created_at DESC
-         LIMIT 1
-       )
-       UNION ALL
-       (
-         SELECT s.id, s.creator_id, u.handle AS creator_handle, s.variant, s.time_control, s.rated, s.color, s.min_rating, s.max_rating, s.created_at, s.game_id, s.accepted_at
-         FROM seeks s
-         LEFT JOIN users u ON u.id = s.creator_id
-         WHERE s.game_id IS NULL AND s.created_at > NOW() - $3::interval
-         ORDER BY s.created_at ASC
-         LIMIT $1
-       )`,
+      `SELECT id, creator_id, creator_handle, variant, time_control, rated, color, min_rating, max_rating, created_at, game_id, accepted_at
+       FROM (
+         (
+           SELECT 0 AS result_kind, s.id, s.creator_id, u.handle AS creator_handle, s.variant, s.time_control, s.rated, s.color, s.min_rating, s.max_rating, s.created_at, s.game_id, s.accepted_at
+           FROM seeks s
+           LEFT JOIN users u ON u.id = s.creator_id
+           LEFT JOIN games g ON g.id = s.game_id
+           WHERE s.creator_id = $2 AND s.game_id IS NOT NULL AND s.accepted_at > NOW() - interval '5 minutes' AND (g.id IS NULL OR g.ended_at IS NULL)
+           ORDER BY s.accepted_at DESC, s.created_at DESC, s.id DESC
+           LIMIT 1
+         )
+         UNION ALL
+         (
+           SELECT 1 AS result_kind, s.id, s.creator_id, u.handle AS creator_handle, s.variant, s.time_control, s.rated, s.color, s.min_rating, s.max_rating, s.created_at, s.game_id, s.accepted_at
+           FROM seeks s
+           LEFT JOIN users u ON u.id = s.creator_id
+           WHERE s.game_id IS NULL AND s.created_at > NOW() - $3::interval
+           ORDER BY s.created_at ASC, s.id ASC
+           LIMIT $1
+         )
+       ) AS ordered_seeks
+       ORDER BY result_kind ASC, created_at ASC, id ASC`,
       [limit, cid, SEEK_TTL_INTERVAL],
     );
     return res.rows.map(toSeek);

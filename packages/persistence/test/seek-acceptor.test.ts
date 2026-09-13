@@ -35,6 +35,30 @@ test('PgSeeksRepository cleanup uses the database clock for expiry decisions', a
   assert.deepEqual(capturedValues, ['600 seconds']);
 });
 
+test('PgSeeksRepository listOpen explicitly orders receipts before deterministic open seeks', async () => {
+  let capturedSql = '';
+  const pool = {
+    query: async (sql: string): Promise<object> => {
+      capturedSql = sql;
+      return { rows: [], rowCount: 0 };
+    },
+  } as unknown as Pool;
+  const seeks = new PgSeeksRepository(pool);
+
+  await seeks.listOpen(10, '00000000-0000-0000-0000-000000000001');
+
+  const sql = capturedSql.replace(/\s+/g, ' ').trim();
+  assert.match(sql, /SELECT 0 AS result_kind/);
+  assert.match(sql, /ORDER BY s\.accepted_at DESC, s\.created_at DESC, s\.id DESC LIMIT 1/);
+  assert.match(sql, /SELECT 1 AS result_kind/);
+  assert.match(sql, /ORDER BY s\.created_at ASC, s\.id ASC LIMIT \$1/);
+  assert.match(
+    sql,
+    /\) AS ordered_seeks ORDER BY result_kind ASC, created_at ASC, id ASC$/,
+    'the outer query must define the order of the UNION ALL result',
+  );
+});
+
 test('PgSeekAcceptor preserves the transaction failure when rollback also fails', async () => {
   const transactionFailure = new Error('connection lost during seek claim');
   const rollbackFailure = new Error('connection unavailable during rollback');

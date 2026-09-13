@@ -710,6 +710,105 @@ test('renderSeeks: preserves the focused seek action across asynchronous name en
   );
 });
 
+test('renderSeeks: moves focus to the next row when the focused seek disappears', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const first = makeSeek({ id: 'seek-first', creatorId: 'opponent-first' });
+  const middle = makeSeek({ id: 'seek-middle', creatorId: 'opponent-middle' });
+  const last = makeSeek({ id: 'seek-last', creatorId: 'opponent-last' });
+
+  renderSeeks(container, [first, middle, last], 'user-me');
+  const middleButton = container.children[1]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(middleButton);
+  middleButton.focus();
+
+  renderSeeks(container, [first, last], 'user-me');
+
+  const nextButton = container.children[1]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(nextButton);
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    nextButton,
+  );
+});
+
+test('renderSeeks: moves focus to the previous row when the focused last seek disappears', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const first = makeSeek({ id: 'seek-first', creatorId: 'opponent-first' });
+  const last = makeSeek({ id: 'seek-last', creatorId: 'opponent-last' });
+
+  renderSeeks(container, [first, last], 'user-me');
+  const lastButton = container.children[1]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(lastButton);
+  lastButton.focus();
+
+  renderSeeks(container, [first], 'user-me');
+
+  const previousButton = container.children[0]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(previousButton);
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    previousButton,
+  );
+});
+
+test('renderSeeks: focuses the empty state only when list focus loses its final seek', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const seek = makeSeek({ id: 'seek-final', creatorId: 'opponent-final' });
+
+  renderSeeks(container, [seek], 'user-me');
+  const button = container.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(button);
+  button.focus();
+
+  renderSeeks(container, [], 'user-me');
+
+  assert.equal(container.getAttribute('role'), 'status');
+  assert.equal(container.getAttribute('tabindex'), '-1');
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    container,
+  );
+});
+
+test('renderSeeks: does not steal focus that was outside the seek list', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const outside = doc.createElement('button') as unknown as FakeDOMElement;
+  outside.focus();
+
+  renderSeeks(container, [makeSeek()], 'user-me');
+
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    outside,
+  );
+  assert.equal(outside.focusCount, 1);
+});
+
+test('renderSeeks: exposes valid list and listitem semantics when seeks exist', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+
+  renderSeeks(
+    container,
+    [
+      makeSeek({ id: 'seek-owned', creatorId: 'user-me' }),
+      makeSeek({ id: 'seek-other', creatorId: 'user-them' }),
+    ],
+    'user-me',
+  );
+
+  assert.equal(container.getAttribute('role'), 'list');
+  assert.equal(container.getAttribute('tabindex'), null);
+  assert.equal(container.children.length, 2);
+  for (const row of container.children) {
+    assert.equal(row.getAttribute('role'), 'listitem');
+  }
+});
+
 test('mountLobby: wires delegated cancel button click to lobby.cancelSeek', async () => {
   const { doc, elements } = createTestDoc();
   const seekListEl = elements.get('seek-list')!;

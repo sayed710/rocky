@@ -27,27 +27,47 @@ export function renderSeeks(
 ): void {
   const doc = container.ownerDocument ?? document;
   const active = doc.activeElement;
-  const focusedControl = active instanceof HTMLElement && container.contains(active) && active.dataset.seekId
+  const renderedRows = [...container.querySelectorAll<HTMLElement>('.seek-row')];
+  const focusedClassName = active instanceof HTMLElement
+    ? ['seek-cancel', 'seek-accept', 'row-link'].find((name) => active.classList.contains(name))
+    : undefined;
+  const focusedRowIndex = active instanceof HTMLElement
+    ? renderedRows.findIndex((row) => row.contains(active))
+    : -1;
+  const focusedControl = active instanceof HTMLElement
+    && container.contains(active)
+    && active.dataset.seekId
+    && focusedClassName
+    && focusedRowIndex >= 0
     ? {
         seekId: active.dataset.seekId,
-        className: ['seek-cancel', 'seek-accept', 'row-link'].find((name) => active.classList.contains(name)) ?? null,
+        className: focusedClassName,
+        rowIndex: focusedRowIndex,
       }
     : null;
 
   container.replaceChildren();
   if (seeks.length === 0) {
+    container.setAttribute('role', 'status');
+    container.setAttribute('tabindex', '-1');
     renderEmpty(container, {
       mark: '♟',
       title: 'No open seeks right now',
       body: 'Create a game above — the first player to accept joins you.',
     });
+    if (focusedControl) {
+      container.focus();
+    }
     return;
   }
+  container.setAttribute('role', 'list');
+  container.removeAttribute('tabindex');
   for (const seek of seeks) {
     const owned = currentUserId !== null && seek.creatorId === currentUserId;
     const row = doc.createElement('div');
     row.className = owned ? 'seek-row seek-row-own' : 'seek-row';
     row.dataset.seekId = seek.id;
+    row.setAttribute('role', 'listitem');
 
     const info = doc.createElement('span');
     info.className = 'seek-info';
@@ -139,10 +159,20 @@ export function renderSeeks(
     container.appendChild(row);
   }
 
-  if (focusedControl?.className) {
+  if (focusedControl) {
     const replacement = [...container.querySelectorAll<HTMLElement>(`.${focusedControl.className}`)]
       .find((candidate) => candidate.dataset.seekId === focusedControl.seekId);
-    replacement?.focus();
+    if (replacement) {
+      replacement.focus();
+      return;
+    }
+
+    const replacementRows = [...container.querySelectorAll<HTMLElement>('.seek-row')];
+    const fallbackRow = replacementRows[Math.min(focusedControl.rowIndex, replacementRows.length - 1)];
+    const fallbackControl = fallbackRow?.querySelector<HTMLElement>('.seek-accept')
+      ?? fallbackRow?.querySelector<HTMLElement>('.seek-cancel')
+      ?? fallbackRow?.querySelector<HTMLElement>('.row-link');
+    fallbackControl?.focus();
   }
 }
 
