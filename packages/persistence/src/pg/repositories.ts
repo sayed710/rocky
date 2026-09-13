@@ -595,12 +595,14 @@ export class PgSeeksRepository implements SeeksRepository {
   }
 
   /**
-   * Finds a seek by id, joining creator handle.
+   * Finds a seek by id, joining creator handle. Malformed public IDs are treated
+   * as missing so PostgreSQL UUID parsing errors do not escape through API routes.
    *
    * @param id - The seek ID
    * @returns The SeekRow if found, or null
    */
   async findById(id: string): Promise<SeekRow | null> {
+    if (!isCanonicalUuid(id)) return null;
     const res = await this.pool.query<SeekDbRow>(
       `SELECT s.id, s.creator_id, u.handle AS creator_handle, s.variant, s.time_control, s.rated, s.color, s.min_rating, s.max_rating, s.created_at, s.game_id, s.accepted_at
        FROM seeks s

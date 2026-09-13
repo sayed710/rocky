@@ -320,6 +320,7 @@ export interface NewSeek {
 
 export interface SeeksRepository {
   create(seek: NewSeek): Promise<SeekRow>;
+  /** Finds a seek by public id, returning `null` when the id is unknown or malformed. */
   findById(id: string): Promise<SeekRow | null>;
   /** Returns open seeks. If `creatorId` is provided, also includes that user's latest match receipt. */
   listOpen(limit: number, creatorId?: string): Promise<SeekRow[]>;

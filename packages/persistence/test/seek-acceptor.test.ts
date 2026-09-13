@@ -3,6 +3,20 @@ import { test } from 'node:test';
 import type { Pool, PoolClient } from 'pg';
 import { PgSeekAcceptor, PgSeeksRepository } from '../src/pg/repositories';
 
+test('PgSeeksRepository findById rejects malformed UUIDs before querying PostgreSQL', async () => {
+  let queryCount = 0;
+  const pool = {
+    query: async (): Promise<never> => {
+      queryCount += 1;
+      throw new Error('malformed seek id must not reach PostgreSQL');
+    },
+  } as unknown as Pool;
+  const seeks = new PgSeeksRepository(pool);
+
+  assert.equal(await seeks.findById('not-a-uuid'), null);
+  assert.equal(queryCount, 0);
+});
+
 test('PgSeeksRepository cleanup uses the database clock for expiry decisions', async () => {
   let capturedSql = '';
   let capturedValues: readonly unknown[] = [];
