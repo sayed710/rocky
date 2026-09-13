@@ -388,6 +388,44 @@ test('listOpen caches lazily resolved legacy creator handles', async () => {
   }
 });
 
+test('lazy handle resolution cannot resurrect a concurrently removed seek', async () => {
+  const h = await startHarness();
+  try {
+    const creator = await h.makeUser('removed-legacy-seek-creator', ['user']);
+    const seek = await h.repos.seeks.create({
+      id: '018f0000-0000-7000-8000-000000000005',
+      creatorId: creator.userId,
+      creatorHandle: null,
+      variant: 'standard',
+      timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      rated: false,
+    });
+    const storage = h.repos.seeks as unknown as { byId: Map<string, typeof seek> };
+    storage.byId.set(seek.id, { ...seek, creatorHandle: undefined });
+
+    let signalLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => { signalLookupStarted = resolve; });
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const originalFindByIds = h.repos.users.findByIds.bind(h.repos.users);
+    h.repos.users.findByIds = async (ids) => {
+      signalLookupStarted();
+      await lookupGate;
+      return originalFindByIds(ids);
+    };
+
+    const pendingList = h.repos.seeks.listOpen(10);
+    await lookupStarted;
+    assert.equal(await h.repos.seeks.remove(seek.id), true);
+    releaseLookup();
+    await pendingList;
+
+    assert.equal(await h.repos.seeks.findById(seek.id), null);
+  } finally {
+    await h.close();
+  }
+});
+
 test('accept defers entirely to storage layer to avoid split-brain under clock skew', async () => {
   const h = await startHarness();
   try {
