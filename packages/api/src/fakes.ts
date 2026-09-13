@@ -373,6 +373,11 @@ export class InMemorySeeksRepository implements SeeksRepository {
   private seq = 0;
   private readonly order = new Map<string, number>();
 
+  /**
+   * Build the deterministic seek store used by tests and local development.
+   * The supplied clock owns every lifecycle timestamp; optional game and user
+   * repositories enable receipt filtering and creator-handle enrichment.
+   */
   constructor(
     private readonly clock: Clock = systemClock,
     private readonly games?: GamesRepository,
@@ -530,6 +535,7 @@ export class InMemorySeeksRepository implements SeeksRepository {
     }
   }
 
+  /** Purge open seeks and accepted receipts whose inclusive TTL boundary is at or before `at`. */
   async cleanup(at: Date): Promise<void> {
     const cutoff = at.getTime() - 5 * 60 * 1000;
     const openCutoff = at.getTime() - SEEK_TTL_MS;

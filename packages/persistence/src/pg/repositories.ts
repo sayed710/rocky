@@ -561,6 +561,7 @@ function isCanonicalUuid(value: string): boolean {
  * Performs database-level joins to include creator handles in seek rows.
  */
 export class PgSeeksRepository implements SeeksRepository {
+  /** Bind seek reads and writes to a pool whose database clock is the lifecycle authority. */
   constructor(private readonly pool: Pool) {}
 
   /**
@@ -677,6 +678,7 @@ export class PgSeeksRepository implements SeeksRepository {
  * PostgreSQL transaction coordinator for atomically accepting seeks.
  */
 export class PgSeekAcceptor implements SeekAcceptor {
+  /** Bind atomic seek claims and game creation to transactions from the supplied pool. */
   constructor(private readonly pool: Pool) {}
 
   /**
