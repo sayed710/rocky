@@ -479,6 +479,37 @@ test('dispose suppresses a late logout continuation and preserves newer persiste
   assert.deepEqual(pendingStates, [true]);
 });
 
+test('overlapping auth operations keep the UI pending until every operation settles', async () => {
+  let finishFirst!: () => void;
+  const firstResponse = new Promise<void>((resolve) => { finishFirst = resolve; });
+  let logoutCalls = 0;
+  const client = makeFakeClient({
+    logout: async () => {
+      logoutCalls++;
+      if (logoutCalls === 1) await firstResponse;
+    },
+  });
+  const pendingStates: boolean[] = [];
+  const controller = new AuthController({
+    client: client as unknown as GambitClient,
+    callbacks: {
+      onSessionChange: () => {},
+      onPending: (pending) => { pendingStates.push(pending); },
+      onError: () => {},
+    },
+  });
+
+  const first = controller.logout();
+  const second = controller.logout();
+  await second;
+
+  assert.deepEqual(pendingStates, [true], 'the first operation is still pending');
+  finishFirst();
+  await first;
+  assert.deepEqual(pendingStates, [true, false]);
+  controller.dispose();
+});
+
 test('peer reset during logout clears the pending state without repeating the reset', async () => {
   let finish!: () => void;
   const response = new Promise<void>((resolve) => { finish = resolve; });

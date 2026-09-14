@@ -96,6 +96,7 @@ export class AuthController {
    * stale results if the controller is reset or invalidated while a network call is in flight.
    */
   private sessionGeneration = 0;
+  private pendingOperations = 0;
   private disposed = false;
 
   constructor(opts: AuthControllerOptions) {
@@ -194,7 +195,7 @@ export class AuthController {
     if (this.disposed) return null;
     const managerGeneration = this.client.session.captureGeneration();
     const generation = this.sessionGeneration;
-    this.callbacks.onPending(true);
+    this.beginPendingOperation();
     try {
       const result = await this.client.auth.login({ handle, password }, managerGeneration);
       if (this.disposed || generation !== this.sessionGeneration) return null;
@@ -204,7 +205,7 @@ export class AuthController {
       this.callbacks.onError(err instanceof Error ? err.message : String(err));
       return null;
     } finally {
-      if (!this.disposed) this.callbacks.onPending(false);
+      this.finishPendingOperation();
     }
   }
 
@@ -222,7 +223,7 @@ export class AuthController {
     }
     const managerGeneration = this.client.session.captureGeneration();
     const generation = this.sessionGeneration;
-    this.callbacks.onPending(true);
+    this.beginPendingOperation();
     try {
       const options = await this.client.auth.loginPasskeyOptions({ handle: trimmed });
       if (!this.authOperationIsCurrent(generation, managerGeneration)) return null;
@@ -237,7 +238,7 @@ export class AuthController {
       this.callbacks.onError('Sign in with passkey failed.');
       return null;
     } finally {
-      if (!this.disposed) this.callbacks.onPending(false);
+      this.finishPendingOperation();
     }
   }
 
@@ -246,7 +247,7 @@ export class AuthController {
     if (this.disposed) return null;
     const managerGeneration = this.client.session.captureGeneration();
     const generation = this.sessionGeneration;
-    this.callbacks.onPending(true);
+    this.beginPendingOperation();
     try {
       const trimmed = email?.trim() ?? '';
       const body: RegisterRequest = trimmed ? { handle, password, email: trimmed } : { handle, password };
@@ -258,7 +259,7 @@ export class AuthController {
       this.callbacks.onError(err instanceof Error ? err.message : String(err));
       return null;
     } finally {
-      if (!this.disposed) this.callbacks.onPending(false);
+      this.finishPendingOperation();
     }
   }
 
@@ -266,7 +267,7 @@ export class AuthController {
   async logout(): Promise<void> {
     if (this.disposed) return;
     const generation = this.sessionGeneration;
-    this.callbacks.onPending(true);
+    this.beginPendingOperation();
     try {
       await this.client.auth.logout();
     } catch {
@@ -279,9 +280,21 @@ export class AuthController {
         if (generation === this.sessionGeneration && !this.client.session.isAuthenticated) {
           this.clearControllerSession();
         }
-        this.callbacks.onPending(false);
       }
+      this.finishPendingOperation();
     }
+  }
+
+  /** Mark an auth operation active, notifying the UI only on the idle-to-pending transition. */
+  private beginPendingOperation(): void {
+    this.pendingOperations++;
+    if (this.pendingOperations === 1) this.callbacks.onPending(true);
+  }
+
+  /** Retire an auth operation and clear pending UI only after the final active operation settles. */
+  private finishPendingOperation(): void {
+    this.pendingOperations--;
+    if (!this.disposed && this.pendingOperations === 0) this.callbacks.onPending(false);
   }
 
   /**
