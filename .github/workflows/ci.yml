@@ -78,7 +78,7 @@ jobs:
           fi
           if [ -n "$changed" ]; then
             printf 'Changed files:\n%s\n' "$changed"
-            grep -qE '^(services/gateway/|packages/realtime-gateway/|packages/game/|packages/core/|package(-lock)?\.json|\.github/workflows/)' <<<"$changed" && gateway=true || gateway=false
+            grep -qE '^(services/gateway/|packages/realtime-gateway/|packages/game/|packages/core/|packages/api/src/http/client-ip\.ts|scripts/(nginx-trusted-edge-acceptance|lib/wait-for-health)\.mjs|docker/web/nginx\.conf\.template|package(-lock)?\.json|\.github/workflows/)' <<<"$changed" && gateway=true || gateway=false
             grep -qE '^(packages/web/|packages/e2e-harness/|packages/api/|packages/game/|packages/realtime-gateway/|packages/core/|package(-lock)?\.json|\.github/workflows/)' <<<"$changed" && web=true || web=false
             grep -qE '^(deploy/|\.github/workflows/)' <<<"$changed" && deploy=true || deploy=false
             # Only what changes how an image is *built*. Application code is already compiled by
@@ -598,6 +598,12 @@ jobs:
       - name: Test gateway service against Redis
         run: npm test
         working-directory: services/gateway
+
+      - name: Test trusted edge through real Nginx
+        run: npm run test:trusted-edge
+        working-directory: services/gateway
+        env:
+          REQUIRE_DOCKER: '1'
 
   # M6 acceptance gate: Playwright e2e (full game vs bot + vs human) +
   # Lighthouse a11y audit (score must be >= 95). Runs the e2e harness

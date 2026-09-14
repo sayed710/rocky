@@ -41,4 +41,35 @@ describe('Trusted Edge Contract: API Rate Limit Spoof Resistance', () => {
       await h.close();
     }
   });
+
+  test('equivalent IPv6 spellings share one rate-limit identity', async () => {
+    const h = await startHarness({ trustProxy: true });
+    const spellings = [
+      '2001:db8::1',
+      '2001:0db8:0:0:0:0:0:1',
+      '2001:DB8:0000:0000:0000:0000:0000:0001',
+      '2001:db8:0::1',
+      '2001:0db8::0001',
+      '2001:db8:0:0::1',
+    ];
+
+    try {
+      for (let i = 0; i < 5; i++) {
+        const res = await h.json('POST', '/v1/auth/register', {
+          body: { handle: `ipv6user${i}`, password: 'password123' },
+          headers: { 'x-forwarded-for': spellings[i]! },
+        });
+        assert.equal(res.status, 201);
+      }
+
+      const blocked = await h.json('POST', '/v1/auth/register', {
+        body: { handle: 'ipv6user5', password: 'password123' },
+        headers: { 'x-forwarded-for': spellings[5]! },
+      });
+      assert.equal(blocked.status, 429);
+      assert.equal(blocked.body.error.code, 'rate_limited');
+    } finally {
+      await h.close();
+    }
+  });
 });

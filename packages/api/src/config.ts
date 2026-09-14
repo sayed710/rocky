@@ -6,7 +6,7 @@
  */
 
 import type { CorsConfig } from './http/security';
-import { resolveTrustProxyEnv, type TrustProxy } from './http/client-ip';
+import { resolveTrustProxyEnv, validateTrustProxy, type TrustProxy } from './http/client-ip';
 
 /** Trusted proxy contract type re-exported for API server configuration. */
 export type { TrustProxy };
@@ -321,15 +321,14 @@ export function resolveConfig(
   }
   const cors = input.cors ?? DEFAULT_CORS;
   validateCors(cors);
+  const trustProxy = input.trustProxy ?? resolveTrustProxyEnv(env['TRUST_PROXY']);
+  validateTrustProxy(trustProxy);
   return {
     accessTokenSecret,
     accessTokenTtlSec: input.accessTokenTtlSec ?? DEFAULT_ACCESS_TOKEN_TTL_SEC,
     refreshTokenTtlSec: input.refreshTokenTtlSec ?? DEFAULT_REFRESH_TOKEN_TTL_SEC,
     maxBodyBytes: input.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
-    trustProxy:
-      input.trustProxy !== undefined
-        ? input.trustProxy
-        : resolveTrustProxyEnv(env['TRUST_PROXY']),
+    trustProxy,
     cors,
     enableHsts: input.enableHsts ?? true,
     cookieSecure: resolveRefreshCookieSecure(input.cookieSecure, env),

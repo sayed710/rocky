@@ -1,0 +1,84 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- if .Values.web.ingress.enabled }}
+{{- if or (empty .Values.networkPolicy.ingressController.namespaceLabels) (empty .Values.networkPolicy.ingressController.podLabels) }}
+{{- fail "networkPolicy.ingressController requires non-empty namespaceLabels and podLabels when Ingress is enabled" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gambit.fullname" . }}-web
+  labels:
+    {{- include "gambit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gambit.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: web
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressController.namespaceLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressController.podLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.web.port }}
+---
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gambit.fullname" . }}-api
+  labels:
+    {{- include "gambit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gambit.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "gambit.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: web
+        - podSelector:
+            matchLabels:
+              {{- include "gambit.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: gateway
+      ports:
+        - protocol: TCP
+          port: {{ .Values.api.port }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gambit.fullname" . }}-gateway
+  labels:
+    {{- include "gambit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gambit.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "gambit.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: web
+      ports:
+        - protocol: TCP
+          port: {{ .Values.gateway.port }}
+{{- end }}

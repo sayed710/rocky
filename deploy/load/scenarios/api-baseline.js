@@ -16,7 +16,7 @@ import http from 'k6/http';
 import { check } from 'k6';
 import { Rate } from 'k6/metrics';
 
-const BASE = __ENV.BASE_URL || 'http://host.docker.internal:8080';
+const BASE = __ENV.BASE_URL || 'http://host.docker.internal:3000';
 const READ_VUS = Number(__ENV.READ_VUS || 20);
 const AUTH_VUS = Number(__ENV.AUTH_VUS || 3);
 const DURATION = __ENV.DURATION || '30s';

@@ -27,6 +27,14 @@ describe('client-ip: normalizeIp', () => {
     assert.equal(normalizeIp('[::1]'), '::1');
   });
 
+  test('canonicalizes equivalent IPv6 and IPv4-mapped IPv6 spellings', () => {
+    assert.equal(normalizeIp('2001:0DB8:0:0:0:0:0:1'), '2001:db8::1');
+    assert.equal(normalizeIp('2001:db8::1'), '2001:db8::1');
+    assert.equal(normalizeIp('0:0:0:0:0:ffff:c000:0201'), '192.0.2.1');
+    assert.equal(normalizeIp('::ffff:192.0.2.1'), '192.0.2.1');
+    assert.equal(normalizeIp('FE80:0:0:0::1%eth0'), 'fe80::1%eth0');
+  });
+
   test('returns null for empty, missing, or invalid IP strings', () => {
     assert.equal(normalizeIp(undefined), null);
     assert.equal(normalizeIp(null), null);
@@ -159,5 +167,16 @@ describe('client-ip: resolveClientIp', () => {
       socket: { remoteAddress: '::ffff:198.51.100.42' },
     };
     assert.equal(resolveClientIp(req, false), '198.51.100.42');
+  });
+
+  test('rejects invalid numeric hop counts instead of silently changing trust mode', () => {
+    const req = {
+      headers: { 'x-forwarded-for': '203.0.113.1' },
+      socket: { remoteAddress: '198.51.100.42' },
+    };
+
+    for (const value of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(() => resolveClientIp(req, value), /TRUST_PROXY must be/);
+    }
   });
 });

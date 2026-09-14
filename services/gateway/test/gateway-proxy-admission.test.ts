@@ -45,6 +45,21 @@ async function waitForHealth(healthPort: number, timeoutMs = 10_000): Promise<vo
   throw new Error(`Health check failed on port ${healthPort} within ${timeoutMs}ms`);
 }
 
+/** Resolves with a WebSocket close event or rejects when the peer stays open past the deadline. */
+async function waitForClose(ws: WebSocket, timeoutMs = 2_000): Promise<{ code: number; reason: string }> {
+  return new Promise((resolveClose, reject) => {
+    const onClose = (code: number, reason: Buffer) => {
+      clearTimeout(timer);
+      resolveClose({ code, reason: reason.toString() });
+    };
+    const timer = setTimeout(() => {
+      ws.off('close', onClose);
+      reject(new Error('WebSocket did not close before the deadline'));
+    }, timeoutMs);
+    ws.once('close', onClose);
+  });
+}
+
 describe('Trusted Edge Contract: Gateway WebSocket Admission (TRUST_PROXY=1)', () => {
   let gwProc: ChildProcess | undefined;
   let port: number;
@@ -172,6 +187,45 @@ describe('Trusted Edge Contract: Gateway WebSocket Admission (TRUST_PROXY=1)', (
         }
       }
       await new Promise((r) => setTimeout(r, 100));
+    }
+  });
+
+  test('equivalent IPv6 spellings share one per-IP connection limit', async () => {
+    const sockets: WebSocket[] = [];
+    const spellings = ['2001:db8::1', '2001:0db8:0:0:0:0:0:1'];
+
+    try {
+      for (let i = 0; i < 20; i++) {
+        sockets.push(new WebSocket(`ws://127.0.0.1:${port}`, {
+          headers: { 'x-forwarded-for': spellings[i % spellings.length]! },
+        }));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      assert.equal(sockets.filter((socket) => socket.readyState === WebSocket.OPEN).length, 20);
+
+      const overflow = new WebSocket(`ws://127.0.0.1:${port}`, {
+        headers: { 'x-forwarded-for': '2001:0DB8:0000:0000:0000:0000:0000:0001' },
+      });
+      sockets.push(overflow);
+      const closed = await waitForClose(overflow);
+      assert.deepEqual(closed, { code: 1013, reason: 'connection limit exceeded' });
+    } finally {
+      for (const socket of sockets) {
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+          socket.terminate();
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  });
+
+  test('missing or malformed trusted identity is rejected without using the proxy socket address', async () => {
+    for (const forwardedFor of [undefined, 'not-an-ip']) {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`, {
+        ...(forwardedFor ? { headers: { 'x-forwarded-for': forwardedFor } } : {}),
+      });
+      const closed = await waitForClose(ws);
+      assert.deepEqual(closed, { code: 1008, reason: 'client identity unavailable' });
     }
   });
 

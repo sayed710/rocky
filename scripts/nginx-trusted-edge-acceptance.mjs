@@ -6,6 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
+import { waitForHealth } from './lib/wait-for-health.mjs';
 
 import {
   createApiServer,
@@ -60,120 +61,10 @@ async function getFreePort() {
   });
 }
 
-/**
- * Polls an HTTP endpoint until it answers with HTTP 2xx or the deadline expires.
- *
- * Bounded deadline contract:
- * - Computes the exact remaining duration against the declared deadline on each iteration.
- * - Ceases polling immediately if no time remains (remaining <= 0).
- * - Bounds each request with `AbortSignal.timeout(remaining)` so stalled responses
- *   cannot overshoot the overall deadline.
- *
- * @param url - Health URL to probe.
- * @param timeoutMs - Maximum total duration in milliseconds to poll before rejecting.
- * @throws Error if the endpoint fails to return HTTP 2xx within the deadline.
- */
-async function waitForHealth(url, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  let lastErr;
-  while (Date.now() < deadline) {
-    try {
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      const res = await fetch(url, { signal: AbortSignal.timeout(remaining) });
-      if (res.ok) return;
-      lastErr = new Error(`HTTP ${res.status}`);
-    } catch (err) {
-      lastErr = err;
-    }
-    const delay = Math.max(0, Math.min(150, deadline - Date.now()));
-    if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-  }
-  throw new Error(`Service at ${url} did not become ready within ${timeoutMs}ms (last: ${lastErr?.message})`);
-}
-
 const dockerAvailable = isDockerAvailable();
-
-describe('waitForHealth deadline enforcement', () => {
-  test('retry sleep never exceeds the remaining deadline', async () => {
-    const originalNow = Date.now;
-    const originalSetTimeout = globalThis.setTimeout;
-    const originalFetch = globalThis.fetch;
-    let now = 1_000;
-    const requestedDelays = [];
-    Date.now = () => now;
-    globalThis.fetch = async () => ({ ok: false, status: 503 });
-    globalThis.setTimeout = (callback, delay = 0, ...args) => {
-      const milliseconds = Number(delay);
-      requestedDelays.push(milliseconds);
-      now += milliseconds;
-      callback(...args);
-      return 0;
-    };
-
-    try {
-      await assert.rejects(
-        () => waitForHealth('http://127.0.0.1:9', 50),
-        /did not become ready within 50ms/,
-      );
-      assert.deepEqual(requestedDelays, [50]);
-    } finally {
-      Date.now = originalNow;
-      globalThis.setTimeout = originalSetTimeout;
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test('timeout signal never exceeds the remaining deadline', async () => {
-    const origTimeout = AbortSignal.timeout;
-    const requestedTimeouts = [];
-    AbortSignal.timeout = (ms) => {
-      requestedTimeouts.push(ms);
-      return origTimeout.call(AbortSignal, ms);
-    };
-
-    const origFetch = globalThis.fetch;
-    globalThis.fetch = async () => ({ ok: false, status: 503 });
-
-    try {
-      const timeoutMs = 50;
-      await assert.rejects(
-        () => waitForHealth('http://127.0.0.1:9', timeoutMs),
-        /did not become ready within 50ms/,
-      );
-
-      assert.ok(requestedTimeouts.length > 0, 'at least one health check should be attempted');
-      for (const t of requestedTimeouts) {
-        assert.ok(
-          t <= timeoutMs,
-          `AbortSignal.timeout(${t}) exceeded declared deadline timeoutMs (${timeoutMs})`,
-        );
-      }
-    } finally {
-      AbortSignal.timeout = origTimeout;
-      globalThis.fetch = origFetch;
-    }
-  });
-
-  test('does not issue a fetch when remaining deadline is non-positive', async () => {
-    let fetchCalled = false;
-    const origFetch = globalThis.fetch;
-    globalThis.fetch = async () => {
-      fetchCalled = true;
-      return { ok: false, status: 503 };
-    };
-
-    try {
-      await assert.rejects(
-        () => waitForHealth('http://127.0.0.1:9', 0),
-        /did not become ready within 0ms/,
-      );
-      assert.equal(fetchCalled, false, 'fetch should not be called when remaining deadline is <= 0');
-    } finally {
-      globalThis.fetch = origFetch;
-    }
-  });
-});
+if (!dockerAvailable && process.env['REQUIRE_DOCKER'] === '1') {
+  throw new Error('Docker is required for the trusted-edge acceptance gate but is unavailable');
+}
 
 describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAvailable }, () => {
   let apiPort;
@@ -218,7 +109,7 @@ describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAva
       rateLimiter,
     });
     httpServer = await apiServer.listen(apiPort, '0.0.0.0');
-    await waitForHealth(`http://127.0.0.1:${apiPort}/v1/health`);
+    await waitForHealth(`http://127.0.0.1:${apiPort}/v1/health`, 'API', { timeoutMs: 15_000 });
 
     // 2. Start Gateway server on 0.0.0.0:gwPort with TRUST_PROXY=1 and WS_MAX_CONNECTIONS_PER_IP=20
     const gatewayDir = resolve(repoRoot, 'services/gateway');
@@ -233,11 +124,13 @@ describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAva
         ACCESS_TOKEN_SECRET: secret,
         WS_MAX_CONNECTIONS_PER_IP: '20',
         TRUST_PROXY: '1',
+        DATABASE_URL: '',
+        REDIS_URL: '',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     gwProc.on('error', () => {});
-    await waitForHealth(`http://127.0.0.1:${gwHealthPort}/health`);
+    await waitForHealth(`http://127.0.0.1:${gwHealthPort}/health`, 'gateway', { timeoutMs: 15_000 });
 
     // 3. Start real Nginx container mounting docker/web/nginx.conf.template
     nginxContainerName = `gambit-test-nginx-${randomUUID().slice(0, 8)}`;
@@ -264,7 +157,7 @@ describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAva
     nginxProc.on('error', () => {});
 
     // Wait for Nginx to proxy /v1/health
-    await waitForHealth(`http://127.0.0.1:${nginxPort}/v1/health`);
+    await waitForHealth(`http://127.0.0.1:${nginxPort}/v1/health`, 'nginx edge', { timeoutMs: 15_000 });
   });
 
   after(async () => {

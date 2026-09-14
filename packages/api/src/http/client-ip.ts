@@ -7,13 +7,14 @@
  * 2. Resolves client identity from `X-Forwarded-For` using right-to-left hop traversal
  *    when operating behind trusted reverse proxies (e.g. nginx, ingress-nginx).
  * 3. Rejects attacker-supplied prefixes in forwarded chains to guarantee spoof resistance.
- * 4. Normalizes IPv4-mapped IPv6 addresses (e.g. `::ffff:192.0.2.1` -> `192.0.2.1`) and IPv6 literals.
+ * 4. Canonicalizes IPv6 spellings and unmaps IPv4-mapped IPv6 addresses so one
+ *    network identity cannot be split across multiple rate-limit buckets.
  */
 
 import { isIP } from 'node:net';
 import type { IncomingHttpHeaders } from 'node:http';
 
-/** Trusted proxy configuration: boolean toggle (true = 1 hop, false = direct socket) or positive integer hop count. */
+/** Trusted proxy configuration: boolean toggle (true = 1 hop, false = direct socket) or non-negative integer hop count. */
 export type TrustProxy = boolean | number;
 
 /** Minimal HTTP request interface containing headers and TCP socket peer address needed for IP resolution. */
@@ -24,11 +25,31 @@ export interface ClientIpRequestLike {
   };
 }
 
+/** Converts a canonical IPv4-mapped IPv6 literal to dotted IPv4 when applicable. */
+function unmapIpv4(canonicalIpv6: string): string | null {
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(canonicalIpv6);
+  if (!mapped) return null;
+  const upper = Number.parseInt(mapped[1]!, 16);
+  const lower = Number.parseInt(mapped[2]!, 16);
+  return `${upper >>> 8}.${upper & 0xff}.${lower >>> 8}.${lower & 0xff}`;
+}
+
+/** Returns the WHATWG canonical spelling for a validated IPv6 literal. */
+function canonicalIpv6(ip: string): string | null {
+  try {
+    const hostname = new URL(`http://[${ip}]/`).hostname;
+    return hostname.slice(1, -1);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Normalizes an IP address into a canonical string representation:
  * - Unmaps IPv4-mapped IPv6 addresses (e.g. `::ffff:192.0.2.1` -> `192.0.2.1`).
  * - Trims whitespace and strips surrounding IPv6 brackets (`[2001:db8::1]` -> `2001:db8::1`).
- * - Lowers case for IPv6 hex characters.
+ * - Compresses and lowers IPv6 hex according to the WHATWG host serializer.
+ * - Preserves a validated IPv6 zone identifier used by link-local socket addresses.
  * - Returns null if input is undefined, empty, or not a valid IPv4/IPv6 address.
  *
  * @param raw - Raw IP string from socket or forwarded header.
@@ -44,18 +65,25 @@ export function normalizeIp(raw: string | undefined | null): string | null {
     ip = ip.slice(1, -1).trim();
   }
 
-  // IPv4-mapped IPv6: ::ffff:192.0.2.1
-  if (ip.toLowerCase().startsWith('::ffff:')) {
-    const unmapped = ip.slice(7).trim();
-    if (isIP(unmapped) === 4) {
-      return unmapped;
-    }
-  }
-
   const ver = isIP(ip);
   if (ver === 4) return ip;
-  if (ver === 6) return ip.toLowerCase();
+  if (ver === 6) {
+    const zoneIndex = ip.indexOf('%');
+    const address = zoneIndex === -1 ? ip : ip.slice(0, zoneIndex);
+    const zone = zoneIndex === -1 ? '' : ip.slice(zoneIndex);
+    const canonical = canonicalIpv6(address);
+    return canonical ? (unmapIpv4(canonical) ?? `${canonical}${zone}`) : null;
+  }
   return null;
+}
+
+/** Rejects typed trusted-proxy values that cannot represent a safe hop count. */
+export function validateTrustProxy(value: TrustProxy): void {
+  if (typeof value === 'boolean') return;
+  if (Number.isSafeInteger(value) && value >= 0) return;
+  throw new Error(
+    `TRUST_PROXY must be a boolean or non-negative integer (received ${String(value)})`,
+  );
 }
 
 /**
@@ -80,7 +108,7 @@ export function parseForwardedFor(header: string | string[] | undefined): string
  * - "1", "2", ... -> number (exact hop count)
  *
  * @param val - Environment variable string value.
- * @returns Parsed TrustProxy configuration (boolean or positive hop count).
+ * @returns Parsed TrustProxy configuration (boolean or non-negative hop count).
  * @throws Error if the value is not a boolean string or non-negative integer.
  */
 export function resolveTrustProxyEnv(val: string | undefined): TrustProxy {
@@ -89,11 +117,9 @@ export function resolveTrustProxyEnv(val: string | undefined): TrustProxy {
   if (lower === 'false' || lower === '0') return false;
   if (lower === 'true') return true;
   const num = Number(lower);
-  if (Number.isSafeInteger(num) && num >= 0) {
-    return num === 0 ? false : num;
-  }
+  if (Number.isSafeInteger(num) && num >= 0) return num === 0 ? false : num;
   throw new Error(
-    `resolveConfig: TRUST_PROXY must be "true", "false", or a non-negative integer (received ${JSON.stringify(val)})`,
+    `TRUST_PROXY must be "true", "false", or a non-negative integer (received ${JSON.stringify(val)})`,
   );
 }
 
@@ -101,7 +127,7 @@ export function resolveTrustProxyEnv(val: string | undefined): TrustProxy {
  * Resolves the authentic client IP address according to the explicit trusted-hop contract.
  *
  * Security & Trust-boundary semantics:
- * - Direct connection (`trustProxy` is false or <= 0):
+ * - Direct connection (`trustProxy` is false or 0):
  *   Derives identity strictly from the direct TCP peer socket (`socket.remoteAddress`).
  *   Any forwarded headers are ignored to prevent forged client identity.
  * - Reverse proxy (`trustProxy` is true or > 0):
@@ -116,7 +142,7 @@ export function resolveTrustProxyEnv(val: string | undefined): TrustProxy {
  *   misidentify the proxy address as the client and allow per-IP rate-limit bypass.
  *
  * @param req - HTTP request-like object containing headers and socket peer address.
- * @param trustProxy - Trusted proxy configuration (boolean or positive hop count, default: false).
+ * @param trustProxy - Trusted proxy configuration (boolean or non-negative hop count, default: false).
  * @returns Canonical client IP string, or null if unresolvable.
  */
 export function resolveClientIp(
@@ -124,14 +150,8 @@ export function resolveClientIp(
   trustProxy: TrustProxy = false,
 ): string | null {
   const socketIp = normalizeIp(req.socket.remoteAddress);
-  const hops =
-    typeof trustProxy === 'number'
-      ? trustProxy > 0
-        ? trustProxy
-        : 0
-      : trustProxy
-        ? 1
-        : 0;
+  validateTrustProxy(trustProxy);
+  const hops = typeof trustProxy === 'number' ? trustProxy : trustProxy ? 1 : 0;
 
   if (hops === 0) {
     return socketIp;

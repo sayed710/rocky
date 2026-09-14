@@ -44,8 +44,8 @@ Tunables (all optional):
 | `READ_VUS` | 20 | concurrent virtual users on the read path |
 | `AUTH_VUS` | 3 | concurrent users registering; scrypt-bound, so keep this low |
 | `DURATION` | 30s | per-scenario duration |
-| `BASE_URL` | `http://host.docker.internal:8080` | API as seen **from inside the k6 container** |
-| `HEALTH_URL` | `http://localhost:8080` | API as seen from the runner process |
+| `BASE_URL` | `http://host.docker.internal:3000` | API through the trusted web edge as seen **from inside the k6 container** |
+| `HEALTH_URL` | `http://localhost:3000` | API through the trusted web edge as seen from the runner process |
 
 ## Why two scenarios
 

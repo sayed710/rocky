@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-07 — PR #51: backup/restore drill safety regressions._
+_Last updated: 2026-09-14 — M15 Increment 54: trusted edge integration hardening._
+
+Prior: _Last updated: 2026-09-07 — PR #51: backup/restore drill safety regressions._
 
 Prior: _Last updated: 2026-09-06 — M15 Increment 53: trusted edge proxy identity contract (PR-1)._
 
@@ -15,6 +17,21 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## M15 Increment 54 — trusted edge integration hardening
+
+**Status: RESOLVED — the proxy identity contract now includes its deploy-time network boundary and exact topology.**
+
+- Current `main` was merged normally and its append-only project history preserved.
+- Helm derives one or two trusted hops from whether Ingress is rendered, rejects invalid explicit
+  overrides, and renders default-on web/API/Gateway NetworkPolicies that preserve every configured
+  hop plus the Gateway-to-API readiness path.
+- The normal Compose stack publishes only the web edge; the explicit chaos/developer override
+  exposes loopback-only direct ports with `TRUST_PROXY=false`.
+- Equivalent IPv6 spellings now canonicalize to one client identity. Missing or malformed trusted
+  Gateway identity closes with WebSocket code 1008 instead of falling back to the proxy socket.
+- The real-nginx acceptance suite reuses the shared bounded health helper and is wired into the
+  gateway CI job with Docker required, while deterministic helper coverage remains in script tests.
 
 ## M15 Increment 53 — trusted edge proxy identity contract (PR-1)
 

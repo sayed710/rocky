@@ -138,4 +138,13 @@ describe('resolveConfig trustProxy', () => {
     );
     assert.equal(cfgDisabled.trustProxy, false);
   });
+
+  it('rejects invalid programmatic trustProxy hop counts', () => {
+    for (const trustProxy of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => resolveConfig({ accessTokenSecret: SECRET, trustProxy }, {}),
+        /TRUST_PROXY must be/,
+      );
+    }
+  });
 });

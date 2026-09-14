@@ -14,8 +14,8 @@
  *   node scripts/load-test.mjs
  *
  * Env:
- *   BASE_URL   API base as seen FROM THE CONTAINER (default http://host.docker.internal:8080)
- *   HEALTH_URL API base as seen from this process  (default http://localhost:8080)
+ *   BASE_URL   trusted web edge as seen FROM THE CONTAINER (default http://host.docker.internal:3000)
+ *   HEALTH_URL trusted web edge as seen from this process  (default http://localhost:3000)
  *   READ_VUS, AUTH_VUS, DURATION   passed through to the scenario
  */
 
@@ -45,8 +45,8 @@ const SLO_TARGETS = Object.freeze({
   readChecks: 'checks{scenario:read} rate>0.999',
 });
 
-const baseUrl = process.env['BASE_URL'] ?? 'http://host.docker.internal:8080';
-const healthUrl = process.env['HEALTH_URL'] ?? 'http://localhost:8080';
+const baseUrl = process.env['BASE_URL'] ?? 'http://host.docker.internal:3000';
+const healthUrl = process.env['HEALTH_URL'] ?? 'http://localhost:3000';
 
 /**
  * Refuse to start against a stack that is not answering.

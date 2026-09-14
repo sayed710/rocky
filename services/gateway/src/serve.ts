@@ -16,7 +16,7 @@
  * - `ACCESS_TOKEN_TTL_SEC` (default 900) — token lifetime, must match the API
  * - `TRUST_PROXY` (optional, default false) — trusted reverse proxy hop count
  *   ("1", "2", ...) or boolean ("true", "false"). Determines how client IP
- *   is resolved from X-Forwarded-For for per-IP connection limits (ADR-0146).
+ *   is resolved from X-Forwarded-For for per-IP connection limits (ADR-0141).
  * - `DATABASE_URL` (optional) — when set, the authority persists game events
  *   to the shared Postgres event store; when absent, falls back to in-memory
  *   (state lost on restart).
@@ -578,7 +578,11 @@ async function main(): Promise<void> {
   const alive = new WeakSet<WebSocket>();
 
   wss.on('connection', (ws: WebSocket, request) => {
-    const ip = resolveClientIp(request, trustProxy) ?? request.socket.remoteAddress ?? 'unknown';
+    const ip = resolveClientIp(request, trustProxy);
+    if (ip === null) {
+      ws.close(1008, 'client identity unavailable');
+      return;
+    }
     const ipConnections = connectionsByIp.get(ip) ?? 0;
     if (wss.clients.size > maxConnections || ipConnections >= maxConnectionsPerIp) {
       ws.close(1013, 'connection limit exceeded');

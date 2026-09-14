@@ -48,6 +48,13 @@ const CORE = [
  */
 const POSTGRES_URL = process.env['DATABASE_URL'];
 const REDIS_URL = process.env['REDIS_URL'];
+const DOCKER_AVAILABLE =
+  !QUICK &&
+  spawnSync('docker info', {
+    stdio: 'ignore',
+    shell: true,
+    timeout: 5_000,
+  }).status === 0;
 
 /**
  * CI gets a brand-new Postgres container per run; a local database keeps whatever the last run left
@@ -89,6 +96,16 @@ const SERVICE_JOBS = [
       ['gateway against Redis', 'npm test'],
     ],
   },
+  {
+    name: 'trusted edge acceptance (real Nginx)',
+    needs: 'Docker',
+    available: DOCKER_AVAILABLE,
+    cwd: 'services/gateway',
+    env: { REQUIRE_DOCKER: '1' },
+    steps: [
+      ['trusted edge through real Nginx', 'npm run test:trusted-edge'],
+    ],
+  },
 ];
 
 /**
@@ -101,8 +118,8 @@ const SERVICE_JOBS = [
  * became a different, database-backed suite. That is the opposite of parity, and it is how the
  * first run of this script reported a failure the real CI would never have produced.
  */
-function run(command, { cwd, serviceEnv = false } = {}) {
-  const env = { ...process.env };
+function run(command, { cwd, serviceEnv = false, extraEnv } = {}) {
+  const env = { ...process.env, ...(extraEnv ?? {}) };
   if (!serviceEnv) {
     delete env['DATABASE_URL'];
     delete env['REDIS_URL'];
@@ -127,7 +144,7 @@ for (const job of SERVICE_JOBS) {
   }
   for (const [label, command] of job.steps) {
     process.stdout.write(`\n=== ${label} ===\n`);
-    if (!run(command, { cwd: job.cwd, serviceEnv: true })) failed.push(label);
+    if (!run(command, { cwd: job.cwd, serviceEnv: true, extraEnv: job.env })) failed.push(label);
   }
 }
 

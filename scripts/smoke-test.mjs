@@ -14,7 +14,7 @@
  *   node scripts/smoke-test.mjs
  *
  * Or with custom URLs:
- *   API_URL=http://localhost:8080 WS_URL=ws://localhost:3000/ws WEB_URL=http://localhost:3000 node scripts/smoke-test.mjs
+ *   API_URL=http://localhost:3000 WS_URL=ws://localhost:3000/ws WEB_URL=http://localhost:3000 node scripts/smoke-test.mjs
  */
 
 import WebSocket from 'ws';
@@ -22,7 +22,7 @@ import { pathToFileURL } from 'node:url';
 
 import { waitForHealth } from './lib/wait-for-health.mjs';
 
-const apiUrl = process.env['API_URL'] ?? 'http://localhost:8080';
+const apiUrl = process.env['API_URL'] ?? 'http://localhost:3000';
 // Exercise the same nginx upgrade path a real browser uses, not the gateway's
 // direct host port. Supplying Origin below also verifies the production
 // same-origin guard and proxy Host forwarding.

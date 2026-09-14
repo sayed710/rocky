@@ -38,16 +38,21 @@ Any entries to the left of the trusted boundary are treated as untrusted user in
 - Unmaps IPv4-mapped IPv6 literals (`::ffff:192.0.2.1` -> `192.0.2.1`).
 - Strips surrounding brackets from IPv6 literals (`[2001:db8::1]` -> `2001:db8::1`).
 - Validates syntax using `node:net isIP`.
-- Lowers case for IPv6 addresses.
-- Rejects malformed or non-IP strings, falling back safely to the direct socket address.
+- Serializes equivalent IPv6 spellings to one compressed, lowercase identity.
+- Rejects malformed or non-IP strings. The API uses its fail-closed `unknown` bucket; the Gateway
+  rejects the connection with close code 1008 rather than falling back to a trusted proxy's socket.
 
 ### 3. Unified Adoption in API and Gateway
 
 - `packages/api/src/http/client-ip.ts` provides `resolveClientIp(req, trustProxy)` and `resolveTrustProxyEnv(envVal)`.
 - `packages/api/src/http/router.ts` resolves `ctx.ip` via `resolveClientIp(req, runtime.trustProxy ?? false)`.
 - `services/gateway/src/serve.ts` imports `resolveClientIp` and `resolveTrustProxyEnv` from `@chess-platform/api` and resolves the connection IP for per-IP tracking and limits.
-- `docker-compose.yml` configures `TRUST_PROXY: "1"` for both `api` and `gateway`.
-- `deploy/helm/gambit/values.yaml` configures `config.trustProxy: "2"`, passed via `test-gambit-config` ConfigMap in `deploy/helm/gambit/templates/configmap.yaml` to both `api` and `gateway` Deployments.
+- `docker-compose.yml` configures `TRUST_PROXY: "1"` for both `api` and `gateway`, and exposes them
+  only through the published web nginx port. The explicit chaos/developer override publishes
+  loopback-only direct ports and switches those services to direct-socket mode.
+- `deploy/helm/gambit` derives one or two trusted hops from whether Ingress is rendered and isolates
+  web/API/Gateway ingress with default-on NetworkPolicies. Arbitrary workload pods therefore cannot
+  bypass the web edge and supply trusted forwarded identity.
 
 ## Verification & Acceptance
 
@@ -66,9 +71,12 @@ Any entries to the left of the trusted boundary are treated as untrusted user in
    - Defeats WebSocket spoofing through real Nginx.
    - Defeats API registration rate limit spoofing through real Nginx.
    - Verifies Nginx path security rules (`/v1/metrics` blocked with 404 while `/v1/health` routes).
+   This suite is a required gateway CI step; CI fails rather than skipping when Docker is absent.
 
 ## Consequences
 
 - Reverse-proxied deployments no longer suffer from false-positive connection limit rejections or rate limit bypasses.
 - The platform maintains zero drift in `packages/api/openapi.json` and strict package boundaries (Gateway depends on API; API does not depend on Gateway).
 - Ingress topology is explicitly declared in deployment manifests rather than guessed from request headers.
+- Deployments need a NetworkPolicy-enforcing CNI. Monitoring outside the release must add a narrow,
+  additive policy for direct API scraping rather than disabling the trusted edge boundary.
