@@ -248,11 +248,14 @@ for (const operation of ['login', 'register', 'passkey'] as const) {
   for (const transition of ['reset', 'dispose'] as const) {
     test(`${operation} revokes its response after session ${transition}`, async () => {
       let finish!: (response: HttpResponse) => void;
+      let markStarted!: () => void;
       const response = new Promise<HttpResponse>((resolve) => { finish = resolve; });
+      const started = new Promise<void>((resolve) => { markStarted = resolve; });
       const calls: HttpRequest[] = [];
       const c = make({
         async send(request) {
           calls.push(request);
+          markStarted();
           return calls.length === 1 ? response : empty(204);
         },
       });
@@ -271,6 +274,7 @@ for (const operation of ['login', 'register', 'passkey'] as const) {
               signature: 'signature',
             },
           });
+      await started;
       if (transition === 'reset') c.session.reset();
       else c.session.dispose();
       finish(json(200, auth('obsolete-auth')));
@@ -290,16 +294,20 @@ for (const operation of ['login', 'register', 'passkey'] as const) {
 
 test('stale cookie-only login is revoked through the response cookie', async () => {
   let finish!: (response: HttpResponse) => void;
+  let markStarted!: () => void;
   const response = new Promise<HttpResponse>((resolve) => { finish = resolve; });
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
   const calls: HttpRequest[] = [];
   const c = make({
     async send(request) {
       calls.push(request);
+      markStarted();
       return calls.length === 1 ? response : empty(204);
     },
   });
 
   const pending = c.auth.login({ handle: 'alice', password: 'pw' });
+  await started;
   c.session.reset();
   const cookieOnly = auth('obsolete-cookie-only');
   const { refreshToken: _refreshToken, ...tokens } = cookieOnly.tokens;
