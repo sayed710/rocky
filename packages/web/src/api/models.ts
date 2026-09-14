@@ -14,9 +14,11 @@
  * leaderboard and game summaries. Lobby/matchmaking (seeks) and live game
  * streaming (WS) land with their own increments and are intentionally absent.
  *
- * M12 inc 2: `refreshToken` in `TokenPair` is now optional for the browser
- * flow — the browser never reads or stores it (it lives in an httpOnly
- * cookie). Non-browser API clients still receive it in the JSON body.
+ * M12 inc 2: `refreshToken` in `TokenPair` is optional because cookie-only
+ * responses need not expose it. The shared API currently includes it in JSON
+ * for non-browser compatibility, so a browser client can hold that copy only
+ * transiently in memory; it is never persisted and the browser refresh flow
+ * relies on the httpOnly cookie.
  * `RefreshRequest` is kept for API-client compatibility but the browser
  * flow no longer sends the token in the body (it relies on the cookie).
  */
@@ -79,9 +81,10 @@ export type UserRole = (typeof USER_ROLES)[number];
 /**
  * Access + refresh token pair returned by the auth endpoints.
  *
- * `refreshToken` is optional: the API still returns it in the JSON body for
- * non-browser API clients, but the browser flow (M12 inc 2) never reads or
- * stores it — the refresh token lives in an httpOnly cookie set by the API.
+ * `refreshToken` is optional: the API currently returns it in the shared JSON
+ * response for non-browser compatibility, while browser refresh requests use
+ * the httpOnly cookie. Any JSON copy is transient in-memory state, never
+ * persistent browser storage.
  */
 export interface TokenPair {
   readonly accessToken: string;
@@ -89,8 +92,9 @@ export interface TokenPair {
   /** Access-token lifetime in seconds. */
   readonly expiresIn: number;
   /**
-   * Opaque refresh token. Present for non-browser API clients; the browser
-   * never reads this (it uses the httpOnly cookie). See ADR-0012.
+   * Opaque refresh token for body-token clients. The shared browser client can
+   * receive this compatibility field but does not persist it or send it for
+   * cookie-based refresh. See ADR-0012.
    */
   readonly refreshToken?: string;
   /** ISO-8601 timestamp. */

@@ -23,8 +23,17 @@
  */
 import type { AuthResponse, SelfUser, TokenPair } from '../api/models.js';
 
-/** A refresh call: exchange a refresh token for a fresh auth response. */
-export type RefreshFn = (refreshToken?: string) => Promise<AuthResponse>;
+/** A cookie refresh paired with its browser-wide mutation order. */
+export interface OrderedAuthResponse {
+  readonly auth: AuthResponse;
+  readonly cookieOrder: number;
+}
+
+/** A refresh call guarded by the lifecycle generation captured before it was queued. */
+export type RefreshFn = (
+  refreshToken?: string,
+  expectedGeneration?: number,
+) => Promise<AuthResponse | OrderedAuthResponse>;
 
 /**
  * Full in-memory session (includes the refresh token for the refresh call).
@@ -114,15 +123,36 @@ export interface SessionResetOptions {
 function isAuthResponse(val: unknown): val is AuthResponse {
   if (!val || typeof val !== 'object') return false;
   const cand = val as Record<string, unknown>;
+  const user = cand['user'];
   const tokens = cand['tokens'];
   return (
-    typeof cand['user'] === 'object' &&
-    cand['user'] !== null &&
+    typeof user === 'object' &&
+    user !== null &&
+    typeof (user as Record<string, unknown>)['id'] === 'string' &&
+    typeof (user as Record<string, unknown>)['handle'] === 'string' &&
+    Array.isArray((user as Record<string, unknown>)['roles']) &&
     typeof tokens === 'object' &&
     tokens !== null &&
+    typeof (tokens as Record<string, unknown>)['accessToken'] === 'string' &&
+    (tokens as Record<string, unknown>)['tokenType'] === 'Bearer' &&
     typeof (tokens as Record<string, unknown>)['expiresIn'] === 'number' &&
-    Number.isFinite((tokens as Record<string, unknown>)['expiresIn'])
+    Number.isFinite((tokens as Record<string, unknown>)['expiresIn']) &&
+    (tokens as Record<string, unknown>)['refreshExpiresAt'] !== undefined &&
+    typeof (tokens as Record<string, unknown>)['refreshExpiresAt'] === 'string'
   );
+}
+
+/** Build the cross-tab auth payload without copying the refresh-token secret. */
+function toChannelAuthResponse(auth: AuthResponse): AuthResponse {
+  return {
+    user: auth.user,
+    tokens: {
+      accessToken: auth.tokens.accessToken,
+      tokenType: auth.tokens.tokenType,
+      expiresIn: auth.tokens.expiresIn,
+      refreshExpiresAt: auth.tokens.refreshExpiresAt,
+    },
+  };
 }
 
 /**
@@ -149,6 +179,10 @@ export interface SessionManagerOptions {
   readonly expiryLeewayMs?: number;
   /** Cross-tab session sync channel. Pass null to disable or custom channel for tests. */
   readonly channel?: SessionChannel | null;
+  /** Shared metadata storage for logout barriers. Defaults to browser localStorage when available. */
+  readonly barrierStorage?: KeyValueStorage | null;
+  /** Stable per-tab channel identity override used by deterministic tests. */
+  readonly channelSource?: string;
 }
 
 /** Mutation classes ordered so security-sensitive logout wins a concurrent adoption. */
@@ -159,6 +193,10 @@ interface SessionRevision {
   readonly clock: Readonly<Record<string, number>>;
   readonly source: string;
   readonly kind: SessionMutationKind;
+  /** Shared logout epoch; absent only on messages from older clients. */
+  readonly barrier?: string;
+  /** Browser-wide order of cookie-writing authentications, when coordinated by a current client. */
+  readonly cookieOrder?: number;
 }
 
 const MUTATION_PRIORITY: Readonly<Record<SessionMutationKind, number>> = {
@@ -166,6 +204,18 @@ const MUTATION_PRIORITY: Readonly<Record<SessionMutationKind, number>> = {
   adoption: 1,
   logout: 2,
 };
+
+/** Bound untrusted cross-tab metadata so it cannot grow every later broadcast indefinitely. */
+const MAX_CHANNEL_CLOCK_ENTRIES = 64;
+const MAX_CHANNEL_SOURCE_LENGTH = 128;
+const CHANNEL_BARRIER_KEY = 'rookzen-session-logout-barrier';
+const INITIAL_CHANNEL_BARRIER = '0000000000000000:initial';
+const CHANNEL_BARRIER_PATTERN = /^\d{16}:[A-Za-z0-9._-]{1,128}$/;
+
+/** Read a vector-clock counter without consulting attacker-controlled prototype properties. */
+function clockCounter(clock: Readonly<Record<string, number>>, source: string): number {
+  return Object.prototype.hasOwnProperty.call(clock, source) ? (clock[source] ?? 0) : 0;
+}
 
 /** Validate a revision received across the untyped BroadcastChannel boundary. */
 function isSessionRevision(value: unknown): value is SessionRevision {
@@ -177,9 +227,26 @@ function isSessionRevision(value: unknown): value is SessionRevision {
   return (
     typeof revision['source'] === 'string' &&
     revision['source'].length > 0 &&
+    revision['source'].length <= MAX_CHANNEL_SOURCE_LENGTH &&
     clockEntries.length > 0 &&
-    clockEntries.every(([source, counter]) => source.length > 0 && Number.isSafeInteger(counter) && (counter as number) > 0) &&
-    Number.isSafeInteger((clock as Record<string, unknown>)[revision['source']]) &&
+    clockEntries.length <= MAX_CHANNEL_CLOCK_ENTRIES &&
+    clockEntries.every(([source, counter]) => (
+      source.length > 0 &&
+      source.length <= MAX_CHANNEL_SOURCE_LENGTH &&
+      Number.isSafeInteger(counter) &&
+      (counter as number) > 0 &&
+      (counter as number) < Number.MAX_SAFE_INTEGER
+    )) &&
+    typeof revision['source'] === 'string' &&
+    clockCounter(clock as Record<string, number>, revision['source']) > 0 &&
+    (revision['barrier'] === undefined || (
+      typeof revision['barrier'] === 'string' && CHANNEL_BARRIER_PATTERN.test(revision['barrier'])
+    )) &&
+    (revision['cookieOrder'] === undefined || (
+      Number.isSafeInteger(revision['cookieOrder']) &&
+      (revision['cookieOrder'] as number) > 0 &&
+      (revision['cookieOrder'] as number) < Number.MAX_SAFE_INTEGER
+    )) &&
     (revision['kind'] === 'invalidation' || revision['kind'] === 'adoption' || revision['kind'] === 'logout')
   );
 }
@@ -192,8 +259,8 @@ function compareCausality(
   let leftAhead = false;
   let rightAhead = false;
   for (const source of new Set([...Object.keys(left), ...Object.keys(right)])) {
-    leftAhead ||= (left[source] ?? 0) > (right[source] ?? 0);
-    rightAhead ||= (right[source] ?? 0) > (left[source] ?? 0);
+    leftAhead ||= clockCounter(left, source) > clockCounter(right, source);
+    rightAhead ||= clockCounter(right, source) > clockCounter(left, source);
   }
   if (leftAhead && rightAhead) return 'concurrent';
   if (leftAhead) return 'after';
@@ -205,16 +272,30 @@ function compareCausality(
 function compareConcurrentRevisions(left: SessionRevision, right: SessionRevision): number {
   const priority = MUTATION_PRIORITY[left.kind] - MUTATION_PRIORITY[right.kind];
   if (priority !== 0) return priority;
-  const sourceProgress = left.clock[left.source]! - right.clock[right.source]!;
+  const sourceProgress = clockCounter(left.clock, left.source) - clockCounter(right.clock, right.source);
   if (sourceProgress !== 0) return sourceProgress;
   if (left.source === right.source) return 0;
   return left.source < right.source ? -1 : 1;
 }
 
-/** Create a per-tab tie-breaker for concurrently produced channel revisions. */
-function createChannelSource(): string {
+function randomChannelSource(): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
   return `${Date.now()}-${Math.random()}`;
+}
+
+/** Create a fresh tie-breaker for each manager incarnation, including SPA remounts. */
+function createChannelSource(): string {
+  return randomChannelSource();
+}
+
+/** Resolve browser localStorage without making SessionManager unusable in restricted environments. */
+function browserBarrierStorage(): KeyValueStorage | null {
+  if (!isBrowserEnvironment()) return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -240,8 +321,12 @@ export class SessionManager {
   private adoptedHandler: ((session: StoredSession) => void) | null = null;
   private resetHandler: (() => void) | null = null;
   private refreshInFlight: Promise<StoredSession> | null = null;
-  private readonly channelSource = createChannelSource();
-  private channelClock: Record<string, number> = {};
+  private readonly channelSource: string;
+  private readonly barrierStorage: KeyValueStorage | null;
+  private channelBarrier = INITIAL_CHANNEL_BARRIER;
+  private appliedLogoutBarrier = INITIAL_CHANNEL_BARRIER;
+  private channelClockCompacted = false;
+  private channelClock: Record<string, number> = Object.create(null) as Record<string, number>;
   private lastChannelRevision: SessionRevision | null = null;
   /**
    * Monotonically increasing generation counter tracking local session lifecycle changes
@@ -250,6 +335,7 @@ export class SessionManager {
    * or poison newly adopted or cleared sessions.
    */
   private sessionGeneration = 0;
+  private disposed = false;
   private channel: SessionChannel | null = null;
 
   /** Initialize the session manager; opens the BroadcastChannel if running in a browser context. */
@@ -258,6 +344,11 @@ export class SessionManager {
     this.doRefresh = options.refresh;
     this.now = options.now ?? ((): number => Date.now());
     this.leewayMs = options.expiryLeewayMs ?? 30_000;
+    this.channelSource = options.channelSource ?? createChannelSource();
+    this.barrierStorage = options.barrierStorage === undefined
+      ? browserBarrierStorage()
+      : options.barrierStorage;
+    this.channelBarrier = this.readPersistedBarrier();
 
     if (options.channel !== undefined) {
       this.channel = options.channel;
@@ -274,6 +365,75 @@ export class SessionManager {
         this.handleChannelMessage(event.data);
       };
     }
+  }
+
+  /** Read the greatest valid logout barrier visible to this browser context. */
+  private readPersistedBarrier(): string {
+    try {
+      const value = this.barrierStorage?.getItem(CHANNEL_BARRIER_KEY);
+      return value && CHANNEL_BARRIER_PATTERN.test(value) ? value : INITIAL_CHANNEL_BARRIER;
+    } catch {
+      return this.channelBarrier;
+    }
+  }
+
+  /** Persist a monotonic barrier without exposing authentication credentials. */
+  private persistBarrier(barrier: string): void {
+    try {
+      const visible = this.readPersistedBarrier();
+      this.barrierStorage?.setItem(CHANNEL_BARRIER_KEY, visible > barrier ? visible : barrier);
+    } catch {
+      // Storage can be unavailable; BroadcastChannel ordering remains the in-memory fallback.
+    }
+  }
+
+  /** Clear local state when another tab advanced the durable logout barrier before its message arrived. */
+  private synchronizeBarrier(): void {
+    const persisted = this.readPersistedBarrier();
+    if (persisted <= this.channelBarrier) return;
+    this.channelBarrier = persisted;
+    this.channelClock = Object.create(null) as Record<string, number>;
+    this.channelClockCompacted = false;
+    this.lastChannelRevision = null;
+    this.applyReset();
+    this.appliedLogoutBarrier = persisted;
+    this.resetHandler?.();
+  }
+
+  /** Advance the shared barrier before broadcasting an explicit local logout. */
+  private advanceLogoutBarrier(): void {
+    const persisted = this.readPersistedBarrier();
+    const current = persisted > this.channelBarrier ? persisted : this.channelBarrier;
+    const separator = current.indexOf(':');
+    const nextCounter = BigInt(current.slice(0, separator)) + 1n;
+    this.channelBarrier = `${nextCounter.toString().padStart(16, '0')}:${this.channelSource}`;
+    this.persistBarrier(this.channelBarrier);
+    this.channelClock = Object.create(null) as Record<string, number>;
+    this.channelClockCompacted = false;
+    this.lastChannelRevision = null;
+  }
+
+  /** Admit only mutations created in the current logout epoch, while retaining legacy compatibility. */
+  private acceptRevisionBarrier(revision: SessionRevision, kind: SessionMutationKind): boolean {
+    if (revision.barrier === undefined) {
+      this.synchronizeBarrier();
+      // Once this browser has observed an epoch-aware logout, an older client cannot prove that
+      // its adoption began afterwards. Fail closed instead of resurrecting that logged-out state.
+      return kind !== 'adoption' || this.channelBarrier === INITIAL_CHANNEL_BARRIER;
+    }
+    if (kind === 'logout') {
+      if (revision.barrier < this.channelBarrier) return false;
+      if (revision.barrier > this.channelBarrier) {
+        this.channelBarrier = revision.barrier;
+        this.persistBarrier(revision.barrier);
+        this.channelClock = Object.create(null) as Record<string, number>;
+        this.channelClockCompacted = false;
+        this.lastChannelRevision = null;
+      }
+      return true;
+    }
+    this.synchronizeBarrier();
+    return revision.barrier === this.channelBarrier;
   }
 
   /**
@@ -314,10 +474,11 @@ export class SessionManager {
     if (untrustedRevision !== undefined && !isSessionRevision(untrustedRevision)) return;
     const revision = isSessionRevision(untrustedRevision) ? untrustedRevision : null;
     if (revision && revision.kind !== kind) return;
-    if (revision) this.observeChannelClock(revision.clock);
-    if (cause === 'invalidation' && this.shouldPreserveAgainstInvalidation(message['token'])) return;
     if (!this.acceptIncomingRevision(revision, kind)) return;
+    if (cause === 'invalidation' && this.shouldPreserveAgainstInvalidation(message['token'])) return;
+    if (cause === 'logout' && revision?.barrier === this.appliedLogoutBarrier) return;
     this.applyReset();
+    if (cause === 'logout') this.appliedLogoutBarrier = revision?.barrier ?? this.channelBarrier;
     this.resetHandler?.();
   }
 
@@ -330,22 +491,68 @@ export class SessionManager {
   }
 
   /** Advance the local logical clock and record a mutation that originated in this tab. */
-  private nextChannelRevision(kind: SessionMutationKind): SessionRevision {
-    this.channelClock[this.channelSource] = (this.channelClock[this.channelSource] ?? 0) + 1;
+  private nextChannelRevision(kind: SessionMutationKind, cookieOrder?: number): SessionRevision {
+    const nextCounter = clockCounter(this.channelClock, this.channelSource) + 1;
+    if (kind === 'logout') {
+      // Logout is a convergence barrier: compact prior causal metadata so a valid sign-out cannot
+      // be rejected merely because many short-lived tabs have previously contributed clock entries.
+      this.channelClock = Object.create(null) as Record<string, number>;
+    }
+    while (
+      !Object.prototype.hasOwnProperty.call(this.channelClock, this.channelSource) &&
+      Object.keys(this.channelClock).length >= MAX_CHANNEL_CLOCK_ENTRIES
+    ) {
+      const evicted = Object.keys(this.channelClock).find((source) => source !== this.channelSource);
+      if (!evicted) break;
+      delete this.channelClock[evicted];
+      this.channelClockCompacted = true;
+    }
+    this.channelClock[this.channelSource] = nextCounter;
     const revision = {
       clock: { ...this.channelClock },
       source: this.channelSource,
       kind,
+      barrier: this.channelBarrier,
+      ...(cookieOrder !== undefined ? { cookieOrder } : {}),
     } as const;
     this.lastChannelRevision = revision;
     return revision;
   }
 
   /** Merge observed causal history without accepting the peer's state mutation. */
-  private observeChannelClock(observed: Readonly<Record<string, number>>): void {
-    for (const [source, counter] of Object.entries(observed)) {
-      this.channelClock[source] = Math.max(this.channelClock[source] ?? 0, counter);
+  private observeChannelClock(observed: Readonly<Record<string, number>>): boolean {
+    if (clockCounter(observed, this.channelSource) > clockCounter(this.channelClock, this.channelSource)) {
+      return false;
     }
+    for (const [source, counter] of Object.entries(observed)) {
+      if (!Object.prototype.hasOwnProperty.call(this.channelClock, source)) {
+        while (Object.keys(this.channelClock).length >= MAX_CHANNEL_CLOCK_ENTRIES) {
+          const evicted = Object.keys(this.channelClock).find((candidate) => (
+            candidate !== this.channelSource && candidate !== source
+          ));
+          if (!evicted) break;
+          delete this.channelClock[evicted];
+          this.channelClockCompacted = true;
+        }
+      }
+      this.channelClock[source] = Math.max(clockCounter(this.channelClock, source), counter);
+    }
+    return true;
+  }
+
+  /** Replace causal history at a logout barrier while retaining a safe local counter. */
+  private compactToLogout(revision: SessionRevision): SessionRevision {
+    const eventClock = { [revision.source]: clockCounter(revision.clock, revision.source) };
+    const localClock = Object.create(null) as Record<string, number>;
+    const ownCounter = clockCounter(this.channelClock, this.channelSource);
+    localClock[revision.source] = eventClock[revision.source]!;
+    if (this.channelSource !== revision.source) {
+      localClock[this.channelSource] = Math.max(ownCounter, clockCounter(revision.clock, this.channelSource));
+    }
+    this.channelClock = localClock;
+    // The accepted event is the sender's logout barrier only. Receiver-local history belongs in
+    // future revisions it originates, not in the event used to judge the sender's later login.
+    return { ...revision, clock: eventClock };
   }
 
   /** Accept only a causally newer peer mutation, with a conservative rolling-upgrade fallback. */
@@ -354,21 +561,65 @@ export class SessionManager {
     legacyKind: SessionMutationKind,
   ): boolean {
     if (!revision) {
+      this.synchronizeBarrier();
+      if (legacyKind === 'adoption' && this.channelBarrier !== INITIAL_CHANNEL_BARRIER) return false;
       // A new client that has explicitly logged out must not be resurrected by
       // a delayed adoption from an older client that cannot prove freshness.
       if (legacyKind === 'adoption' && this.lastChannelRevision?.kind === 'logout') return false;
+      if (legacyKind === 'logout') this.advanceLogoutBarrier();
       this.nextChannelRevision(legacyKind);
       return true;
     }
     if (revision.kind !== legacyKind) return false;
-    this.observeChannelClock(revision.clock);
+    if (clockCounter(revision.clock, this.channelSource) > clockCounter(this.channelClock, this.channelSource)) {
+      return false;
+    }
+    if (legacyKind === 'logout' && revision.barrier === undefined) {
+      // Upgrade a valid old-client logout into the same durable epoch boundary emitted by a
+      // current client. This prevents a remount from forgetting the legacy tombstone.
+      this.advanceLogoutBarrier();
+      revision = { ...revision, barrier: this.channelBarrier };
+    }
+    if (!this.acceptRevisionBarrier(revision, legacyKind)) return false;
     if (this.lastChannelRevision) {
-      const causality = compareCausality(revision.clock, this.lastChannelRevision.clock);
-      if (causality === 'before' || causality === 'equal') return false;
-      if (causality === 'concurrent' && compareConcurrentRevisions(revision, this.lastChannelRevision) <= 0) {
-        return false;
+      const orderedCookieAdoption = (
+        revision.kind === 'adoption' &&
+        this.lastChannelRevision.kind === 'adoption' &&
+        revision.cookieOrder !== undefined &&
+        this.lastChannelRevision.cookieOrder !== undefined &&
+        revision.cookieOrder !== this.lastChannelRevision.cookieOrder
+      );
+      if (orderedCookieAdoption && revision.cookieOrder! < this.lastChannelRevision.cookieOrder!) return false;
+      if (!orderedCookieAdoption) {
+        if (
+          revision.kind === 'adoption' &&
+          revision.cookieOrder === undefined &&
+          this.channelClockCompacted &&
+          !Object.prototype.hasOwnProperty.call(this.channelClock, revision.source)
+        ) return false;
+        const causality = compareCausality(revision.clock, this.lastChannelRevision.clock);
+        if (causality === 'before' || causality === 'equal') return false;
+        const adoptionCapturedAfterBarrier = (
+          causality === 'concurrent' &&
+          revision.kind === 'adoption' &&
+          this.lastChannelRevision.kind === 'logout' &&
+          revision.barrier !== undefined &&
+          revision.barrier === this.lastChannelRevision.barrier
+        );
+        if (
+          causality === 'concurrent' &&
+          !adoptionCapturedAfterBarrier &&
+          compareConcurrentRevisions(revision, this.lastChannelRevision) <= 0
+        ) {
+          return false;
+        }
       }
     }
+    if (legacyKind === 'logout') {
+      this.lastChannelRevision = this.compactToLogout(revision);
+      return true;
+    }
+    if (!this.observeChannelClock(revision.clock)) return false;
     this.lastChannelRevision = revision;
     return true;
   }
@@ -407,6 +658,20 @@ export class SessionManager {
     return this.store.load() !== null;
   }
 
+  /** Capture the current lifecycle generation for guarding a later asynchronous adoption. */
+  captureGeneration(): number {
+    this.synchronizeBarrier();
+    return this.sessionGeneration;
+  }
+
+  /** Reject work queued for a session generation that has since been superseded. */
+  assertGeneration(expectedGeneration: number): void {
+    this.synchronizeBarrier();
+    if (this.disposed || expectedGeneration !== this.sessionGeneration) {
+      throw new NoSessionError('session changed while authentication was queued');
+    }
+  }
+
   /**
    * Persist tokens+user from an auth response, computing access-token expiry.
    *
@@ -414,12 +679,21 @@ export class SessionManager {
    * refresh started before this adoption cannot overwrite the freshly adopted session.
    * Optionally broadcasts a `session_adopted` message to notify peer tabs.
    */
-  adopt(auth: AuthResponse, broadcast = true): StoredSession {
-    const revision = this.nextChannelRevision('adoption');
+  adopt(
+    auth: AuthResponse,
+    broadcast = true,
+    expectedGeneration?: number,
+    cookieOrder?: number,
+  ): StoredSession {
+    this.synchronizeBarrier();
+    if (this.disposed || (expectedGeneration !== undefined && expectedGeneration !== this.sessionGeneration)) {
+      throw new NoSessionError('session changed while authentication was in flight');
+    }
+    const revision = this.nextChannelRevision('adoption', cookieOrder);
     const session = this.storeAuth(auth);
     if (broadcast && this.channel) {
       try {
-        this.channel.postMessage({ type: 'session_adopted', auth, revision });
+        this.channel.postMessage({ type: 'session_adopted', auth: toChannelAuthResponse(auth), revision });
       } catch {
         // Channel closed or in error state.
       }
@@ -440,7 +714,7 @@ export class SessionManager {
    * calls where the controller already drives the session update directly.
    */
   private adoptFromChannel(auth: AuthResponse): void {
-    const session = this.storeAuth(auth);
+    const session = this.storeAuth(toChannelAuthResponse(auth));
     this.adoptedHandler?.(session);
   }
 
@@ -486,8 +760,10 @@ export class SessionManager {
     const currentToken = this.store.load()?.tokens.accessToken;
     const token = typeof options === 'object' && options.token !== undefined ? options.token : currentToken;
 
+    if (cause === 'logout') this.advanceLogoutBarrier();
     const revision = this.nextChannelRevision(cause === 'invalidation' ? 'invalidation' : 'logout');
     this.applyReset();
+    if (cause === 'logout') this.appliedLogoutBarrier = this.channelBarrier;
     if (broadcast && this.channel) {
       try {
         this.channel.postMessage({
@@ -502,13 +778,22 @@ export class SessionManager {
     }
   }
 
+  /** Reset only if no newer session transition superseded the asynchronous caller. */
+  resetIfGeneration(expectedGeneration: number, options: boolean | SessionResetOptions = true): boolean {
+    this.synchronizeBarrier();
+    if (this.disposed || expectedGeneration !== this.sessionGeneration) return false;
+    this.reset(options);
+    return true;
+  }
+
   /**
    * Permanently close the cross-tab channel and invalidate any in-flight refresh requests.
    * Increments `sessionGeneration` so pending asynchronous responses cannot mutate state after disposal.
    */
   dispose(): void {
-    this.sessionGeneration++;
-    this.refreshInFlight = null;
+    if (this.disposed) return;
+    this.disposed = true;
+    this.applyReset();
     if (this.channel) {
       this.channel.onmessage = null;
       this.channel.close();
@@ -551,12 +836,14 @@ export class SessionManager {
    * disposal has superseded this request.
    */
   async restore(): Promise<StoredSession> {
-    const generation = this.sessionGeneration;
-    const auth = await this.doRefresh();
+    const generation = this.captureGeneration();
+    const result = await this.doRefresh(undefined, generation);
+    const auth = 'auth' in result ? result.auth : result;
+    const cookieOrder = 'auth' in result ? result.cookieOrder : undefined;
     if (generation !== this.sessionGeneration) {
       throw new NoSessionError('session changed while restore was in flight');
     }
-    return this.adopt(auth);
+    return this.adopt(auth, true, generation, cookieOrder);
   }
 
   /**
@@ -581,17 +868,19 @@ export class SessionManager {
     const session = this.store.load();
     if (!session) throw new NoSessionError('cannot refresh without a session');
 
-    const opGen = this.sessionGeneration;
+    const opGen = this.captureGeneration();
 
     const pending = (async (): Promise<StoredSession> => {
       try {
         // Pass the refresh token if available (non-browser path).
         // For the browser flow, the token is undefined and the cookie is sent.
-        const auth = await this.doRefresh(session.tokens.refreshToken);
+        const result = await this.doRefresh(session.tokens.refreshToken, opGen);
+        const auth = 'auth' in result ? result.auth : result;
+        const cookieOrder = 'auth' in result ? result.cookieOrder : undefined;
         if (this.sessionGeneration !== opGen) {
           throw new NoSessionError('session was reset while refresh was in flight');
         }
-        return this.adopt(auth);
+        return this.adopt(auth, true, opGen, cookieOrder);
       } catch (error) {
         if (!(error instanceof NoSessionError)) {
           // If a concurrent tab refreshed and updated our store with a fresh successor token,

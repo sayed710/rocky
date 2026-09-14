@@ -9,9 +9,10 @@
  * - Login does a hash comparison even when the handle is unknown, so response
  *   timing does not reveal whether an account exists.
  * - Refresh tokens are single-use. Each refresh rotates to a fresh token and
- *   revokes the presenting session (`rotated_from` links the chain). Presenting
- *   an already-revoked (i.e. previously rotated) token is treated as theft: the
- *   entire session chain for that user is revoked and the attempt is audited.
+ *   revokes the presenting session (`rotated_from` links the chain). A replay
+ *   inside the bounded grace window is rejected without chain revocation;
+ *   replay outside it is treated as theft, revokes the user's session chains,
+ *   and is audited.
  */
 
 import { createHash, generateKeyPairSync, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
@@ -86,13 +87,23 @@ function strictBase64UrlDecode(input: unknown, name: string): Buffer {
  * than the direct successor: after two refreshes the direct successor is revoked too.
  */
 function descendantsOf(sessions: readonly SessionRow[], rootId: string): Set<string> {
-  const seen = new Set([rootId]);
+  const childrenByParent = new Map<string, string[]>();
+  for (const session of sessions) {
+    if (!session.rotatedFrom) continue;
+    const children = childrenByParent.get(session.rotatedFrom) ?? [];
+    children.push(session.id);
+    childrenByParent.set(session.rotatedFrom, children);
+  }
+
   const descendants = new Set<string>();
-  // `listForUser` orders newest first, so walk oldest first to reach a successor after its parent.
-  for (const session of [...sessions].reverse()) {
-    if (session.rotatedFrom && seen.has(session.rotatedFrom)) {
-      seen.add(session.id);
-      descendants.add(session.id);
+  const pending = [rootId];
+  while (pending.length > 0) {
+    const parent = pending.pop()!;
+    for (const child of childrenByParent.get(parent) ?? []) {
+      if (child !== rootId && !descendants.has(child)) {
+        descendants.add(child);
+        pending.push(child);
+      }
     }
   }
   return descendants;
@@ -240,9 +251,18 @@ export class AuthService {
       throw HttpError.unauthorized('invalid credentials');
     }
     const roles = await this.repos.users.rolesOf(user.id);
-    const tokens = await this.startSession(user, roles, meta);
+    const prepared = this.prepareSession(user, roles, meta);
+    await this.repos.sessions.create(prepared.session);
+    // Password reset updates the hash before revoking the account's sessions. Re-read it after
+    // creation so an old-password login that straddled that boundary cannot survive by inserting
+    // its session just after the bulk revocation completed.
+    if ((await this.repos.users.getPasswordHash(user.id)) !== stored) {
+      await this.repos.sessions.revoke(prepared.session.id, new Date(this.clock.now()));
+      await this.audit(meta, user.id, 'auth.login.fail', user.id);
+      throw HttpError.unauthorized('invalid credentials');
+    }
     await this.audit(meta, user.id, 'auth.login', user.id);
-    return { user, roles, tokens };
+    return { user, roles, tokens: prepared.tokens };
   }
 
   /**
@@ -252,13 +272,14 @@ export class AuthService {
    * A revoked row has two very different causes, and the response to them is not the same:
    *
    * - It was **rotated away** by a legitimate refresh, and a live successor is holding the account.
-   *   Something is replaying a token the real client already exchanged, so the whole account is
-   *   burned — this is the reuse detection the rotation scheme exists for.
+   *   Something is replaying a token the real client already exchanged, so a replay outside the
+   *   bounded grace window burns the account — this is the reuse detection the rotation scheme
+   *   exists for.
    *   To prevent false-positive account burns under near-simultaneous multi-tab refreshes or immediate
    *   network retries, presentations within `[0, refreshGracePeriodMs]` of rotation are tolerated
    *   (rejected with 401 without burning the account). Presentations with negative elapsed time
    *   (e.g. wall clock rollback or NTP skew) or elapsed time exceeding the grace window are strictly
-   *   treated as illegitimate and trigger the full session chain burn.
+   *   treated as illegitimate and revoke every active session chain for the account.
    * - It was **deliberately revoked**, by {@link revokeSession} or {@link logout}. Then the browser
    *   presenting it is simply the one the user just signed out, doing what any client does when its
    *   access token expires. Burning the account here would mean that revoking one session signs the
@@ -300,7 +321,7 @@ export class AuthService {
    *
    * Concurrent state transitions are explicitly handled:
    * - A grace period applies to newly rotated sessions to tolerate benign races (e.g. multi-tab refresh).
-   * - Presentations outside the grace window trigger the full session chain burn (reuse detection).
+   * - Presentations outside the grace window revoke every active session chain for the account.
    * - If a session was explicitly logged out, a concurrent refresh attempt correctly throws 401 without burning all sessions.
    */
   async refresh(refreshToken: string, meta: RequestMeta): Promise<AuthResult> {
@@ -347,8 +368,13 @@ export class AuthService {
    */
   async logout(refreshToken: string, meta: RequestMeta, actingUserId: string): Promise<void> {
     const session = await this.repos.sessions.findByRefreshHash(hashRefreshToken(refreshToken));
-    if (session && session.userId === actingUserId && !session.revokedAt) {
-      await this.repos.sessions.revoke(session.id, new Date(this.clock.now()));
+    if (session && session.userId === actingUserId) {
+      const revoked = await this.repos.sessions.revokeChainForUser(
+        actingUserId,
+        session.id,
+        new Date(this.clock.now()),
+      );
+      if (!revoked) return;
       await this.audit(meta, session.userId, 'auth.logout', session.id);
     }
   }
@@ -361,10 +387,8 @@ export class AuthService {
   /**
    * Revoke one of the caller's own sessions by id.
    *
-   * Ownership is enforced structurally rather than by comparison: the candidate is looked up
-   * *within* `listForUser(userId)`, so a session belonging to anyone else is simply not in the set
-   * and cannot be reached. There is no code path where a caller-supplied id is passed to
-   * `sessions.revoke` without first having been found in that user's own list. Same shape as
+   * Ownership is enforced inside the repository's atomic chain operation: a root belonging to
+   * another user is indistinguishable from a missing root and cannot be reached. Same shape as
    * {@link deletePasskey}, and for the same reason.
    *
    * A session id that does not belong to the caller is reported as `404`, not `403`: distinguishing
@@ -372,17 +396,14 @@ export class AuthService {
    * live session somewhere on the platform.
    *
    * Revoking an already-revoked session succeeds rather than erroring. The caller asked for that
-   * session to be dead and it is dead, so there is nothing to report; this also makes two
-   * simultaneous revocations of the same id both succeed instead of one losing a race. Same
-   * tolerance {@link logout} already applies. The audit record is written by whichever call
-   * actually performed the transition, which `sessions.revoke` reports atomically — a
-   * read-then-write check here would let two concurrent requests both audit one revocation.
+   * session to be dead and it is dead, so there is nothing to report; this also makes simultaneous
+   * revocations all succeed. The audit record is written by whichever atomic call transitioned at
+   * least one row.
    *
    * What a user calls "a session" is a *chain* of rows, not one row: every {@link refresh} retires
    * the current row and inserts a successor linked by `rotatedFrom`. Revoking only the row the user
-   * clicked would leave that browser signed in whenever a refresh landed between this list being
-   * read and the revocation being written, so the whole chain descending from the target goes with
-   * it. The re-read closes the same window for a rotation that lands during the first pass.
+   * clicked would leave that browser signed in whenever a refresh landed during revocation. The
+   * repository therefore serializes the recursive chain update with rotation for this account.
    *
    * What revocation does and does not reach is a consequence of the existing token design, not a
    * choice made here. A session row *is* the refresh capability, so revoking it stops that session
@@ -393,38 +414,10 @@ export class AuthService {
    * architecture from the one this endpoint was added to.
    */
   async revokeSession(userId: string, sessionId: string, meta: RequestMeta): Promise<void> {
-    const sessions = await this.repos.sessions.listForUser(userId);
-    if (!sessions.some((s) => s.id === sessionId)) throw HttpError.notFound('Session not found');
-
     const at = new Date(this.clock.now());
-    const first = await this.revokeChain(sessions, sessionId, at);
-    // A refresh that landed while the first pass ran produced a successor the first list did not
-    // contain. One re-read catches it; the successor of *that* would need a refresh to have landed
-    // inside this window too, and it is revoked before it can mint anything either way.
-    const second = await this.revokeChain(await this.repos.sessions.listForUser(userId), sessionId, at);
-
-    if (first || second) await this.audit(meta, userId, 'auth.session.revoke', sessionId);
-  }
-
-  /**
-   * Revoke `rootId` and every session rotated from it, directly or transitively.
-   *
-   * Returns whether this call revoked anything, so the caller can audit once per revocation rather
-   * than once per request.
-   */
-  private async revokeChain(
-    sessions: readonly SessionRow[],
-    rootId: string,
-    at: Date,
-  ): Promise<boolean> {
-    const chain = descendantsOf(sessions, rootId);
-    chain.add(rootId);
-
-    let transitioned = false;
-    for (const id of chain) {
-      if (await this.repos.sessions.revoke(id, at)) transitioned = true;
-    }
-    return transitioned;
+    const revoked = await this.repos.sessions.revokeChainForUser(userId, sessionId, at);
+    if (revoked === null) throw HttpError.notFound('Session not found');
+    if (revoked > 0) await this.audit(meta, userId, 'auth.session.revoke', sessionId);
   }
 
   /**
@@ -866,11 +859,7 @@ export class AuthService {
   }
 
   private async revokeAllForUser(userId: string, now: number): Promise<void> {
-    const sessions = await this.repos.sessions.listForUser(userId);
-    const at = new Date(now);
-    for (const s of sessions) {
-      if (!s.revokedAt) await this.repos.sessions.revoke(s.id, at);
-    }
+    await this.repos.sessions.revokeAllForUser(userId, new Date(now));
   }
 
   private async audit(

@@ -25,7 +25,7 @@ import type { HttpTransport } from '../ports/http.js';
 import { HttpClient } from '../net/http-client.js';
 import type { RequestSpec } from '../net/http-client.js';
 import { UnauthorizedError } from '../net/errors.js';
-import { SessionManager } from '../net/session.js';
+import { NoSessionError, SessionManager } from '../net/session.js';
 import type { TokenStore } from '../net/session.js';
 import { DEFAULT_RETRY_POLICY } from '../net/retry.js';
 import { SocialApi } from './social.js';
@@ -116,6 +116,54 @@ export type ExecSpec = RequestSpec & { readonly auth?: boolean | 'optional' };
 /** The bound request executor handed to resource groups. */
 export type Execute = <T>(spec: ExecSpec) => Promise<T>;
 
+/** Serialize operations that can replace or clear the browser's shared refresh cookie. */
+export interface AuthCookieCoordinator {
+  run<T>(operation: (cookieOrder: number) => Promise<T>): Promise<T>;
+}
+
+const AUTH_COOKIE_LOCK_NAME = 'rookzen-auth-cookie';
+const AUTH_COOKIE_ORDER_KEY = 'rookzen-auth-cookie-order';
+
+class BrowserAuthCookieCoordinator implements AuthCookieCoordinator {
+  private fallbackTail: Promise<void> = Promise.resolve();
+  private fallbackOrder = 0;
+
+  private nextOrder(): number {
+    try {
+      if (typeof window !== 'undefined') {
+        const current = Number.parseInt(window.localStorage.getItem(AUTH_COOKIE_ORDER_KEY) ?? '0', 10);
+        const next = Number.isSafeInteger(current) && current >= 0 ? current + 1 : 1;
+        if (!Number.isSafeInteger(next)) throw new Error('auth cookie order exhausted');
+        window.localStorage.setItem(AUTH_COOKIE_ORDER_KEY, String(next));
+        return next;
+      }
+    } catch {
+      // Restricted storage falls back to process-local ordering below.
+    }
+    this.fallbackOrder += 1;
+    return this.fallbackOrder;
+  }
+
+  async run<T>(operation: (cookieOrder: number) => Promise<T>): Promise<T> {
+    if (typeof navigator !== 'undefined' && navigator.locks) {
+      return navigator.locks.request(AUTH_COOKIE_LOCK_NAME, () => operation(this.nextOrder()));
+    }
+
+    // Tests, SSR, and older single-realm clients still need deterministic sequencing.
+    const previous = this.fallbackTail;
+    let release!: () => void;
+    this.fallbackTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation(this.nextOrder());
+    } finally {
+      release();
+    }
+  }
+}
+
+const DEFAULT_AUTH_COOKIE_COORDINATOR = new BrowserAuthCookieCoordinator();
+
 export interface GambitClientOptions {
   /** API origin, e.g. `https://api.gambit.example`. Empty string = same-origin. */
   readonly baseUrl: string;
@@ -127,6 +175,8 @@ export interface GambitClientOptions {
   readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
   readonly rng?: () => number;
+  /** Override the browser-wide refresh-cookie coordinator, primarily for deterministic tests. */
+  readonly authCookieCoordinator?: AuthCookieCoordinator;
 }
 
 export class GambitClient {
@@ -150,6 +200,7 @@ export class GambitClient {
   private readonly http: HttpClient;
 
   constructor(options: GambitClientOptions) {
+    const authCookieCoordinator = options.authCookieCoordinator ?? DEFAULT_AUTH_COOKIE_COORDINATOR;
     this.http = new HttpClient({
       baseUrl: options.baseUrl,
       transport: options.transport ?? new FetchTransport(),
@@ -163,17 +214,21 @@ export class GambitClient {
     this.session = new SessionManager({
       // M12 inc 2: refresh relies on the httpOnly cookie (credentials: 'include').
       // The refresh token is NOT sent in the body for the browser flow.
-      refresh: (): Promise<AuthResponse> =>
-        this.http.request<AuthResponse>({
-          method: 'POST',
-          path: '/v1/auth/refresh',
-          credentials: 'include',
+      refresh: (_refreshToken, expectedGeneration) =>
+        authCookieCoordinator.run(async (cookieOrder) => {
+          if (expectedGeneration !== undefined) this.session.assertGeneration(expectedGeneration);
+          const auth = await this.http.request<AuthResponse>({
+            method: 'POST',
+            path: '/v1/auth/refresh',
+            credentials: 'include',
+          });
+          return { auth, cookieOrder };
         }),
       ...(options.tokenStore ? { store: options.tokenStore } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
 
-    this.auth = new AuthApi(this.execute, this.session);
+    this.auth = new AuthApi(this.execute, this.session, authCookieCoordinator);
     this.users = new UsersApi(this.execute);
     this.games = new GamesApi(this.execute);
     this.seeks = new SeeksApi(this.execute);
@@ -257,9 +312,45 @@ export class GambitClient {
 export class AuthApi {
   private readonly execute: Execute;
   private readonly session: SessionManager;
-  constructor(execute: Execute, session: SessionManager) {
+  private readonly cookieCoordinator: AuthCookieCoordinator;
+  constructor(execute: Execute, session: SessionManager, cookieCoordinator: AuthCookieCoordinator) {
     this.execute = execute;
     this.session = session;
+    this.cookieCoordinator = cookieCoordinator;
+  }
+
+  /** Adopt an auth response, revoking its server session if a newer local transition won the race. */
+  private async adoptOrRevokeStale(
+    auth: AuthResponse,
+    expectedGeneration: number,
+    cookieOrder: number,
+  ): Promise<void> {
+    try {
+      this.session.adopt(auth, true, expectedGeneration, cookieOrder);
+    } catch (error) {
+      if (error instanceof NoSessionError) {
+        await this.revokeStaleAuth(auth);
+      }
+      throw error;
+    }
+  }
+
+  /** Best-effort cleanup for credentials created by an obsolete authentication response. */
+  private async revokeStaleAuth(auth: AuthResponse): Promise<void> {
+    try {
+      await this.execute<void>({
+        method: 'POST',
+        path: '/v1/auth/logout',
+        headers: { authorization: `Bearer ${auth.tokens.accessToken}` },
+        ...(auth.tokens.refreshToken
+          ? { body: { refreshToken: auth.tokens.refreshToken } }
+          : {}),
+        // Cookie-changing auth requests are serialized, so this is still the obsolete cookie.
+        credentials: 'include',
+      });
+    } catch {
+      // The stale result must stay rejected even when its server-side cleanup is unavailable.
+    }
   }
 
   /**
@@ -269,16 +360,22 @@ export class AuthApi {
    * response header for the httpOnly refresh cookie. The access token is stored
    * in-memory only via `SessionManager.adopt()` — never in `localStorage`.
    */
-  async register(body: RegisterRequest): Promise<AuthResponse> {
-    // M12 inc 2: send credentials so the browser accepts the Set-Cookie.
-    const auth = await this.execute<AuthResponse>({
-      method: 'POST',
-      path: '/v1/auth/register',
-      body,
-      credentials: 'include',
+  async register(
+    body: RegisterRequest,
+    expectedGeneration = this.session.captureGeneration(),
+  ): Promise<AuthResponse> {
+    return this.cookieCoordinator.run(async (cookieOrder) => {
+      this.session.assertGeneration(expectedGeneration);
+      // M12 inc 2: send credentials so the browser accepts the Set-Cookie.
+      const auth = await this.execute<AuthResponse>({
+        method: 'POST',
+        path: '/v1/auth/register',
+        body,
+        credentials: 'include',
+      });
+      await this.adoptOrRevokeStale(auth, expectedGeneration, cookieOrder);
+      return auth;
     });
-    this.session.adopt(auth);
-    return auth;
   }
 
   /**
@@ -288,16 +385,22 @@ export class AuthApi {
    * response header for the httpOnly refresh cookie. The access token is stored
    * in-memory only via `SessionManager.adopt()` — never in `localStorage`.
    */
-  async login(body: LoginRequest): Promise<AuthResponse> {
-    // M12 inc 2: send credentials so the browser accepts the Set-Cookie.
-    const auth = await this.execute<AuthResponse>({
-      method: 'POST',
-      path: '/v1/auth/login',
-      body,
-      credentials: 'include',
+  async login(
+    body: LoginRequest,
+    expectedGeneration = this.session.captureGeneration(),
+  ): Promise<AuthResponse> {
+    return this.cookieCoordinator.run(async (cookieOrder) => {
+      this.session.assertGeneration(expectedGeneration);
+      // M12 inc 2: send credentials so the browser accepts the Set-Cookie.
+      const auth = await this.execute<AuthResponse>({
+        method: 'POST',
+        path: '/v1/auth/login',
+        body,
+        credentials: 'include',
+      });
+      await this.adoptOrRevokeStale(auth, expectedGeneration, cookieOrder);
+      return auth;
     });
-    this.session.adopt(auth);
-    return auth;
   }
 
   /**
@@ -321,16 +424,37 @@ export class AuthApi {
    */
   async logout(): Promise<void> {
     if (!this.session.isAuthenticated) return;
+    // A required proactive refresh is itself a session transition. Complete it before capturing
+    // the generation that this logout is allowed to clear.
+    let token: string | undefined;
     try {
+      token = await this.session.validAccessToken();
+    } catch (error) {
+      // A failed refresh is only an invalidation internally, but the user's explicit action is a
+      // durable logout boundary and must still converge across tabs.
+      this.session.reset();
+      throw error;
+    }
+    if (token === undefined) {
+      this.session.reset();
+      return;
+    }
+    const expectedGeneration = this.session.captureGeneration();
+    await this.cookieCoordinator.run(async () => {
+      this.session.assertGeneration(expectedGeneration);
+      const currentToken = this.session.current?.tokens.accessToken;
+      if (!currentToken) throw new NoSessionError();
+      // Publish the durable barrier before starting the request. This rejects a delayed peer
+      // adoption from an auth operation that completed before this lock was acquired, while a
+      // genuinely newer local transition can still supersede the logout after it starts.
+      if (!this.session.resetIfGeneration(expectedGeneration)) throw new NoSessionError();
       await this.execute<void>({
         method: 'POST',
         path: '/v1/auth/logout',
-        auth: true,
+        headers: { authorization: `Bearer ${currentToken}` },
         credentials: 'include',
       });
-    } finally {
-      this.session.reset();
-    }
+    });
   }
 
   sessions(): Promise<SessionView[]> {
@@ -358,13 +482,18 @@ export class AuthApi {
   }
 
   confirmPasswordReset(body: PasswordResetConfirmRequest): Promise<void> {
-    return this.execute<void>({
-      method: 'POST',
-      path: '/v1/auth/password-reset/confirm',
-      body,
-      // The response clears the httpOnly refresh cookie. Include credentials so
-      // browsers accept that Set-Cookie when the configured API is cross-origin.
-      credentials: 'include',
+    return this.cookieCoordinator.run(async () => {
+      await this.execute<void>({
+        method: 'POST',
+        path: '/v1/auth/password-reset/confirm',
+        body,
+        // The response clears the httpOnly refresh cookie. Include credentials so
+        // browsers accept that Set-Cookie when the configured API is cross-origin.
+        credentials: 'include',
+      });
+      // Password reset revokes every account session. Publish that durable reset before the
+      // cookie lock is released so a queued authentication cannot miss the security boundary.
+      this.session.reset();
     });
   }
 
@@ -413,15 +542,22 @@ export class AuthApi {
     });
   }
 
-  async verifyPasskeyLogin(body: WebAuthnLoginVerifyRequest): Promise<AuthResponse> {
-    const auth = await this.execute<AuthResponse>({
-      method: 'POST',
-      path: '/v1/auth/webauthn/login/verify',
-      body,
-      credentials: 'include',
+  /** Verify a passkey assertion and adopt it only if no newer session transition superseded the flow. */
+  async verifyPasskeyLogin(
+    body: WebAuthnLoginVerifyRequest,
+    expectedGeneration = this.session.captureGeneration(),
+  ): Promise<AuthResponse> {
+    return this.cookieCoordinator.run(async (cookieOrder) => {
+      this.session.assertGeneration(expectedGeneration);
+      const auth = await this.execute<AuthResponse>({
+        method: 'POST',
+        path: '/v1/auth/webauthn/login/verify',
+        body,
+        credentials: 'include',
+      });
+      await this.adoptOrRevokeStale(auth, expectedGeneration, cookieOrder);
+      return auth;
     });
-    this.session.adopt(auth);
-    return auth;
   }
 }
 

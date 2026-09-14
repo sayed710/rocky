@@ -20,10 +20,13 @@ function makeFakeStorage(): KeyValueStorage {
 
 interface FakeSession {
   resets: number;
+  generation: number;
   invalidate: (() => void) | null;
   resetCallback: (() => void) | null;
   adoptedCallback: ((session: StoredSession) => void) | null;
   reset(): void;
+  dispose(): void;
+  captureGeneration(): number;
   onInvalidated(handler: () => void): void;
   onReset(handler: () => void): void;
   onAdopted(handler: (session: StoredSession) => void): void;
@@ -36,13 +39,22 @@ interface FakeSession {
 function makeFakeSession(): FakeSession {
   return {
     resets: 0,
+    generation: 0,
     invalidate: null,
     resetCallback: null,
     adoptedCallback: null,
-    reset(): void { this.resets++; },
-    onInvalidated(handler: () => void): void { this.invalidate = handler; },
-    onReset(handler: () => void): void { this.resetCallback = handler; },
-    onAdopted(handler: (session: StoredSession) => void): void { this.adoptedCallback = handler; },
+    reset(): void { this.resets++; this.generation++; },
+    dispose(): void { this.generation++; },
+    captureGeneration(): number { return this.generation; },
+    onInvalidated(handler: () => void): void {
+      this.invalidate = () => { this.generation++; handler(); };
+    },
+    onReset(handler: () => void): void {
+      this.resetCallback = () => { this.generation++; handler(); };
+    },
+    onAdopted(handler: (session: StoredSession) => void): void {
+      this.adoptedCallback = (session) => { this.generation++; handler(session); };
+    },
   };
 }
 
@@ -282,7 +294,7 @@ test('when session is reset on another tab (onReset), AuthController clears loca
   assert.equal(fakeSession.resets, 0, 'must not trigger client.session.reset() again');
 });
 
-test('local login produces exactly one onSessionChange and one storage write when session.adopt fires onAdopted', async () => {
+test('local login produces exactly one onSessionChange and one storage write', async () => {
   const storage = makeFakeStorage();
   let setItemCalls = 0;
   const instrumentedStorage: KeyValueStorage = {
@@ -304,12 +316,6 @@ test('local login produces exactly one onSessionChange and one storage write whe
           user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] as const },
           tokens: { accessToken: 'tok-1', tokenType: 'Bearer' as const, expiresIn: 900, refreshToken: 'ref-1', refreshExpiresAt: '2030-01-01T00:00:00Z' },
         };
-        // In real GambitClient, AuthApi.login calls session.adopt(auth) which fires onAdopted
-        fakeSession.adoptedCallback?.({
-          user: res.user,
-          tokens: res.tokens,
-          accessTokenExpiresAt: 2000,
-        });
         return res;
       },
     },
@@ -331,6 +337,209 @@ test('local login produces exactly one onSessionChange and one storage write whe
   assert.equal(session.userId, 'u1');
   assert.equal(sessions.length, 1, 'must have exactly one onSessionChange notification');
   assert.equal(setItemCalls, 1, 'must have exactly one storage write');
+});
+
+test('peer reset wins over a late login response', async () => {
+  let finish!: (response: AuthResponse) => void;
+  const response = new Promise<AuthResponse>((resolve) => { finish = resolve; });
+  const fakeSession = makeFakeSession();
+  const client = { ...makeFakeClient({ login: async () => response }), session: fakeSession };
+  const changes: (AuthSession | null)[] = [];
+  const controller = new AuthController({
+    client: client as unknown as GambitClient,
+    callbacks: {
+      onSessionChange: (session) => { changes.push(session); },
+      onPending: () => {},
+      onError: () => {},
+    },
+  });
+
+  const pending = controller.login('alice', 'pw');
+  fakeSession.resetCallback?.();
+  finish({
+    user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: 'late', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  });
+
+  assert.equal(await pending, null);
+  assert.equal(controller.currentSession, null);
+  assert.deepEqual(changes, [null]);
+});
+
+test('login starts in the new controller generation after synchronizing a persisted logout', async () => {
+  const storage = makeFakeStorage();
+  const fakeSession = makeFakeSession();
+  const client = { ...makeFakeClient(), session: fakeSession };
+  const changes: (AuthSession | null)[] = [];
+  const ctrl = new AuthController({
+    client: client as unknown as GambitClient,
+    storage,
+    callbacks: {
+      onSessionChange: (session) => { changes.push(session); },
+      onPending: () => {},
+      onError: () => {},
+    },
+  });
+  const capture = fakeSession.captureGeneration.bind(fakeSession);
+  let synchronized = false;
+  fakeSession.captureGeneration = () => {
+    if (!synchronized) {
+      synchronized = true;
+      fakeSession.resetCallback?.();
+    }
+    return capture();
+  };
+
+  const result = await ctrl.login('alice', 'pw');
+
+  assert.deepEqual(result, { handle: 'alice', userId: 'u1' });
+  assert.deepEqual(changes, [null, { handle: 'alice', userId: 'u1' }]);
+});
+
+test('dispose suppresses a late login result and callbacks', async () => {
+  let finish!: (response: AuthResponse) => void;
+  const response = new Promise<AuthResponse>((resolve) => { finish = resolve; });
+  const client = makeFakeClient({ login: async () => response });
+  const changes: (AuthSession | null)[] = [];
+  const pendingStates: boolean[] = [];
+  const errors: string[] = [];
+  const controller = new AuthController({
+    client: client as unknown as GambitClient,
+    callbacks: {
+      onSessionChange: (session) => { changes.push(session); },
+      onPending: (pending) => { pendingStates.push(pending); },
+      onError: (error) => { errors.push(error); },
+    },
+  });
+
+  const pending = controller.login('alice', 'pw');
+  controller.dispose();
+  finish({
+    user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: 'late', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  });
+
+  assert.equal(await pending, null);
+  assert.equal(controller.currentSession, null);
+  assert.deepEqual(changes, []);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(pendingStates, [true]);
+});
+
+test('a failed local login does not report over a newer peer adoption', async () => {
+  let fail!: (error: Error) => void;
+  const response = new Promise<AuthResponse>((_resolve, reject) => { fail = reject; });
+  const client = makeFakeClient({ login: async () => response });
+  const errors: string[] = [];
+  const controller = new AuthController({
+    client: client as unknown as GambitClient,
+    callbacks: { onSessionChange: () => {}, onPending: () => {}, onError: (error) => { errors.push(error); } },
+  });
+
+  const pending = controller.login('alice', 'pw');
+  client.session.adoptedCallback?.({
+    user: { id: 'u2', handle: 'bob', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: 'peer', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+    accessTokenExpiresAt: 2000,
+  });
+  fail(new Error('obsolete network failure'));
+
+  assert.equal(await pending, null);
+  assert.deepEqual(controller.currentSession, { handle: 'bob', userId: 'u2' });
+  assert.deepEqual(errors, []);
+  controller.dispose();
+});
+
+test('dispose suppresses a late logout continuation and preserves newer persistence', async () => {
+  let finish!: () => void;
+  const response = new Promise<void>((resolve) => { finish = resolve; });
+  const storage = makeFakeStorage();
+  storage.setItem('gambit-session', JSON.stringify({ handle: 'alice', userId: 'u1' }));
+  const client = makeFakeClient({ logout: async () => response });
+  const changes: (AuthSession | null)[] = [];
+  const pendingStates: boolean[] = [];
+  const controller = new AuthController({
+    client: client as unknown as GambitClient,
+    storage,
+    callbacks: {
+      onSessionChange: (session) => { changes.push(session); },
+      onPending: (pending) => { pendingStates.push(pending); },
+      onError: () => {},
+    },
+  });
+
+  const pending = controller.logout();
+  controller.dispose();
+  storage.setItem('gambit-session', JSON.stringify({ handle: 'bob', userId: 'u2' }));
+  finish();
+  await pending;
+
+  assert.deepEqual(JSON.parse(storage.getItem('gambit-session')!), { handle: 'bob', userId: 'u2' });
+  assert.deepEqual(changes, []);
+  assert.deepEqual(pendingStates, [true]);
+});
+
+test('peer reset during logout clears the pending state without repeating the reset', async () => {
+  let finish!: () => void;
+  const response = new Promise<void>((resolve) => { finish = resolve; });
+  const client = makeFakeClient({ logout: async () => response });
+  const changes: (AuthSession | null)[] = [];
+  const pendingStates: boolean[] = [];
+  const controller = new AuthController({
+    client: client as unknown as GambitClient,
+    callbacks: {
+      onSessionChange: (session) => { changes.push(session); },
+      onPending: (pending) => { pendingStates.push(pending); },
+      onError: () => {},
+    },
+  });
+
+  await controller.login('alice', 'pw');
+  changes.length = 0;
+  pendingStates.length = 0;
+  const pending = controller.logout();
+  client.session.resetCallback?.();
+  finish();
+  await pending;
+
+  assert.deepEqual(changes, [null]);
+  assert.deepEqual(pendingStates, [true, false]);
+  assert.equal(client.session.resets, 0, 'the controller must not turn a peer reset into local logout');
+  controller.dispose();
+});
+
+test('a peer adoption that completes during logout remains the controller session', async () => {
+  let finish!: () => void;
+  const response = new Promise<void>((resolve) => { finish = resolve; });
+  const storage = makeFakeStorage();
+  const client = makeFakeClient({ logout: async () => response });
+  const changes: (AuthSession | null)[] = [];
+  const controller = new AuthController({
+    client: client as unknown as GambitClient,
+    storage,
+    callbacks: {
+      onSessionChange: (session) => { changes.push(session); },
+      onPending: () => {},
+      onError: () => {},
+    },
+  });
+
+  await controller.login('alice', 'pw');
+  changes.length = 0;
+  const pending = controller.logout();
+  client.session.adoptedCallback?.({
+    user: { id: 'u2', handle: 'bob', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] as const },
+    tokens: { accessToken: 'peer', tokenType: 'Bearer' as const, expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+    accessTokenExpiresAt: 2000,
+  });
+  Object.assign(client.session, { isAuthenticated: true });
+  finish();
+  await pending;
+
+  assert.deepEqual(controller.currentSession, { handle: 'bob', userId: 'u2' });
+  assert.deepEqual(JSON.parse(storage.getItem('gambit-session')!), { handle: 'bob', userId: 'u2' });
+  assert.deepEqual(changes, [{ handle: 'bob', userId: 'u2' }]);
+  controller.dispose();
 });
 
 test('peer tab adoption updates AuthController with exactly one onSessionChange notification', async () => {
@@ -369,7 +578,7 @@ test('peer tab adoption updates AuthController with exactly one onSessionChange 
   assert.deepEqual(sessions[0], { handle: 'bob', userId: 'u2' });
 });
 
-test('background token refresh for same user does not re-emit onSessionChange', async () => {
+test('a duplicate peer adoption for the same user does not re-emit onSessionChange', async () => {
   const sessions: (AuthSession | null)[] = [];
   const fakeSession = makeFakeSession();
   const client = {
@@ -380,6 +589,7 @@ test('background token refresh for same user does not re-emit onSessionChange', 
           user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] as const },
           tokens: { accessToken: 'tok-1', tokenType: 'Bearer' as const, expiresIn: 900, refreshToken: 'ref-1', refreshExpiresAt: '2030-01-01T00:00:00Z' },
         };
+        // Simulate a peer-tab adoption racing the controller's own login continuation.
         fakeSession.adoptedCallback?.({
           user: res.user,
           tokens: res.tokens,
@@ -402,14 +612,14 @@ test('background token refresh for same user does not re-emit onSessionChange', 
   await ctrl.login('alice', 'pw');
   assert.equal(sessions.length, 1);
 
-  // Background token refresh rotates tokens but user remains alice
+  // A later peer adoption repeats the same user with rotated credentials.
   fakeSession.adoptedCallback?.({
     user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] as const },
     tokens: { accessToken: 'tok-refreshed', tokenType: 'Bearer' as const, expiresIn: 900, refreshToken: 'ref-2', refreshExpiresAt: '2030-01-01T00:00:00Z' },
     accessTokenExpiresAt: 3000,
   });
 
-  assert.equal(sessions.length, 1, 'must NOT emit another onSessionChange for same user refresh');
+  assert.equal(sessions.length, 1, 'must NOT emit another onSessionChange for the same-user peer adoption');
 });
 
 test('M12 inc 2: restore takes identity from cookie refresh, not storage', async () => {
@@ -646,10 +856,11 @@ for (const outcome of ['success', 'failure'] as const) {
 
     const restoring = ctrl.restore();
     ctrl.clearLocalSession();
-    await ctrl.login('bob', 'password');
+    const login = ctrl.login('bob', 'password');
     finish();
 
     assert.equal(await restoring, null, 'a cancelled operation must not adopt another operation\'s result');
+    await login;
     assert.equal(client.session.current?.tokens.accessToken, 'newer-login');
     assert.deepEqual(ctrl.currentSession, { handle: 'bob', userId: 'u2' });
     assert.deepEqual(JSON.parse(storage.getItem('gambit-session')!), { handle: 'bob', userId: 'u2' });

@@ -65,6 +65,7 @@ export type { EmptyStateOptions };
 /** Disposables returned by bootstrap, torn down on SPA route navigation. */
 export interface BootstrappedDisposables {
   readonly app: App;
+  readonly auth: AuthController;
   readonly controller: GameController | null;
   readonly board: MountedBoard | null;
   readonly lobby: LobbyController | null;
@@ -88,14 +89,13 @@ export interface BootstrappedDisposables {
 
 /** Everything the bootstrap wired, returned for later increments and tests. */
 export interface Bootstrapped extends BootstrappedDisposables {
-  readonly auth: AuthController;
   readonly theme: ThemeToggle;
 }
 
 /** Key of disposables returned by bootstrap. Driven by BootstrappedDisposables for structural teardown exhaustiveness. */
 export type DisposableKey = keyof BootstrappedDisposables;
 
-type ActiveBootstrappedDisposables = Partial<Omit<BootstrappedDisposables, 'app'>>;
+type ActiveBootstrappedDisposables = Partial<Omit<BootstrappedDisposables, 'app' | 'auth'>>;
 
 function createBootstrapped(
   app: App,
@@ -105,6 +105,7 @@ function createBootstrapped(
 ): Bootstrapped {
   return {
     app,
+    auth,
     controller: null,
     board: null,
     lobby: null,
@@ -124,7 +125,6 @@ function createBootstrapped(
     emailVerification: null,
     connectivity: null,
     analysis: null,
-    auth,
     theme,
     ...activeDisposables,
   };

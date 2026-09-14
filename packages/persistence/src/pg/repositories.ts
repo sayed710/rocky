@@ -392,6 +392,15 @@ export class PgSessionsRepository implements SessionsRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      const owner = await client.query<{ user_id: string }>(
+        'SELECT user_id FROM sessions WHERE refresh_hash = $1',
+        [refreshHash],
+      );
+      if (!owner.rows[0]) {
+        await client.query('COMMIT');
+        return { status: 'missing' };
+      }
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [owner.rows[0].user_id]);
       const found = await client.query<SessionDbRow>(
         `SELECT ${SESSION_COLS} FROM sessions
          WHERE refresh_hash = $1 FOR UPDATE`,
@@ -452,6 +461,60 @@ export class PgSessionsRepository implements SessionsRepository {
       [id, at],
     );
     return (res.rowCount ?? 0) > 0;
+  }
+
+  async revokeChainForUser(userId: string, rootId: string, at: Date): Promise<number | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [userId]);
+      const result = await client.query<{ found: boolean; revoked: number }>(
+        `WITH RECURSIVE chain(id) AS (
+           SELECT id FROM sessions WHERE id = $2 AND user_id = $1
+           UNION
+           SELECT child.id
+           FROM sessions child
+           JOIN chain parent ON child.rotated_from = parent.id
+           WHERE child.user_id = $1
+         ), updated AS (
+           UPDATE sessions
+           SET revoked_at = $3
+           WHERE id IN (SELECT id FROM chain) AND revoked_at IS NULL
+           RETURNING id
+         )
+         SELECT
+           EXISTS (SELECT 1 FROM chain) AS found,
+           (SELECT COUNT(*)::int FROM updated) AS revoked`,
+        [userId, rootId, at],
+      );
+      await client.query('COMMIT');
+      const row = result.rows[0]!;
+      return row.found ? row.revoked : null;
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async revokeAllForUser(userId: string, at: Date): Promise<number> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [userId]);
+      const res = await client.query(
+        'UPDATE sessions SET revoked_at = $2 WHERE user_id = $1 AND revoked_at IS NULL',
+        [userId, at],
+      );
+      await client.query('COMMIT');
+      return res.rowCount ?? 0;
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listForUser(userId: string): Promise<SessionRow[]> {

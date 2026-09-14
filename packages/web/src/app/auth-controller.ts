@@ -23,6 +23,7 @@
 import type { GambitClient } from '../api/client.js';
 import type { RegisterRequest } from '../api/models.js';
 import type { KeyValueStorage } from '../net/session.js';
+import { NoSessionError } from '../net/session.js';
 import { NativeWebAuthnAdapter } from '../ports/webauthn.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
 
@@ -39,10 +40,10 @@ export interface AuthCallbacks {
 /**
  * Session data persisted across reloads.
  *
- * M12 inc 2: Only the handle and userId are persisted — NOT the access token
- * (stays in memory) and NOT the refresh token (httpOnly cookie). This is
- * enough to restore the UI state; the actual access token is obtained by
- * calling refresh on reload, which uses the cookie.
+ * M12 inc 2: Only the handle and userId are persisted — no access or refresh
+ * token is written to storage. This is enough to restore the UI state; the
+ * actual access token is obtained by calling refresh on reload, using the
+ * httpOnly cookie.
  */
 export interface AuthSession {
   /** The authenticated user's handle. */
@@ -79,8 +80,9 @@ const DEFAULT_STORAGE_KEY = 'gambit-session';
  * The controller is framework-independent and DOM-free. It persists only the
  * user's handle and ID to an injectable key-value store so that page reloads
  * can restore the UI state. The access token is kept in memory only (via the
- * SessionManager); the refresh token is in an httpOnly cookie. It drives the
- * UI through callbacks.
+ * SessionManager); the browser's durable refresh credential is an httpOnly cookie, while the
+ * API-compatible JSON response may also be retained transiently in memory. It drives the UI
+ * through callbacks.
  */
 export class AuthController {
   private readonly client: GambitClient;
@@ -190,15 +192,19 @@ export class AuthController {
   /** Log in with handle + password. Returns the session on success. */
   async login(handle: string, password: string): Promise<AuthSession | null> {
     if (this.disposed) return null;
+    const managerGeneration = this.client.session.captureGeneration();
+    const generation = this.sessionGeneration;
     this.callbacks.onPending(true);
     try {
-      const result = await this.client.auth.login({ handle, password });
+      const result = await this.client.auth.login({ handle, password }, managerGeneration);
+      if (this.disposed || generation !== this.sessionGeneration) return null;
       return this.adoptSession(result.user);
     } catch (err) {
+      if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
       this.callbacks.onError(err instanceof Error ? err.message : String(err));
       return null;
     } finally {
-      this.callbacks.onPending(false);
+      if (!this.disposed) this.callbacks.onPending(false);
     }
   }
 
@@ -214,49 +220,67 @@ export class AuthController {
       this.callbacks.onError('Passkey sign-in is not supported on this browser.');
       return null;
     }
+    const managerGeneration = this.client.session.captureGeneration();
+    const generation = this.sessionGeneration;
     this.callbacks.onPending(true);
     try {
       const options = await this.client.auth.loginPasskeyOptions({ handle: trimmed });
+      if (!this.authOperationIsCurrent(generation, managerGeneration)) return null;
       const assertion = await this.webauthnAdapter.getCredential(options);
-      const result = await this.client.auth.verifyPasskeyLogin(assertion);
+      if (!this.authOperationIsCurrent(generation, managerGeneration)) return null;
+      const result = await this.client.auth.verifyPasskeyLogin(assertion, managerGeneration);
+      if (this.disposed || generation !== this.sessionGeneration) return null;
       return this.adoptSession(result.user);
-    } catch {
+    } catch (err) {
+      if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
       // Do not expose account-existence details in client error copy.
       this.callbacks.onError('Sign in with passkey failed.');
       return null;
     } finally {
-      this.callbacks.onPending(false);
+      if (!this.disposed) this.callbacks.onPending(false);
     }
   }
 
   /** Register a new account. Returns the session on success. */
   async register(handle: string, password: string, email?: string): Promise<AuthSession | null> {
     if (this.disposed) return null;
+    const managerGeneration = this.client.session.captureGeneration();
+    const generation = this.sessionGeneration;
     this.callbacks.onPending(true);
     try {
       const trimmed = email?.trim() ?? '';
       const body: RegisterRequest = trimmed ? { handle, password, email: trimmed } : { handle, password };
-      const result = await this.client.auth.register(body);
+      const result = await this.client.auth.register(body, managerGeneration);
+      if (this.disposed || generation !== this.sessionGeneration) return null;
       return this.adoptSession(result.user);
     } catch (err) {
+      if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
       this.callbacks.onError(err instanceof Error ? err.message : String(err));
       return null;
     } finally {
-      this.callbacks.onPending(false);
+      if (!this.disposed) this.callbacks.onPending(false);
     }
   }
 
   /** Log out and clear the persisted session. */
   async logout(): Promise<void> {
     if (this.disposed) return;
+    const generation = this.sessionGeneration;
     this.callbacks.onPending(true);
     try {
       await this.client.auth.logout();
     } catch {
       // Server-side logout failure is non-fatal — clear locally regardless.
     } finally {
-      this.clearControllerSession();
-      this.callbacks.onPending(false);
+      if (!this.disposed) {
+        // `AuthApi.logout()` clears the token manager before awaiting the server. If another tab
+        // signs in after that boundary, its adoption is the newer state and must remain mirrored
+        // here when the older logout request eventually settles.
+        if (generation === this.sessionGeneration && !this.client.session.isAuthenticated) {
+          this.clearControllerSession();
+        }
+        this.callbacks.onPending(false);
+      }
     }
   }
 
@@ -280,13 +304,24 @@ export class AuthController {
   /** Clear local session state without issuing server logout (e.g. after password reset confirm). */
   clearLocalSession(): void {
     this.clearControllerSession();
-    this.client.session.reset();
+    this.client.session.reset({ broadcast: false, cause: 'invalidation' });
   }
 
   /** Permanently dispose the controller. */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.sessionGeneration++;
     this.client.session.dispose?.();
+  }
+
+  /** Check both controller and token-manager lifecycles before continuing a multi-step sign-in. */
+  private authOperationIsCurrent(controllerGeneration: number, managerGeneration: number): boolean {
+    return (
+      !this.disposed &&
+      controllerGeneration === this.sessionGeneration &&
+      managerGeneration === this.client.session.captureGeneration()
+    );
   }
 
   /**
@@ -296,9 +331,7 @@ export class AuthController {
    * Deduplicates by checking whether the controller already holds the exact same user
    * session (matching handle and userId). This prevents duplicate `onSessionChange` events,
    * redundant storage persistence, and unnecessary downstream UI re-renders when:
-   * 1. `client.auth.login/register/refresh` internally calls `session.adopt(auth)` (which triggers
-   *    the controller's `onAdopted` listener) and then returns `result` to the controller method
-   *    which calls `adoptSession(result.user)`.
+   * 1. A controller method receives an auth result for the identity it already mirrors.
    * 2. Background token refreshes rotate credentials in memory for the currently signed-in user.
    *
    * Peer-tab adoptions for a newly signed-in user or different identity still transition cleanly.

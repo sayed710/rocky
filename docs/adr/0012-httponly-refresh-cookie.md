@@ -42,7 +42,7 @@ the API on login/refresh. The short-lived access token stays **in memory only**
 | Token | Location | Readable by JS? | Persisted across reloads? |
 |-------|----------|-----------------|--------------------------|
 | Access token (short-lived) | In memory only | Yes (but short-lived) | **No** — repopulated via refresh on reload |
-| Refresh token (long-lived) | httpOnly cookie | **No** | Yes (via cookie) |
+| Refresh token (long-lived) | httpOnly cookie; API-compatible JSON responses can also expose a transient in-memory copy | Cookie: **No**; JSON copy: yes | Yes via cookie; the JSON copy is not persisted |
 
 ### API changes
 
@@ -55,7 +55,8 @@ the API on login/refresh. The short-lived access token stays **in memory only**
 3. **Logout** (and refresh-reuse/theft revocation) clears the cookie
    (`Set-Cookie: ...; Max-Age=0`).
 4. The refresh token is **still returned in the JSON response body** for
-   non-browser API clients. The browser simply never reads or stores it.
+   non-browser API clients. The shared browser client parses that response and may retain the
+   compatibility copy in memory, but never persists it or uses it for cookie-based refresh.
 
 ### Web changes
 
@@ -70,8 +71,8 @@ the API on login/refresh. The short-lived access token stays **in memory only**
 3. `GambitClient` (`api/client.ts`) sends `credentials: 'include'` on login,
    register, refresh, and logout so the browser sends/receives the cookie.
    The refresh token is **not** sent in the request body for the browser flow.
-4. `TokenPair.refreshToken` in `api/models.ts` is now optional (`?: string`) —
-   the browser never reads it.
+4. `TokenPair.refreshToken` in `api/models.ts` is optional (`?: string`) so
+   cookie-only responses and non-browser-compatible JSON responses share one model.
 
 ### CSRF stance
 
@@ -105,8 +106,8 @@ The cookie is preferred when both are present.
 
 ## Consequences
 
-- **Positive:** The refresh token is no longer readable by JavaScript,
-  eliminating the XSS-exfiltration vector for the most sensitive credential.
+- **Positive:** The durable refresh credential is no longer persisted in JavaScript-readable
+  storage; the httpOnly cookie itself cannot be exfiltrated by injected script.
 - **Positive:** The access token is no longer persisted to `localStorage`,
   eliminating the XSS-exfiltration vector for the access token as well. On
   reload, a fresh access token is obtained via the httpOnly refresh cookie.
@@ -116,9 +117,10 @@ The cookie is preferred when both are present.
 - **Negative:** Local development over plain HTTP must set `cookieSecure: false`
   so the browser accepts the cookie.
 - **Residual:** Login and refresh responses still include the refresh token in
-  the JSON body for non-browser API clients. The browser never reads or stores
-  it. This is acceptable because the browser flow uses the cookie exclusively,
-  and the body token is only useful to clients that explicitly parse it.
+  the JSON body for non-browser API clients. The shared browser client parses that payload and can
+  retain the copy in memory, where injected script could read it; it is never persisted, and the
+  browser's refresh requests use the cookie exclusively. Removing this residual exposure requires
+  a response contract that distinguishes browser and non-browser clients.
 
 ## Implementation
 
