@@ -293,7 +293,6 @@ export class AuthService {
     session: SessionRow,
     now: number,
     meta: RequestMeta,
-    isConcurrentRotation = false,
   ): Promise<never> {
     const sessions = await this.repos.sessions.listForUser(session.userId);
     // The whole descending chain, not just the direct successor: after two refreshes the successor
@@ -302,7 +301,7 @@ export class AuthService {
     const rotatedAway = sessions.some(
       (s) => descendants.has(s.id) && !s.revokedAt && s.expiresAt.getTime() > now,
     );
-    if (rotatedAway && !isConcurrentRotation) {
+    if (rotatedAway) {
       const rotatedAt = session.revokedAt ? session.revokedAt.getTime() : 0;
       const elapsed = now - rotatedAt;
       // Legitimate concurrent/retry refresh can only happen forward within [0, gracePeriodMs].
@@ -355,7 +354,9 @@ export class AuthService {
       throw HttpError.unauthorized('refresh token has expired');
     }
     if (rotation.status === 'revoked') {
-      await this.rejectRevokedRefresh(rotation.previous, now, meta, true);
+      // A repository collision can surface long after this request first read the session. Evaluate
+      // the grace window at rejection time so delayed replays cannot inherit the request's old time.
+      await this.rejectRevokedRefresh(rotation.previous, this.clock.now(), meta);
     }
     await this.audit(meta, user.id, 'auth.refresh', session.id);
     return { user, roles, tokens: prepared.tokens };

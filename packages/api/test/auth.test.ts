@@ -245,6 +245,48 @@ test('two concurrent refreshes from the same token family leave the winner succe
   }
 });
 
+test('a refresh collision delayed beyond the grace period triggers reuse detection', async () => {
+  const h = await startHarness();
+  try {
+    const reg = await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'delayed-refresh-race', password: 'passw0rd!!' },
+    });
+    const refreshToken = reg.body.tokens.refreshToken;
+    const rotate = h.repos.sessions.rotate.bind(h.repos.sessions);
+    let releaseFirstRotate!: () => void;
+    const firstRotateGate = new Promise<void>((resolve) => { releaseFirstRotate = resolve; });
+    let markFirstRotateStarted!: () => void;
+    const firstRotateStarted = new Promise<void>((resolve) => { markFirstRotateStarted = resolve; });
+    let rotateCalls = 0;
+    h.repos.sessions.rotate = async (refreshHash, replacement, at) => {
+      rotateCalls += 1;
+      if (rotateCalls === 1) {
+        markFirstRotateStarted();
+        await firstRotateGate;
+      }
+      return rotate(refreshHash, replacement, at);
+    };
+
+    const delayed = h.json('POST', '/v1/auth/refresh', { body: { refreshToken } });
+    await firstRotateStarted;
+    const winner = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken } });
+    assert.equal(winner.status, 200);
+
+    h.clock.advance(15_000);
+    releaseFirstRotate();
+    const replay = await delayed;
+    assert.equal(replay.status, 401);
+    assert.equal(h.repos.audit.withAction('auth.refresh.reuse').length, 1, 'delayed collision is reuse');
+
+    const afterBurn = await h.json('POST', '/v1/auth/refresh', {
+      body: { refreshToken: winner.body.tokens.refreshToken },
+    });
+    assert.equal(afterBurn.status, 401, 'the winner successor is burned after delayed reuse');
+  } finally {
+    await h.close();
+  }
+});
+
 test('replaying a rotated token within the grace period returns 401 without burning the chain', async () => {
   const h = await startHarness();
   try {
