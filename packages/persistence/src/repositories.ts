@@ -198,6 +198,10 @@ export interface SessionsRepository {
    * race between two concurrent revocations of the same session.
    */
   revoke(id: string, at: Date): Promise<boolean>;
+  /** Atomically revoke one user-owned rotation chain, or return null when the root is not theirs. */
+  revokeChainForUser(userId: string, rootId: string, at: Date): Promise<number | null>;
+  /** Atomically revoke every live session for a user, serialized against refresh rotation. */
+  revokeAllForUser(userId: string, at: Date): Promise<number>;
   /** Every session ever created for the user, including revoked and expired rows. */
   listForUser(userId: string): Promise<SessionRow[]>;
 }

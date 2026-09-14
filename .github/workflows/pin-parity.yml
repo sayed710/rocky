@@ -61,10 +61,11 @@ jobs:
         with:
           node-version: '22.x'
 
-      # No `npm ci`: both the guard and its tests are dependency-free Node, so installing the
-      # workspace would be the slowest thing in this workflow by an order of magnitude.
+      # No `npm ci`: the guard and its focused tests are dependency-free Node, so installing the
+      # workspace would be the slowest thing in this workflow by an order of magnitude. Other
+      # script tests may depend on workspace packages and run in the primary CI job after install.
       - name: Engine pin parity check
         run: node scripts/check-engine-pin-parity.mjs
 
-      - name: Guard script tests
-        run: node --test "scripts/test/**/*.test.mjs"
+      - name: Engine pin parity tests
+        run: node --test scripts/test/check-engine-pin-parity.test.mjs

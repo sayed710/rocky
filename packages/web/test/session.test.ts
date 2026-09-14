@@ -4,8 +4,10 @@ import {
   MemoryTokenStore,
   NoSessionError,
   SessionManager,
+  type SessionChannel,
 } from '../src/net/session.js';
 import type { StoredSession } from '../src/net/session.js';
+import type { KeyValueStorage } from '../src/net/session.js';
 import type { AuthResponse } from '../src/api/models.js';
 
 function authResponse(access = 'access-1', refresh = 'refresh-1', expiresIn = 3600): AuthResponse {
@@ -24,6 +26,15 @@ function authResponse(access = 'access-1', refresh = 'refresh-1', expiresIn = 36
 function storedSession(): StoredSession {
   const a = authResponse();
   return { user: a.user, tokens: a.tokens, accessTokenExpiresAt: 123 };
+}
+
+function sharedBarrierStorage(): KeyValueStorage {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { values.delete(key); },
+  };
 }
 
 test('MemoryTokenStore stores and clears', () => {
@@ -67,6 +78,36 @@ test('adopt computes access-token expiry from the injected clock', () => {
   assert.equal(session.accessTokenExpiresAt, 1000 + 60 * 1000);
   assert.equal(mgr.isAuthenticated, true);
   assert.equal(mgr.authorizationHeader(), 'Bearer a');
+});
+
+test('cross-tab adoption never broadcasts the refresh token', () => {
+  let posted: unknown;
+  const channel: SessionChannel = {
+    onmessage: null,
+    postMessage(message) { posted = message; },
+    close() {},
+  };
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel });
+
+  manager.adopt(authResponse('access-secret', 'refresh-secret'));
+
+  assert.ok(posted && typeof posted === 'object');
+  const message = posted as { auth: AuthResponse };
+  assert.equal(message.auth.tokens.accessToken, 'access-secret');
+  assert.equal(message.auth.tokens.refreshToken, undefined);
+  assert.equal(manager.current?.tokens.refreshToken, 'refresh-secret', 'the originating tab retains its local token');
+  manager.dispose();
+});
+
+test('local adoption does not invoke the peer-adoption callback', () => {
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000 });
+  let adoptions = 0;
+  manager.onAdopted(() => { adoptions += 1; });
+
+  manager.adopt(authResponse());
+
+  assert.equal(adoptions, 0);
+  manager.dispose();
 });
 
 test('isAccessTokenExpired respects leeway', () => {
@@ -203,4 +244,950 @@ test('M12 inc 2: refreshNow works without a refresh token (cookie-based)', async
   });
   await mgr.refreshNow();
   assert.equal(receivedToken, undefined, 'refresh function should receive undefined when no token');
+});
+
+interface MockChannel extends SessionChannel {
+  peer: MockChannel | null;
+}
+
+/** Create two asynchronous in-memory channels connected as browser-tab peers. */
+function createMockChannelPair(): [SessionChannel, SessionChannel] {
+  const ch1: MockChannel = {
+    peer: null,
+    postMessage(data: unknown): void {
+      const peer = this.peer;
+      if (peer) {
+        queueMicrotask(() => {
+          peer.onmessage?.(new MessageEvent('message', { data }));
+        });
+      }
+    },
+    onmessage: null,
+    close(): void {
+      this.peer = null;
+    },
+  };
+
+  const ch2: MockChannel = {
+    peer: null,
+    postMessage(data: unknown): void {
+      const peer = this.peer;
+      if (peer) {
+        queueMicrotask(() => {
+          peer.onmessage?.(new MessageEvent('message', { data }));
+        });
+      }
+    },
+    onmessage: null,
+    close(): void {
+      this.peer = null;
+    },
+  };
+
+  ch1.peer = ch2;
+  ch2.peer = ch1;
+  return [ch1, ch2];
+}
+
+test('dispose detaches the channel handler before closing a custom channel', () => {
+  const channel: SessionChannel = {
+    onmessage: null,
+    postMessage: () => {},
+    close(): void {
+      this.onmessage?.(new MessageEvent('message', {
+        data: { type: 'session_adopted', auth: authResponse('queued-after-dispose') },
+      }));
+    },
+  };
+  const manager = new SessionManager({
+    refresh: async () => authResponse(),
+    now: () => 1000,
+    channel,
+  });
+
+  manager.dispose();
+
+  assert.equal(channel.onmessage, null);
+  assert.equal(manager.current, null);
+});
+
+/** Hold cross-tab delivery until the test explicitly advances that boundary. */
+function queuedChannels() {
+  const toFirst: unknown[] = [];
+  const toSecond: unknown[] = [];
+  const first: SessionChannel = {
+    onmessage: null,
+    postMessage: (message) => { toSecond.push(message); },
+    close: () => {},
+  };
+  const second: SessionChannel = {
+    onmessage: null,
+    postMessage: (message) => { toFirst.push(message); },
+    close: () => {},
+  };
+  return {
+    first,
+    second,
+    deliverFirst: () => {
+      for (const data of toFirst.splice(0)) first.onmessage?.(new MessageEvent('message', { data }));
+    },
+    deliverSecond: () => {
+      for (const data of toSecond.splice(0)) second.onmessage?.(new MessageEvent('message', { data }));
+    },
+  };
+}
+
+test('loser invalidation cannot cancel the winner refresh still waiting for its response', async () => {
+  const channels = queuedChannels();
+  let finish!: (auth: AuthResponse) => void;
+  const winner = new SessionManager({
+    refresh: () => new Promise((resolve) => { finish = resolve; }),
+    now: () => 1000,
+    channel: channels.first,
+  });
+  const loser = new SessionManager({
+    refresh: async () => { throw new Error('rotation lost'); },
+    now: () => 1000,
+    channel: channels.second,
+  });
+  winner.adopt(authResponse('old', 'old-refresh', 1), false);
+  loser.adopt(authResponse('old', 'old-refresh', 1), false);
+
+  const pending = winner.refreshNow();
+  await assert.rejects(loser.refreshNow(), /rotation lost/);
+  channels.deliverFirst();
+  finish(authResponse('winner', 'winner-refresh'));
+
+  assert.equal((await pending).tokens.accessToken, 'winner');
+  channels.deliverSecond();
+  assert.equal(winner.current?.tokens.accessToken, 'winner');
+  assert.equal(loser.current?.tokens.accessToken, 'winner');
+  winner.dispose();
+  loser.dispose();
+});
+
+test('delayed invalidation preserves a successor whose access token needs refreshing', async () => {
+  const channels = queuedChannels();
+  const winner = new SessionManager({ refresh: async () => authResponse('next'), now: () => 1000, channel: channels.first });
+  const loser = new SessionManager({ refresh: async () => { throw new Error('lost'); }, now: () => 1000, channel: channels.second });
+  winner.adopt(authResponse('successor', 'successor-refresh', 1), false);
+  loser.adopt(authResponse('old', 'old-refresh', 1), false);
+
+  await assert.rejects(loser.refreshNow(), /lost/);
+  channels.deliverFirst();
+
+  assert.equal(winner.current?.tokens.accessToken, 'successor');
+  assert.equal((await winner.refreshNow()).tokens.accessToken, 'next');
+  winner.dispose();
+  loser.dispose();
+});
+
+test('an adoption queued before explicit logout cannot resurrect the logged-out peer', () => {
+  const channels = queuedChannels();
+  const first = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: channels.first });
+  const second = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: channels.second });
+  first.adopt(authResponse('old'), false);
+  second.adopt(authResponse('old'), false);
+
+  first.adopt(authResponse('queued-successor'));
+  second.reset();
+  channels.deliverSecond();
+  channels.deliverFirst();
+
+  assert.equal(second.current, null);
+  assert.equal(first.current, null);
+  first.dispose();
+  second.dispose();
+});
+
+test('explicit logout beats a concurrent adoption despite asymmetric local revision counts', () => {
+  const channels = queuedChannels();
+  const first = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: channels.first });
+  const second = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: channels.second });
+  first.adopt(authResponse('first-1'), false);
+  first.adopt(authResponse('first-2'), false);
+  first.adopt(authResponse('first-3'), false);
+  second.adopt(authResponse('second-1'), false);
+
+  first.adopt(authResponse('concurrent-adoption'));
+  second.reset();
+  channels.deliverSecond();
+  channels.deliverFirst();
+
+  assert.equal(first.current, null);
+  assert.equal(second.current, null);
+  first.dispose();
+  second.dispose();
+});
+
+test('a login causally after peer logout can authenticate both tabs again', () => {
+  const channels = queuedChannels();
+  const first = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: channels.first });
+  const second = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: channels.second });
+  first.adopt(authResponse('old'), false);
+  second.adopt(authResponse('old'), false);
+
+  first.adopt(authResponse('obsolete-adoption'));
+  second.reset();
+  channels.deliverFirst();
+  first.adopt(authResponse('later-login'));
+  channels.deliverSecond();
+
+  assert.equal(first.current?.tokens.accessToken, 'later-login');
+  assert.equal(second.current?.tokens.accessToken, 'later-login');
+  first.dispose();
+  second.dispose();
+});
+
+test('the tab that originated logout can later authenticate every peer again', () => {
+  const channels = queuedChannels();
+  const first = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: channels.first });
+  const second = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: channels.second });
+  first.adopt(authResponse('first-old'), false);
+  second.adopt(authResponse('second-old'), false);
+
+  second.reset();
+  channels.deliverFirst();
+  second.adopt(authResponse('origin-later-login'));
+  channels.deliverFirst();
+
+  assert.equal(first.current?.tokens.accessToken, 'origin-later-login');
+  assert.equal(second.current?.tokens.accessToken, 'origin-later-login');
+  first.dispose();
+  second.dispose();
+});
+
+test('a tab opened after logout can authenticate peers that retained the logout tombstone', () => {
+  const barriers = sharedBarrierStorage();
+  const channels = queuedChannels();
+  const existing = new SessionManager({
+    refresh: async () => authResponse(), now: () => 1000, channel: channels.first,
+    barrierStorage: barriers, channelSource: 'existing',
+  });
+  existing.adopt(authResponse('old'), false);
+  existing.reset();
+
+  const fresh = new SessionManager({
+    refresh: async () => authResponse(), now: () => 1000, channel: channels.second,
+    barrierStorage: barriers, channelSource: 'fresh',
+  });
+  fresh.adopt(authResponse('fresh-login'), true, fresh.captureGeneration());
+  channels.deliverFirst();
+
+  assert.equal(existing.current?.tokens.accessToken, 'fresh-login');
+  existing.dispose();
+  fresh.dispose();
+});
+
+test('a delayed legacy adoption cannot cross a persisted logout barrier', () => {
+  const storage = sharedBarrierStorage();
+  const first: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
+  const manager = new SessionManager({
+    refresh: async () => authResponse('unused'),
+    channel: first,
+    channelSource: 'logout-source',
+    barrierStorage: storage,
+  });
+  manager.adopt(authResponse('before-logout'));
+  manager.reset();
+  manager.dispose();
+
+  const remountedChannel: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
+  const remounted = new SessionManager({
+    refresh: async () => authResponse('unused'),
+    channel: remountedChannel,
+    channelSource: 'remounted-source',
+    barrierStorage: storage,
+  });
+  remountedChannel.onmessage?.(new MessageEvent('message', { data: {
+    type: 'session_adopted', auth: authResponse('legacy-stale'),
+  } }));
+
+  assert.equal(remounted.current, null);
+});
+
+for (const legacyRevision of [
+  undefined,
+  { clock: { legacy: 1 }, source: 'legacy', kind: 'logout' },
+] as const) {
+  test(`a ${legacyRevision ? 'barrierless-revision' : 'revisionless'} legacy logout survives remount`, () => {
+    const storage = sharedBarrierStorage();
+    const first: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
+    const manager = new SessionManager({
+      refresh: async () => authResponse(), channel: first, channelSource: 'first', barrierStorage: storage,
+    });
+    manager.adopt(authResponse('before'), false);
+    first.onmessage?.(new MessageEvent('message', { data: {
+      type: 'session_reset', cause: 'logout', ...(legacyRevision ? { revision: legacyRevision } : {}),
+    } }));
+    assert.equal(manager.current, null);
+    manager.dispose();
+
+    const second: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
+    const remounted = new SessionManager({
+      refresh: async () => authResponse(), channel: second, channelSource: 'second', barrierStorage: storage,
+    });
+    second.onmessage?.(new MessageEvent('message', { data: {
+      type: 'session_adopted',
+      auth: authResponse('delayed'),
+      revision: {
+        clock: { delayed: 1 }, source: 'delayed', kind: 'adoption',
+        barrier: '0000000000000000:initial',
+      },
+    } }));
+
+    assert.equal(remounted.current, null);
+    remounted.dispose();
+  });
+}
+
+test('an old-epoch invalidation cannot poison the current bounded clock', () => {
+  const storage = sharedBarrierStorage();
+  const posted: unknown[] = [];
+  const channel: SessionChannel = {
+    onmessage: null,
+    postMessage: (message) => { posted.push(message); },
+    close: () => {},
+  };
+  const manager = new SessionManager({
+    refresh: async () => authResponse(), channel, channelSource: 'current', barrierStorage: storage,
+  });
+  manager.reset();
+  manager.adopt(authResponse('current-token'));
+  channel.onmessage?.(new MessageEvent('message', { data: {
+    type: 'session_reset',
+    cause: 'invalidation',
+    token: 'different-token',
+    revision: {
+      clock: { poison: 999 }, source: 'poison', kind: 'invalidation',
+      barrier: '0000000000000000:initial',
+    },
+  } }));
+  manager.adopt(authResponse('next-token'));
+
+  const latest = posted.at(-1) as { revision: { clock: Record<string, number> } };
+  assert.equal(Object.prototype.hasOwnProperty.call(latest.revision.clock, 'poison'), false);
+  assert.equal(manager.current?.tokens.accessToken, 'next-token');
+  manager.dispose();
+});
+
+test('an authentication captured before a durable peer logout cannot publish after it', () => {
+  const barriers = sharedBarrierStorage();
+  const beforeLogout = new SessionManager({
+    refresh: async () => authResponse(), now: () => 1000, channel: null,
+    barrierStorage: barriers, channelSource: 'before',
+  });
+  const loggingOut = new SessionManager({
+    refresh: async () => authResponse(), now: () => 1000, channel: null,
+    barrierStorage: barriers, channelSource: 'logout',
+  });
+  const captured = beforeLogout.captureGeneration();
+
+  loggingOut.reset();
+
+  assert.throws(
+    () => beforeLogout.adopt(authResponse('obsolete'), true, captured),
+    NoSessionError,
+  );
+  assert.equal(beforeLogout.current, null);
+  beforeLogout.dispose();
+  loggingOut.dispose();
+});
+
+test('channel messages with malformed revisions cannot mutate session state', () => {
+  const channel: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel });
+  manager.adopt(authResponse('current'), false);
+  const malformedRevision = { clock: {}, source: 'peer', kind: 'adoption' };
+
+  channel.onmessage?.(new MessageEvent('message', {
+    data: { type: 'session_adopted', auth: authResponse('untrusted'), revision: malformedRevision },
+  }));
+  channel.onmessage?.(new MessageEvent('message', {
+    data: { type: 'session_reset', cause: 'logout', revision: malformedRevision },
+  }));
+
+  assert.equal(manager.current?.tokens.accessToken, 'current');
+  manager.dispose();
+});
+
+test('an oversized revision clock is rejected without mutating session state', () => {
+  const channel: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel });
+  manager.adopt(authResponse('current'), false);
+  const clock = Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`peer-${index}`, 1]));
+
+  channel.onmessage?.(new MessageEvent('message', {
+    data: {
+      type: 'session_adopted',
+      auth: authResponse('untrusted'),
+      revision: { clock, source: 'peer-0', kind: 'adoption' },
+    },
+  }));
+
+  assert.equal(manager.current?.tokens.accessToken, 'current');
+  manager.dispose();
+});
+
+test('sequential peer revisions cannot make outbound clocks grow without bound', () => {
+  let posted: unknown;
+  const channel: SessionChannel = {
+    onmessage: null,
+    postMessage(message) { posted = message; },
+    close: () => {},
+  };
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel });
+
+  for (let index = 0; index < 80; index += 1) {
+    const source = `peer-${index.toString().padStart(3, '0')}`;
+    channel.onmessage?.(new MessageEvent('message', {
+      data: {
+        type: 'session_adopted',
+        auth: authResponse(`peer-access-${index}`),
+        revision: {
+          clock: { [source]: 1 },
+          source,
+          kind: 'adoption',
+          cookieOrder: index + 1,
+        },
+      },
+    }));
+  }
+  assert.equal(manager.current?.tokens.accessToken, 'peer-access-79', 'later peers remain synchronized after churn');
+  manager.adopt(authResponse('local'));
+
+  assert.ok(posted && typeof posted === 'object');
+  const revision = (posted as { revision: { clock: Record<string, number> } }).revision;
+  assert.ok(Object.keys(revision.clock).length <= 64);
+
+  channel.onmessage?.(new MessageEvent('message', {
+    data: {
+      type: 'session_reset',
+      cause: 'logout',
+      revision: { clock: { 'fresh-logout-peer': 1 }, source: 'fresh-logout-peer', kind: 'logout' },
+    },
+  }));
+  assert.equal(manager.current, null, 'bounded metadata must not partition explicit logout');
+  manager.dispose();
+});
+
+test('an evicted source cannot replay an older ordered adoption', () => {
+  const channel: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
+  const manager = new SessionManager({
+    refresh: async () => authResponse(), now: () => 1000, channel, channelSource: 'local',
+  });
+  const delayed = {
+    type: 'session_adopted',
+    auth: authResponse('old-evicted'),
+    revision: { clock: { aaa: 1 }, source: 'aaa', kind: 'adoption' },
+  };
+  channel.onmessage?.(new MessageEvent('message', { data: delayed }));
+  for (let index = 2; index <= 70; index += 1) {
+    const source = `peer-${index.toString().padStart(3, '0')}`;
+    channel.onmessage?.(new MessageEvent('message', { data: {
+      type: 'session_adopted',
+      auth: authResponse(`peer-${index}`),
+      revision: { clock: { [source]: 1 }, source, kind: 'adoption' },
+    } }));
+  }
+  manager.adopt(authResponse('newer-local'), true, undefined, 100);
+
+  channel.onmessage?.(new MessageEvent('message', { data: delayed }));
+
+  assert.equal(manager.current?.tokens.accessToken, 'newer-local');
+  manager.dispose();
+});
+
+test('cookie-writing adoption order wins even when channel delivery is delayed', () => {
+  const barriers = sharedBarrierStorage();
+  const channels = queuedChannels();
+  const first = new SessionManager({
+    refresh: async () => authResponse(), channel: channels.first,
+    channelSource: 'first', barrierStorage: barriers,
+  });
+  const second = new SessionManager({
+    refresh: async () => authResponse(), channel: channels.second,
+    channelSource: 'second', barrierStorage: barriers,
+  });
+
+  first.adopt(authResponse('first-cookie'), true, undefined, 1);
+  second.adopt(authResponse('second-cookie'), true, undefined, 2);
+  channels.deliverSecond();
+  channels.deliverFirst();
+
+  assert.equal(first.current?.tokens.accessToken, 'second-cookie');
+  assert.equal(second.current?.tokens.accessToken, 'second-cookie');
+  first.dispose();
+  second.dispose();
+});
+
+test('a fresh tab with the newest cookie order updates a long-lived peer', () => {
+  const barriers = sharedBarrierStorage();
+  const channels = queuedChannels();
+  const existing = new SessionManager({
+    refresh: async () => authResponse(), channel: channels.first,
+    channelSource: 'existing', barrierStorage: barriers,
+  });
+  for (let order = 1; order <= 10; order += 1) {
+    existing.adopt(authResponse(`existing-${order}`), false, undefined, order);
+  }
+  const fresh = new SessionManager({
+    refresh: async () => authResponse(), channel: channels.second,
+    channelSource: 'fresh', barrierStorage: barriers,
+  });
+
+  fresh.adopt(authResponse('fresh-newest'), true, undefined, 100);
+  channels.deliverFirst();
+
+  assert.equal(existing.current?.tokens.accessToken, 'fresh-newest');
+  existing.dispose();
+  fresh.dispose();
+});
+
+test('prototype-like channel sources cannot corrupt the local revision counter', () => {
+  let posted: unknown;
+  const channel: SessionChannel = {
+    onmessage: null,
+    postMessage(message) { posted = message; },
+    close: () => {},
+  };
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel });
+
+  channel.onmessage?.(new MessageEvent('message', {
+    data: {
+      type: 'session_adopted',
+      auth: authResponse('untrusted'),
+      revision: { clock: { constructor: 1 }, source: 'constructor', kind: 'adoption' },
+    },
+  }));
+  manager.adopt(authResponse('local'));
+
+  assert.ok(posted && typeof posted === 'object');
+  const counter = Object.values((posted as { revision: { clock: Record<string, number> } }).revision.clock);
+  assert.ok(counter.every((value) => Number.isSafeInteger(value) && value > 0));
+  manager.dispose();
+});
+
+test('a peer cannot advance this tab\'s private revision source', () => {
+  let posted: unknown;
+  const channel: SessionChannel = {
+    onmessage: null,
+    postMessage(message) { posted = message; },
+    close: () => {},
+  };
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel });
+  manager.adopt(authResponse('current'));
+  const first = (posted as { revision: { source: string; clock: Record<string, number> } }).revision;
+
+  channel.onmessage?.(new MessageEvent('message', {
+    data: {
+      type: 'session_adopted',
+      auth: authResponse('forged'),
+      revision: { clock: { [first.source]: 100 }, source: first.source, kind: 'adoption' },
+    },
+  }));
+  assert.equal(manager.current?.tokens.accessToken, 'current');
+
+  manager.adopt(authResponse('next'));
+  const next = (posted as { revision: { source: string; clock: Record<string, number> } }).revision;
+  assert.equal(next.clock[first.source], 2);
+  manager.dispose();
+});
+
+test('channel adoption rejects a nonnumeric or non-finite token lifetime', () => {
+  const channel: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel });
+  manager.adopt(authResponse('current'), false);
+
+  for (const expiresIn of ['900', Number.NaN, Number.POSITIVE_INFINITY]) {
+    const candidate = authResponse('untrusted');
+    channel.onmessage?.(new MessageEvent('message', {
+      data: { type: 'session_adopted', auth: { ...candidate, tokens: { ...candidate.tokens, expiresIn } } },
+    }));
+    assert.equal(manager.current?.tokens.accessToken, 'current');
+  }
+  manager.dispose();
+});
+
+test('a revision whose kind contradicts its message cannot poison a later logout', () => {
+  let posted: unknown;
+  const channel: SessionChannel = {
+    onmessage: null,
+    postMessage: (message) => { posted = message; },
+    close: () => {},
+  };
+  const manager = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel });
+  manager.adopt(authResponse('current'), false);
+
+  channel.onmessage?.(new MessageEvent('message', {
+    data: {
+      type: 'session_reset',
+      cause: 'logout',
+      revision: { clock: { peer: 100 }, source: 'peer', kind: 'adoption' },
+    },
+  }));
+  manager.adopt(authResponse('local-successor'));
+  assert.ok(posted, 'local adoption should publish its revision');
+
+  channel.onmessage?.(new MessageEvent('message', {
+    data: {
+      type: 'session_reset',
+      cause: 'logout',
+      revision: { clock: { peer: 2 }, source: 'peer', kind: 'logout' },
+    },
+  }));
+
+  assert.equal(manager.current, null);
+  manager.dispose();
+});
+
+test('two session managers synchronize adoption across tabs via channel', async () => {
+  const [ch1, ch2] = createMockChannelPair();
+  const mgr1 = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: ch1 });
+  const mgr2 = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: ch2 });
+
+  let mgr2Adopted = false;
+  mgr2.onAdopted(() => { mgr2Adopted = true; });
+
+  mgr1.adopt(authResponse('tab1-token', 'r1', 3600));
+
+  await new Promise<void>((r) => queueMicrotask(() => r()));
+
+  assert.equal(mgr2.isAuthenticated, true);
+  assert.equal(mgr2.authorizationHeader(), 'Bearer tab1-token');
+  assert.equal(mgr2.current?.tokens.refreshToken, undefined, 'peer messages never transfer refresh credentials');
+  assert.equal(mgr2Adopted, true);
+
+  mgr1.dispose();
+  mgr2.dispose();
+});
+
+test('concurrent refreshes from two tabs: loser adopts winner without destroying session', async () => {
+  const [ch1, ch2] = createMockChannelPair();
+  const mgr1 = new SessionManager({
+    refresh: async () => {
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      return authResponse('winner-token', 'r-winner', 3600);
+    },
+    now: () => 1000,
+    channel: ch1,
+  });
+  const mgr2 = new SessionManager({
+    refresh: async () => {
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      await new Promise<void>((r) => queueMicrotask(() => r()));
+      // Tab 2 loses race; server returns 401 because Tab 1 refreshed first
+      throw new Error('401 Unauthorized: refresh token has been revoked');
+    },
+    now: () => 1000,
+    channel: ch2,
+  });
+
+  // Both have the initial session before expiry
+  mgr1.adopt(authResponse('old-token', 'r-old', 1), false);
+  mgr2.adopt(authResponse('old-token', 'r-old', 1), false);
+
+  let mgr2Invalidated = false;
+  mgr2.onInvalidated(() => { mgr2Invalidated = true; });
+
+  // Both tabs invoke refreshNow() concurrently
+  const [s1, s2] = await Promise.all([
+    mgr1.refreshNow(),
+    mgr2.refreshNow(),
+  ]);
+
+  assert.equal(s1.tokens.accessToken, 'winner-token');
+  assert.equal(s2.tokens.accessToken, 'winner-token', 'Tab 2 must recover by returning winner session');
+
+  // Tab 2 now has the winner's token and is still authenticated
+  assert.equal(mgr2.isAuthenticated, true);
+  assert.equal(mgr2.current?.tokens.accessToken, 'winner-token');
+  assert.equal(mgr2Invalidated, false, 'Tab 2 must not be invalidated when Tab 1 succeeded');
+
+  mgr1.dispose();
+  mgr2.dispose();
+});
+
+test('session reset synchronizes across tabs via channel', async () => {
+  const [ch1, ch2] = createMockChannelPair();
+  const mgr1 = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: ch1 });
+  const mgr2 = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: ch2 });
+
+  let mgr2ResetFired = false;
+  mgr2.onReset(() => {
+    mgr2ResetFired = true;
+  });
+
+  mgr1.adopt(authResponse('tok', 'r', 3600), false);
+  mgr2.adopt(authResponse('tok', 'r', 3600), false);
+  assert.equal(mgr2.isAuthenticated, true);
+
+  // Tab 1 logs out / resets
+  mgr1.reset();
+
+  await new Promise<void>((r) => queueMicrotask(() => r()));
+
+  assert.equal(mgr2.isAuthenticated, false);
+  assert.equal(mgr2ResetFired, true, 'mgr2.onReset must be notified when peer resets');
+
+  mgr1.dispose();
+  mgr2.dispose();
+});
+
+test('deferred refresh is invalidated when peer reset arrives before refresh resolves', async () => {
+  const [ch1, ch2] = createMockChannelPair();
+  let releaseRefresh!: () => void;
+  const refreshGate = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+
+  const mgr1 = new SessionManager({
+    refresh: async () => {
+      await refreshGate;
+      return authResponse('new-tok', 'new-r', 3600);
+    },
+    now: () => 1000,
+    channel: ch1,
+  });
+  const mgr2 = new SessionManager({
+    refresh: async () => authResponse(),
+    now: () => 1000,
+    channel: ch2,
+  });
+
+  let mgr1Invalidated = false;
+  mgr1.onInvalidated(() => {
+    mgr1Invalidated = true;
+  });
+
+  mgr1.adopt(authResponse('old-tok', 'old-r', 3600), false);
+  mgr2.adopt(authResponse('old-tok', 'old-r', 3600), false);
+  assert.equal(mgr1.isAuthenticated, true);
+  assert.equal(mgr2.isAuthenticated, true);
+
+  // Tab 1 starts refreshNow() while the network call is deferred
+  let refreshError: unknown = null;
+  const refreshPromise = mgr1.refreshNow().catch((err: unknown) => {
+    refreshError = err;
+  });
+
+  // Peer tab (Tab 2) logs out / resets session while Tab 1's refresh is still in flight
+  mgr2.reset();
+
+  // Allow message to be delivered from ch2 to ch1
+  await new Promise<void>((r) => queueMicrotask(() => r()));
+
+  // Tab 1 received session_reset
+  assert.equal(mgr1.isAuthenticated, false);
+
+  // Now the network response resolves on Tab 1
+  releaseRefresh();
+  await refreshPromise;
+
+  // The in-flight refresh MUST NOT adopt the session or resurrect it
+  assert.ok(refreshError instanceof NoSessionError, 'refreshNow must reject with NoSessionError');
+  assert.equal(mgr1.isAuthenticated, false, 'Tab 1 must remain unauthenticated');
+  assert.equal(mgr1.current, null, 'Tab 1 session store must remain empty');
+  assert.equal(mgr1Invalidated, false, 'voluntary reset must not trigger involuntary invalidation handler');
+
+  // Allow microtasks to ensure no channel message resurrected Tab 2
+  await new Promise<void>((r) => queueMicrotask(() => r()));
+
+  assert.equal(mgr2.isAuthenticated, false, 'Tab 2 must not be re-authenticated by peer refresh');
+  assert.equal(mgr2.current, null);
+
+  mgr1.dispose();
+  mgr2.dispose();
+});
+
+test('synchronous throw in doRefresh clears refreshInFlight and allows subsequent retry', async () => {
+  let attempts = 0;
+  const mgr = new SessionManager({
+    refresh: () => {
+      attempts++;
+      if (attempts === 1) {
+        // Synchronous throw before returning a Promise
+        throw new Error('sync error during refresh initialization');
+      }
+      return Promise.resolve(authResponse('token-retry', 'refresh-retry', 3600));
+    },
+    now: () => 1000,
+  });
+
+  mgr.adopt(authResponse('old-token', 'old-r', 3600));
+
+  // First call throws synchronously inside doRefresh
+  await assert.rejects(
+    async () => mgr.refreshNow(),
+    /sync error during refresh initialization/,
+  );
+
+  // Re-adopt to simulate having a session for the retry
+  mgr.adopt(authResponse('retry-base', 'retry-r', 3600));
+
+  // Second call must NOT return a stale cached rejected promise; it must invoke doRefresh again
+  const refreshed = await mgr.refreshNow();
+  assert.equal(attempts, 2, 'doRefresh should be invoked on retry');
+  assert.equal(refreshed.tokens.accessToken, 'token-retry');
+  assert.equal(mgr.current?.tokens.accessToken, 'token-retry');
+
+  mgr.dispose();
+});
+
+test('loser tab refresh failure before adoption broadcast does NOT clear winner tab', async () => {
+  // A controlled channel where delivery between peers can be delayed deterministically
+  let ch1ToCh2Queue: unknown[] = [];
+  let ch2ToCh1Queue: unknown[] = [];
+
+  const ch1: SessionChannel = {
+    postMessage(data: unknown): void {
+      ch1ToCh2Queue.push(data);
+    },
+    onmessage: null,
+    close(): void {},
+  };
+
+  const ch2: SessionChannel = {
+    postMessage(data: unknown): void {
+      ch2ToCh1Queue.push(data);
+    },
+    onmessage: null,
+    close(): void {},
+  };
+
+  const mgr1 = new SessionManager({
+    refresh: async () => authResponse('winner-token', 'r-winner', 3600),
+    now: () => 1000,
+    channel: ch1,
+  });
+
+  const mgr2 = new SessionManager({
+    refresh: async () => {
+      throw new Error('401 Unauthorized: refresh token has been revoked');
+    },
+    now: () => 1000,
+    channel: ch2,
+  });
+
+  // Both tabs hold the same initial session
+  mgr1.adopt(authResponse('old-token', 'r-old', 1), false);
+  mgr2.adopt(authResponse('old-token', 'r-old', 1), false);
+
+  // Tab 1 wins refresh and adopts valid successor
+  const s1 = await mgr1.refreshNow();
+  assert.equal(s1.tokens.accessToken, 'winner-token');
+  assert.equal(mgr1.isAuthenticated, true);
+  // ch1 queued a 'session_adopted' message for ch2, but ch2 has not processed it yet
+  assert.equal(ch1ToCh2Queue.length, 1);
+
+  // Tab 2 loses refresh BEFORE processing Tab 1's adoption broadcast
+  await assert.rejects(
+    async () => mgr2.refreshNow(),
+    /401 Unauthorized/,
+  );
+
+  // Tab 2 followed failure reset path and posted 'session_reset' to ch2
+  assert.equal(ch2ToCh1Queue.length, 1);
+
+  // Deliver Tab 2's reset message to Tab 1 (Winner Tab)
+  for (const msg of ch2ToCh1Queue) {
+    ch1.onmessage?.(new MessageEvent('message', { data: msg }));
+  }
+  ch2ToCh1Queue = [];
+
+  // CRITICAL INVARIANT: The winner tab must NOT have its valid successor session cleared by loser tab reset!
+  assert.equal(mgr1.isAuthenticated, true, 'winner tab must remain authenticated');
+  assert.equal(mgr1.current?.tokens.accessToken, 'winner-token', 'winner tab must retain winner token');
+
+  // Now deliver Tab 1's adoption broadcast to Tab 2
+  for (const msg of ch1ToCh2Queue) {
+    ch2.onmessage?.(new MessageEvent('message', { data: msg }));
+  }
+  ch1ToCh2Queue = [];
+
+  // Tab 2 recovers and adopts the winner session
+  assert.equal(mgr2.isAuthenticated, true, 'loser tab adopts winner after broadcast is delivered');
+  assert.equal(mgr2.current?.tokens.accessToken, 'winner-token');
+
+  // Explicit logout MUST still synchronize across tabs
+  mgr1.reset();
+  assert.equal(ch1ToCh2Queue.length, 1);
+  for (const msg of ch1ToCh2Queue) {
+    ch2.onmessage?.(new MessageEvent('message', { data: msg }));
+  }
+  assert.equal(mgr2.isAuthenticated, false, 'explicit logout must synchronize across tabs');
+
+  mgr1.dispose();
+  mgr2.dispose();
+});
+
+test('asynchronous throw in doRefresh clears refreshInFlight and allows subsequent retry', async () => {
+  let attempts = 0;
+  const mgr = new SessionManager({
+    refresh: async () => {
+      attempts++;
+      await new Promise<void>((r) => queueMicrotask(r));
+      if (attempts === 1) {
+        throw new Error('async network error during refresh');
+      }
+      return authResponse('token-async-retry', 'refresh-retry', 3600);
+    },
+    now: () => 1000,
+  });
+
+  mgr.adopt(authResponse('old-token', 'old-r', 3600));
+
+  // First call rejects asynchronously
+  await assert.rejects(
+    async () => mgr.refreshNow(),
+    /async network error during refresh/,
+  );
+
+  // Re-adopt to simulate having a session for the retry
+  mgr.adopt(authResponse('retry-base', 'retry-r', 3600));
+
+  // Second call must NOT return a stale cached rejected promise; it must invoke doRefresh again
+  const refreshed = await mgr.refreshNow();
+  assert.equal(attempts, 2, 'doRefresh should be invoked on subsequent attempt');
+  assert.equal(refreshed.tokens.accessToken, 'token-async-retry');
+  assert.equal(mgr.current?.tokens.accessToken, 'token-async-retry');
+
+  mgr.dispose();
+});
+
+test('in-flight refresh started before adopt() cannot overwrite the newly adopted session', async () => {
+  let finishRefresh!: (auth: AuthResponse) => void;
+  const refreshPromise = new Promise<AuthResponse>((resolve) => {
+    finishRefresh = resolve;
+  });
+
+  const mgr = new SessionManager({
+    refresh: async () => refreshPromise,
+    now: () => 1000,
+  });
+
+  // Tab has initial session S1
+  mgr.adopt(authResponse('s1-token', 's1-refresh', 3600), false);
+
+  // Tab starts refreshNow() based on S1
+  const refreshInFlight = mgr.refreshNow();
+
+  // Concurrently, a peer tab broadcast or re-auth adopts S2
+  mgr.adopt(authResponse('s2-token', 's2-refresh', 7200), false);
+  assert.equal(mgr.current?.tokens.accessToken, 's2-token');
+
+  // Now the delayed refresh based on S1 finishes with S1-successor
+  finishRefresh(authResponse('s1-delayed-successor', 's1-delayed-r', 3600));
+
+  // The in-flight refresh MUST reject with NoSessionError because sessionGeneration was bumped by adopt()
+  await assert.rejects(
+    async () => refreshInFlight,
+    NoSessionError,
+  );
+
+  // CRITICAL: The adopted S2 session must NOT be overwritten by the delayed refresh!
+  assert.equal(mgr.current?.tokens.accessToken, 's2-token', 'retained adopted session token');
+  assert.equal(mgr.isAuthenticated, true);
+
+  mgr.dispose();
 });

@@ -466,14 +466,19 @@ test('route teardown closes the app socket and removes browser connectivity list
 
 test('route teardown prevents a delayed auth restore from reopening the game socket', async () => {
   let resolveRefresh: ((response: HttpResponse) => void) | undefined;
+  let markRefreshStarted!: () => void;
   let refreshRequests = 0;
   const refreshResponse = new Promise<HttpResponse>((resolve) => {
     resolveRefresh = resolve;
+  });
+  const refreshStarted = new Promise<void>((resolve) => {
+    markRefreshStarted = resolve;
   });
   const transport: HttpTransport = {
     send: (request) => {
       if (new URL(request.url).pathname === '/v1/auth/refresh') {
         refreshRequests += 1;
+        markRefreshStarted();
         return refreshResponse;
       }
       return Promise.resolve(json(200, {}));
@@ -493,6 +498,7 @@ test('route teardown prevents a delayed auth restore from reopening the game soc
   }));
 
   lifecycle.run();
+  await refreshStarted;
   assert.equal(refreshRequests, 1, 'auth restoration must be pending for the race to be exercised');
   assert.equal(sockets.sockets.length, 0, 'the socket waits for auth restoration');
   lifecycle.teardown();
@@ -983,7 +989,7 @@ test('game metadata: populates elements correctly', () => {
  * password and pressing Enter did nothing at all, with no feedback to say why. Every other form in
  * `bootstrap.ts` binds `onsubmit`; this asserts that this one does too.
  */
-test('pressing Enter in the sign-in form logs in, without reaching for the mouse', () => {
+test('pressing Enter in the sign-in form logs in, without reaching for the mouse', async () => {
   const doc = makeDoc();
   const transport = new FakeTransport().onEach(() => json(200, { accessToken: 't', handle: 'alice' }));
   bootstrap(doc, { ...makeDeps(), httpTransport: transport });
@@ -993,6 +999,7 @@ test('pressing Enter in the sign-in form logs in, without reaching for the mouse
 
   const form = doc.getElementById('auth-form') as unknown as { submit(): void };
   form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   const urls = transport.calls.map((c) => c.url);
   assert.ok(
@@ -1429,7 +1436,7 @@ test('bootstrapping the same document twice on /email-verify and disposing does 
   }
 });
 
-test('submitting the sign-in form with malformed email still calls login', () => {
+test('submitting the sign-in form with malformed email still calls login', async () => {
   const doc = makeDoc();
   const transport = new FakeTransport().onEach(() => json(200, { accessToken: 't', handle: 'alice' }));
   bootstrap(doc, { ...makeDeps(), httpTransport: transport });
@@ -1446,6 +1453,7 @@ test('submitting the sign-in form with malformed email still calls login', () =>
 
   const form = doc.getElementById('auth-form') as unknown as { submit(): void };
   form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   const urls = transport.calls.map((c) => c.url);
   assert.ok(

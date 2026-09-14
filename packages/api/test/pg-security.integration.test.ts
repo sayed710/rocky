@@ -119,6 +119,90 @@ test('Postgres refresh rotation has exactly one winner under concurrency', { ski
   });
 });
 
+test('Postgres account revocation cannot miss a concurrently rotated successor', { skip }, async () => {
+  const userIds: string[] = [];
+  await withSharedDatabase({ cleanup: (pool) => deleteFixtureUsers(pool, userIds) }, async (pool) => {
+    await migrate(pool, MIGRATIONS);
+    const users = new PgUsersRepository(pool);
+    const sessions = new PgSessionsRepository(pool);
+    const userId = uuidv7();
+    userIds.push(userId);
+    const user = await users.createWithPasswordAndRole(
+      { id: userId, handle: `burn${uuidv7().replaceAll('-', '').slice(0, 12)}` },
+      'hash',
+      'user',
+    );
+    const oldId = uuidv7();
+    const oldHash = `burn-old-${uuidv7()}`;
+    await sessions.create({
+      id: oldId, userId: user.id, refreshHash: oldHash,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    await Promise.all([
+      sessions.rotate(oldHash, {
+        id: uuidv7(), userId: user.id, refreshHash: `burn-new-${uuidv7()}`,
+        expiresAt: new Date(Date.now() + 60_000), rotatedFrom: oldId,
+      }, new Date()),
+      sessions.revokeAllForUser(user.id, new Date()),
+    ]);
+
+    const active = await pool.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM sessions WHERE user_id = $1 AND revoked_at IS NULL',
+      [user.id],
+    );
+    assert.equal(active.rows[0]!.count, '0');
+  });
+});
+
+test('Postgres chain revocation cannot miss a concurrently rotated successor', { skip }, async () => {
+  const userIds: string[] = [];
+  await withSharedDatabase({ cleanup: (pool) => deleteFixtureUsers(pool, userIds) }, async (pool) => {
+    await migrate(pool, MIGRATIONS);
+    const users = new PgUsersRepository(pool);
+    const sessions = new PgSessionsRepository(pool);
+    const userId = uuidv7();
+    userIds.push(userId);
+    const user = await users.createWithPasswordAndRole(
+      { id: userId, handle: `chain${uuidv7().replaceAll('-', '').slice(0, 12)}` },
+      'hash',
+      'user',
+    );
+    const rootId = uuidv7();
+    const rootHash = `chain-root-${uuidv7()}`;
+    await sessions.create({
+      id: rootId,
+      userId: user.id,
+      refreshHash: rootHash,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    await Promise.all([
+      sessions.rotate(rootHash, {
+        id: uuidv7(),
+        userId: user.id,
+        refreshHash: `chain-next-${uuidv7()}`,
+        expiresAt: new Date(Date.now() + 60_000),
+        rotatedFrom: rootId,
+      }, new Date()),
+      sessions.revokeChainForUser(user.id, rootId, new Date()),
+    ]);
+
+    const active = await pool.query<{ count: string }>(
+      `WITH RECURSIVE chain(id) AS (
+         SELECT id FROM sessions WHERE id = $1
+         UNION
+         SELECT child.id FROM sessions child JOIN chain parent ON child.rotated_from = parent.id
+       )
+       SELECT COUNT(*)::text AS count
+       FROM sessions
+       WHERE id IN (SELECT id FROM chain) AND revoked_at IS NULL`,
+      [rootId],
+    );
+    assert.equal(active.rows[0]!.count, '0');
+  });
+});
+
 /**
  * `AuthService.revokeSession` audits only when its own call performed the revocation, which is only
  * true if the repository resolves the race rather than the service. The in-memory fake mirrors the

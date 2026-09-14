@@ -261,6 +261,49 @@ export class InMemorySessionsRepository implements SessionsRepository {
     return true;
   }
 
+  async revokeChainForUser(userId: string, rootId: string, at: Date): Promise<number | null> {
+    const root = this.byId.get(rootId);
+    if (!root || root.row.userId !== userId) return null;
+
+    const chain = new Set([rootId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const stored of this.byId.values()) {
+        if (
+          stored.row.userId === userId &&
+          stored.row.rotatedFrom &&
+          chain.has(stored.row.rotatedFrom) &&
+          !chain.has(stored.row.id)
+        ) {
+          chain.add(stored.row.id);
+          changed = true;
+        }
+      }
+    }
+
+    let revoked = 0;
+    for (const id of chain) {
+      const stored = this.byId.get(id)!;
+      if (!stored.row.revokedAt) {
+        stored.row = { ...stored.row, revokedAt: at };
+        revoked += 1;
+      }
+    }
+    return revoked;
+  }
+
+  async revokeAllForUser(userId: string, at: Date): Promise<number> {
+    let revoked = 0;
+    for (const stored of this.byId.values()) {
+      if (stored.row.userId === userId && !stored.row.revokedAt) {
+        stored.row = { ...stored.row, revokedAt: at };
+        revoked += 1;
+      }
+    }
+    return revoked;
+  }
+
   async listForUser(userId: string): Promise<SessionRow[]> {
     return [...this.byId.values()]
       .filter((s) => s.row.userId === userId)

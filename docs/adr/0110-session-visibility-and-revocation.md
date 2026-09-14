@@ -49,12 +49,11 @@ be dead and it is dead, so there is nothing to report — and it means two simul
 the same id both succeed instead of one losing a race. `AuthService.logout` already applies the same
 tolerance.
 
-The audit record is written once because `SessionsRepository.revoke` is now
-`UPDATE ... WHERE revoked_at IS NULL` and reports whether *this* call performed the transition. The
-first shape of this was a `revokedAt` check in the service followed by an unconditional update,
-which is a read-then-write race: two concurrent `DELETE`s both saw an active row and both audited
-one revocation. Making the transition its own lock is the only version that holds without a
-transaction.
+The audit record is written once because `SessionsRepository.revokeChainForUser` performs the
+conditional update atomically and reports how many rows this call transitioned. The first shape of
+this was a `revokedAt` check in the service followed by an unconditional update, which is a
+read-then-write race: two concurrent `DELETE`s both saw an active row and both audited one
+revocation.
 
 ### 3. A session is a chain, not a row
 
@@ -62,8 +61,10 @@ Every `refresh` retires the current row and inserts a successor linked by `rotat
 user points at in the list is the newest row of a chain. Revoking only that row leaves the browser
 signed in whenever a refresh lands between the list being read and the revocation being written: the
 `DELETE` answers `204` while the successor it never saw is still a working refresh capability.
-`revokeSession` therefore revokes the whole chain descending from the target, and re-reads once to
-catch a rotation that landed during the first pass.
+`revokeSession` therefore asks the repository to revoke the whole descending chain in one
+transaction. The PostgreSQL implementation takes the same per-account advisory lock as refresh
+rotation, so neither operation can insert or overlook a successor while the other is updating the
+chain.
 
 This also decides what `refresh` does with a revoked row. It cannot treat every revoked row as token
 theft, which is what it did originally: the browser whose session was *deliberately* revoked will
@@ -71,8 +72,11 @@ present its token within one access-token lifetime, doing exactly what any clien
 the account for it would mean that ending one session signs the user out of all the others — the one
 thing this feature promises not to do. A **live successor** separates the two cases. If the row was
 rotated away and something is still refreshing from its replacement, a token the real client already
-exchanged is being replayed and the chain burns. If the row was deliberately revoked, no descendant
-survives it (see above) and the answer is a plain `401`.
+exchanged is being replayed. A presentation inside the configured bounded grace window is rejected
+with `401` without revoking the successor, allowing near-simultaneous tab refreshes and immediate
+network retries to fail safely; a presentation outside that window revokes every active session
+chain for the account. If the row was
+deliberately revoked, no descendant survives it (see above) and the answer is a plain `401`.
 
 ### 4. Current-session behaviour follows from the token design
 

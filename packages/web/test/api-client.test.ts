@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { GambitClient } from '../src/api/client.js';
 import type { RetryPolicy } from '../src/net/retry.js';
 import { RequestAbortedError, UnauthorizedError } from '../src/net/errors.js';
-import type { HttpRequest, HttpTransport } from '../src/ports/http.js';
+import { NoSessionError } from '../src/net/session.js';
+import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { abortableHang, FakeTransport, empty, json } from './support/fake-transport.js';
 import type { AuthResponse, GameReviewResponse, SelfUser } from '../src/api/models.js';
 
@@ -156,6 +157,195 @@ test('register adopts the session', async () => {
   const res = await c.auth.register({ handle: 'newbie', password: 'password1' });
   assert.equal(res.tokens.accessToken, 'tok-R');
   assert.equal(c.session.isAuthenticated, true);
+});
+
+test('a late logout response cannot clear a newer session transition', async () => {
+  let finishLogout!: (response: HttpResponse) => void;
+  const logoutResponse = new Promise<HttpResponse>((resolve) => { finishLogout = resolve; });
+  let markLogoutStarted!: () => void;
+  const logoutStarted = new Promise<void>((resolve) => { markLogoutStarted = resolve; });
+  let call = 0;
+  const c = make({
+    send: async () => {
+      call += 1;
+      if (call === 1) return json(200, auth('old'));
+      markLogoutStarted();
+      return logoutResponse;
+    },
+  });
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+
+  const pending = c.auth.logout();
+  await logoutStarted;
+  assert.equal(c.session.isAuthenticated, false, 'logout publishes its local barrier before awaiting the response');
+  c.session.reset({ broadcast: false });
+  c.session.adopt(auth('newer'), false);
+  finishLogout(empty(204));
+  await pending;
+
+  assert.equal(c.session.current?.tokens.accessToken, 'newer');
+  c.session.dispose();
+});
+
+test('logout clears the session after proactively refreshing an expired access token', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'refresh-old', 0)),
+    () => json(200, auth('fresh', 'refresh-new')),
+    () => empty(204),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+
+  await c.auth.logout();
+
+  assert.equal(c.session.current, null);
+  assert.equal(t.calls[1]!.url, 'https://api.test/v1/auth/refresh');
+  assert.equal(t.calls[2]!.url, 'https://api.test/v1/auth/logout');
+  assert.equal(t.calls[2]!.headers['authorization'], 'Bearer fresh');
+  c.session.dispose();
+});
+
+test('explicit logout establishes a second reset boundary when proactive refresh fails', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'refresh-old', 0)),
+    () => json(401, { error: { code: 'unauthenticated', message: 'expired', requestId: 'refresh' } }),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  const before = c.session.captureGeneration();
+
+  await assert.rejects(c.auth.logout(), UnauthorizedError);
+
+  assert.equal(c.session.current, null);
+  assert.equal(c.session.captureGeneration(), before + 2, 'refresh invalidation is promoted to explicit logout');
+  c.session.dispose();
+});
+
+for (const transition of ['reset', 'adopt', 'dispose'] as const) {
+  test(`cookie restore discards its response after ${transition}`, async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => { finish = resolve; });
+    const c = make({
+      async send() {
+        await gate;
+        return json(200, auth('obsolete-restore'));
+      },
+    });
+
+    const restore = c.auth.refresh();
+    if (transition === 'reset') c.session.reset();
+    if (transition === 'adopt') c.session.adopt(auth('newer-login'));
+    if (transition === 'dispose') c.session.dispose();
+    finish();
+
+    await assert.rejects(restore, NoSessionError);
+    assert.equal(c.session.current?.tokens.accessToken, transition === 'adopt' ? 'newer-login' : undefined);
+    c.session.dispose();
+  });
+}
+
+for (const operation of ['login', 'register', 'passkey'] as const) {
+  for (const transition of ['reset', 'dispose'] as const) {
+    test(`${operation} revokes its response after session ${transition}`, async () => {
+      let finish!: (response: HttpResponse) => void;
+      let markStarted!: () => void;
+      const response = new Promise<HttpResponse>((resolve) => { finish = resolve; });
+      const started = new Promise<void>((resolve) => { markStarted = resolve; });
+      const calls: HttpRequest[] = [];
+      const c = make({
+        async send(request) {
+          calls.push(request);
+          markStarted();
+          return calls.length === 1 ? response : empty(204);
+        },
+      });
+
+      const pending = operation === 'login'
+        ? c.auth.login({ handle: 'alice', password: 'pw' })
+        : operation === 'register'
+          ? c.auth.register({ handle: 'alice', password: 'password1' })
+          : c.auth.verifyPasskeyLogin({
+            id: 'credential-1',
+            rawId: 'credential-1',
+            type: 'public-key',
+            response: {
+              clientDataJSON: 'client-data',
+              authenticatorData: 'authenticator-data',
+              signature: 'signature',
+            },
+          });
+      await started;
+      if (transition === 'reset') c.session.reset();
+      else c.session.dispose();
+      finish(json(200, auth('obsolete-auth')));
+
+      await assert.rejects(pending, NoSessionError);
+      assert.equal(c.session.current, null);
+      assert.equal(calls.length, 2, 'the obsolete server session is revoked');
+      assert.equal(calls[1]!.url, 'https://api.test/v1/auth/logout');
+      assert.equal(calls[1]!.method, 'POST');
+      assert.equal(calls[1]!.credentials, 'include', 'cleanup clears the obsolete cookie while holding the auth lock');
+      assert.equal(calls[1]!.headers['authorization'], 'Bearer obsolete-auth');
+      assert.deepEqual(JSON.parse(calls[1]!.body as string), { refreshToken: 'r' });
+      c.session.dispose();
+    });
+  }
+}
+
+test('stale cookie-only login is revoked through the response cookie', async () => {
+  let finish!: (response: HttpResponse) => void;
+  let markStarted!: () => void;
+  const response = new Promise<HttpResponse>((resolve) => { finish = resolve; });
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const calls: HttpRequest[] = [];
+  const c = make({
+    async send(request) {
+      calls.push(request);
+      markStarted();
+      return calls.length === 1 ? response : empty(204);
+    },
+  });
+
+  const pending = c.auth.login({ handle: 'alice', password: 'pw' });
+  await started;
+  c.session.reset();
+  const cookieOnly = auth('obsolete-cookie-only');
+  const { refreshToken: _refreshToken, ...tokens } = cookieOnly.tokens;
+  finish(json(200, { ...cookieOnly, tokens }));
+
+  await assert.rejects(pending, NoSessionError);
+  assert.equal(calls.length, 2, 'the obsolete cookie-only session is revoked');
+  assert.equal(calls[1]!.url, 'https://api.test/v1/auth/logout');
+  assert.equal(calls[1]!.credentials, 'include');
+  assert.equal(calls[1]!.headers['authorization'], 'Bearer obsolete-cookie-only');
+  assert.equal(calls[1]!.body, undefined);
+  c.session.dispose();
+});
+
+test('serialized logins do not send a queued request after the first login changes the session', async () => {
+  let finishFirst!: (response: HttpResponse) => void;
+  let markFirstStarted!: () => void;
+  const firstResponse = new Promise<HttpResponse>((resolve) => { finishFirst = resolve; });
+  const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+  const calls: HttpRequest[] = [];
+  const c = make({
+    send: async (request) => {
+      calls.push(request);
+      markFirstStarted();
+      return firstResponse;
+    },
+  });
+
+  const first = c.auth.login({ handle: 'alice', password: 'pw' });
+  await firstStarted;
+  const queued = c.auth.login({ handle: 'alice', password: 'new-pw' });
+  finishFirst(json(200, auth('winner')));
+
+  await first;
+  await assert.rejects(queued, NoSessionError);
+  assert.equal(calls.length, 1);
+  assert.equal(c.session.current?.tokens.accessToken, 'winner');
+  c.session.dispose();
 });
 
 test('games.createVsBot posts to /v1/games/bot with auth and returns summary', async () => {

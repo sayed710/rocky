@@ -3695,8 +3695,10 @@ approved.** Base commits: `f7c588e` (M4 api) → `cb19dec` + `4703f23` (M5 gate 
   JWS, constant-time verify, `exp` enforced against the injected `Clock`. Only the
   exact pinned header is accepted (no alg-confusion / `alg:none`).
 - **Refresh tokens:** opaque 256-bit random, stored only as SHA-256 hash,
-  **single-use with rotation** (`rotated_from` chain). Replaying a rotated token is
-  treated as **theft** and revokes the whole chain (audited `auth.refresh.reuse`).
+  **single-use with rotation** (`rotated_from` chain). A near-simultaneous replay
+  inside the bounded grace window is rejected without revoking the successor;
+  replay outside the window is treated as **theft** and revokes every active session chain for the account
+  (audited `auth.refresh.reuse`).
 - **RBAC:** enforced declaratively per route (`AuthPolicy.anyRole`) and re-checked
   in handlers where ownership matters (seek cancellation).
 - **Ports (injectable seams):** `Clock`, `IdGenerator` (UUIDv7), and an
@@ -3811,14 +3813,12 @@ needs no database — it runs against in-memory fakes.
   runtime dependency; any future replacement requires a new evidence-backed decision.
 - **Rate-limiting store.** In-process token bucket (simple, per-instance) vs. Redis
   (accurate across instances). Likely Redis, reusing the M3 pub/sub adapter seam.
-- **Refresh-rotation UX.** Chain-burn on reuse can log out a legitimate client that
-  retried after a dropped response. Acceptable now; consider a short grace window
-  keyed on the rotated-from id if it proves noisy in practice.
+- **Refresh-rotation UX — resolved in the current auth service.** A bounded grace
+  window on a newly rotated session rejects near-simultaneous reuse with `401`
+  without burning the live successor; negative elapsed time or reuse after the
+  window still triggers the full theft response.
 
 ### Known issues
-- Session create + old-session revoke on refresh are two repository calls, not one
-  transaction; a crash between them could briefly leave two active sessions. Wrap in
-  a transaction when a `UnitOfWork`/tx seam is added to `persistence`.
 - ~~`additionalProperties: false` is documented in the OpenAPI request schemas but the
   runtime validators don't yet reject unknown fields (they ignore them).~~ **RESOLVED:**
   `strictObject()` in `http/validate.ts` is applied to every mutating route in

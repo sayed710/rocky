@@ -3,8 +3,9 @@
  * Opaque refresh tokens. A refresh token is high-entropy random data given to
  * the client; the server persists only its SHA-256 hash (so a database leak
  * cannot be replayed). Tokens are single-use: each refresh rotates to a new
- * token and revokes the presenting session. Presenting an already-rotated token
- * signals theft and triggers chain revocation (handled in the auth service).
+ * token and revokes the presenting session. The auth service rejects a replay
+ * inside its bounded concurrency grace window without revoking the successor;
+ * a replay outside that window revokes every active session chain for the account.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
