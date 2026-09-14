@@ -66,6 +66,21 @@ if (!dockerAvailable && process.env['REQUIRE_DOCKER'] === '1') {
   throw new Error('Docker is required for the trusted-edge acceptance gate but is unavailable');
 }
 
+/** Resolve a WebSocket close event, failing the test if the peer remains open. */
+async function waitForClose(ws, timeoutMs = 2_000) {
+  return new Promise((resolveClose, reject) => {
+    const onClose = (code, reason) => {
+      clearTimeout(timer);
+      resolveClose({ code, reason: reason.toString() });
+    };
+    const timer = setTimeout(() => {
+      ws.off('close', onClose);
+      reject(new Error('WebSocket did not close before the deadline'));
+    }, timeoutMs);
+    ws.once('close', onClose);
+  });
+}
+
 describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAvailable }, () => {
   let apiPort;
   let gwPort;
@@ -251,9 +266,7 @@ describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAva
       });
       sockets.push(ws21);
 
-      const close21 = await new Promise((resolve) => {
-        ws21.on('close', (code, reason) => resolve({ code, reason: reason.toString() }));
-      });
+      const close21 = await waitForClose(ws21);
 
       assert.equal(
         close21.code,

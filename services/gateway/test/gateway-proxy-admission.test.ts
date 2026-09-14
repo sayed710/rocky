@@ -264,9 +264,7 @@ describe('Trusted Edge Contract: Gateway WebSocket Admission (TRUST_PROXY=1)', (
       });
       sockets.push(ws21);
 
-      const close21 = await new Promise<{ code: number; reason: string }>((resolve) => {
-        ws21.on('close', (code, reason) => resolve({ code, reason: reason.toString() }));
-      });
+      const close21 = await waitForClose(ws21);
 
       assert.equal(
         close21.code,
