@@ -27,13 +27,21 @@ export const DEFAULT_GAME_REVIEW_DEADLINE_MS = 120_000;
 /** Exact evidence policy required to compare the played move with one alternative. */
 export const GAME_REVIEW_ANALYSIS_LIMITS = { multiPv: 2 } as const satisfies RequestedAnalysisLimits;
 
+/** Pluggable adapter that predicts whether a move was a mistake given engine evidence. */
 export interface MoveAssessmentService {
+  /**
+   * Assess one played move from request-scoped evidence.
+   *
+   * When supplied, `onAccepted` runs after the adapter's validation and before any engine work it
+   * owns; Game Review omits it because the outer review request already owns quota admission.
+   */
   predict(
     input: MistakePredictionInput,
     onAccepted?: () => Promise<void>,
   ): Promise<MistakePredictionOutcome>;
 }
 
+/** A single assessed player move produced by the review engine. */
 export interface GameReviewMove {
   readonly ply: number;
   readonly san: string;
@@ -43,7 +51,13 @@ export interface GameReviewMove {
   readonly classification: GameReviewClassification;
 }
 
-export interface GameReviewOutcome {
+/**
+ * The complete outcome of one engine-grounded player review.
+ *
+ * Discriminated on `isPartial`: when false the entire game was analysed; when true the review was
+ * capped at {@link MAX_REVIEWED_PLAYER_MOVES} and `cutoffReason` names the cause.
+ */
+export type GameReviewOutcome = {
   readonly gameId: string;
   readonly variant: string;
   readonly playerColor: 'white' | 'black';
@@ -51,8 +65,14 @@ export interface GameReviewOutcome {
   readonly termination: string;
   readonly moves: readonly GameReviewMove[];
   readonly summary: GameReviewSummary;
-}
+  readonly totalPlayerMoves: number;
+  readonly analyzedPlayerMoves: number;
+} & (
+  | { readonly isPartial: false; readonly cutoffReason?: never }
+  | { readonly isPartial: true; readonly cutoffReason: 'move_limit' }
+);
 
+/** Construction-time wiring for {@link GameReviewService}. */
 export interface GameReviewServiceOptions {
   readonly archive: FinishedGameReviewArchive;
   readonly analysis: AnalysisPort;
@@ -67,8 +87,10 @@ export interface GameReviewServiceOptions {
 /**
  * Produces a player's engine-grounded review only after a game is durable and over.
  *
- * The service returns no partial review: a cancelled or unavailable engine operation fails the
- * request, so callers never mistake an incomplete set of findings for a complete assessment.
+ * For long games exceeding the engine move budget, the service returns a bounded partial review
+ * with explicit partial-review metadata, ensuring callers never mistake an incomplete set of
+ * findings for a complete assessment. A cancelled or unavailable engine operation fails the
+ * request, so callers never mistake an interrupted engine run for an assessment.
  */
 export class GameReviewService {
   private readonly archive: FinishedGameReviewArchive;
@@ -95,7 +117,14 @@ export class GameReviewService {
       && this.analysis.supportsMultiPv(variant, GAME_REVIEW_ANALYSIS_LIMITS.multiPv);
   }
 
-  /** Produce one ownership-checked, quota-admitted review or fail without returning partial data. */
+  /**
+   * Produce one ownership-checked, quota-admitted review.
+   *
+   * `onAccepted` runs exactly once after ownership, variant, and non-empty-game validation but
+   * before engine work. Games over the move budget return the first
+   * {@link MAX_REVIEWED_PLAYER_MOVES} player moves with explicit partial-review metadata;
+   * cancellation or deadline failures return no interrupted engine result.
+   */
   async review(
     input: { readonly gameId: string; readonly userId: string; readonly signal: AbortSignal },
     onAccepted: () => Promise<void>,
@@ -112,12 +141,11 @@ export class GameReviewService {
     }
 
     const moves = game.moves.filter((move) => move.by === (playerColor === 'white' ? 'w' : 'b'));
-    if (moves.length > MAX_REVIEWED_PLAYER_MOVES) {
-      throw HttpError.validation('game is too long for an instant review', {
-        moves: `at most ${MAX_REVIEWED_PLAYER_MOVES} player moves are supported`,
-      });
-    }
     if (moves.length === 0) throw HttpError.validation('game has no moves to review');
+
+    const totalPlayerMoves = moves.length;
+    const isPartial = totalPlayerMoves > MAX_REVIEWED_PLAYER_MOVES;
+    const analyzedMoves = isPartial ? moves.slice(0, MAX_REVIEWED_PLAYER_MOVES) : moves;
 
     // Archive/ownership/length validation is complete before quota is spent. One accepted review
     // consumes one quota unit even though it contains several fixed-policy engine assessments.
@@ -134,7 +162,7 @@ export class GameReviewService {
       const assessor = this.createMoveAssessment(scoped);
       const reviewed: GameReviewMove[] = [];
       const summary = emptyGameReviewSummary();
-      for (const move of moves) {
+      for (const move of analyzedMoves) {
         throwIfReviewCancelled(input.signal, deadline.signal);
         // The review owns this fixed two-line pre-move search. Passing the same evidence into the
         // predictor preserves the normal mistake verdict while avoiding a duplicate first search.
@@ -168,7 +196,7 @@ export class GameReviewService {
         summary[classification] += 1;
       }
 
-      return {
+      const base = {
         gameId: game.gameId,
         variant: game.variant,
         playerColor,
@@ -176,7 +204,13 @@ export class GameReviewService {
         termination: game.termination,
         moves: reviewed,
         summary,
+        totalPlayerMoves,
+        analyzedPlayerMoves: reviewed.length,
       };
+
+      return isPartial
+        ? { ...base, isPartial: true, cutoffReason: 'move_limit' as const }
+        : { ...base, isPartial: false };
     } catch (error: unknown) {
       throwIfReviewCancelled(input.signal, deadline.signal);
       throw error;

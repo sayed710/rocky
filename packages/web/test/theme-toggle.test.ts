@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ThemeToggle } from '../src/app/theme-toggle.js';
 import type { Theme } from '../src/app/theme-toggle.js';
+import type { KeyValueStorage } from '../src/net/session.js';
 
-class FakeStorage {
+class FakeStorage implements KeyValueStorage {
   private map = new Map<string, string>();
   getItem(key: string): string | null { return this.map.get(key) ?? null; }
   setItem(key: string, val: string): void { this.map.set(key, val); }
@@ -82,7 +83,7 @@ test('custom storage key', () => {
 });
 
 test('storage errors are silently ignored', () => {
-  const brokenStorage = {
+  const brokenStorage: KeyValueStorage = {
     getItem: () => { throw new Error('denied'); },
     setItem: () => { throw new Error('denied'); },
     removeItem: () => {},
@@ -91,7 +92,7 @@ test('storage errors are silently ignored', () => {
   // Should not throw on construction or set
   const t = new ThemeToggle({
     callbacks: { onTheme: (th) => { themes.push(th); } },
-    storage: brokenStorage as any,
+    storage: brokenStorage,
     initial: 'light',
   });
   t.set('dark');
@@ -104,6 +105,37 @@ test('defaults to dark when no preference or system detection', () => {
     callbacks: { onTheme: () => {} },
     // No storage, no initial — should default to dark
   });
-  // Note: in Node test env, matchMedia is undefined, so it falls to default
-  assert.ok(t.current === 'light' || t.current === 'dark');
+  assert.equal(t.current, 'dark');
+});
+
+test('dark-first: system light preference does NOT override dark default for new users', () => {
+  const originalMatchMedia = globalThis.matchMedia;
+  try {
+    globalThis.matchMedia = (query: string): MediaQueryList => ({
+      matches: false, // OS prefers light (does not match prefers-color-scheme: dark)
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    });
+    const t = new ThemeToggle({
+      callbacks: { onTheme: () => {} },
+    });
+    assert.equal(t.current, 'dark', 'first-time user on light OS must start in dark theme');
+  } finally {
+    globalThis.matchMedia = originalMatchMedia;
+  }
+});
+
+test('dark-first: explicit stored user choice still wins over default', () => {
+  const storage = new FakeStorage();
+  storage.setItem('gambit-theme', 'light');
+  const t = new ThemeToggle({
+    callbacks: { onTheme: () => {} },
+    storage,
+  });
+  assert.equal(t.current, 'light', 'stored user choice of light theme must win');
 });

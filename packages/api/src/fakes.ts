@@ -36,7 +36,7 @@ import type {
   NewIdentityToken,
   IdentityTokensRepository,
 } from '@chess-platform/persistence';
-import { DuplicateUserError, VersionConflictError } from '@chess-platform/persistence';
+import { DuplicateUserError, VersionConflictError, SEEK_TTL_MS } from '@chess-platform/persistence';
 
 import { InMemoryLearningRepository } from '@chess-platform/learning';
 import type { AuditEntry, AuditRepository } from './ports/audit';
@@ -261,6 +261,49 @@ export class InMemorySessionsRepository implements SessionsRepository {
     return true;
   }
 
+  async revokeChainForUser(userId: string, rootId: string, at: Date): Promise<number | null> {
+    const root = this.byId.get(rootId);
+    if (!root || root.row.userId !== userId) return null;
+
+    const chain = new Set([rootId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const stored of this.byId.values()) {
+        if (
+          stored.row.userId === userId &&
+          stored.row.rotatedFrom &&
+          chain.has(stored.row.rotatedFrom) &&
+          !chain.has(stored.row.id)
+        ) {
+          chain.add(stored.row.id);
+          changed = true;
+        }
+      }
+    }
+
+    let revoked = 0;
+    for (const id of chain) {
+      const stored = this.byId.get(id)!;
+      if (!stored.row.revokedAt) {
+        stored.row = { ...stored.row, revokedAt: at };
+        revoked += 1;
+      }
+    }
+    return revoked;
+  }
+
+  async revokeAllForUser(userId: string, at: Date): Promise<number> {
+    let revoked = 0;
+    for (const stored of this.byId.values()) {
+      if (stored.row.userId === userId && !stored.row.revokedAt) {
+        stored.row = { ...stored.row, revokedAt: at };
+        revoked += 1;
+      }
+    }
+    return revoked;
+  }
+
   async listForUser(userId: string): Promise<SessionRow[]> {
     return [...this.byId.values()]
       .filter((s) => s.row.userId === userId)
@@ -364,17 +407,48 @@ export class InMemoryGamesRepository implements GamesRepository {
   }
 }
 
+/**
+ * Deterministic in-memory seek store that mirrors open-seek ordering, expiry, and
+ * single-winner acceptance semantics used by the PostgreSQL implementation.
+ */
 export class InMemorySeeksRepository implements SeeksRepository {
   private readonly byId = new Map<string, SeekRow>();
   private seq = 0;
   private readonly order = new Map<string, number>();
 
-  constructor(private readonly clock: Clock = systemClock) {}
+  /**
+   * Build the deterministic seek store used by tests and local development.
+   * The supplied clock owns every lifecycle timestamp; optional game and user
+   * repositories enable receipt filtering and creator-handle enrichment.
+   *
+   * @param clock - Source of lifecycle time for creation, expiry, and claims
+   * @param games - Optional game lookup used to suppress receipts for ended games
+   * @param users - Optional user lookup used to enrich creator handles
+   */
+  constructor(
+    private readonly clock: Clock = systemClock,
+    private readonly games?: GamesRepository,
+    private readonly users?: UsersRepository,
+  ) {}
 
+  /**
+   * Create and persist a seek using the injected clock for its creation time.
+   * When the caller omits `creatorHandle`, the optional user repository resolves it;
+   * an unknown creator is stored explicitly as `null`.
+   *
+   * @param seek - Immutable seek attributes supplied by the caller
+   * @returns The stored row with lifecycle fields and a normalized creator handle
+   */
   async create(seek: NewSeek): Promise<SeekRow> {
+    let creatorHandle = seek.creatorHandle;
+    if (creatorHandle === undefined) {
+      const user = this.users ? await this.users.findById(seek.creatorId) : null;
+      creatorHandle = user?.handle ?? null;
+    }
     const row: SeekRow = {
       id: seek.id,
       creatorId: seek.creatorId,
+      creatorHandle,
       variant: seek.variant,
       timeControl: seek.timeControl,
       rated: seek.rated,
@@ -390,38 +464,118 @@ export class InMemorySeeksRepository implements SeeksRepository {
     return row;
   }
 
+  /**
+   * Look up a seek by id and normalize legacy rows whose creator handle is undefined.
+   * Successful lazy resolution is cached, including an explicit `null` for an unknown user.
+   *
+   * @param id - Seek identifier
+   * @returns The stored seek, or `null` when the id is absent
+   */
   async findById(id: string): Promise<SeekRow | null> {
-    return this.byId.get(id) ?? null;
+    const existing = this.byId.get(id);
+    if (!existing) return null;
+    if (existing.creatorHandle === undefined && this.users) {
+      const user = await this.users.findById(existing.creatorId);
+      const current = this.byId.get(id);
+      if (!current) return null;
+      if (current.creatorHandle !== undefined) return current;
+      const enriched = { ...current, creatorHandle: user?.handle ?? null };
+      this.byId.set(id, enriched);
+      return enriched;
+    }
+    return existing;
   }
 
+  /**
+   * List active unaccepted seeks in insertion order and enrich their creator handles.
+   * When `creatorId` is supplied, the creator's newest still-active acceptance receipt
+   * is prepended; expired seeks and receipts for ended games are excluded.
+   *
+   * @param limit - Maximum number of open seeks to return
+   * @param creatorId - Optional requesting creator whose latest receipt should be included
+   * @returns Active open seeks, optionally preceded by the creator's latest valid receipt
+   */
   async listOpen(limit: number, creatorId?: string): Promise<SeekRow[]> {
     const now = this.clock.now();
     const fiveMinsAgo = now - 5 * 60 * 1000;
     const rows = [...this.byId.values()];
     const open = rows
-      .filter((s) => s.gameId === null)
+      .filter((s) => s.gameId === null && now - s.createdAt.getTime() < SEEK_TTL_MS)
       .sort((a, b) => (this.order.get(a.id) ?? 0) - (this.order.get(b.id) ?? 0))
       .slice(0, limit);
 
-    if (!creatorId) return open;
+    const candidatesToEnrich = [...open];
+    let latestCandidate: SeekRow | undefined;
 
-    const latestMatch = rows
-      .filter(
-        (s) =>
-          s.creatorId === creatorId &&
-          s.gameId !== null &&
-          s.acceptedAt !== null &&
-          s.acceptedAt.getTime() > fiveMinsAgo,
-      )
-      .sort(
-        (a, b) =>
-          b.acceptedAt!.getTime() - a.acceptedAt!.getTime() ||
-          (this.order.get(b.id) ?? 0) - (this.order.get(a.id) ?? 0),
-      )[0];
+    if (creatorId) {
+      const matchedCandidates = rows
+        .filter(
+          (s) =>
+            s.creatorId === creatorId &&
+            s.gameId !== null &&
+            s.acceptedAt !== null &&
+            s.acceptedAt.getTime() > fiveMinsAgo,
+        )
+        .sort(
+          (a, b) =>
+            b.acceptedAt!.getTime() - a.acceptedAt!.getTime() ||
+            (this.order.get(b.id) ?? 0) - (this.order.get(a.id) ?? 0),
+        );
 
-    return latestMatch ? [latestMatch, ...open] : open;
+      for (const match of matchedCandidates) {
+        if (!this.games) {
+          latestCandidate = match;
+          break;
+        }
+        const game = await this.games.findById(match.gameId!);
+        if (game && game.endedAt !== null) {
+          continue;
+        }
+        latestCandidate = match;
+        break;
+      }
+      if (latestCandidate) candidatesToEnrich.push(latestCandidate);
+    }
+
+    const missingIds = [
+      ...new Set(
+        candidatesToEnrich
+          .filter((s) => s.creatorHandle === undefined)
+          .map((s) => s.creatorId),
+      ),
+    ];
+    const userMap = new Map<string, string>();
+    if (this.users && missingIds.length > 0) {
+      const users = await this.users.findByIds(missingIds);
+      for (const u of users) {
+        userMap.set(u.id, u.handle);
+      }
+    }
+
+    /** Preserve resolved handles and cache an unresolvable creator as explicit `null`. */
+    const enrich = (s: SeekRow): SeekRow => {
+      if (s.creatorHandle !== undefined) return s;
+      const handle = userMap.get(s.creatorId);
+      const enriched = { ...s, creatorHandle: handle ?? null };
+      const current = this.byId.get(enriched.id);
+      if (current && current.creatorHandle === undefined) {
+        this.byId.set(enriched.id, { ...current, creatorHandle: enriched.creatorHandle });
+      }
+      return enriched;
+    };
+
+    const enrichedOpen = open.map(enrich);
+    if (!creatorId || !latestCandidate) return enrichedOpen;
+
+    return [enrich(latestCandidate), ...enrichedOpen];
   }
 
+  /**
+   * Remove an unaccepted seek while preserving accepted rows as match receipts.
+   *
+   * @param id - Seek identifier
+   * @returns `true` only when an open seek existed and was removed
+   */
   async remove(id: string): Promise<boolean> {
     const existing = this.byId.get(id);
     if (!existing || existing.gameId !== null) return false;
@@ -434,6 +588,7 @@ export class InMemorySeeksRepository implements SeeksRepository {
   _claim(id: string, gameId: string, acceptedAt: Date): SeekRow | null {
     const existing = this.byId.get(id);
     if (!existing || existing.gameId !== null) return null;
+    if (this.clock.now() - existing.createdAt.getTime() >= SEEK_TTL_MS) return null;
     const claimed = { ...existing, gameId, acceptedAt };
     this.byId.set(id, claimed);
     return claimed;
@@ -447,10 +602,15 @@ export class InMemorySeeksRepository implements SeeksRepository {
     }
   }
 
+  /** Purge open seeks and accepted receipts whose inclusive TTL boundary is at or before `at`. */
   async cleanup(at: Date): Promise<void> {
     const cutoff = at.getTime() - 5 * 60 * 1000;
+    const openCutoff = at.getTime() - SEEK_TTL_MS;
     for (const [id, seek] of this.byId) {
       if (seek.gameId !== null && seek.acceptedAt && seek.acceptedAt.getTime() <= cutoff) {
+        this.byId.delete(id);
+        this.order.delete(id);
+      } else if (seek.gameId === null && seek.createdAt.getTime() <= openCutoff) {
         this.byId.delete(id);
         this.order.delete(id);
       }
@@ -756,10 +916,10 @@ export interface InMemoryRepositories extends Repositories {
 
 /** Construct a fresh set of in-memory repositories sharing a clock. */
 export function createInMemoryRepositories(clock: Clock = systemClock): InMemoryRepositories {
-  const seeks = new InMemorySeeksRepository(clock);
   const games = new InMemoryGamesRepository();
-  const events = new InMemoryEventStore(() => clock.now());
   const users = new InMemoryUsersRepository(clock);
+  const seeks = new InMemorySeeksRepository(clock, games, users);
+  const events = new InMemoryEventStore(() => clock.now());
   
   return {
     events,

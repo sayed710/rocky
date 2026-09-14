@@ -3,20 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#161512" />
-    <title>Gambit</title>
+    <meta name="theme-color" content="#242224" />
+    <title>Rookzen</title>
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="alternate icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
     <a id="skip-board" class="skip-link" href="#board" hidden>Skip to board</a>
     <header class="topbar">
-      <h1><a href="/" data-route="lobby">Gambit</a></h1>
+      <h1 class="brand">
+        <a href="/" data-route="lobby" class="brand-link">
+          <svg class="brand-rook" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <path fill="currentColor" d="M4 2h4v3h2V2h4v3h2V2h4v5l-2 2v7h1v4H5v-4h1V9L4 7V2zm3 16h10v-8.5l1.5-1.5V5h-1V4h-2v2h-4V4h-2v2H7V5H6v2l1.5 1.5V18z"/>
+          </svg>
+          <span class="brand-name">Rookzen</span>
+        </a>
+      </h1>
       <nav class="nav">
-        <a href="/" data-route="lobby">Lobby</a>
+        <a href="/" data-route="lobby">Play</a>
         <a href="/courses" data-route="courses">Learn</a>
-        <a href="/endgames" data-route="endgames">Endgames</a>
-        <a href="/studies" data-route="studies">Studies</a>
         <a href="/profile" data-route="profile">Profile</a>
         <a href="/tournaments" data-route="tournaments">Tournaments</a>
         <a href="/leaderboard" data-route="leaderboard">Leaderboard</a>
@@ -195,8 +203,20 @@
         </section>
       </aside>
     </main>
+    <section id="lobby" class="lobby" aria-label="Lobby" hidden>
+      <div class="lobby-hero">
+        <h2 class="lobby-title">Play Chess</h2>
+        <p class="lobby-subtitle">Create a game, challenge the computer, or accept an open seek.</p>
+      </div>
+      <div id="create-game" class="create-game"></div>
+      <div id="play-bot-mount" class="play-bot"></div>
+      <h2>Open seeks</h2>
+      <div id="seek-list" class="seek-list" role="list"></div>
+      <p id="lobby-error" class="error" role="alert"></p>
+    </section>
     <section id="auth" class="auth" aria-labelledby="auth-heading">
-      <h2 id="auth-heading">Sign in</h2>
+      <h2 id="auth-heading">Sign in to play</h2>
+      <p class="auth-context">Sign in or register to create seeks, challenge bots, and track your rating.</p>
       <!-- `auth-submit` is type="submit" so Enter in either field signs in, the way every other
            form in this app already behaves. `auth-register` stays type="button": it is the second
            action on a form that has one default. -->
@@ -265,12 +285,12 @@
       </div>
       <p class="auth-meta"><a id="email-verify-back-link" href="/" data-route="lobby">Continue to the lobby</a></p>
     </section>
-    <section id="lobby" class="lobby" aria-label="Lobby" hidden>
-      <div id="create-game" class="create-game"></div>
-      <div id="play-bot-mount" class="play-bot"></div>
-      <h2>Open seeks</h2>
-      <div id="seek-list" class="seek-list" role="list"></div>
-      <p id="lobby-error" class="error" role="alert"></p>
+    <section id="not-found" class="not-found" aria-labelledby="not-found-heading" hidden>
+      <div class="not-found-card">
+        <h2 id="not-found-heading">Page not found</h2>
+        <p class="not-found-desc">The requested page or position does not exist or has been moved.</p>
+        <a href="/" data-route="lobby" class="button primary not-found-action">Return to Play</a>
+      </div>
     </section>
     <section id="profile" class="profile" aria-label="Profile" hidden>
       <h2 id="profile-handle">Profile</h2>
@@ -437,6 +457,11 @@
          the live game. The board here is read-only and the move is typed, mirroring a lesson's move
          step — building a second interactive board is a larger piece of work than this needs. -->
     <section id="endgames" class="endgames" aria-label="Endgame trainer" hidden>
+      <nav class="subnav" aria-label="Learn navigation">
+        <a href="/courses" data-route="courses" class="subnav-link">Courses</a>
+        <a href="/endgames" data-route="endgames" class="subnav-link" aria-current="page">Endgame Trainer</a>
+        <a href="/studies" data-route="studies" class="subnav-link">Studies</a>
+      </nav>
       <h2>Endgame trainer</h2>
       <div class="endgame-actions">
         <button id="endgame-next" type="button" class="button">New position</button>
@@ -462,6 +487,11 @@
       </div>
     </section>
     <section id="courses" class="courses" aria-label="Courses" hidden>
+      <nav class="subnav" aria-label="Learn navigation">
+        <a href="/courses" data-route="courses" class="subnav-link" aria-current="page">Courses</a>
+        <a href="/endgames" data-route="endgames" class="subnav-link">Endgame Trainer</a>
+        <a href="/studies" data-route="studies" class="subnav-link">Studies</a>
+      </nav>
       <h2>Courses</h2>
       <div id="course-list" class="panel-list" aria-label="Courses list"></div>
       <p id="courses-error" class="error" role="alert"></p>
@@ -481,6 +511,11 @@
       <p id="lesson-error" class="error" role="alert"></p>
     </section>
     <section id="studies" class="studies" aria-label="Studies" hidden>
+      <nav class="subnav" aria-label="Learn navigation">
+        <a href="/courses" data-route="courses" class="subnav-link">Courses</a>
+        <a href="/endgames" data-route="endgames" class="subnav-link">Endgame Trainer</a>
+        <a href="/studies" data-route="studies" class="subnav-link" aria-current="page">Studies</a>
+      </nav>
       <h2>Studies</h2>
       <form id="study-search-form" class="study-search" role="search">
         <label class="sr-only" for="study-search-input">Search studies</label>

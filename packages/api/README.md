@@ -21,8 +21,9 @@ dependency-free HTTP API with a published OpenAPI 3.1 contract.
   - **HMAC-SHA256 (HS256) access tokens** — self-contained, verified with no
     database round-trip, so the service scales horizontally.
   - **Opaque refresh tokens**, stored only as a SHA-256 hash, **single-use with
-    rotation**. Replaying an already-rotated token is treated as theft and burns
-    the whole session chain.
+    rotation**. A near-simultaneous replay inside the bounded grace window is
+    rejected without revoking the successor; replay outside that window is
+    treated as theft and revokes every active session chain for the account.
 - **RBAC** (`user`, `coach`, `tournament_director`, `moderator`, `admin`)
   enforced declaratively per route and re-checked in handlers where ownership
   matters (e.g. seek cancellation).

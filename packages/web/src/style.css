@@ -1,60 +1,45 @@
 :root {
-  --bg: #161512;
-  --fg: #bababa;
-  --light: #f0d9b5;
-  --dark: #b58863;
-  --sel: #20b2aa;
-  /* Deepened selection teal for LIGHT surfaces. #20b2aa is only 2.4:1 on the
-     light paper and 2.5:1 on the promotion tile — under the 3:1 WCAG 1.4.11
-     floor for focus and state indicators. This clears it (4.3:1 / 4.5:1) while
-     staying recognisably the selection hue. Mirrors --ember / --ember-deep. */
-  --sel-deep: #17827c;
-  /* Contrast edge for the board selection ring. Board squares are fixed by
-     chess convention and theme-independent, and NO teal clears 3:1 against both
-     (#20b2aa: 1.9:1 light / 1.2:1 dark; #17827c: 3.4:1 / 1.5:1). Ink does
-     (13.3:1 / 5.8:1), so the ring pairs a 1px ink edge — which carries the
-     WCAG 1.4.11 contrast against the square — with the teal band that carries
-     the meaning. Ink vs teal is 7.0:1, so the two bands stay distinct. */
-  --sel-edge: #161512;
-  /* Ember: error/danger only — deliberately a different hue from --sel so
-     "you're selected" and "something's wrong" never share a color (a real
-     problem for colorblind users, and confusing regardless). */
+  --bg: #242224;
+  --fg: #E9E4DE;
+  --light: #E9E4DE;
+  --dark: #91888B;
+  --accent: #934A54;
+  --accent-hover: #83414B;
+  --accent-active: #72373F;
+  --sel: #C6A0A2;
+  /* Deepened selection / accent for LIGHT surfaces. */
+  --sel-deep: #83414B;
+  /* Contrast edge for the board selection ring. */
+  --sel-edge: #242224;
+  /* Ember: error/danger only — deliberately a different hue from --sel. */
   --ember: #e5484d;
-  /* Panel surfaces lift a row a hair off the background without a hard edge.
-     A white overlay works on the dark bg; light mode overrides it below with
-     an ink-tinted dark overlay (a white-on-Paper overlay is invisible). */
-  --panel: rgba(255, 255, 255, 0.04);
-  --panel-strong: rgba(255, 255, 255, 0.06);
+  /* Panel surfaces lift a row a hair off the background without a hard edge. */
+  --panel: rgba(233, 228, 222, 0.05);
+  --panel-strong: rgba(233, 228, 222, 0.09);
   /* Interactive Lift: shadow that appears only on hover/focus, never at rest. */
   --lift: 0 2px 8px rgba(0, 0, 0, 0.28);
-  /* Muted: secondary text (empty-state prose, hints). Still ≥4.5:1 — never a
-     washed-out gray. */
-  --muted: #8f8f8c;
+  /* Muted: secondary text (silver gray). Still ≥4.5:1 — never a washed-out gray. */
+  --muted: #A6A6A7;
   --hint: rgba(20, 85, 30, 0.5);
   --last: rgba(155, 199, 0, 0.41);
   --premove: rgba(20, 30, 200, 0.4);
-  /* Promotion overlay surfaces. The tile is deliberately near-white in both
-     themes, so these are theme-independent and the ring over them uses
-     --sel-deep, not --sel. It reads for either colour because the Cburnett
-     pieces are drawn with a heavy contrasting outline — a white queen is white
-     with a black edge, not a pale silhouette that a pale tile would swallow.
-     (This note used to say the glyphs were dark, which was true of the Unicode
-     characters the picker drew before the SVG set replaced them.) The scrim is
-     dark enough that a focus ring over it clears 3:1 on either board square
-     (4.1:1 / 5.9:1). */
+  /* Promotion overlay surfaces. The tile is deliberately near-white in both themes. */
   --scrim: rgba(0, 0, 0, 0.72);
   --promo-tile: #fafafa;
   --promo-tile-hover: #fff;
   --promo-cancel-ink: #fff;
   --promo-cancel-hover: rgba(255, 255, 255, 0.12);
-  /* Light-theme values. Assigned by BOTH light entry points below (OS
-     preference and the explicit .light class) so the two can never drift. */
-  --light-bg: #f7f6f5;
-  --light-fg: #2b2b2b;
+  /* Light-theme values. Applied only by the explicit persisted .light class;
+     an unclassified document stays on the product's dark-first default. */
+  --light-bg: #F5F1ED;
+  --light-fg: #242224;
   --light-ember: #b42318;
-  --light-panel: rgba(22, 21, 18, 0.05);
-  --light-panel-strong: rgba(22, 21, 18, 0.07);
-  --light-muted: #5c5b57;
+  --light-panel: rgba(36, 34, 36, 0.05);
+  --light-panel-strong: rgba(36, 34, 36, 0.08);
+  --light-muted: #686466;
+  --light-accent: #83414B;
+  --light-accent-hover: #72373F;
+  --light-accent-active: #622D35;
   /* Review verdicts are semantic data, not interactive accents. Each hue has a
      dark- and light-surface value so its compact text stays at WCAG AA. */
   --review-brilliant: #a78bfa;
@@ -80,31 +65,7 @@
   --z-skip: 40;
   color-scheme: dark;
 }
-@media (prefers-color-scheme: light) {
-  :root:not(.light):not(.dark) {
-    --bg: var(--light-bg);
-    --fg: var(--light-fg);
-    --ember: var(--light-ember);
-    --panel: var(--light-panel);
-    --panel-strong: var(--light-panel-strong);
-    --muted: var(--light-muted);
-    --review-brilliant: var(--light-review-brilliant);
-    --review-great: var(--light-review-great);
-    --review-excellent: var(--light-review-excellent);
-    --review-book: var(--light-review-book);
-    --review-inaccuracy: var(--light-review-inaccuracy);
-    --review-mistake: var(--light-review-mistake);
-    --review-miss: var(--light-review-miss);
-    /* Selection/focus deepens on light surfaces (see --sel-deep). */
-    --sel: var(--sel-deep);
-    color-scheme: light;
-  }
-}
-
-/* Once the user makes an explicit choice it must win over the operating
-   system preference. Previously only `.dark` was toggled, so switching to
-   light on a dark-system browser removed a class but left every colour token
-   dark. Keep an explicit light state as the persisted, authoritative choice. */
+/* Once the user makes an explicit choice it becomes the persisted, authoritative state. */
 :root.light {
   --bg: var(--light-bg);
   --fg: var(--light-fg);
@@ -121,6 +82,9 @@
   --review-miss: var(--light-review-miss);
   /* Selection/focus deepens on light surfaces (see --sel-deep). */
   --sel: var(--sel-deep);
+  --accent: var(--light-accent);
+  --accent-hover: var(--light-accent-hover);
+  --accent-active: var(--light-accent-active);
   color-scheme: light;
 }
 
@@ -132,7 +96,9 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.4 system-ui, sans-serif;
+  font-family: 'Source Sans 3', system-ui, -apple-system, 'Segoe UI Variable', 'Segoe UI', Tahoma, sans-serif;
+  font-size: 16px;
+  line-height: 1.4;
   display: flex;
   flex-direction: column;
   min-height: 100vh;
@@ -164,6 +130,27 @@ body {
    and match the nav's opacity-shift convention rather than borrowing the accent. */
 .topbar h1 a { color: var(--fg); text-decoration: none; }
 .topbar h1 a:hover { opacity: 0.8; }
+.brand { font-size: 1.25rem; margin: 0; }
+.brand-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  text-decoration: none;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.brand-link:hover { opacity: 0.85; }
+.brand-rook {
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.brand-name {
+  font-weight: 700;
+  color: var(--fg);
+}
 /* Takes the height the topbar leaves. `min-height: 0` because a flex item's default
    `min-height: auto` refuses to shrink below its content — without it the board's own size wins
    and the cap below never binds. */
@@ -181,9 +168,8 @@ body {
    viewport column with the stacked sidebar and collapsed to 115px at 390×844. Let the page scroll
    vertically instead: width establishes the square and the sidebar follows below it. */
 .cb-board {
-  display: grid;
-  grid-template-columns: repeat(8, 1fr);
-  grid-template-rows: repeat(8, 1fr);
+  display: flex;
+  flex-direction: column;
   aspect-ratio: 1 / 1;
   width: 100%;
   height: auto;
@@ -215,7 +201,12 @@ body {
     min-height: 0;
   }
 }
+.cb-row {
+  display: flex;
+  flex: 1;
+}
 .cb-sq {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -224,9 +215,8 @@ body {
 .cb-light { background: var(--light); }
 .cb-dark { background: var(--dark); }
 /* Two-tone selection ring, same 3px inset footprint as before: the outer 1px is
-   the ink contrast edge (see --sel-edge), the inner 2px stays Grandmaster Teal
-   so selection still reads as teal at a glance. Outline paints over the inset
-   shadow, so the shadow supplies the teal band and the outline the ink edge. */
+   the dark-neutral contrast edge (see --sel-edge), while the inner 2px carries
+   the approved dusty-rose selection hue. */
 .cb-selected {
   outline: 1px solid var(--sel-edge);
   outline-offset: -1px;
@@ -456,6 +446,12 @@ a.button:hover {
   background-color: var(--panel);
   box-shadow: var(--lift);
 }
+/* Light theme: --panel is 5 % opacity and imperceptible against a pale background.
+   Promote to --panel-strong (8 %) so the hover affordance is visible. */
+:root.light button:not(:disabled):hover,
+:root.light a.button:hover {
+  background-color: var(--panel-strong);
+}
 button:focus-visible,
 a.button:focus-visible { outline: 3px solid var(--sel); }
 button:disabled {
@@ -468,6 +464,24 @@ button:disabled {
 /* `background-color`, not the shorthand: hovering must not erase the piece. */
 .cb-promo-choice:hover { background-color: var(--promo-tile-hover); }
 .cb-promo-cancel:hover { background: var(--promo-cancel-hover); }
+.button.primary,
+a.button.primary {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  color: var(--light);
+}
+.button.primary:not(:disabled):hover,
+a.button.primary:hover {
+  background-color: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: var(--light);
+}
+.button.primary:not(:disabled):active,
+a.button.primary:active {
+  background-color: var(--accent-active);
+  border-color: var(--accent-active);
+  color: var(--light);
+}
 
 
 .sr-only {
@@ -512,6 +526,41 @@ button:disabled {
   outline-offset: 3px;
   border-radius: 6px;
   opacity: 1;
+}
+
+/* --- Learn Subnavigation --- */
+.subnav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-block: 8px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--panel-strong);
+  overflow-x: auto;
+}
+.subnav-link {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 6px 12px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: color 150ms ease, background-color 150ms ease;
+}
+.subnav-link:hover {
+  color: var(--fg);
+  background-color: var(--panel);
+}
+.subnav-link[aria-current="page"] {
+  color: var(--fg);
+  background-color: var(--panel-strong);
+  font-weight: 600;
+}
+.subnav-link:focus-visible {
+  outline: 3px solid var(--sel);
+  outline-offset: 2px;
 }
 
 /* --- Theme toggle button --- */
@@ -630,6 +679,12 @@ button:disabled {
   grid-column: 1 / -1;
   font-weight: 600;
 }
+.auth-context {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
 .auth .error {
   margin: 12px 0 0;
 }
@@ -686,9 +741,11 @@ button:disabled {
 .team,
 .forum,
 .thread,
+.courses,
 .course,
 .lesson,
 .endgames,
+.not-found,
 /* Same shape as `.game`: a grid that is also a flex item. Found by the guard below rather than by
    anyone looking — which is the point of asserting the property instead of listing the sections. */
 .study-chapter-layout {
@@ -700,6 +757,45 @@ button:disabled {
   max-width: 600px;
   margin: 0 auto;
   padding: 16px;
+}
+.lobby-hero {
+  margin-bottom: 20px;
+}
+.lobby-title {
+  margin: 0 0 4px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.lobby-subtitle {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+/* --- 404 Not Found --- */
+.not-found {
+  max-width: 560px;
+  margin: clamp(24px, 8vh, 64px) auto;
+  padding: 16px;
+  text-align: center;
+}
+.not-found-card {
+  background: var(--panel);
+  border: 1px solid var(--panel-strong);
+  border-radius: 6px;
+  padding: 40px 24px;
+}
+.not-found-card h2 {
+  margin: 0 0 8px;
+  font-size: 1.25rem;
+}
+.not-found-desc {
+  color: var(--muted);
+  margin: 0 0 24px;
+}
+.not-found-action {
+  min-width: 140px;
 }
 .seek-list {
   display: flex;
@@ -719,6 +815,21 @@ button:disabled {
 /* Your own open seek reads as yours (and carries the cancel affordance). */
 .seek-row-own { background: color-mix(in srgb, var(--sel) 10%, var(--panel)); }
 .seek-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.seek-opponent {
+  color: var(--fg);
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+.seek-details {
+  color: var(--muted);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+.seek-opponent .row-link:focus-visible {
+  outline: 3px solid var(--sel);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 /* "Live and waiting" status on your own seek. */
 .seek-waiting {
   display: inline-flex;
@@ -923,17 +1034,24 @@ button:disabled {
   button:not(.cb-promo-choice):not(.cb-promo-cancel),
   a.button,
   .nav a,
+  .subnav-link,
   .empty-cta,
   .auth-meta a {
     min-height: 44px;
   }
   .nav a,
+  .subnav-link,
   .auth-meta a { display: inline-flex; align-items: center; }
   .seek-cancel {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     min-width: 44px;
+  }
+  .seek-opponent .row-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
   }
 }
 

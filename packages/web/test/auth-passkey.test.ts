@@ -100,7 +100,7 @@ test('AuthController.loginWithPasskey: logs in via passkey, adopts session, and 
         return mockAuthResponse;
       },
     },
-    session: { reset: () => {}, onInvalidated: () => {} },
+    session: { reset: () => {}, onInvalidated: () => {}, captureGeneration: () => 0 },
   } as unknown as GambitClient;
 
   const adapter = new FakeWebAuthnAdapter();
@@ -152,7 +152,7 @@ test('AuthController.loginWithPasskey: surfaces generic error copy when passkey 
         throw new Error('401 Unauthorized / User not found');
       },
     },
-    session: { reset: () => {}, onInvalidated: () => {} },
+    session: { reset: () => {}, onInvalidated: () => {}, captureGeneration: () => 0 },
   } as unknown as GambitClient;
 
   const adapter = new FakeWebAuthnAdapter();
@@ -176,6 +176,45 @@ test('AuthController.loginWithPasskey: surfaces generic error copy when passkey 
   assert.equal(errorMessage, 'Sign in with passkey failed.');
   assert.ok(errorMessage);
   assert.equal((errorMessage as string).includes('User not found'), false);
+});
+
+test('AuthController.loginWithPasskey: peer reset cancels the multi-step flow before verification', async () => {
+  let releaseOptions!: (options: WebAuthnLoginOptions) => void;
+  const options = new Promise<WebAuthnLoginOptions>((resolve) => { releaseOptions = resolve; });
+  let generation = 0;
+  let resetHandler: (() => void) | null = null;
+  let verifyCalls = 0;
+  const mockClient = {
+    auth: {
+      loginPasskeyOptions: async () => options,
+      verifyPasskeyLogin: async () => {
+        verifyCalls += 1;
+        throw new Error('verification must not run after reset');
+      },
+    },
+    session: {
+      reset: () => { generation += 1; },
+      onInvalidated: () => {},
+      onReset: (handler: () => void) => {
+        resetHandler = () => { generation += 1; handler(); };
+      },
+      captureGeneration: () => generation,
+    },
+  } as unknown as GambitClient;
+  const controller = new AuthController({
+    client: mockClient,
+    webauthnAdapter: new FakeWebAuthnAdapter(),
+    callbacks: { onSessionChange: () => {}, onPending: () => {}, onError: () => {} },
+  });
+
+  const pending = controller.loginWithPasskey('alice');
+  assert.ok(resetHandler);
+  (resetHandler as () => void)();
+  releaseOptions({ challenge: 'ch1', timeout: 60_000, rpId: 'localhost', userVerification: 'required' });
+
+  assert.equal(await pending, null);
+  assert.equal(verifyCalls, 0);
+  assert.equal(controller.currentSession, null);
 });
 
 test('AuthController.loginWithPasskey: rejects missing handles and unsupported browsers before calling the API', async () => {

@@ -1,6 +1,37 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { startHarness } from './helpers';
+import { AuthService } from '../src/auth/service';
+import { ScryptPasswordHasher } from '../src/auth/password';
+import { AccessTokenService } from '../src/auth/tokens';
+import { createInMemoryRepositories } from '../src/fakes';
+import { InMemoryEmailSender } from '../src/ports/email';
+import { ManualClock } from '../src/ports/clock';
+import { uuidv7Generator } from '../src/ports/ids';
+import { START_MS, TEST_SECRET, startHarness } from './helpers';
+
+/** Construct the auth service at a chosen refresh-collision grace boundary. */
+function authServiceWithGrace(refreshGracePeriodMs: number): AuthService {
+  const clock = new ManualClock(START_MS);
+  return new AuthService({
+    repos: createInMemoryRepositories(clock),
+    hasher: new ScryptPasswordHasher({ N: 1024 }),
+    tokens: new AccessTokenService({ secret: TEST_SECRET, ttlSec: 900, clock, ids: uuidv7Generator }),
+    clock,
+    ids: uuidv7Generator,
+    refreshTtlSec: 3_600,
+    emailSender: new InMemoryEmailSender(),
+    webauthn: { rpId: 'localhost', origins: ['http://localhost'] },
+    refreshGracePeriodMs,
+  });
+}
+
+test('refresh grace configuration rejects values that could disable reuse detection', () => {
+  for (const invalid of [-1, Number.NaN, Number.POSITIVE_INFINITY, 60_001]) {
+    assert.throws(() => authServiceWithGrace(invalid), RangeError);
+  }
+  assert.doesNotThrow(() => authServiceWithGrace(0));
+  assert.doesNotThrow(() => authServiceWithGrace(60_000));
+});
 
 test('register issues tokens and grants the base user role', async () => {
   const h = await startHarness();
@@ -90,6 +121,42 @@ test('login succeeds with correct password and fails otherwise', async () => {
   }
 });
 
+test('a login verified before password reset cannot create a surviving session afterwards', async () => {
+  const h = await startHarness();
+  try {
+    const registered = await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'reset-race', password: 'old-passw0rd!!' },
+    });
+    const userId = registered.body.user.id as string;
+    const originalCreate = h.repos.sessions.create.bind(h.repos.sessions);
+    let releaseCreate!: () => void;
+    const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    let markCreateStarted!: () => void;
+    const createStarted = new Promise<void>((resolve) => { markCreateStarted = resolve; });
+    h.repos.sessions.create = async (session) => {
+      markCreateStarted();
+      await createGate;
+      return originalCreate(session);
+    };
+
+    const pendingLogin = h.json('POST', '/v1/auth/login', {
+      body: { handle: 'reset-race', password: 'old-passw0rd!!' },
+    });
+    await createStarted;
+    const hasher = new ScryptPasswordHasher({ N: 1024 });
+    await h.repos.users.setPassword(userId, await hasher.hash('new-passw0rd!!'));
+    await h.repos.sessions.revokeAllForUser(userId, new Date(h.clock.now()));
+    releaseCreate();
+
+    const result = await pendingLogin;
+    assert.equal(result.status, 401);
+    const sessions = await h.repos.sessions.listForUser(userId);
+    assert.ok(sessions.every((session) => session.revokedAt !== null));
+  } finally {
+    await h.close();
+  }
+});
+
 test('login for an unknown handle is 401 (no user enumeration)', async () => {
   const h = await startHarness();
   try {
@@ -153,6 +220,98 @@ test('two concurrent refreshes consume a token at most once', async () => {
   }
 });
 
+test('two concurrent refreshes from the same token family leave the winner successor chain alive', async () => {
+  const h = await startHarness();
+  try {
+    const reg = await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'refresh-race-survives', password: 'passw0rd!!' },
+    });
+    const refreshToken = reg.body.tokens.refreshToken;
+    const responses = await Promise.all([
+      h.json('POST', '/v1/auth/refresh', { body: { refreshToken } }),
+      h.json('POST', '/v1/auth/refresh', { body: { refreshToken } }),
+    ]);
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 401]);
+    const winner = responses.find((r) => r.status === 200);
+    assert.ok(winner);
+    assert.equal(h.repos.audit.withAction('auth.refresh.reuse').length, 0, 'concurrent refresh must not trigger false reuse detection');
+
+    const successorRefresh = await h.json('POST', '/v1/auth/refresh', {
+      body: { refreshToken: winner.body.tokens.refreshToken },
+    });
+    assert.equal(successorRefresh.status, 200, 'winner successor token must survive and be refreshable');
+  } finally {
+    await h.close();
+  }
+});
+
+test('a refresh collision delayed beyond the grace period triggers reuse detection', async () => {
+  const h = await startHarness();
+  try {
+    const reg = await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'delayed-refresh-race', password: 'passw0rd!!' },
+    });
+    const refreshToken = reg.body.tokens.refreshToken;
+    const rotate = h.repos.sessions.rotate.bind(h.repos.sessions);
+    let releaseFirstRotate!: () => void;
+    const firstRotateGate = new Promise<void>((resolve) => { releaseFirstRotate = resolve; });
+    let markFirstRotateStarted!: () => void;
+    const firstRotateStarted = new Promise<void>((resolve) => { markFirstRotateStarted = resolve; });
+    let rotateCalls = 0;
+    h.repos.sessions.rotate = async (refreshHash, replacement, at) => {
+      rotateCalls += 1;
+      if (rotateCalls === 1) {
+        markFirstRotateStarted();
+        await firstRotateGate;
+      }
+      return rotate(refreshHash, replacement, at);
+    };
+
+    const delayed = h.json('POST', '/v1/auth/refresh', { body: { refreshToken } });
+    await firstRotateStarted;
+    const winner = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken } });
+    assert.equal(winner.status, 200);
+
+    h.clock.advance(15_000);
+    releaseFirstRotate();
+    const replay = await delayed;
+    assert.equal(replay.status, 401);
+    assert.equal(h.repos.audit.withAction('auth.refresh.reuse').length, 1, 'delayed collision is reuse');
+
+    const afterBurn = await h.json('POST', '/v1/auth/refresh', {
+      body: { refreshToken: winner.body.tokens.refreshToken },
+    });
+    assert.equal(afterBurn.status, 401, 'the winner successor is burned after delayed reuse');
+  } finally {
+    await h.close();
+  }
+});
+
+test('replaying a rotated token within the grace period returns 401 without burning the chain', async () => {
+  const h = await startHarness();
+  try {
+    const reg = await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'grace-user', password: 'passw0rd!!' },
+    });
+    const t0 = reg.body.tokens.refreshToken;
+    const r1 = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
+    assert.equal(r1.status, 200);
+    const t1 = r1.body.tokens.refreshToken;
+
+    // Advance by 5s (within 10s grace window).
+    h.clock.advance(5_000);
+    const retry = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
+    assert.equal(retry.status, 401);
+    assert.equal(h.repos.audit.withAction('auth.refresh.reuse').length, 0, 'must not burn inside grace window');
+
+    // The legitimate successor token t1 is STILL VALID and not burned.
+    const validRefresh = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t1 } });
+    assert.equal(validRefresh.status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
 test('reusing a rotated refresh token burns the whole session chain', async () => {
   const h = await startHarness();
   try {
@@ -163,12 +322,43 @@ test('reusing a rotated refresh token burns the whole session chain', async () =
     const r1 = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
     const t1 = r1.body.tokens.refreshToken; // current, still valid
 
-    // Attacker replays the already-rotated t0 → theft detected.
+    // Attacker replays the already-rotated t0 after the grace period → theft detected.
+    h.clock.advance(15_000);
     const theft = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
     assert.equal(theft.status, 401);
     assert.equal(h.repos.audit.withAction('auth.refresh.reuse').length, 1);
 
     // The legitimate current token is now also revoked (chain burned).
+    const afterBurn = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t1 } });
+    assert.equal(afterBurn.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test('clock rollback when replaying a rotated token triggers reuse detection', async () => {
+  const h = await startHarness();
+  try {
+    const reg = await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'clock-skew-user', password: 'passw0rd!!' },
+    });
+    const t0 = reg.body.tokens.refreshToken;
+    const r1 = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
+    assert.equal(r1.status, 200);
+    const t1 = r1.body.tokens.refreshToken;
+
+    // Simulate clock rollback: clock moves backwards by 10s (now < rotatedAt, elapsed < 0)
+    h.clock.advance(-10_000);
+
+    const replay = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
+    assert.equal(replay.status, 401);
+    assert.equal(
+      h.repos.audit.withAction('auth.refresh.reuse').length,
+      1,
+      'negative elapsed time must NOT suppress reuse detection',
+    );
+
+    // The current token must be revoked (whole chain burned)
     const afterBurn = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t1 } });
     assert.equal(afterBurn.status, 401);
   } finally {
@@ -214,6 +404,33 @@ test('logout revokes the session; listing sessions reflects it', async () => {
 
     const afterLogout = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: refresh } });
     assert.equal(afterLogout.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test('logout of a rotated token revokes its live successor chain', async () => {
+  const h = await startHarness();
+  try {
+    const registered = await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'logout-race', password: 'passw0rd!!' },
+    });
+    const originalRefresh = registered.body.tokens.refreshToken;
+    const rotated = await h.json('POST', '/v1/auth/refresh', {
+      body: { refreshToken: originalRefresh },
+    });
+    assert.equal(rotated.status, 200);
+
+    const out = await h.json('POST', '/v1/auth/logout', {
+      token: rotated.body.tokens.accessToken,
+      body: { refreshToken: originalRefresh },
+    });
+    assert.equal(out.status, 204);
+
+    const successor = await h.json('POST', '/v1/auth/refresh', {
+      body: { refreshToken: rotated.body.tokens.refreshToken },
+    });
+    assert.equal(successor.status, 401);
   } finally {
     await h.close();
   }
@@ -451,6 +668,7 @@ test('replaying a rotated-away refresh token still burns the account', async () 
     const legitimate = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: stolen } });
     assert.equal(legitimate.status, 200);
 
+    h.clock.advance(15_000);
     const replay = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: stolen } });
     assert.equal(replay.status, 401);
     assert.equal(h.repos.audit.withAction('auth.refresh.reuse').length, 1, 'recorded as reuse');
@@ -484,6 +702,7 @@ test('a stolen refresh token is detected however many rotations have happened si
     });
     assert.equal(third.status, 200);
 
+    h.clock.advance(15_000);
     const replay = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: stolen } });
     assert.equal(replay.status, 401);
     assert.equal(h.repos.audit.withAction('auth.refresh.reuse').length, 1, 'still recorded as reuse');
@@ -492,6 +711,36 @@ test('a stolen refresh token is detected however many rotations have happened si
       body: { refreshToken: third.body.tokens.refreshToken },
     });
     assert.equal(afterBurn.status, 401, 'the account was burned two rotations later');
+  } finally {
+    await h.close();
+  }
+});
+
+test('refresh reuse detection is independent of repository session ordering', async () => {
+  const h = await startHarness();
+  try {
+    const reg = await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'ordering', password: 'passw0rd!!' },
+    });
+    const stolen = reg.body.tokens.refreshToken;
+    const second = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: stolen } });
+    const third = await h.json('POST', '/v1/auth/refresh', {
+      body: { refreshToken: second.body.tokens.refreshToken },
+    });
+    assert.equal(third.status, 200);
+
+    const listForUser = h.repos.sessions.listForUser.bind(h.repos.sessions);
+    h.repos.sessions.listForUser = async (userId: string) => (await listForUser(userId)).reverse();
+
+    h.clock.advance(15_000);
+    const replay = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: stolen } });
+    assert.equal(replay.status, 401);
+    assert.equal(h.repos.audit.withAction('auth.refresh.reuse').length, 1);
+
+    const afterBurn = await h.json('POST', '/v1/auth/refresh', {
+      body: { refreshToken: third.body.tokens.refreshToken },
+    });
+    assert.equal(afterBurn.status, 401, 'the live descendant is revoked for any repository ordering');
   } finally {
     await h.close();
   }

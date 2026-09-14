@@ -6,6 +6,12 @@ import { el } from './dom.js';
 import { renderEmpty } from './render-helpers.js';
 import type { SearchRow, SearchEntityType } from './search-results.js';
 
+/**
+ * Formats a search entity type for display.
+ *
+ * @param type - The entity type to format.
+ * @returns The formatted display string.
+ */
 export function formatEntityType(type: SearchEntityType | null): string {
   switch (type) {
     case 'game':
@@ -19,6 +25,12 @@ export function formatEntityType(type: SearchEntityType | null): string {
   }
 }
 
+/**
+ * Renders search results into the given container.
+ *
+ * @param container - The DOM element to render into.
+ * @param hits - The list of search results.
+ */
 export function renderSearchResults(
   container: HTMLElement,
   hits: readonly SearchRow[],
@@ -52,10 +64,15 @@ export function renderSearchResults(
   }
 }
 
+/**
+ * Renders the initial search prompt when no search has been performed.
+ *
+ * @param container - The DOM element to render into.
+ */
 export function renderSearchPrompt(container: HTMLElement): void {
   renderEmpty(container, {
     mark: '🔍',
-    title: 'Search Gambit',
+    title: 'Search Rookzen',
     body: 'Search for players, games, or tournaments above.',
   });
 }
@@ -67,6 +84,8 @@ export function renderSearchPrompt(container: HTMLElement): void {
  * (ADR-0132 §5). It says the feature is off rather than issuing a request that is guaranteed to
  * answer 503 and showing the visitor the server's refusal — a 503 reads as "broken", and this is
  * not broken, it is configured.
+ *
+ * @param container - The DOM element to render into.
  */
 export function renderSearchUnavailable(container: HTMLElement): void {
   renderEmpty(container, {
@@ -86,11 +105,13 @@ export function renderSearchUnavailable(container: HTMLElement): void {
  *
  * Reload rather than a retry button, because `loadCapabilities` memoises for the page's lifetime
  * with deliberately no reset seam: within this page there is nothing left to retry.
+ *
+ * @param container - The DOM element to render into.
  */
 export function renderSearchUndetermined(container: HTMLElement): void {
   renderEmpty(container, {
     mark: '🔍',
     title: 'Search is unavailable',
-    body: 'Gambit could not check whether this server offers search. Reload the page to try again.',
+    body: 'Rookzen could not check whether this server offers search. Reload the page to try again.',
   });
 }

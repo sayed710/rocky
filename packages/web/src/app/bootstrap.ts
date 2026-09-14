@@ -65,6 +65,7 @@ export type { EmptyStateOptions };
 /** Disposables returned by bootstrap, torn down on SPA route navigation. */
 export interface BootstrappedDisposables {
   readonly app: App;
+  readonly auth: AuthController;
   readonly controller: GameController | null;
   readonly board: MountedBoard | null;
   readonly lobby: LobbyController | null;
@@ -88,14 +89,13 @@ export interface BootstrappedDisposables {
 
 /** Everything the bootstrap wired, returned for later increments and tests. */
 export interface Bootstrapped extends BootstrappedDisposables {
-  readonly auth: AuthController;
   readonly theme: ThemeToggle;
 }
 
 /** Key of disposables returned by bootstrap. Driven by BootstrappedDisposables for structural teardown exhaustiveness. */
 export type DisposableKey = keyof BootstrappedDisposables;
 
-type ActiveBootstrappedDisposables = Partial<Omit<BootstrappedDisposables, 'app'>>;
+type ActiveBootstrappedDisposables = Partial<Omit<BootstrappedDisposables, 'app' | 'auth'>>;
 
 function createBootstrapped(
   app: App,
@@ -105,6 +105,7 @@ function createBootstrapped(
 ): Bootstrapped {
   return {
     app,
+    auth,
     controller: null,
     board: null,
     lobby: null,
@@ -124,7 +125,6 @@ function createBootstrapped(
     emailVerification: null,
     connectivity: null,
     analysis: null,
-    auth,
     theme,
     ...activeDisposables,
   };
@@ -193,7 +193,7 @@ export function bootstrap(
   const showEmailVerify = route.name === 'email-verify';
   const activeResetToken = showPasswordReset ? captureAndStripToken('/password-reset') : null;
   const activeVerificationToken = showEmailVerify ? captureAndStripToken('/email-verify') : null;
-  const hideAuthSection = showPasswordReset || showEmailVerify;
+  const hideAuthSection = showPasswordReset || showEmailVerify || route.name === 'not-found';
 
   const config = deps?.config ?? resolveConfig();
   const appDeps: AppDependencies = {
@@ -223,7 +223,7 @@ export function bootstrap(
         }
         if ('querySelector' in doc && typeof doc.querySelector === 'function') {
           const themeColor = doc.querySelector('meta[name="theme-color"]');
-          themeColor?.setAttribute('content', t === 'dark' ? '#161512' : '#f7f6f5');
+          themeColor?.setAttribute('content', t === 'dark' ? '#242224' : '#F5F1ED');
         }
       },
     },
@@ -247,6 +247,7 @@ export function bootstrap(
   let selfProfileSessionHandler: ((session: AuthSession | null) => void) | null = null;
   let setCreateGameAuthenticated: ((authenticated: boolean) => void) | null = null;
   let setPlayBotAuthenticated: ((authenticated: boolean) => void) | null = null;
+  let lobbySessionHandler: (() => void) | null = null;
   let gameSessionHandler: ((session: AuthSession | null) => void) | null = null;
   let endgameSessionHandler: (() => void) | null = null;
   let commentarySessionHandler: ((signedIn: boolean) => void) | null = null;
@@ -269,6 +270,7 @@ export function bootstrap(
         }
         setCreateGameAuthenticated?.(session !== null);
         setPlayBotAuthenticated?.(session !== null);
+        lobbySessionHandler?.();
         selfProfileSessionHandler?.(session);
         gameSessionHandler?.(session);
         endgameSessionHandler?.();
@@ -355,6 +357,12 @@ export function bootstrap(
 
   applyRouteSurface(doc, route);
 
+  // The not-found page is a complete route surface. Keep the global shell controllers alive, but
+  // do not fall through to the legacy standalone-board fallback hidden inside #game-main.
+  if (route.name === 'not-found') {
+    return createBootstrapped(app, auth, theme, {});
+  }
+
   // --- Game view ---
   const boardEl = doc.getElementById('board');
   if (boardEl && gameId) {
@@ -385,6 +393,7 @@ export function bootstrap(
     });
     setCreateGameAuthenticated = mountedLobby.setCreateGameAuthenticated;
     setPlayBotAuthenticated = mountedLobby.setPlayBotAuthenticated;
+    lobbySessionHandler = mountedLobby.onSessionChange;
 
     return createBootstrapped(app, auth, theme, { lobby: mountedLobby.lobby });
   }

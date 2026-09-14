@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-06 — M15 Increment 53: trusted edge proxy identity contract (PR-1)._
+_Last updated: 2026-09-07 — PR #51: backup/restore drill safety regressions._
+
+Prior: _Last updated: 2026-09-06 — M15 Increment 53: trusted edge proxy identity contract (PR-1)._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-cache cold-race test._
 
@@ -3732,8 +3734,10 @@ approved.** Base commits: `f7c588e` (M4 api) → `cb19dec` + `4703f23` (M5 gate 
   JWS, constant-time verify, `exp` enforced against the injected `Clock`. Only the
   exact pinned header is accepted (no alg-confusion / `alg:none`).
 - **Refresh tokens:** opaque 256-bit random, stored only as SHA-256 hash,
-  **single-use with rotation** (`rotated_from` chain). Replaying a rotated token is
-  treated as **theft** and revokes the whole chain (audited `auth.refresh.reuse`).
+  **single-use with rotation** (`rotated_from` chain). A near-simultaneous replay
+  inside the bounded grace window is rejected without revoking the successor;
+  replay outside the window is treated as **theft** and revokes every active session chain for the account
+  (audited `auth.refresh.reuse`).
 - **RBAC:** enforced declaratively per route (`AuthPolicy.anyRole`) and re-checked
   in handlers where ownership matters (seek cancellation).
 - **Ports (injectable seams):** `Clock`, `IdGenerator` (UUIDv7), and an
@@ -3848,14 +3852,12 @@ needs no database — it runs against in-memory fakes.
   runtime dependency; any future replacement requires a new evidence-backed decision.
 - **Rate-limiting store.** In-process token bucket (simple, per-instance) vs. Redis
   (accurate across instances). Likely Redis, reusing the M3 pub/sub adapter seam.
-- **Refresh-rotation UX.** Chain-burn on reuse can log out a legitimate client that
-  retried after a dropped response. Acceptable now; consider a short grace window
-  keyed on the rotated-from id if it proves noisy in practice.
+- **Refresh-rotation UX — resolved in the current auth service.** A bounded grace
+  window on a newly rotated session rejects near-simultaneous reuse with `401`
+  without burning the live successor; negative elapsed time or reuse after the
+  window still triggers the full theft response.
 
 ### Known issues
-- Session create + old-session revoke on refresh are two repository calls, not one
-  transaction; a crash between them could briefly leave two active sessions. Wrap in
-  a transaction when a `UnitOfWork`/tx seam is added to `persistence`.
 - ~~`additionalProperties: false` is documented in the OpenAPI request schemas but the
   runtime validators don't yet reject unknown fields (they ignore them).~~ **RESOLVED:**
   `strictObject()` in `http/validate.ts` is applied to every mutating route in
@@ -4159,6 +4161,13 @@ Per package: `cd packages/<pkg> && npm install && npm run build && npm test`.
 - **Tests**: `social-controller.test.ts` (15) plus 3 a11y assertions; 305/305 web tests pass. Eight rules mutation-tested, 8/8 caught — the pass caught a stale-load test that proved nothing (identical fakes on both loads meant it passed with the generation guard removed) and it was rewritten with a gated slow response.
 - **Recorded gaps**: GraphQL `Player` has no `teams` field despite ADR-0073's Context claiming it; five pre-existing design-system findings in `style.css` are reported, not repaired (fixing drift inside a feature PR is how a design-system change ships unreviewed).
 - Detailed in `docs/adr/0074-social-ui-profile.md`.
+
+## PR #51 — Backup/restore drill safety regressions — 2026-09-07
+
+- Fixed the restore tooling scope error and made every nonzero restore exit fatal. Both dump formats require the baseline's exported snapshot; unreadable tables fail the baseline instead of losing count coverage.
+- Bounded generated target names to 63 ASCII bytes, reject oversized explicit names and connection query overrides, escape catalog-derived table identifiers, and preserve row counts for special property names.
+- Reserve backup files exclusively and clean up only resources created by the drill. Preserve restore and cleanup errors together while continuing other cleanup. Redact connection secrets from diagnostics, including CLI argument errors.
+- Verify append-only protection and valid, ready HNSW indexes on their specific public-schema relations. Added database-boundary and disposable-file regressions for native/Docker custom/plain orchestration and failure paths; live integration remains opt-in and was not run against an existing database.
 
 
 

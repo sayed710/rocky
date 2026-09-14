@@ -80,7 +80,7 @@ if (typeof document !== 'undefined') {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('/sw.js').catch((err) => {
         // Log registration failures so SW breakage is visible (m1).
-        console.warn('[Gambit] Service worker registration failed:', err);
+        console.warn('[Rookzen] Service worker registration failed:', err);
       });
     });
   }

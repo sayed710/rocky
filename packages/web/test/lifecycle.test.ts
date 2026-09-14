@@ -23,7 +23,7 @@ function createMockBootstrapped(
 
   return {
     app: disposables.app as App,
-    auth: {} as unknown as AuthController,
+    auth: disposables.auth as AuthController,
     theme: { toggle: () => {} } as unknown as ThemeToggle,
     controller: disposables.controller as Bootstrapped['controller'],
     board: disposables.board as Bootstrapped['board'],
@@ -77,6 +77,17 @@ test('running twice tears down every disposable from the first run before second
     assert.ok(idx !== -1, `teardown for ${key} should occur`);
     assert.ok(idx < bootstrap2Index, `teardown for ${key} should occur BEFORE bootstrap:2`);
   }
+});
+
+test('SPA re-bootstrap disposes the previous authentication controller', () => {
+  const events: string[] = [];
+  const lifecycle = createLifecycle(() => createMockBootstrapped((key) => { events.push(key); }));
+
+  lifecycle.run();
+  lifecycle.run();
+
+  assert.ok((DISPOSABLE_KEYS as readonly string[]).includes('auth'));
+  assert.equal(events.filter((key) => key === 'auth').length, 1);
 });
 
 test('a disposable that is null for a route is skipped without error', () => {

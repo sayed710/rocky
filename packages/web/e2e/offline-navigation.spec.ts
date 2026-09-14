@@ -1,5 +1,5 @@
 /**
- * Offline navigation check — verifies SW provides offline shell.
+ * Offline navigation check — verifies the Rookzen service worker provides its offline shell.
  *
  * This spec runs without backends (only needs vite preview).
  *
@@ -28,7 +28,7 @@ test('offline navigation falls back to cached shell', async ({ page, context }) 
 
   // Navigate to a new page — should fall back to cached index.html.
   await page.goto('/game/test-offline');
-  await expect(page.locator('h1')).toContainText('Gambit');
+  await expect(page.locator('h1')).toContainText('Rookzen');
 
   // Restore online.
   await context.setOffline(false);
