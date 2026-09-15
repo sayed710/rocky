@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-14 — M15 Increment 54: trusted edge integration hardening._
+_Last updated: 2026-09-15 — M15 Increment 55: real two-hop trusted-edge acceptance._
+
+Prior: _Last updated: 2026-09-14 — M15 Increment 54: trusted edge integration hardening._
 
 Prior: _Last updated: 2026-09-07 — PR #51: backup/restore drill safety regressions._
 
@@ -17,6 +19,18 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## M15 Increment 55 — real two-hop trusted-edge acceptance
+
+**Status: RESOLVED — the Helm ingress topology now has live proxy-chain acceptance coverage.**
+
+- The existing one-hop Compose acceptance path remains intact.
+- A separate ingress-like forwarding hop derives the test client's identity from its TCP peer,
+  appends it before the real web Nginx hop, and drives the API and Gateway with two trusted hops.
+- Acceptance assertions cover distinct-client API rate-limit and WebSocket admission buckets,
+  attacker-prepended forwarded values, and fail-safe malformed or insufficient chains.
+- Helm snapshot tests remain the source of truth for deriving `TRUST_PROXY=2` with Ingress and
+  `TRUST_PROXY=1` without it; the live acceptance runner verifies the resulting wire behavior.
 
 ## M15 Increment 54 — trusted edge integration hardening
 

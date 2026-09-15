@@ -67,9 +67,10 @@ Any entries to the left of the trusted boundary are treated as untrusted user in
    - Direct socket mode (`TRUST_PROXY=false`) ignores forwarded headers.
 3. **Real Nginx Acceptance Suite:**
    `scripts/nginx-trusted-edge-acceptance.mjs` executes an automated integration suite against a real container running `nginxinc/nginx-unprivileged:alpine` with `docker/web/nginx.conf.template`:
-   - Enforces the 20-socket WebSocket limit through real Nginx.
-   - Defeats WebSocket spoofing through real Nginx.
-   - Defeats API registration rate limit spoofing through real Nginx.
+   - Preserves the one-hop Compose path and separately exercises an ingress-like hop before real Nginx with `TRUST_PROXY=2` for the Helm topology.
+   - Enforces per-client WebSocket limits and defeats forwarded-header spoofing through both trusted hops.
+   - Keeps API registration rate limits per client through both trusted hops, without collapsing distinct clients into a proxy bucket.
+   - Rejects or safely bounds malformed and insufficient two-hop identity chains.
    - Verifies Nginx path security rules (`/v1/metrics` blocked with 404 while `/v1/health` routes).
    This suite is a required gateway CI step; CI fails rather than skipping when Docker is absent.
 
