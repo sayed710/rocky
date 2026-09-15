@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-15 — M15 Increment 55: real two-hop trusted-edge acceptance._
+_Last updated: 2026-09-15 — M15 Increment 56: trusted-edge acceptance determinism and clean invocation._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 55: real two-hop trusted-edge acceptance._
 
 Prior: _Last updated: 2026-09-14 — M15 Increment 54: trusted edge integration hardening._
 
@@ -19,6 +21,15 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## M15 Increment 56 — trusted-edge acceptance determinism and clean invocation
+
+**Status: RESOLVED — trusted-edge acceptance now synchronizes on socket state and prepares its runtime outputs.**
+
+- One-hop WebSocket assertions wait for the expected open/closed distribution instead of relying
+  on fixed delays, keeping the same admission and spoof-resistance expectations without timing races.
+- The Gateway package's trusted-edge command builds the server workspace and Gateway outputs before
+  launching the runner, so the documented package command also works after a clean checkout.
 
 ## M15 Increment 55 — real two-hop trusted-edge acceptance
 

@@ -116,6 +116,56 @@ async function waitForOpen(ws, timeoutMs = 5_000) {
   });
 }
 
+/** Wait until a WebSocket group reaches the expected open/closed distribution. */
+async function waitForSocketStateCounts(sockets, expectedOpen, expectedClosed, timeoutMs = 5_000) {
+  const counts = () => ({
+    open: sockets.filter((socket) => socket.readyState === WebSocket.OPEN).length,
+    closed: sockets.filter((socket) => socket.readyState === WebSocket.CLOSED).length,
+  });
+
+  return new Promise((resolveStates, reject) => {
+    let timer;
+    const listeners = sockets.map((socket) => {
+      const onStateChange = () => {
+        const current = counts();
+        if (current.open === expectedOpen && current.closed === expectedClosed) {
+          cleanup();
+          resolveStates();
+        }
+      };
+      const onError = (error) => {
+        cleanup();
+        reject(error);
+      };
+      socket.on('open', onStateChange);
+      socket.on('close', onStateChange);
+      socket.on('error', onError);
+      return { socket, onStateChange, onError };
+    });
+    const cleanup = () => {
+      clearTimeout(timer);
+      for (const { socket, onStateChange, onError } of listeners) {
+        socket.off('open', onStateChange);
+        socket.off('close', onStateChange);
+        socket.off('error', onError);
+      }
+    };
+
+    timer = setTimeout(() => {
+      const current = counts();
+      cleanup();
+      reject(new Error(
+        `WebSockets did not reach ${expectedOpen} open and ${expectedClosed} closed before the deadline `
+        + `(observed ${current.open} open and ${current.closed} closed)`,
+      ));
+    }, timeoutMs);
+
+    for (const { onStateChange } of listeners) {
+      onStateChange();
+    }
+  });
+}
+
 /** Append the ingress-observed TCP peer after any untrusted forwarded prefix. */
 function appendForwardedFor(forwardedFor, remoteAddress) {
   const prefix = Array.isArray(forwardedFor) ? forwardedFor.join(', ') : forwardedFor;
@@ -356,7 +406,7 @@ describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAva
         sockets.push(ws);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await waitForSocketStateCounts(sockets, 20, 5);
 
       const rejected1013 = closeEvents.filter((e) => e.code === 1013);
       assert.equal(
@@ -399,7 +449,7 @@ describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAva
         sockets.push(ws);
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await Promise.all(sockets.map((socket) => waitForOpen(socket)));
       const openCount = sockets.filter((s) => s.readyState === WebSocket.OPEN).length;
       assert.equal(openCount, 20, `Expected 20 connections open, got ${openCount}`);
 
