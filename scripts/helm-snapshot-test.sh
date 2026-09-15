@@ -64,6 +64,11 @@ HELM_PRODUCTION_EMAIL=(
 
 helm template "$CHART_DIR" "${HELM_SECRETS[@]}" > "$TMPDIR/default.yaml" 2>/dev/null
 
+# Render without an external ingress hop. The internal web nginx remains the
+# sole trusted proxy, so TRUST_PROXY must be derived as one hop.
+helm template "$CHART_DIR" "${HELM_SECRETS[@]}" \
+  --set web.ingress.enabled=false > "$TMPDIR/ingress-off.yaml" 2>/dev/null
+
 # Render external-datastore override
 helm template "$CHART_DIR" \
   --set secrets.accessTokenSecret=test-only-access-token-secret-32-bytes-minimum \
@@ -104,6 +109,29 @@ fi
 echo ""
 echo "=== Snapshot test: key wiring ==="
 echo ""
+
+# --- Trusted edge topology -------------------------------------------------
+DEFAULT_TRUST_PROXY=$(yq 'select(.kind=="ConfigMap") | .data.TRUST_PROXY' "$TMPDIR/default.yaml" 2>/dev/null || echo "")
+INGRESS_OFF_TRUST_PROXY=$(yq 'select(.kind=="ConfigMap") | .data.TRUST_PROXY' "$TMPDIR/ingress-off.yaml" 2>/dev/null || echo "")
+check "Trusted edge: ingress + web derives TRUST_PROXY=2" "$([ "$DEFAULT_TRUST_PROXY" = "2" ] && echo 0 || echo 1)"
+check "Trusted edge: web-only topology derives TRUST_PROXY=1" "$([ "$INGRESS_OFF_TRUST_PROXY" = "1" ] && echo 0 || echo 1)"
+
+NETWORK_POLICY_COUNT=$(yq 'select(.kind=="NetworkPolicy") | .metadata.name' "$TMPDIR/default.yaml" 2>/dev/null | grep -vx -- '---' | grep -c . || true)
+INGRESS_OFF_NETWORK_POLICY_COUNT=$(yq 'select(.kind=="NetworkPolicy") | .metadata.name' "$TMPDIR/ingress-off.yaml" 2>/dev/null | grep -vx -- '---' | grep -c . || true)
+API_ALLOWED_COMPONENTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/default.yaml" 2>/dev/null | grep -vx -- '---' | sort | tr '\n' ' ' | sed 's/ $//')
+GATEWAY_ALLOWED_COMPONENTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="gateway") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/default.yaml" 2>/dev/null | grep -vx -- '---' | sort | tr '\n' ' ' | sed 's/ $//')
+NETWORK_POLICY_IPBLOCK_COUNT=$(yq 'select(.kind=="NetworkPolicy") | .spec.ingress[].from[] | select(.ipBlock != null) | .ipBlock.cidr' "$TMPDIR/default.yaml" | awk '$0 != "---" && NF { count++ } END { print count + 0 }')
+GATEWAY_POLICY_PORTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="gateway") | .spec.ingress[].ports[] | select(.protocol=="TCP") | .port' "$TMPDIR/default.yaml" 2>/dev/null | grep -vx -- '---' | sort -n | tr '\n' ' ' | sed 's/ $//')
+WEB_ALLOWED_NAMESPACE=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="web") | .spec.ingress[0].from[0].namespaceSelector.matchLabels."kubernetes.io/metadata.name"' "$TMPDIR/default.yaml" 2>/dev/null || echo "")
+WEB_ALLOWED_POD=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="web") | .spec.ingress[0].from[0].podSelector.matchLabels."app.kubernetes.io/name"' "$TMPDIR/default.yaml" 2>/dev/null || echo "")
+check "Trusted edge: three application NetworkPolicies render with Ingress" "$([ "$NETWORK_POLICY_COUNT" = "3" ] && echo 0 || echo 1)"
+check "Trusted edge: web allows only the configured ingress-controller namespace" "$([ "$WEB_ALLOWED_NAMESPACE" = "ingress-nginx" ] && echo 0 || echo 1)"
+check "Trusted edge: web allows only the configured ingress-controller pods" "$([ "$WEB_ALLOWED_POD" = "ingress-nginx" ] && echo 0 || echo 1)"
+check "Trusted edge: web policy is omitted for the one-hop ingress-disabled topology" "$([ "$INGRESS_OFF_NETWORK_POLICY_COUNT" = "2" ] && echo 0 || echo 1)"
+check "Trusted edge: only gateway and web pods can enter the API" "$([ "$API_ALLOWED_COMPONENTS" = "gateway web" ] && echo 0 || echo 1)"
+check "Trusted edge: only web pods can enter the WebSocket gateway" "$([ "$GATEWAY_ALLOWED_COMPONENTS" = "web" ] && echo 0 || echo 1)"
+check "Trusted edge: bundled policies do not guess node CIDRs" "$([ "$NETWORK_POLICY_IPBLOCK_COUNT" = "0" ] && echo 0 || echo 1)"
+check "Trusted edge: application pods cannot enter the gateway health port" "$([ "$GATEWAY_POLICY_PORTS" = "4175" ] && echo 0 || echo 1)"
 
 # --- 1. Gateway replicas == 2 ---
 GATEWAY_REPLICAS=$(yq '. | select(.kind=="Deployment" and .metadata.name | test("gateway")) | .spec.replicas' "$TMPDIR/default.yaml" 2>/dev/null || echo "")
@@ -235,6 +263,17 @@ check "Default render: no search-indexer resources" "$([ "$DEFAULT_IX" = "0" ] &
 # Present when enabled.
 IX_PRESENT=$(grep -c 'app.kubernetes.io/component: search-indexer' "$TMPDIR/indexer.yaml" || true)
 check "Indexer enabled: search-indexer resources render" "$([ "$IX_PRESENT" -gt 0 ] && echo 0 || echo 1)"
+
+# The indexer's wait-for-api init container must reach the API without opening
+# that boundary to other releases, components, or ports.
+INDEXER_API_ALLOWED_COMPONENTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/indexer.yaml" 2>/dev/null | grep -vx -- '---' | sort | tr '\n' ' ' | sed 's/ $//')
+INDEXER_API_INSTANCE=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].from[] | select(.podSelector.matchLabels."app.kubernetes.io/component"=="search-indexer") | .podSelector.matchLabels."app.kubernetes.io/instance"' "$TMPDIR/indexer.yaml" 2>/dev/null || echo "")
+INDEXER_API_PORT=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].ports[] | select(.protocol=="TCP") | .port' "$TMPDIR/indexer.yaml" 2>/dev/null || echo "")
+INDEXER_GATEWAY_ALLOWED_COMPONENTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="gateway") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/indexer.yaml" 2>/dev/null | grep -vx -- '---' | sort | tr '\n' ' ' | sed 's/ $//')
+check "Indexer enabled: only gateway, search-indexer, and web pods can enter the API" "$([ "$INDEXER_API_ALLOWED_COMPONENTS" = "gateway search-indexer web" ] && echo 0 || echo 1)"
+check "Indexer enabled: API ingress is scoped to the same release" "$([ "$INDEXER_API_INSTANCE" = "release-name" ] && echo 0 || echo 1)"
+check "Indexer enabled: API ingress remains limited to TCP port 8080" "$([ "$INDEXER_API_PORT" = "8080" ] && echo 0 || echo 1)"
+check "Indexer enabled: only web pods can enter the WebSocket gateway" "$([ "$INDEXER_GATEWAY_ALLOWED_COMPONENTS" = "web" ] && echo 0 || echo 1)"
 
 # Exactly one Deployment, and its replica count is 1. Read the replicas line that
 # follows the search-indexer Deployment's metadata, without depending on yq.
@@ -518,6 +557,9 @@ reject "Fail-closed: canary without its own tag is rejected" --set rollout.strat
 reject "Fail-closed: canary without an Ingress is rejected" --set rollout.strategy=canary --set rollout.canary.tag=0.2.0 --set web.ingress.enabled=false
 reject "Fail-closed: canary weight above 100 is rejected" "${CANARY_SET[@]}" --set rollout.canary.weight=150
 reject "Fail-closed: canary weight below 0 is rejected" "${CANARY_SET[@]}" --set rollout.canary.weight=-1
+reject "Fail-closed: invalid explicit TRUST_PROXY is rejected" --set-string config.trustProxy=1.5
+reject "Fail-closed: empty ingress-controller namespace selector is rejected" --set networkPolicy.ingressController.namespaceLabels=null
+reject "Fail-closed: empty ingress-controller pod selector is rejected" --set networkPolicy.ingressController.podLabels=null
 
 # Weight 0 is legitimate: the canary is staged and reachable by header, taking no
 # sampled traffic yet. It must NOT be rejected.

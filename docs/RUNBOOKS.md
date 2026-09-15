@@ -10,8 +10,8 @@ moment, so each of these names the specific queries and commands to run and what
 dashboards are `gambit-service-health` and `gambit-observability-pipeline`.
 
 **Note on scraping (SEC-1):** `/v1/metrics` is blocked at the public web proxy. Prometheus scrapes
-the API Service directly in-cluster, so to read metrics by hand you must port-forward rather than
-hit the public hostname:
+the API Service directly in-cluster, so its pods need a narrow additive NetworkPolicy allowing the
+API port. To read metrics by hand, port-forward rather than hit the public hostname:
 
 ```bash
 kubectl port-forward svc/<release>-gambit-api 8080:8080

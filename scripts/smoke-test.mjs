@@ -14,25 +14,27 @@
  *   node scripts/smoke-test.mjs
  *
  * Or with custom URLs:
- *   API_URL=http://localhost:8080 WS_URL=ws://localhost:3000/ws WEB_URL=http://localhost:3000 node scripts/smoke-test.mjs
+ *   API_URL=http://localhost:3000 WS_URL=ws://localhost:3000/ws WEB_URL=http://localhost:3000 node scripts/smoke-test.mjs
  */
 
 import WebSocket from 'ws';
+import { pathToFileURL } from 'node:url';
 
-const apiUrl = process.env['API_URL'] ?? 'http://localhost:8080';
+import { waitForHealth } from './lib/wait-for-health.mjs';
+
+const apiUrl = process.env['API_URL'] ?? 'http://localhost:3000';
 // Exercise the same nginx upgrade path a real browser uses, not the gateway's
 // direct host port. Supplying Origin below also verifies the production
 // same-origin guard and proxy Host forwarding.
 const wsUrl = process.env['WS_URL'] ?? 'ws://localhost:3000/ws';
 const webUrl = process.env['WEB_URL'] ?? 'http://localhost:3000';
 
-const TIMEOUT_MS = 60_000;
-const POLL_INTERVAL = 2_000;
-
+/** Emit one consistently prefixed smoke-test progress message. */
 function log(msg) {
   console.log(`[smoke] ${msg}`);
 }
 
+/** Assert an exact response-header contract at the public web edge. */
 function requireHeader(response, name, expected) {
   const actual = response.headers.get(name);
   if (actual !== expected) {
@@ -40,23 +42,7 @@ function requireHeader(response, name, expected) {
   }
 }
 
-async function waitForHealth(url, name) {
-  const deadline = Date.now() + TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (res.ok) {
-        log(`✓ ${name} healthy`);
-        return true;
-      }
-    } catch {
-      // not ready yet
-    }
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL));
-  }
-  throw new Error(`✗ ${name} did not become healthy within ${TIMEOUT_MS / 1000}s`);
-}
-
+/** Register a smoke-test account and return the authenticated API response body. */
 async function registerUser(handle, password) {
   const res = await fetch(`${apiUrl}/v1/auth/register`, {
     method: 'POST',
@@ -72,6 +58,7 @@ async function registerUser(handle, password) {
   return body;
 }
 
+/** Publish the standard smoke-test seek using the supplied bearer token. */
 async function createSeek(token) {
   const res = await fetch(`${apiUrl}/v1/seeks`, {
     method: 'POST',
@@ -100,6 +87,7 @@ async function createSeek(token) {
   return body;
 }
 
+/** Accept a published seek and return its provisioned-game response body. */
 async function acceptSeek(token, seekId) {
   const res = await fetch(`${apiUrl}/v1/seeks/${encodeURIComponent(seekId)}/accept`, {
     method: 'POST',
@@ -115,6 +103,10 @@ async function acceptSeek(token, seekId) {
   return body;
 }
 
+/**
+ * Resolve after the authenticated socket receives the target game's initial state.
+ * Reject on protocol errors, premature close, or the bounded handshake deadline.
+ */
 function waitForWs(url, token, gameId) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + 15_000;
@@ -166,6 +158,7 @@ function waitForWs(url, token, gameId) {
   });
 }
 
+/** Run the public-edge health, header, REST, and WebSocket smoke journey end to end. */
 async function main() {
   log(`API: ${apiUrl}`);
   log(`WS:  ${wsUrl}`);
@@ -173,8 +166,8 @@ async function main() {
 
   // 1. Wait for health
   log('Waiting for services to be healthy...');
-  await waitForHealth(`${apiUrl}/v1/health`, 'API');
-  await waitForHealth(webUrl, 'Web');
+  await waitForHealth(`${apiUrl}/v1/health`, 'API', { log });
+  await waitForHealth(webUrl, 'Web', { log });
   // Gateway health is on port+1 inside the container, but from outside we
   // can check the WS port is listening by attempting a connection later.
   log('');
@@ -270,8 +263,10 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((err) => {
-  console.error('');
-  console.error(`[smoke] ✗ FAILED: ${err.message}`);
-  process.exit(1);
-});
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error('');
+    console.error(`[smoke] ✗ FAILED: ${err.message}`);
+    process.exit(1);
+  });
+}

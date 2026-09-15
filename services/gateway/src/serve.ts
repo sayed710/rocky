@@ -14,6 +14,9 @@
  * - `HOST` (default 0.0.0.0) — WebSocket listen host
  * - `ACCESS_TOKEN_SECRET` (required) — HMAC secret, must match the API
  * - `ACCESS_TOKEN_TTL_SEC` (default 900) — token lifetime, must match the API
+ * - `TRUST_PROXY` (optional, default false) — trusted reverse proxy hop count
+ *   ("1", "2", ...) or boolean ("true", "false"). Determines how client IP
+ *   is resolved from X-Forwarded-For for per-IP connection limits (ADR-0141).
  * - `DATABASE_URL` (optional) — when set, the authority persists game events
  *   to the shared Postgres event store; when absent, falls back to in-memory
  *   (state lost on restart).
@@ -91,6 +94,8 @@ import {
   RecordingTracer,
   spanSinkFromExporter,
   resolveTracesSampler,
+  resolveClientIp,
+  resolveTrustProxyEnv,
 } from '@chess-platform/api';
 import type { TournamentResultReporter, LaunchInput } from '@chess-platform/api';
 import type { EventStore } from '@chess-platform/persistence';
@@ -113,6 +118,7 @@ class SharedSecretTokenVerifier implements TokenVerifier {
     });
   }
 
+  /** Verifies the access token and returns the userId, or null and fires onFailure if invalid. */
   verify(token: string): { readonly userId: string } | null {
     const identity = this.tokens.identify(token);
     if (!identity) {
@@ -123,6 +129,13 @@ class SharedSecretTokenVerifier implements TokenVerifier {
   }
 }
 
+/**
+ * Bootstrap entry point for the realtime gateway service.
+ *
+ * Reads configuration from environment variables, initialises all subsystems
+ * (event log, pub/sub, command router, optional workers), starts the WebSocket
+ * server and HTTP health/metrics server, and wires graceful-shutdown handlers.
+ */
 async function main(): Promise<void> {
   const port = Number(process.env['PORT'] ?? 4175);
   const healthPort = Number(process.env['HEALTH_PORT'] ?? port + 1);
@@ -142,6 +155,7 @@ async function main(): Promise<void> {
   const joinTimeoutMs = positiveIntEnv('WS_JOIN_TIMEOUT_MS', 10_000);
   const heartbeatIntervalMs = positiveIntEnv('WS_HEARTBEAT_INTERVAL_MS', 30_000);
   const maxRoomsPerConnection = positiveIntEnv('WS_MAX_ROOMS_PER_CONNECTION', 4);
+  const trustProxy = resolveTrustProxyEnv(process.env['TRUST_PROXY']);
 
   const logger = new JsonLogger({ service: 'realtime-gateway', nodeId });
   const metrics = new InMemoryMetrics();
@@ -185,6 +199,7 @@ async function main(): Promise<void> {
   } else {
     logger.info('traces export: log-only');
   }
+  logger.info(`trusted proxy: ${typeof trustProxy === 'number' ? `${trustProxy} hops` : trustProxy ? '1 hop' : 'disabled (direct socket)'}`);
 
   const connectionsCounter = metrics.counter('gateway_connections_opened_total');
   const messagesCounter = metrics.counter('gateway_messages_received_total');
@@ -563,7 +578,11 @@ async function main(): Promise<void> {
   const alive = new WeakSet<WebSocket>();
 
   wss.on('connection', (ws: WebSocket, request) => {
-    const ip = request.socket.remoteAddress ?? 'unknown';
+    const ip = resolveClientIp(request, trustProxy);
+    if (ip === null) {
+      ws.close(1008, 'client identity unavailable');
+      return;
+    }
     const ipConnections = connectionsByIp.get(ip) ?? 0;
     if (wss.clients.size > maxConnections || ipConnections >= maxConnectionsPerIp) {
       ws.close(1013, 'connection limit exceeded');
@@ -712,6 +731,14 @@ void main().catch((err: unknown) => {
   process.exit(1);
 });
 
+/**
+ * Reads an environment variable as a positive integer, falling back to `fallback` when absent.
+ *
+ * @param name - The environment variable name.
+ * @param fallback - Default value used when the variable is not set.
+ * @returns Parsed positive integer value.
+ * @throws Error if the value is present but not a safe positive integer.
+ */
 function positiveIntEnv(name: string, fallback: number): number {
   const parsed = Number(process.env[name] ?? fallback);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -720,6 +747,18 @@ function positiveIntEnv(name: string, fallback: number): number {
   return parsed;
 }
 
+/**
+ * Checks whether an incoming WebSocket upgrade origin is permitted.
+ *
+ * Non-browser clients (e.g. native apps, curl) omit the `Origin` header; those are always
+ * allowed. When an explicit allow-list is configured, the origin must be in the set.
+ * Otherwise the origin's host must equal the HTTP `Host` header (same-origin policy).
+ *
+ * @param origin - The `Origin` header value from the upgrade request, or undefined.
+ * @param hostHeader - The `Host` header value from the upgrade request, or undefined.
+ * @param allowed - Explicit set of allowed origin strings (empty = same-origin check).
+ * @returns `true` if the origin is permitted, `false` otherwise.
+ */
 function originAllowed(origin: string | undefined, hostHeader: string | undefined, allowed: ReadonlySet<string>): boolean {
   if (!origin) return true; // Non-browser clients do not send Origin.
   if (allowed.size > 0) return allowed.has(origin);

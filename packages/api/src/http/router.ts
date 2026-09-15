@@ -18,6 +18,7 @@ import type { Logger } from '../ports/logger';
 import type { Metrics } from '../ports/metrics';
 import type { Tracer } from '../ports/tracer';
 import { parseTraceparent, generateTraceId, formatTraceparent, isSampled } from './traceparent';
+import { resolveClientIp, type TrustProxy } from './client-ip';
 
 /** HTTP methods the router dispatches. */
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -55,7 +56,7 @@ export interface RouterRuntime {
   readonly maxBodyBytes?: number;
   readonly newRequestId: () => string;
   /** Whether to trust `X-Forwarded-For` for the client IP (behind a proxy). */
-  readonly trustProxy?: boolean;
+  readonly trustProxy?: TrustProxy;
   /** Sink for uncaught (non-HttpError) failures; defaults to `console.error`. */
   readonly onInternalError?: (err: unknown, requestId: string) => void;
   readonly logger: Logger;
@@ -72,9 +73,14 @@ const KNOWN_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 
 const LATENCY_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 
 /**
- * Bound metric-label cardinality: `req.method` is client-controlled, so an
+ * Normalizes an HTTP method string into one of the known method tokens or `OTHER`.
+ *
+ * Bounds metric-label cardinality: `req.method` is client-controlled, so an
  * attacker could otherwise mint an unbounded number of `method="…"` series on
- * the failure path. Map any unrecognized token to `OTHER`.
+ * the failure path. Maps any unrecognized token to `OTHER`.
+ *
+ * @param method - Raw HTTP method string from the incoming request (may be undefined).
+ * @returns Uppercase known method name, or `"OTHER"` for unrecognized tokens.
  */
 function normalizeMethod(method: string | undefined): string {
   if (method === undefined) return 'OTHER';
@@ -82,6 +88,12 @@ function normalizeMethod(method: string | undefined): string {
   return KNOWN_METHODS.has(upper) ? upper : 'OTHER';
 }
 
+/**
+ * Splits a URL pathname into non-empty path segments, discarding leading/trailing slashes.
+ *
+ * @param path - The URL pathname to split (e.g. `/v1/users/:handle`).
+ * @returns Array of path segments in order (e.g. `["v1", "users", ":handle"]`).
+ */
 function splitPath(path: string): string[] {
   return path.split('/').filter((s) => s.length > 0);
 }
@@ -100,18 +112,23 @@ export class Router {
     return this;
   }
 
+  /** Shorthand for {@link add} with method `GET`. */
   get(path: string, doc: RouteDoc, auth: AuthPolicy, handler: Handler): this {
     return this.add({ method: 'GET', path, doc, auth, handler });
   }
+  /** Shorthand for {@link add} with method `POST`. */
   post(path: string, doc: RouteDoc, auth: AuthPolicy, handler: Handler): this {
     return this.add({ method: 'POST', path, doc, auth, handler });
   }
+  /** Shorthand for {@link add} with method `PUT`. */
   put(path: string, doc: RouteDoc, auth: AuthPolicy, handler: Handler): this {
     return this.add({ method: 'PUT', path, doc, auth, handler });
   }
+  /** Shorthand for {@link add} with method `PATCH`. */
   patch(path: string, doc: RouteDoc, auth: AuthPolicy, handler: Handler): this {
     return this.add({ method: 'PATCH', path, doc, auth, handler });
   }
+  /** Shorthand for {@link add} with method `DELETE`. */
   delete(path: string, doc: RouteDoc, auth: AuthPolicy, handler: Handler): this {
     return this.add({ method: 'DELETE', path, doc, auth, handler });
   }
@@ -264,7 +281,7 @@ export class Router {
         requestId,
         traceId,
         logger,
-        ip: clientIp(req, runtime.trustProxy ?? false),
+        ip: resolveClientIp(req, runtime.trustProxy ?? false),
         userAgent: headerString(req.headers['user-agent']) ?? null,
         auth,
         signal: disconnect.signal,
@@ -334,6 +351,7 @@ export class Router {
   }
 }
 
+/** Serialize a handler result to the Node response while preserving status and declared headers. */
 function writeResult(res: ServerResponse, result: HandlerResult): void {
   if (result.headers) {
     for (const [k, v] of Object.entries(result.headers)) res.setHeader(k, v);
@@ -363,18 +381,13 @@ function writeResult(res: ServerResponse, result: HandlerResult): void {
   res.end(payload);
 }
 
+/**
+ * Normalizes an HTTP header value that may be a single string, array of strings, or undefined.
+ *
+ * @param value - Raw header value from IncomingHttpHeaders.
+ * @returns The first header string if present, or undefined if absent.
+ */
 function headerString(value: string | string[] | undefined): string | undefined {
   if (value === undefined) return undefined;
   return Array.isArray(value) ? value[0] : value;
-}
-
-function clientIp(req: IncomingMessage, trustProxy: boolean): string | null {
-  if (trustProxy) {
-    const fwd = headerString(req.headers['x-forwarded-for']);
-    if (fwd) {
-      const first = fwd.split(',')[0]!.trim();
-      if (first) return first;
-    }
-  }
-  return req.socket.remoteAddress ?? null;
 }

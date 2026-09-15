@@ -33,3 +33,4 @@ data:
   EMAIL_FROM: {{ .Values.email.from | quote }}
   PUBLIC_WEB_ORIGIN: {{ .Values.email.publicWebOrigin | quote }}
   EMAIL_TIMEOUT_MS: {{ .Values.email.timeoutMs | quote }}
+  TRUST_PROXY: {{ include "gambit.trustProxy" . | quote }}

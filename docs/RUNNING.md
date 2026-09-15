@@ -38,8 +38,8 @@ That's it. You can register a user, and the platform is live.
 |---|---|---|---|
 | **Postgres + pgvector** | `postgres` | `localhost:5432` | `pgvector/pgvector:pg16`, with the schema auto-migrated on API startup |
 | **Redis** | `redis` | `localhost:6379` | Redis 7 durable pub/sub service for multi-node gateway fanout |
-| **API** | `api` | `localhost:8080` | REST API (`@chess-platform/api`) backed by real Postgres |
-| **Gateway** | `gateway` | `localhost:4175` | WebSocket gateway (`@chess-platform/realtime-gateway`) with shared-secret token verification |
+| **API** | `api` | not published | REST API (`@chess-platform/api`) reachable through the web edge at `localhost:3000/v1` |
+| **Gateway** | `gateway` | not published | WebSocket gateway reached through the web edge at `localhost:3000/ws` |
 | **Web** | `web` | `localhost:3000` | Vite-built SPA served by nginx, proxying `/v1` → API and `/ws` → gateway |
 
 ## How it works
@@ -123,11 +123,12 @@ npm run dev --workspace @chess-platform/web   # http://127.0.0.1:5173
 ```
 
 Because `resolveConfig()` uses the page origin, the app calls `/v1/...` on the dev server itself,
-so the dev server proxies `/v1` and `/ws` to a backend you are already running — by default the
-Compose one (`api` on 8080, `gateway` on 4175). Start the backend first:
+so the dev server proxies `/v1` and `/ws` to a backend you are already running — by default direct
+test ports (`api` on 8080, `gateway` on 4175). Expose those ports with the explicit chaos/developer
+override rather than weakening the normal Compose edge boundary:
 
 ```bash
-docker compose up -d postgres redis api gateway
+docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d postgres redis api gateway
 ```
 
 Point elsewhere with `GAMBIT_DEV_API_URL` / `GAMBIT_DEV_WS_URL`. Without the proxy every API call
@@ -161,8 +162,8 @@ The script:
 | `ACCESS_TOKEN_SECRET` | `dev-secret-...` | Yes (≥32 bytes) | HMAC secret shared between API and gateway |
 | `POSTGRES_PASSWORD` | `gambit_dev` | No | Postgres password |
 | `DATABASE_URL` | derived from `POSTGRES_PASSWORD` | No | Postgres connection string for the API container; Compose builds this automatically — do not set it yourself |
-| `PORT` | `8080` | No | API host port |
-| `GATEWAY_PORT` | `4175` | No | Gateway WebSocket host port |
+| `PORT` | `8080` | No | API host port in the explicit chaos/developer override; not published by the normal stack |
+| `GATEWAY_PORT` | `4175` | No | Gateway host port in the explicit chaos/developer override; not published by the normal stack |
 | `WEB_PORT` | `3000` | No | Web frontend host port |
 | `ENGINE_BOT` | `1` in Compose | No | Set to `"0"` to disable the autonomous engine bot mover in the gateway (ADR-0080) |
 | `STOCKFISH_PATH` | `/usr/local/bin/stockfish` in the gateway image | Required if `ENGINE_BOT=1` outside the image | Path to the Stockfish UCI executable binary |

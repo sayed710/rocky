@@ -6,11 +6,117 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-07 — PR #51: backup/restore drill safety regressions._
+_Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 56: trusted-edge acceptance determinism and clean invocation._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 55: real two-hop trusted-edge acceptance._
+
+Prior: _Last updated: 2026-09-14 — M15 Increment 54: trusted edge integration hardening._
+
+Prior: _Last updated: 2026-09-07 — PR #51: backup/restore drill safety regressions._
+
+Prior: _Last updated: 2026-09-06 — M15 Increment 53: trusted edge proxy identity contract (PR-1)._
+
+Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-cache cold-race test._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## M15 Increment 58 — kubelet probe NetworkPolicy contract
+
+**Status: CLARIFIED — standard node-local probes need no bundled CIDR exception.**
+
+- The chart documents that kubelet HTTP probes target each Pod IP from its hosting node, traffic
+  that standard `networking.k8s.io/v1` semantics always allow independently of ingress rules.
+- The bundled policies therefore do not guess cluster-specific node CIDRs or open the gateway
+  health port to application pods. Non-standard CNI host-firewall or mesh behavior remains an
+  explicit cluster-operator responsibility, using narrowly scoped additive controls.
+- Helm snapshot coverage pins the absence of `ipBlock` sources and keeps application ingress to
+  the gateway's WebSocket port only.
+
+## M15 Increment 57 — search-indexer API NetworkPolicy reachability
+
+**Status: RESOLVED — the opt-in search indexer can reach API readiness without widening the trusted edge.**
+
+- When `gateway.searchIndexer.enabled=true`, the API NetworkPolicy admits only the same-release
+  `search-indexer` pod alongside the existing `web` and `gateway` sources, and only on the API port.
+- The default-disabled render remains unchanged. Helm snapshot coverage pins enabled and disabled
+  source sets, release scoping, the API port, and the unchanged WebSocket gateway boundary.
+
+## M15 Increment 56 — trusted-edge acceptance determinism and clean invocation
+
+**Status: RESOLVED — trusted-edge acceptance now synchronizes on socket state and prepares its runtime outputs.**
+
+- One-hop WebSocket assertions wait for the expected open/closed distribution instead of relying
+  on fixed delays, keeping the same admission and spoof-resistance expectations without timing races.
+- The Gateway package's trusted-edge command builds the server workspace and Gateway outputs before
+  launching the runner, so the documented package command also works after a clean checkout.
+
+## M15 Increment 55 — real two-hop trusted-edge acceptance
+
+**Status: RESOLVED — the Helm ingress topology now has live proxy-chain acceptance coverage.**
+
+- The existing one-hop Compose acceptance path remains intact.
+- A separate ingress-like forwarding hop derives the test client's identity from its TCP peer,
+  appends it before the real web Nginx hop, and drives the API and Gateway with two trusted hops.
+- Acceptance assertions cover distinct-client API rate-limit and WebSocket admission buckets,
+  attacker-prepended forwarded values, and fail-safe malformed or insufficient chains.
+- Helm snapshot tests remain the source of truth for deriving `TRUST_PROXY=2` with Ingress and
+  `TRUST_PROXY=1` without it; the live acceptance runner verifies the resulting wire behavior.
+
+## M15 Increment 54 — trusted edge integration hardening
+
+**Status: RESOLVED — the proxy identity contract now includes its deploy-time network boundary and exact topology.**
+
+- Current `main` was merged normally and its append-only project history preserved.
+- Helm derives one or two trusted hops from whether Ingress is rendered, rejects invalid explicit
+  overrides, and renders default-on web/API/Gateway NetworkPolicies that preserve every configured
+  hop plus the Gateway-to-API readiness path.
+- The normal Compose stack publishes only the web edge; the explicit chaos/developer override
+  exposes loopback-only direct ports with `TRUST_PROXY=false`.
+- Equivalent IPv6 spellings now canonicalize to one client identity. Missing or malformed trusted
+  Gateway identity closes with WebSocket code 1008 instead of falling back to the proxy socket.
+- The real-nginx acceptance suite reuses the shared bounded health helper and is wired into the
+  gateway CI job with Docker required, while deterministic helper coverage remains in script tests.
+
+## M15 Increment 53 — trusted edge proxy identity contract (PR-1)
+
+**Status: RESOLVED — trusted edge client identity contract across WebSocket admission, API rate limiting, and real Nginx path.** Detailed in `docs/adr/0141-trusted-edge-proxy-identity.md`.
+
+### The Defect and Root Cause
+
+The Rookzen launch-readiness audit established two defects sharing the same trusted-edge boundary:
+1. **WebSocket Gateway Per-IP Limit Collapse:** In `services/gateway/src/serve.ts`, connection admission derived client identity directly from `request.socket.remoteAddress`, ignoring upstream reverse proxy headers. In Docker Compose and Kubernetes deployments behind `web` (Nginx) or Ingress, all browser connections arrived from the proxy socket IP. Consequently, `WS_MAX_CONNECTIONS_PER_IP` (20) collapsed into a shared cap across all users behind the proxy, causing connections 21–25 of 25 distinct users to be rejected with WebSocket close code 1013 (`connection limit exceeded`).
+2. **API Rate Limiting Spoof Vulnerability:** In `packages/api/src/http/router.ts`, client identity was resolved from the leftmost token of `X-Forwarded-For` (`fwd.split(',')[0]`). Because Nginx appends the client's socket address via `$proxy_add_x_forwarded_for`, an attacker prepending forged IPs in `X-Forwarded-For` was treated as the forged leftmost IP, completely bypassing per-IP rate limits on sensitive endpoints such as `/v1/auth/register`.
+
+### Architecture and Trusted-Hop Contract
+
+Implemented an explicit trusted-hop proxy contract (`TRUST_PROXY`) in `packages/api/src/http/client-ip.ts`:
+- **Direct connection (`TRUST_PROXY=false` or `0`):** Client identity is derived strictly from `socket.remoteAddress`; forwarded headers are completely ignored.
+- **Reverse proxy (`TRUST_PROXY=<hops>` or `"true"` meaning 1):** Hop count specifies the number of trusted proxy layers. Client IP is resolved from `X-Forwarded-For` by reading **right to left** (`entries.length - hops`), treating any prefixes to the left as untrusted attacker input.
+- **Topology parity:**
+  - Docker Compose: 1 hop (`web` Nginx), `TRUST_PROXY: "1"`.
+  - Helm (Kubernetes): 2 hops (`ingress-nginx` + `web` Nginx), `config.trustProxy: "2"`.
+- **IP normalization:** `normalizeIp` unmaps IPv4-mapped IPv6 literals (`::ffff:x.x.x.x` -> `x.x.x.x`), unbrackets IPv6 literals, validates syntax with `node:net isIP`, and lowers case.
+
+### TDD and Acceptance Proofs
+
+1. **API Rate Limit Spoof Defense (`packages/api/test/rate-limit-spoofing.test.ts`):** Proved RED (attacker making 6 registrations with varying spoofed prefixes was admitted without rate limiting) and GREEN (request 6 blocked with HTTP 429 `rate_limited`).
+2. **Gateway Admission & Spoof Defense (`services/gateway/test/gateway-proxy-admission.test.ts`):** Proved RED (25 distinct clients behind proxy collapsed to 127.0.0.1, rejecting 5 with 1013) and GREEN:
+   - 25 distinct proxied clients all admitted (0 rejected).
+   - Same client capped at 20 connections (21–25 rejected with 1013).
+   - Spoofed XFF prefixes do not bypass connection limits.
+   - Connection closing decrements the active IP count.
+   - Direct socket mode (`TRUST_PROXY=false`) ignores forwarded headers.
+3. **Real Nginx Acceptance Suite (`scripts/nginx-trusted-edge-acceptance.mjs`):** Runs an automated test against a live container running `nginxinc/nginx-unprivileged:alpine` with `docker/web/nginx.conf.template`:
+   - Real Nginx WebSocket admission: enforces 20-connection limit.
+   - Real Nginx WebSocket spoof defense: spoofed prefixes cannot bypass connection limit.
+   - Real Nginx API rate limit spoof defense: 6th registration blocked with 429.
+   - Real Nginx SEC-1 boundary: `/v1/metrics` and `/v1/metrics/` blocked with 404 while `/v1/health` proxies.
 
 ## M15 Increment 52 — deterministic analysis-cache cold-race test
 

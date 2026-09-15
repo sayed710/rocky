@@ -67,6 +67,24 @@ ConfigMap name.
 {{- end -}}
 
 {{/*
+Resolve the trusted proxy hop count from the rendered topology unless the
+operator supplies an explicit non-negative integer override.
+*/}}
+{{- define "gambit.trustProxy" -}}
+{{- $explicit := toString .Values.config.trustProxy -}}
+{{- if ne $explicit "" -}}
+{{- if not (regexMatch "^(0|[1-9][0-9]*)$" $explicit) -}}
+{{- fail (printf "config.trustProxy must be an empty value or a non-negative integer (got %q)" $explicit) -}}
+{{- end -}}
+{{- $explicit -}}
+{{- else if .Values.web.ingress.enabled -}}
+2
+{{- else -}}
+1
+{{- end -}}
+{{- end -}}
+
+{{/*
 Progressive delivery (M14 inc 9, ADR-0075).
 
 `gambit.variants` returns the list of Deployment variants for a traffic-taking

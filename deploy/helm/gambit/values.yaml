@@ -158,6 +158,20 @@ gateway:
       cpu: 500m
       memory: 512Mi
 
+# --- Application network boundary ---
+# API and gateway trust proxy-derived client identity, so arbitrary workload
+# pods must not bypass the web edge or reach it outside the declared ingress path.
+# This requires a CNI that enforces networking.k8s.io/v1 NetworkPolicy.
+networkPolicy:
+  enabled: true
+  # When the chart renders an Ingress, direct pod-to-web traffic would bypass
+  # one configured trusted hop. Both selectors are applied to the same source.
+  ingressController:
+    namespaceLabels:
+      kubernetes.io/metadata.name: ingress-nginx
+    podLabels:
+      app.kubernetes.io/name: ingress-nginx
+
 # --- Web service ---
 web:
   replicas: 2
@@ -301,6 +315,10 @@ config:
   cmdForwardTimeoutMs: "5000"
   ownershipLeaseTtlSec: "30"
   ownershipRenewalIntervalSec: "15"
+  # Trusted reverse proxy hop count (ADR-0141). Empty derives the chart topology:
+  # ingress + web nginx = 2; web nginx alone = 1. Set an explicit non-negative
+  # integer only when an external topology adds or removes trusted hops.
+  trustProxy: ""
 
 # --- Tracing (M13 inc 6, ADR-0062) ---
 tracing:

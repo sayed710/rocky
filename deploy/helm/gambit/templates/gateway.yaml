@@ -147,6 +147,11 @@ spec:
                 configMapKeyRef:
                   name: {{ include "gambit.configMapName" . }}
                   key: OWNERSHIP_RENEWAL_INTERVAL_SEC
+            - name: TRUST_PROXY
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "gambit.configMapName" . }}
+                  key: TRUST_PROXY
             {{- if .Values.gateway.tournamentReporter.enabled }}
             # M9 inc 13 (ADR-0025): tournament result reporter. Every gateway
             # replica runs one when enabled; version CAS on the tournaments

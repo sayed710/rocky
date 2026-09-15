@@ -154,6 +154,11 @@ spec:
                 configMapKeyRef:
                   name: {{ include "gambit.configMapName" $ }}
                   key: EMAIL_TIMEOUT_MS
+            - name: TRUST_PROXY
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "gambit.configMapName" $ }}
+                  key: TRUST_PROXY
             {{- if not $.Values.search.enabled }}
             # M11 (ADR-0055): absolute kill switch. With this set the API never
             # constructs a search repository and GET /v1/search returns 503.

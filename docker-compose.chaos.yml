@@ -1,4 +1,12 @@
 services:
+  api:
+    environment:
+      # Chaos tooling connects directly to this test-only host port, so no
+      # forwarded identity is trusted in this explicit override topology.
+      TRUST_PROXY: "false"
+    ports:
+      - "127.0.0.1:${PORT:-8080}:8080"
+
   gateway:
     environment:
       NODE_ID: "node1"
@@ -6,6 +14,7 @@ services:
       OWNERSHIP_RENEWAL_INTERVAL_SEC: "2"
       TOURNAMENT_REPORTER: "1"
       SEARCH_INDEXER: "0"
+      TRUST_PROXY: "false"
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-4175}:4175"
       - "127.0.0.1:${GATEWAY_HEALTH_PORT:-4176}:4176"
@@ -29,6 +38,7 @@ services:
       HEALTH_PORT: "4176"
       HOST: "0.0.0.0"
       NODE_ENV: production
+      TRUST_PROXY: "false"
       REDIS_URL: redis://redis:6379
       NODE_ID: "node2"
       OWNERSHIP_LEASE_TTL_SEC: "6"

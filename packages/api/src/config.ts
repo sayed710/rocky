@@ -6,6 +6,10 @@
  */
 
 import type { CorsConfig } from './http/security';
+import { resolveTrustProxyEnv, validateTrustProxy, type TrustProxy } from './http/client-ip';
+
+/** Trusted proxy contract type re-exported for API server configuration. */
+export type { TrustProxy };
 
 /** Fully-resolved API configuration. */
 export interface ApiConfig {
@@ -17,8 +21,13 @@ export interface ApiConfig {
   readonly refreshTokenTtlSec: number;
   /** Maximum accepted request body in bytes. */
   readonly maxBodyBytes: number;
-  /** Trust `X-Forwarded-For` for client IP (enable only behind a trusted proxy). */
-  readonly trustProxy: boolean;
+  /**
+   * Trusted proxy contract for client IP resolution:
+   * - `false` (default): direct connection (no proxy trusted, uses `socket.remoteAddress`).
+   * - `true`: 1 trusted proxy hop (e.g. Docker Compose behind `web` nginx).
+   * - `number`: positive hop count (e.g. 2 for ingress-nginx -> `web` in Helm).
+   */
+  readonly trustProxy: TrustProxy;
   /**
    * CORS policy. Safe default: no allowed origins (no cross-origin access).
    * Set `allowedOrigins` explicitly per deployment environment.
@@ -312,12 +321,14 @@ export function resolveConfig(
   }
   const cors = input.cors ?? DEFAULT_CORS;
   validateCors(cors);
+  const trustProxy = input.trustProxy ?? resolveTrustProxyEnv(env['TRUST_PROXY']);
+  validateTrustProxy(trustProxy);
   return {
     accessTokenSecret,
     accessTokenTtlSec: input.accessTokenTtlSec ?? DEFAULT_ACCESS_TOKEN_TTL_SEC,
     refreshTokenTtlSec: input.refreshTokenTtlSec ?? DEFAULT_REFRESH_TOKEN_TTL_SEC,
     maxBodyBytes: input.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
-    trustProxy: input.trustProxy ?? false,
+    trustProxy,
     cors,
     enableHsts: input.enableHsts ?? true,
     cookieSecure: resolveRefreshCookieSecure(input.cookieSecure, env),
