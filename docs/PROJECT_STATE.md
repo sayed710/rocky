@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
+_Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 56: trusted-edge acceptance determinism and clean invocation._
 
@@ -23,6 +25,18 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## M15 Increment 58 — kubelet probe NetworkPolicy contract
+
+**Status: CLARIFIED — standard node-local probes need no bundled CIDR exception.**
+
+- The chart documents that kubelet HTTP probes target each Pod IP from its hosting node, traffic
+  that standard `networking.k8s.io/v1` semantics always allow independently of ingress rules.
+- The bundled policies therefore do not guess cluster-specific node CIDRs or open the gateway
+  health port to application pods. Non-standard CNI host-firewall or mesh behavior remains an
+  explicit cluster-operator responsibility, using narrowly scoped additive controls.
+- Helm snapshot coverage pins the absence of `ipBlock` sources and keeps application ingress to
+  the gateway's WebSocket port only.
 
 ## M15 Increment 57 — search-indexer API NetworkPolicy reachability
 

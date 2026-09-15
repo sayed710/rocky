@@ -95,3 +95,13 @@ pod or namespace, add a separate, narrowly selected NetworkPolicy permitting its
 the API port. Kubernetes NetworkPolicies are additive, so that monitoring rule does not require
 editing or disabling this boundary. Disable the bundled policies only when equivalent controls are
 already enforced outside the chart.
+
+The kubelet sends the chart's HTTP liveness and readiness probes directly to each Pod IP from the
+node that hosts that Pod. Standard `networking.k8s.io/v1` semantics always allow traffic between a
+Pod and its node, independently of the policy's `from` and `ports` entries, so the bundled policies
+intentionally add no node `ipBlock`: web and API probes use their existing port, while gateway
+probes use `gateway.healthPort` without granting that port to application pods. A CNI-specific host
+firewall, service mesh, or non-standard datapath that restricts this node-local path must be
+configured by the cluster operator. If that environment needs an additive policy, scope it to the
+cluster's actual node sources and the exact health ports; never use `0.0.0.0/0` or `::/0` as a probe
+exception.
