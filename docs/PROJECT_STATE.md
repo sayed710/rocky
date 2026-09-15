@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-15 — M15 Increment 56: trusted-edge acceptance determinism and clean invocation._
+_Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 56: trusted-edge acceptance determinism and clean invocation._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 55: real two-hop trusted-edge acceptance._
 
@@ -21,6 +23,15 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## M15 Increment 57 — search-indexer API NetworkPolicy reachability
+
+**Status: RESOLVED — the opt-in search indexer can reach API readiness without widening the trusted edge.**
+
+- When `gateway.searchIndexer.enabled=true`, the API NetworkPolicy admits only the same-release
+  `search-indexer` pod alongside the existing `web` and `gateway` sources, and only on the API port.
+- The default-disabled render remains unchanged. Helm snapshot coverage pins enabled and disabled
+  source sets, release scoping, the API port, and the unchanged WebSocket gateway boundary.
 
 ## M15 Increment 56 — trusted-edge acceptance determinism and clean invocation
 
