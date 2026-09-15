@@ -260,6 +260,17 @@ check "Default render: no search-indexer resources" "$([ "$DEFAULT_IX" = "0" ] &
 IX_PRESENT=$(grep -c 'app.kubernetes.io/component: search-indexer' "$TMPDIR/indexer.yaml" || true)
 check "Indexer enabled: search-indexer resources render" "$([ "$IX_PRESENT" -gt 0 ] && echo 0 || echo 1)"
 
+# The indexer's wait-for-api init container must reach the API without opening
+# that boundary to other releases, components, or ports.
+INDEXER_API_ALLOWED_COMPONENTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/indexer.yaml" 2>/dev/null | grep -vx -- '---' | sort | tr '\n' ' ' | sed 's/ $//')
+INDEXER_API_INSTANCE=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].from[] | select(.podSelector.matchLabels."app.kubernetes.io/component"=="search-indexer") | .podSelector.matchLabels."app.kubernetes.io/instance"' "$TMPDIR/indexer.yaml" 2>/dev/null || echo "")
+INDEXER_API_PORT=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].ports[] | select(.protocol=="TCP") | .port' "$TMPDIR/indexer.yaml" 2>/dev/null || echo "")
+INDEXER_GATEWAY_ALLOWED_COMPONENTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="gateway") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/indexer.yaml" 2>/dev/null | grep -vx -- '---' | sort | tr '\n' ' ' | sed 's/ $//')
+check "Indexer enabled: only gateway, search-indexer, and web pods can enter the API" "$([ "$INDEXER_API_ALLOWED_COMPONENTS" = "gateway search-indexer web" ] && echo 0 || echo 1)"
+check "Indexer enabled: API ingress is scoped to the same release" "$([ "$INDEXER_API_INSTANCE" = "release-name" ] && echo 0 || echo 1)"
+check "Indexer enabled: API ingress remains limited to TCP port 8080" "$([ "$INDEXER_API_PORT" = "8080" ] && echo 0 || echo 1)"
+check "Indexer enabled: only web pods can enter the WebSocket gateway" "$([ "$INDEXER_GATEWAY_ALLOWED_COMPONENTS" = "web" ] && echo 0 || echo 1)"
+
 # Exactly one Deployment, and its replica count is 1. Read the replicas line that
 # follows the search-indexer Deployment's metadata, without depending on yq.
 IX_REPLICAS=$(awk '

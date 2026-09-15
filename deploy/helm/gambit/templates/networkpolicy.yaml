@@ -54,6 +54,12 @@ spec:
             matchLabels:
               {{- include "gambit.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: gateway
+        {{- if .Values.gateway.searchIndexer.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "gambit.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: search-indexer
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.api.port }}
