@@ -35,8 +35,8 @@ jobs:
 
       - name: Verify credentials presence
         run: |
-          if [ -z "${OPENAI_API_KEY}" ] && [ -z "${ANTHROPIC_API_KEY}" ]; then
-            echo "::error::Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is provided in secrets."
+          if [ -z "${OPENAI_API_KEY}" ] || [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "::error::Both OPENAI_API_KEY and ANTHROPIC_API_KEY must be provided in secrets to run the complete live provider contract suite."
             exit 1
           fi
         env:
@@ -54,3 +54,4 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GAMBIT_TEST_INTEGRATION: 1

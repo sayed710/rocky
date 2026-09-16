@@ -97,7 +97,7 @@ for (const [name, args] of HERMETIC_SUITES) {
   const skipped = metric(output, 'skipped') ?? 0;
   const failed = metric(output, 'fail') ?? 0;
 
-  if (result.status !== 0 || tests === null || failed > 0) {
+  if (result.status !== 0 || tests === null || tests === 0 || failed > 0) {
     console.error(`${name}: ERROR (status=${result.status}, tests=${tests}, failed=${failed})`);
     if (result.error) console.error(result.error.message);
     if (output.trim()) console.error(output.trim());
@@ -130,7 +130,7 @@ for (const suite of SERVICE_SUITES) {
   const skipped = metric(output, 'skipped') ?? 0;
   const failed = metric(output, 'fail') ?? 0;
 
-  if (result.status !== 0 || tests === null || failed > 0) {
+  if (result.status !== 0 || tests === null || tests === 0 || failed > 0) {
     console.error(`${suite.name}: ERROR (status=${result.status}, tests=${tests}, failed=${failed})`);
     if (result.error) console.error(result.error.message);
     if (output.trim()) console.error(output.trim());

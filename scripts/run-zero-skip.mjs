@@ -35,10 +35,25 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       resolve(1);
     });
 
-    child.on('close', (code) => {
-      const exitCode = code ?? 0;
-      if (exitCode !== 0) {
-        resolve(exitCode);
+    child.on('close', (code, signal) => {
+      if (signal) {
+        process.stderr.write(`\n[run-zero-skip] Process terminated by signal: ${signal}\n`);
+        resolve(1);
+        return;
+      }
+
+      if (code === null || code !== 0) {
+        resolve(code ?? 1);
+        return;
+      }
+
+      // Guard against empty test runs (e.g. invalid glob or 0 tests executed)
+      const testsMatch = /\btests\s+(\d+)\b/i.exec(combinedOutput);
+      if (testsMatch && Number.parseInt(testsMatch[1], 10) === 0) {
+        process.stderr.write(
+          `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test runner reported 0 tests executed.\x1b[0m\n`
+        );
+        resolve(1);
         return;
       }
 

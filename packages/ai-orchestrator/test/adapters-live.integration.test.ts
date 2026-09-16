@@ -24,7 +24,7 @@ const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 test('Anthropic adapter: real completion', { skip: !anthropicKey }, async () => {
   const adapter = new AnthropicAdapter({
     apiKey: anthropicKey,
-    defaultModel: 'claude-3-5-sonnet-20241022',
+    defaultModel: 'claude-sonnet-4-6',
   });
   const response = await adapter.complete({
     task: 'general',

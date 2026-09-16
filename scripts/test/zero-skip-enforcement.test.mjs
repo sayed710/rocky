@@ -51,4 +51,20 @@ test('zero-skip enforcer: does not falsely fail on test names containing the wor
   assert.equal(code, 0, 'should return exit code 0 when test name contains the word skipped');
 });
 
+test('zero-skip enforcer: fails when test runner reports 0 tests executed', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 0\\n# pass 0\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when 0 tests were executed');
+});
+
+test('zero-skip enforcer: fails when child process is terminated by a signal', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'process.kill(process.pid, "SIGTERM");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when child process is killed by signal');
+});
+
 
