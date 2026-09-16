@@ -20,6 +20,7 @@ import type {
   WebAuthnCredentialsRepository,
   WebAuthnLoginChallengesRepository,
   StudyPartnerRepository,
+  EventStore,
 } from '@chess-platform/persistence';
 import type { PasswordHasher } from './auth/password';
 import type { AccessTokenService } from './auth/tokens';
@@ -46,6 +47,7 @@ import type { AnalysisService } from './analysis/service';
 
 /** The full set of repositories the API consumes. */
 export interface Repositories {
+  readonly events: EventStore;
   readonly users: UsersRepository;
   readonly sessions: SessionsRepository;
   readonly ratings: RatingsRepository;

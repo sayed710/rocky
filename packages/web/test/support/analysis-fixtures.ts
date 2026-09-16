@@ -10,6 +10,7 @@
 import type { AnalysisResponse } from '../../src/api/models.js';
 import type { StateView, WsColor } from '../../src/net/ws-protocol.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../../src/ports/http.js';
+import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
 
 export class FakeElement {
   private _innerHTML = '';
@@ -275,11 +276,12 @@ export function makeState(
   ply = 0,
   turn: WsColor = 'w',
   moves: readonly { readonly ply: number; readonly uci: string; readonly san: string; readonly by: WsColor }[] = [],
+  players: StateView['players'] = { white: 'u1', black: ENGINE_BOT_USER_IDS.novice },
 ): StateView {
   return {
     gameId: 'g-test-1',
     variant: 'standard',
-    players: { white: 'u1', black: 'u2' },
+    players,
     timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
     fen,
     fenHash: `h${ply}`,
@@ -301,9 +303,10 @@ export function makeFinishedState(
   ply = 0,
   turn: WsColor = 'w',
   moves: readonly { readonly ply: number; readonly uci: string; readonly san: string; readonly by: WsColor }[] = [],
+  players?: StateView['players'],
 ): StateView {
   return {
-    ...makeState(fen, ply, turn, moves),
+    ...makeState(fen, ply, turn, moves, players),
     status: { over: true, result: '1-0', termination: 'checkmate', winner: 'w' },
     legalMoves: {},
   };

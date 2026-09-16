@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { Game } from '@chess-platform/game';
+import { Game, type GameEvent } from '@chess-platform/game';
 import { createPool } from '../src/pg/pool';
 import { migrate, migrationChecksum, readMigrationSql } from '../src/pg/migrate';
 import { PostgresEventStore } from '../src/pg/event-store';
@@ -64,6 +64,19 @@ test('migrations apply and are idempotent', { skip }, async () => {
     assert.match(index.rows[0]?.definition ?? '', /\(player_id, created_at DESC, id\)/);
     assert.match(index.rows[0]?.predicate ?? '', /status/);
     assert.match(index.rows[0]?.predicate ?? '', /'pending'/);
+
+    const activePlayersIndex = await pool.query<{ indisvalid: boolean; definition: string; predicate: string }>(
+      `SELECT i.indisvalid,
+              pg_get_indexdef(i.indexrelid) AS definition,
+              pg_get_expr(i.indpred, i.indrelid) AS predicate
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE c.relname = 'game_events_active_players_idx'`,
+    );
+    assert.equal(activePlayersIndex.rows[0]?.indisvalid, true);
+    assert.match(activePlayersIndex.rows[0]?.definition ?? '', /USING gin/);
+    assert.match(activePlayersIndex.rows[0]?.predicate ?? '', /seq = 0/);
+    assert.match(activePlayersIndex.rows[0]?.predicate ?? '', /GameCreated/);
 
     assert.equal(await migrate(pool, dir), 0, 're-running applies nothing');
 
@@ -156,6 +169,62 @@ test('postgres event store: round-trip and optimistic concurrency', { skip }, as
 
     // A second append at a stale head is rejected.
     await assert.rejects(store.append(gameId, -1, events), ConcurrencyError);
+  }, isolated);
+});
+
+test('postgres event store finds only unended games for either player seat', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const store = new PostgresEventStore(pool);
+    const target = uuidv7();
+    const opponent = uuidv7();
+    const activeGameId = uuidv7();
+    const finishedGameId = uuidv7();
+    const event = (gameId: string, players: { white: string; black: string }): GameEvent => ({
+      type: 'GameCreated',
+      gameId,
+      variant: 'standard',
+      initialFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      players,
+      rated: true,
+      at: 1,
+    });
+    await store.append(activeGameId, -1, [event(activeGameId, { white: target, black: opponent })]);
+    await store.append(finishedGameId, -1, [event(finishedGameId, { white: opponent, black: target })]);
+    await store.append(finishedGameId, 0, [{
+      type: 'GameEnded',
+      result: '1-0',
+      termination: 'resignation',
+      winner: 'w',
+      at: 2,
+    }]);
+
+    assert.deepEqual(await store.findActiveGamesByPlayer(target), [{
+      gameId: activeGameId,
+      players: { white: target, black: opponent },
+    }]);
+
+    const lockedPlayer = uuidv7();
+    const blockedGameId = uuidv7();
+    const release = await store.acquirePlayerLock(lockedPlayer);
+    let appendSettled = false;
+    let blockedAppend: Promise<void> | undefined;
+    try {
+      blockedAppend = store.append(blockedGameId, -1, [event(blockedGameId, {
+        white: lockedPlayer,
+        black: uuidv7(),
+      })]).then(() => {
+        appendSettled = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(appendSettled, false, 'human-game creation must wait for the delivery lock');
+    } finally {
+      await release();
+    }
+    assert.ok(blockedAppend);
+    await blockedAppend;
+    assert.equal(appendSettled, true);
   }, isolated);
 });
 

@@ -8,6 +8,9 @@ import { fileURLToPath, URL } from 'node:url';
 export default defineConfig({
   resolve: {
     alias: {
+      // The browser needs only the shared first-party bot identity helper. The package emits
+      // CommonJS, so point Vite at its TypeScript source just as the latency helper below does.
+      '@chess-platform/game': fileURLToPath(new URL('../game/src/bot-accounts.ts', import.meta.url)),
       // The clock-interpolation helpers are authored once, in the gateway, and shared with the
       // browser (ADR-0103). That package emits CommonJS, and Vite only applies its CommonJS
       // interop inside `node_modules` — so bundling the compiled `dist/latency.js` fails with

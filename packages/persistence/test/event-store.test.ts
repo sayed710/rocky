@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { GameEvent } from '@chess-platform/game';
+import { ENGINE_BOT_USER_IDS, type GameEvent } from '@chess-platform/game';
 import { InMemoryEventStore } from '../src/event-store';
 import { ConcurrencyError, PersistenceError } from '../src/errors';
 
@@ -57,6 +57,52 @@ test('exists reflects whether a game has any events', async () => {
   assert.equal(await s.exists('g1'), false);
   await s.append('g1', -1, [created]);
   assert.equal(await s.exists('g1'), true);
+});
+
+test('findActiveGamesByPlayer derives participation from GameCreated through GameEnded', async () => {
+  const s = new InMemoryEventStore();
+  const active = { ...created, gameId: 'active', players: { white: 'target', black: 'other' } };
+  const finished = { ...created, gameId: 'finished', players: { white: 'other', black: 'target' } };
+  const unrelated = { ...created, gameId: 'unrelated', players: { white: 'third', black: 'fourth' } };
+  await s.append('active', -1, [active]);
+  await s.append('finished', -1, [finished]);
+  await s.append('finished', 0, [{
+    type: 'GameEnded',
+    result: '1-0',
+    termination: 'resignation',
+    winner: 'w',
+    at: 2,
+  }]);
+  await s.append('unrelated', -1, [unrelated]);
+
+  assert.deepEqual(await s.findActiveGamesByPlayer('target'), [{
+    gameId: 'active',
+    players: { white: 'target', black: 'other' },
+  }]);
+  assert.deepEqual(await s.findActiveGamesByPlayer('missing'), []);
+});
+
+test('player locks serialize human-game creation but do not delay bot games', async () => {
+  const s = new InMemoryEventStore();
+  const release = await s.acquirePlayerLock('a');
+  let humanSettled = false;
+  const human = s.append('human', -1, [{ ...created, gameId: 'human' }]).then(() => {
+    humanSettled = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(humanSettled, false);
+
+  const bot = {
+    ...created,
+    gameId: 'bot',
+    players: { white: 'a', black: ENGINE_BOT_USER_IDS.novice },
+  };
+  assert.equal(await s.append('bot', -1, [bot]), 0);
+
+  await release();
+  await release();
+  await human;
+  assert.equal(humanSettled, true);
 });
 
 test('stored events are isolated from later caller mutation', async () => {

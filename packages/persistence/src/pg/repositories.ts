@@ -46,6 +46,7 @@ import type {
 } from '../repositories';
 import { SEEK_TTL_MS } from '../repositories';
 import { CURRENT_EVENT_VERSION } from '../event-store.js';
+import { lockGameCreationPlayers } from './event-store.js';
 import { DuplicateUserError, VersionConflictError } from '../errors';
 
 const SEEK_TTL_INTERVAL = `${Math.floor(SEEK_TTL_MS / 1000)} seconds`;
@@ -778,6 +779,8 @@ export class PgSeekAcceptor implements SeekAcceptor {
         await client.query('ROLLBACK');
         return null;
       }
+
+      await lockGameCreationPlayers(client, events);
       
       let seq = -1;
       for (const event of events) {
@@ -812,6 +815,8 @@ export class PgGameStarter implements GameStarter {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+
+      await lockGameCreationPlayers(client, events);
 
       let seq = -1;
       for (const event of events) {

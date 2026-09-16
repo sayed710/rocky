@@ -18,12 +18,14 @@ import type { WsColor, Role, Variant, TimeControl } from '../net/ws-protocol.js'
 import { applyMove } from '../core/mover.js';
 import type { PromotionRole } from '../core/interaction.js';
 import { interpolateRemaining } from '@chess-platform/realtime-gateway/latency';
+import { isEngineBotUserId } from '@chess-platform/game';
 
 /**
  * The unified UI state for game actions, projected from authoritative server state.
  */
 export interface GameActionState {
   readonly isPlayer: boolean;
+  readonly isHumanGame: boolean;
   readonly connected: boolean;
   readonly isOver: boolean;
   readonly canAbort: boolean;
@@ -427,6 +429,10 @@ export class GameController {
 
     // --- Action State ---
     const isPlayer = state.myColor !== null;
+    const players = state.snapshot?.players;
+    const isHumanGame = players !== undefined
+      && !isEngineBotUserId(players.white)
+      && !isEngineBotUserId(players.black);
     const connected = state.connected;
     const isOver = state.status?.over ?? false;
     const canAbort = state.ply < 2;
@@ -440,6 +446,7 @@ export class GameController {
 
     const actionChanged = this.currentActionState === undefined
       || this.currentActionState.isPlayer !== isPlayer
+      || this.currentActionState.isHumanGame !== isHumanGame
       || this.currentActionState.connected !== connected
       || this.currentActionState.isOver !== isOver
       || this.currentActionState.canAbort !== canAbort
@@ -448,7 +455,16 @@ export class GameController {
       || this.currentActionState.pendingAction !== pendingAction;
 
     if (actionChanged) {
-      this.currentActionState = { isPlayer, connected, isOver, canAbort, drawOffer, lastReject, pendingAction };
+      this.currentActionState = {
+        isPlayer,
+        isHumanGame,
+        connected,
+        isOver,
+        canAbort,
+        drawOffer,
+        lastReject,
+        pendingAction,
+      };
       if (this.callbacks.onActionState) {
         this.callbacks.onActionState(this.currentActionState);
       }

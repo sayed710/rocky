@@ -9,7 +9,7 @@
  * upcaster registry. The Postgres implementation lives in `./pg/event-store`.
  */
 
-import type { GameEvent } from '@chess-platform/game';
+import { isEngineBotUserId, type GameEvent } from '@chess-platform/game';
 import { ConcurrencyError, PersistenceError } from './errors';
 
 /** Current event payload schema version written for new events. */
@@ -22,6 +22,15 @@ export interface StoredEvent {
   readonly version: number;
   readonly event: GameEvent;
   readonly serverTs: number;
+}
+
+/** A game whose durable stream has started and has not emitted `GameEnded`. */
+export interface ActiveGameRecord {
+  readonly gameId: string;
+  readonly players: {
+    readonly white: string;
+    readonly black: string;
+  };
 }
 
 /**
@@ -43,6 +52,28 @@ export interface EventStore {
   loadSince(gameId: string, afterSeq: number): Promise<StoredEvent[]>;
   /** Whether any events exist for a game. */
   exists(gameId: string): Promise<boolean>;
+  /** Active games in which `userId` occupies either seat, derived from the durable event log. */
+  findActiveGamesByPlayer(userId: string): Promise<ActiveGameRecord[]>;
+  /**
+   * Acquire the per-player coordination lock shared with human-game creation.
+   *
+   * Assistance delivery holds this lock from its final eligibility check until the HTTP response
+   * is committed, closing the last check/write race. The returned release function is idempotent.
+   */
+  acquirePlayerLock(userId: string): Promise<() => Promise<void>>;
+}
+
+/** Human participants whose game creation must coordinate with assistance delivery. */
+export function humanGamePlayerIds(events: readonly GameEvent[]): readonly string[] {
+  const created = events[0];
+  if (
+    created?.type !== 'GameCreated'
+    || isEngineBotUserId(created.players.white)
+    || isEngineBotUserId(created.players.black)
+  ) {
+    return [];
+  }
+  return [...new Set([created.players.white, created.players.black])].sort();
 }
 
 // --- Schema evolution (upcasters) -----------------------------------------
@@ -76,32 +107,41 @@ export function upcast(type: string, version: number, payload: unknown): GameEve
 /** Deterministic, process-local {@link EventStore} for tests and local dev. */
 export class InMemoryEventStore implements EventStore {
   private readonly logs = new Map<string, StoredEvent[]>();
+  private readonly playerLocks = new Map<string, PlayerMutex>();
 
   /** `now` is injectable so tests can assert deterministic timestamps. */
   constructor(private readonly now: () => number = () => Date.now()) {}
 
-  append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
-    const log = this.logs.get(gameId) ?? [];
-    const head = log.length - 1;
-    if (head !== expectedSeq) {
-      return Promise.reject(new ConcurrencyError(gameId, expectedSeq, head));
+  async append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
+    const releases: Array<() => Promise<void>> = [];
+    try {
+      if (expectedSeq === -1) {
+        for (const playerId of humanGamePlayerIds(events)) {
+          releases.push(await this.acquirePlayerLock(playerId));
+        }
+      }
+      const log = this.logs.get(gameId) ?? [];
+      const head = log.length - 1;
+      if (head !== expectedSeq) throw new ConcurrencyError(gameId, expectedSeq, head);
+      if (events.length === 0) return head;
+      if (head === -1 && events[0]!.type !== 'GameCreated') {
+        throw new PersistenceError('first stored event must be GameCreated');
+      }
+      const ts = this.now();
+      for (const event of events) {
+        log.push({
+          gameId,
+          seq: log.length,
+          version: CURRENT_EVENT_VERSION,
+          event: structuredClone(event),
+          serverTs: ts,
+        });
+      }
+      this.logs.set(gameId, log);
+      return log.length - 1;
+    } finally {
+      for (const release of releases.reverse()) await release();
     }
-    if (events.length === 0) return Promise.resolve(head);
-    if (head === -1 && events[0]!.type !== 'GameCreated') {
-      return Promise.reject(new PersistenceError('first stored event must be GameCreated'));
-    }
-    const ts = this.now();
-    for (const event of events) {
-      log.push({
-        gameId,
-        seq: log.length,
-        version: CURRENT_EVENT_VERSION,
-        event: structuredClone(event),
-        serverTs: ts,
-      });
-    }
-    this.logs.set(gameId, log);
-    return Promise.resolve(log.length - 1);
   }
 
   load(gameId: string): Promise<StoredEvent[]> {
@@ -118,8 +158,60 @@ export class InMemoryEventStore implements EventStore {
     return Promise.resolve((this.logs.get(gameId)?.length ?? 0) > 0);
   }
 
+  findActiveGamesByPlayer(userId: string): Promise<ActiveGameRecord[]> {
+    const active: ActiveGameRecord[] = [];
+    for (const [gameId, log] of this.logs) {
+      const created = log[0]?.event;
+      if (created?.type !== 'GameCreated') continue;
+      if (created.players.white !== userId && created.players.black !== userId) continue;
+      if (log.some(({ event }) => event.type === 'GameEnded')) continue;
+      active.push({ gameId, players: { ...created.players } });
+    }
+    return Promise.resolve(active);
+  }
+
+  acquirePlayerLock(userId: string): Promise<() => Promise<void>> {
+    let lock = this.playerLocks.get(userId);
+    if (!lock) {
+      lock = new PlayerMutex();
+      this.playerLocks.set(userId, lock);
+    }
+    return lock.acquire().then((release) => async () => {
+      await release();
+      if (lock.idle && this.playerLocks.get(userId) === lock) this.playerLocks.delete(userId);
+    });
+  }
+
   /** Test/local-dev transaction compensation used by the in-memory seek acceptor. */
   _removeGame(gameId: string): void {
     this.logs.delete(gameId);
+  }
+}
+
+/** FIFO mutex used by the deterministic in-memory implementation. */
+class PlayerMutex {
+  private locked = false;
+  private readonly waiters: Array<() => void> = [];
+
+  get idle(): boolean {
+    return !this.locked && this.waiters.length === 0;
+  }
+
+  acquire(): Promise<() => Promise<void>> {
+    return new Promise((resolve) => {
+      const grant = (): void => {
+        this.locked = true;
+        let released = false;
+        resolve(async () => {
+          if (released) return;
+          released = true;
+          const next = this.waiters.shift();
+          if (next) next();
+          else this.locked = false;
+        });
+      };
+      if (this.locked) this.waiters.push(grant);
+      else grant();
+    });
   }
 }

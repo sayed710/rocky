@@ -18,9 +18,10 @@ import type { Repositories } from './deps';
 import { Game, classifySpeed } from '@chess-platform/game';
 import { parseRole, parseSeekColor, parseTimeControl, parseUuid, parseVariant, parseCreatableVariant, VARIANTS, CREATABLE_VARIANTS, HANDLE_PATTERN, UUID_PATTERN } from './domain';
 import { BOT_ACCOUNTS, botAccountByLevel } from './bot/catalogue';
+import { LiveGameAssistanceGuard } from './fair-play/live-game-assistance-guard';
 import { HttpError } from './http/errors';
 import { json, noContent } from './http/context';
-import type { RequestContext } from './http/context';
+import type { Handler, HandlerResult, RequestContext } from './http/context';
 import { Router } from './http/router';
 import type { AuthPolicy } from './http/router';
 import {
@@ -231,6 +232,43 @@ const MAX_SEARCH_LIMIT = 100;
 export function buildRouter(deps: RouteDeps): Router {
   const router = new Router();
   const { auth, repos, clock, ids, chess960Starts, info, rateLimiter, config } = deps;
+  const assistanceGuard = new LiveGameAssistanceGuard(repos.events);
+  const withAssistanceGuard = (
+    handler: (
+      ctx: RequestContext,
+      identity: NonNullable<RequestContext['auth']>,
+    ) => Promise<HandlerResult>,
+  ): Handler => async (ctx) => {
+    const identity = requireAuth(ctx);
+    await assistanceGuard.assertEligible(identity.userId);
+    const result = await handler(ctx, identity);
+    const release = await repos.events.acquirePlayerLock(identity.userId);
+    try {
+      await assistanceGuard.assertEligible(identity.userId);
+      return { ...result, afterWrite: release };
+    } catch (error) {
+      await release();
+      throw error;
+    }
+  };
+  const withAssistanceWriteGuard = (
+    handler: (
+      ctx: RequestContext,
+      identity: NonNullable<RequestContext['auth']>,
+    ) => Promise<HandlerResult>,
+  ): Handler => async (ctx) => {
+    const identity = requireAuth(ctx);
+    const release = await repos.events.acquirePlayerLock(identity.userId);
+    try {
+      await assistanceGuard.assertEligible(identity.userId);
+      const result = await handler(ctx, identity);
+      await assistanceGuard.assertEligible(identity.userId);
+      return { ...result, afterWrite: release };
+    } catch (error) {
+      await release();
+      throw error;
+    }
+  };
   const botService = new BotDetectionService(repos.botReports);
   const botAnalysis = deps.botTimingSource
     ? new BotAnalysisService(deps.botTimingSource, repos.botReports)
@@ -1543,14 +1581,14 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['AnalysisResponse', 'Engine analysis lines for the position'],
         401: ['Error', 'Authentication required'],
+        409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid position, variant or limits'],
         429: ['Error', 'Rate limit exceeded'],
         503: ['Error', 'Analysis is not configured, or the engine is saturated or unavailable'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const identity = requireAuth(ctx);
+    withAssistanceGuard(async (ctx, identity) => {
       const service = deps.analysis;
       if (!service) throw HttpError.unavailable('analysis is not configured');
 
@@ -1582,7 +1620,7 @@ export function buildRouter(deps: RouteDeps): Router {
       });
 
       return json(200, analysisView(outcome));
-    },
+    }),
   );
 
   // --- Puzzle Generation ---------------------------------------------------
@@ -1596,14 +1634,14 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['PuzzleGenerationResponse', 'Puzzle, no-tactic conclusion, or insufficient evidence'],
         401: ['Error', 'Authentication required'],
+        409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid position or unsupported variant'],
         429: ['Error', 'Rate limit exceeded'],
         503: ['Error', 'Puzzle generation is not configured, or the engine is unavailable'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const identity = requireAuth(ctx);
+    withAssistanceGuard(async (ctx, identity) => {
       const service = deps.puzzleGeneration;
       if (!service) throw HttpError.unavailable('puzzle generation is not configured');
 
@@ -1624,7 +1662,7 @@ export function buildRouter(deps: RouteDeps): Router {
 
       const outcome = await service.generate({ fen, variant }, charge);
       return json(200, puzzleGenerationView(outcome));
-    },
+    }),
   );
 
   // --- Opening Exploration ---------------------------------------------------
@@ -1642,14 +1680,14 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['OpeningExplorationResponse', 'The identified opening, or a clean no-match result'],
         401: ['Error', 'Authentication required'],
+        409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Unsupported variant or starting position, or a malformed, illegal or over-long move sequence'],
         429: ['Error', 'Rate limit exceeded'],
         503: ['Error', 'Opening exploration is not configured'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const identity = requireAuth(ctx);
+    withAssistanceGuard(async (ctx, identity) => {
       const service = deps.openingExploration;
       if (!service) throw HttpError.unavailable('opening exploration is not configured');
 
@@ -1682,7 +1720,7 @@ export function buildRouter(deps: RouteDeps): Router {
         ...(initialFen === undefined ? {} : { initialFen }),
       });
       return json(200, openingExplorationView(outcome));
-    },
+    }),
   );
 
   // --- Mistake Prediction ----------------------------------------------------
@@ -1700,14 +1738,14 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['MistakePredictionResponse', 'Engine-derived verdict for the move'],
         401: ['Error', 'Authentication required'],
+        409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid position, variant, move, illegal move, or a decided position'],
         429: ['Error', 'Rate limit exceeded'],
         503: ['Error', 'Analysis is not configured, or the engine is saturated or unavailable'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const identity = requireAuth(ctx);
+    withAssistanceGuard(async (ctx, identity) => {
       const service = deps.mistakePrediction;
       if (!service) throw HttpError.unavailable('mistake prediction is not configured');
 
@@ -1738,7 +1776,7 @@ export function buildRouter(deps: RouteDeps): Router {
       const outcome = await service.predict({ fen, variant, move }, charge);
 
       return json(200, mistakePredictionView(outcome));
-    },
+    }),
   );
 
   // --- Endgame Training (ADR-0128) -------------------------------------------
@@ -1851,14 +1889,14 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['CoachResponse', 'Every section, each either present or explicitly omitted with a reason'],
         401: ['Error', 'Authentication required'],
+        409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid FEN, variant, move, or an over-long move sequence'],
         429: ['Error', 'Rate limit exceeded'],
         503: ['Error', 'Coaching is not configured, or no feature could answer'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const identity = requireAuth(ctx);
+    withAssistanceGuard(async (ctx, identity) => {
       const service = deps.coach;
       if (!service) throw HttpError.unavailable('coaching is not configured');
 
@@ -1918,7 +1956,7 @@ export function buildRouter(deps: RouteDeps): Router {
       );
 
       return json(200, coachView(outcome));
-    },
+    }),
   );
 
   // --- Study Partner v1 -----------------------------------------------------
@@ -1932,20 +1970,22 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         201: ['StudyPartnerSession', 'Session created'],
         401: ['Error', 'Authentication required'],
+        409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid variant, FEN, or body'],
         503: ['Error', 'Study Partner is not configured'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const actorId = requireAuth(ctx).userId;
+    withAssistanceWriteGuard(async (ctx, identity) => {
+      const actorId = identity.userId;
       const service = deps.studyPartner;
       if (!service) throw HttpError.unavailable('study partner is not configured');
       const body = strictObject(ctx.body, ['variant', 'initialFen']);
       const variant = parseVariant(reqString(body, 'variant'));
       const initialFen = reqString(body, 'initialFen', { min: 1, max: 200, trim: true });
-      return json(201, studyPartnerSessionView(await service.create(actorId, variant, initialFen)));
-    },
+      const session = await service.create(actorId, variant, initialFen);
+      return json(201, studyPartnerSessionView(session));
+    }),
   );
 
   router.get(
@@ -1958,19 +1998,21 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['StudyPartnerSession', 'Owned session and its bounded turn history'],
         401: ['Error', 'Authentication required'],
+        409: ['Error', 'Caller is participating in an active human game'],
         404: ['Error', 'Session missing or not owned by the caller'],
         422: ['Error', 'Malformed session ID'],
         503: ['Error', 'Study Partner is not configured'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const actorId = requireAuth(ctx).userId;
+    withAssistanceGuard(async (ctx, identity) => {
+      const actorId = identity.userId;
       const service = deps.studyPartner;
       if (!service) throw HttpError.unavailable('study partner is not configured');
       const sessionId = parseUuid(ctx.params['id']!, 'id');
-      return json(200, studyPartnerSessionView(await service.get(actorId, sessionId)));
-    },
+      const session = await service.get(actorId, sessionId);
+      return json(200, studyPartnerSessionView(session));
+    }),
   );
 
   router.post(
@@ -1997,15 +2039,14 @@ export function buildRouter(deps: RouteDeps): Router {
         200: ['SubmitStudyPartnerTurnResponse', 'Turn committed or a completed request replayed'],
         401: ['Error', 'Authentication required'],
         404: ['Error', 'Session missing or not owned by the caller'],
-        409: ['Error', 'Version conflict, completed session, failed key, or turn in progress'],
+        409: ['Error', 'Active human game, version conflict, completed session, failed key, or turn in progress'],
         422: ['Error', 'Invalid move, key, body, or turn limit reached'],
         429: ['Error', 'Coach rate limit exceeded'],
         503: ['Error', 'Study Partner or coaching dependency unavailable'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const identity = requireAuth(ctx);
+    withAssistanceWriteGuard(async (ctx, identity) => {
       const service = deps.studyPartner;
       if (!service) throw HttpError.unavailable('study partner is not configured');
       const sessionId = parseUuid(ctx.params['id']!, 'id');
@@ -2032,7 +2073,7 @@ export function buildRouter(deps: RouteDeps): Router {
         charge,
       });
       return json(200, submitStudyPartnerTurnView(result));
-    },
+    }),
   );
 
   router.post(
@@ -2108,14 +2149,14 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['MoveExplanationResponse', 'Engine-grounded move explanation'],
         401: ['Error', 'Authentication required'],
+        409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid position, variant, move, or illegal move'],
         429: ['Error', 'Rate limit exceeded'],
         503: ['Error', 'Move explanation is not configured, or the provider is unavailable'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const identity = requireAuth(ctx);
+    withAssistanceGuard(async (ctx, identity) => {
       const service = deps.moveExplanation;
       if (!service) throw HttpError.unavailable('move explanation is not configured');
 
@@ -2145,7 +2186,7 @@ export function buildRouter(deps: RouteDeps): Router {
       const outcome = await service.explain({ fen, variant, move }, charge);
 
       return json(200, moveExplanationView(outcome));
-    },
+    }),
   );
 
   // --- Tournaments ---------------------------------------------------------
