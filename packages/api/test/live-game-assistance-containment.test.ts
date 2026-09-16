@@ -217,21 +217,34 @@ test('Study Partner writes acquire the player barrier before durable mutation', 
   const h = await startHarness();
   t.after(() => h.close());
   const player = await h.makeUser('study-write-barrier');
-  const release = await h.repos.events.acquirePlayerLock(player.userId);
-  let settled = false;
+  const originalAcquirePlayerLock = h.repos.events.acquirePlayerLock.bind(h.repos.events);
+  const release = await originalAcquirePlayerLock(player.userId);
+  let markLockAttempted!: () => void;
+  const lockAttempted = new Promise<void>((resolve) => { markLockAttempted = resolve; });
+  h.repos.events.acquirePlayerLock = async (userId) => {
+    if (userId === player.userId) markLockAttempted();
+    return originalAcquirePlayerLock(userId);
+  };
+  const originalCreateSession = h.repos.studyPartner.createSession.bind(h.repos.studyPartner);
+  let mutationEntered = false;
+  h.repos.studyPartner.createSession = async (input) => {
+    mutationEntered = true;
+    return originalCreateSession(input);
+  };
   const pending = h.json('POST', '/v1/study-partner/sessions', {
     token: player.token,
     body: { variant: 'standard', initialFen: START_FEN },
-  }).then((response) => {
-    settled = true;
-    return response;
   });
 
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(settled, false);
-  await release();
+  try {
+    await lockAttempted;
+    assert.equal(mutationEntered, false);
+  } finally {
+    await release();
+  }
 
   const response = await pending;
+  assert.equal(mutationEntered, true);
   assert.equal(response.status, 201);
 });
 

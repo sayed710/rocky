@@ -296,7 +296,13 @@ export class Router {
         // handler passed downstream. Removing it here keeps a long-lived socket from accumulating
         // one per request on a keep-alive connection.
         res.removeListener('close', onClose);
-        await result?.afterWrite?.();
+        try {
+          await result?.afterWrite?.();
+        } catch (cleanupError) {
+          // The response is already committed. Report cleanup failure without entering the outer
+          // response-error path, which would attempt to write a second response.
+          onInternal(cleanupError, requestId);
+        }
       }
 
       const durationMs = Date.now() - startMs;
