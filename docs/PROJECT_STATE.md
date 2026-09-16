@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
+_Last updated: 2026-09-16 — M15 Increment 59: production web delivery caching and compression contract._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
 
@@ -4236,11 +4238,10 @@ Per package: `cd packages/<pkg> && npm install && npm run build && npm test`.
 - Reserve backup files exclusively and clean up only resources created by the drill. Preserve restore and cleanup errors together while continuing other cleanup. Redact connection secrets from diagnostics, including CLI argument errors.
 - Verify append-only protection and valid, ready HNSW indexes on their specific public-schema relations. Added database-boundary and disposable-file regressions for native/Docker custom/plain orchestration and failure paths; live integration remains opt-in and was not run against an existing database.
 
+## M15 Increment 59 — Production web delivery caching and compression contract (2026-09-16)
 
-
-
-
-
-
-
-
+- Hardened production web delivery in `docker/web/nginx.conf.template` to implement optimized HTTP compression and safe caching headers.
+- **Compression**: Enabled `gzip on;`, `gzip_vary on;`, `gzip_proxied any;`, `gzip_comp_level 6;`, `gzip_min_length 1024;`, and MIME types for text/plain, text/css, text/xml, application/json, application/javascript, text/javascript, application/xml, image/svg+xml, and application/manifest+json.
+- **Content-Hashed Assets**: Route `/assets/*` enforces long-lived immutable caching (`Cache-Control: public, max-age=31536000, immutable`), returns 404 for missing assets without attaching immutable headers, and preserves all 7 security headers with `always`.
+- **SPA Shell & Static Mutable Files**: Root route `/` enforces safe revalidation (`Cache-Control: no-cache`), ensuring `index.html` and SPA deep-link fallback routes (`try_files $uri $uri/ /index.html;`) cannot permanently pin clients to stale asset references after deployments.
+- **Real Nginx Acceptance Suite**: Added `scripts/nginx-web-delivery-acceptance.mjs` and `npm run test:web-delivery` in `services/gateway`, validating all 10 delivery assertions (hashed asset caching, SPA shell freshness, deep-link fallback, gzip encoding, Vary header, API proxy safety, WebSocket upgrades, security headers preservation, 404 error routes, and uncompressed representation) through real Nginx containers in CI and local runners with zero test skips.
