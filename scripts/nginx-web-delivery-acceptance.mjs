@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import WebSocket from 'ws';
 import { waitForHealth } from './lib/wait-for-health.mjs';
@@ -127,11 +127,18 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     }
 
     const assetEntries = readdirSync(assetsDir);
-    hashedJsFile = assetEntries.find((f) => f.endsWith('.js') && !f.endsWith('.map'));
+    // Select a hashed JS asset meeting or exceeding Nginx's gzip minimum compression threshold (1024 bytes)
+    hashedJsFile = assetEntries.find((f) => {
+      if (!f.endsWith('.js') || f.endsWith('.map')) return false;
+      const stat = statSync(join(assetsDir, f));
+      return stat.size >= 1024;
+    });
     hashedCssFile = assetEntries.find((f) => f.endsWith('.css'));
 
     if (!hashedJsFile) {
-      throw new Error('No hashed JS asset found in packages/web/dist/assets');
+      throw new Error(
+        `No compressible hashed JS asset (>= 1024 bytes) found in packages/web/dist/assets (found: ${assetEntries.join(', ')})`
+      );
     }
 
     apiPort = await getFreePort();
