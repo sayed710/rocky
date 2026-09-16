@@ -13,7 +13,9 @@ test(
   { skip: process.env.DATABASE_URL ? false : 'DATABASE_URL not set' },
   async () => {
     await withTestDatabase(async ({ pool, connectionString }) => {
+      pool.on('error', () => {});
       await migrate(pool, migrationsDir);
+      await pool.end();
       const report = await runBackupRestoreDrill({
         sourceUrl: connectionString,
         keepTarget: false,
