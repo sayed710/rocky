@@ -43,4 +43,12 @@ test('zero-skip enforcer: detects real child test process self-skipping', async 
   assert.equal(code, 1, 'should return exit code 1 when child test self-skips');
 });
 
+test('zero-skip enforcer: does not falsely fail on test names containing the word skipped', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 145 - a stored game whose chess960 metadata is corrupt is skipped, not thrown from\\n# tests 1\\n# pass 1\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when test name contains the word skipped');
+});
+
 

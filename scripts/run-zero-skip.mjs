@@ -43,8 +43,13 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for test runner skip indicators across TAP, spec format, and serialized test events.
-      const summaryMatch = /\bskipped\s+([1-9]\d*)\b/i.exec(combinedOutput);
-      const individualSkipMatch = /(?:ok\s+\d+\s+-[^\n]+#\s*SKIP|[\ufe63\-]\s+[^\n]+#|#[ \t]*SKIP\b)/i.test(combinedOutput);
+      // 1. Look for TAP or spec summary line: "skipped 0", "skipped 1", etc.
+      const summaryMatch = /\bskipped:?\s+(\d+)\b/i.exec(combinedOutput);
+      // 2. Look for individual test skip directives:
+      // TAP: "ok 1 - test # SKIP [reason]" or "not ok 1 - test # SKIP [reason]"
+      // Spec: "- test # SKIP [reason]" or "- test (skipped)"
+      const individualSkipRegex = /(?:^|\r?\n)\s*(?:(?:ok|not ok)\s+\d+\s+-[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\))/i;
+      const individualSkipMatch = individualSkipRegex.test(combinedOutput);
 
       let skippedCount = 0;
       if (summaryMatch) {
@@ -63,7 +68,7 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
           /Windows terminates on kill\(\) without running handlers/i,
         ];
         const skipLines = combinedOutput.split(/\r?\n/).filter((line) =>
-          /#\s*SKIP/i.test(line) || /[\ufe63\-]\s+[^\n]+#/i.test(line) || /#.*(?:Windows|POSIX)/i.test(line)
+          /#\s*SKIP\b/i.test(line) || /[\ufe63\-]\s+[^\r\n]*\s+#\s*SKIP\b/i.test(line) || /#.*(?:Windows|POSIX)/i.test(line)
         );
         const allKnownPlatformSkips = skipLines.length > 0 && skipLines.every((line) =>
           windowsPlatformSkips.some((re) => re.test(line))
