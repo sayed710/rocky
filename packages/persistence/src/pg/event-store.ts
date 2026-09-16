@@ -11,6 +11,7 @@ import {
   CURRENT_EVENT_VERSION,
   upcast,
   type EventStore,
+  type ActiveGameRecord,
   type StoredEvent,
 } from '../event-store';
 import { ConcurrencyError, PersistenceError } from '../errors';
@@ -22,6 +23,12 @@ interface EventRow {
   event_version: number;
   payload: unknown;
   server_ts: Date;
+}
+
+interface ActiveGameRow {
+  game_id: string;
+  event_version: number;
+  payload: unknown;
 }
 
 const UNIQUE_VIOLATION = '23505';
@@ -113,5 +120,33 @@ export class PostgresEventStore implements EventStore {
       [gameId],
     );
     return res.rowCount !== null && res.rowCount > 0;
+  }
+
+  async findActiveGamesByPlayer(userId: string): Promise<ActiveGameRecord[]> {
+    const res = await this.pool.query<ActiveGameRow>(
+      `SELECT created.game_id, created.event_version, created.payload
+       FROM game_events AS created
+       WHERE created.seq = 0
+         AND created.type = 'GameCreated'
+         AND (
+           created.payload->'players' @> jsonb_build_object('white', $1::text)
+           OR created.payload->'players' @> jsonb_build_object('black', $1::text)
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM game_events AS ended
+           WHERE ended.game_id = created.game_id
+             AND ended.type = 'GameEnded'
+         )
+       ORDER BY created.server_ts DESC, created.game_id DESC`,
+      [userId],
+    );
+    return res.rows.map((row) => {
+      const event = upcast('GameCreated', Number(row.event_version), row.payload);
+      if (event.type !== 'GameCreated') {
+        throw new PersistenceError(`game ${row.game_id} starts with a non-GameCreated payload`);
+      }
+      return { gameId: row.game_id, players: { ...event.players } };
+    });
   }
 }

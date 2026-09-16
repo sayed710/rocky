@@ -2469,6 +2469,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid position, variant or limits",
             "content": {
@@ -2547,6 +2557,16 @@
           },
           "401": {
             "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Caller is participating in an active human game",
             "content": {
               "application/json": {
                 "schema": {
@@ -2641,6 +2661,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Unsupported variant or starting position, or a malformed, illegal or over-long move sequence",
             "content": {
@@ -2719,6 +2749,16 @@
           },
           "401": {
             "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Caller is participating in an active human game",
             "content": {
               "application/json": {
                 "schema": {
@@ -2985,6 +3025,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid FEN, variant, move, or an over-long move sequence",
             "content": {
@@ -3071,6 +3121,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid variant, FEN, or body",
             "content": {
@@ -3149,6 +3209,16 @@
           },
           "404": {
             "description": "Session missing or not owned by the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Caller is participating in an active human game",
             "content": {
               "application/json": {
                 "schema": {
@@ -3333,7 +3403,7 @@
             }
           },
           "409": {
-            "description": "Version conflict, completed session, failed key, or turn in progress",
+            "description": "Active human game, version conflict, completed session, failed key, or turn in progress",
             "content": {
               "application/json": {
                 "schema": {
@@ -3550,6 +3620,16 @@
           },
           "401": {
             "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Caller is participating in an active human game",
             "content": {
               "application/json": {
                 "schema": {

@@ -190,6 +190,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let gameReviewCapabilities: unknown = null;
   let gameOver = false;
   let isGamePlayer = false;
+  let isHumanGame = false;
   let gameReviewPending = false;
   let gameReviewSessionId = deps.initialSessionId ?? null;
   let authoritativeGameFen: string | null = null;
@@ -281,6 +282,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     return Boolean(getAccessToken() ?? deps.client.session.current?.tokens.accessToken);
   };
 
+  /** UI-only reinforcement; the API independently enforces the account-wide boundary. */
+  const liveHumanGameBlocksAssistance = (): boolean =>
+    isGamePlayer && isHumanGame && !gameOver;
+
   /** Whether there is actually something on the board to analyse yet. */
   const hasPosition = (): boolean => Boolean(currentVariant) && Boolean(controller?.fen);
 
@@ -312,6 +317,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unsupportedVariant);
     }
 
+    const blocked = liveHumanGameBlocksAssistance();
+    if (analysisSectionEl) analysisSectionEl.hidden = analysisUnsupported || blocked;
+    if (blocked) {
+      if (analysisRunBtn) analysisRunBtn.disabled = true;
+      return;
+    }
     const authed = isUserAuthenticated();
     if (analysisRunBtn) {
       analysisRunBtn.disabled = !authed || analysisUnsupported || analysisController.isPending || !hasPosition();
@@ -356,7 +367,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       !puzzleGenerationSupportsVariant(puzzleCapabilities, currentVariant)
     ) puzzleUnsupported = true;
 
-    const servable = !puzzleUnsupported;
+    const servable = !puzzleUnsupported && !liveHumanGameBlocksAssistance();
     if (puzzleBlockEl) puzzleBlockEl.hidden = !servable;
     if (!servable) return;
     const authed = isUserAuthenticated();
@@ -450,7 +461,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
    */
   const refreshCoachControls = (): void => {
     if (analysisDisposed || !coachAvailable) return;
-    if (coachBlockEl) coachBlockEl.hidden = false;
+    const blocked = liveHumanGameBlocksAssistance();
+    if (coachBlockEl) coachBlockEl.hidden = blocked;
+    if (blocked) {
+      if (coachRunBtn) coachRunBtn.disabled = true;
+      return;
+    }
     const authed = isUserAuthenticated();
     if (coachRunBtn) {
       coachRunBtn.disabled = !authed || coachTarget() === null || coachController.isPending;
@@ -516,7 +532,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   /** Bring the button state and the note back into agreement with the game and the session. */
   const refreshOpeningControls = (): void => {
     if (analysisDisposed || !openingAvailable) return;
-    if (openingBlockEl) openingBlockEl.hidden = false;
+    const blocked = liveHumanGameBlocksAssistance();
+    if (openingBlockEl) openingBlockEl.hidden = blocked;
+    if (blocked) {
+      if (openingRunBtn) openingRunBtn.disabled = true;
+      return;
+    }
     const authed = isUserAuthenticated();
     const availability = openingAvailability();
     if (openingRunBtn) {
@@ -627,7 +648,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     // enabled control whose every request answers 422 — the exact failure ADR-0114 Decision 7 was
     // written about. Raised in the Qodo review of PR #135.
     const servable =
-      currentVariant === null || moveExplanationSupportsVariant(explainCapabilities, currentVariant);
+      !liveHumanGameBlocksAssistance()
+      && (currentVariant === null || moveExplanationSupportsVariant(explainCapabilities, currentVariant));
     if (explainBlockEl) explainBlockEl.hidden = !servable;
     if (!servable) return;
 
@@ -689,7 +711,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (analysisDisposed || !assessAvailable) return;
 
     const servable =
-      currentVariant === null || mistakePredictionSupportsVariant(assessCapabilities, currentVariant);
+      !liveHumanGameBlocksAssistance()
+      && (currentVariant === null || mistakePredictionSupportsVariant(assessCapabilities, currentVariant));
     if (assessBlockEl) assessBlockEl.hidden = !servable;
     if (!servable) return;
 
@@ -1230,8 +1253,15 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onActionState: (state) => {
         isGamePlayer = state.isPlayer;
+        isHumanGame = state.isHumanGame;
         gameOver = state.isOver;
         refreshGameReview();
+        refreshAnalysisControls();
+        refreshPuzzleControls();
+        refreshOpeningControls();
+        refreshCoachControls();
+        refreshExplainControls();
+        refreshAssessControls();
         if (actionsPanelEl) actionsPanelEl.hidden = !state.isPlayer;
         if (!state.isPlayer) return;
 

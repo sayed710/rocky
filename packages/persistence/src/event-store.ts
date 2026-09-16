@@ -24,6 +24,15 @@ export interface StoredEvent {
   readonly serverTs: number;
 }
 
+/** A game whose durable stream has started and has not emitted `GameEnded`. */
+export interface ActiveGameRecord {
+  readonly gameId: string;
+  readonly players: {
+    readonly white: string;
+    readonly black: string;
+  };
+}
+
 /**
  * Durable, append-only game event log. Implementations must:
  *  - reject an append whose `expectedSeq` != current head (optimistic concurrency);
@@ -43,6 +52,8 @@ export interface EventStore {
   loadSince(gameId: string, afterSeq: number): Promise<StoredEvent[]>;
   /** Whether any events exist for a game. */
   exists(gameId: string): Promise<boolean>;
+  /** Active games in which `userId` occupies either seat, derived from the durable event log. */
+  findActiveGamesByPlayer(userId: string): Promise<ActiveGameRecord[]>;
 }
 
 // --- Schema evolution (upcasters) -----------------------------------------
@@ -116,6 +127,18 @@ export class InMemoryEventStore implements EventStore {
 
   exists(gameId: string): Promise<boolean> {
     return Promise.resolve((this.logs.get(gameId)?.length ?? 0) > 0);
+  }
+
+  findActiveGamesByPlayer(userId: string): Promise<ActiveGameRecord[]> {
+    const active: ActiveGameRecord[] = [];
+    for (const [gameId, log] of this.logs) {
+      const created = log[0]?.event;
+      if (created?.type !== 'GameCreated') continue;
+      if (created.players.white !== userId && created.players.black !== userId) continue;
+      if (log.some(({ event }) => event.type === 'GameEnded')) continue;
+      active.push({ gameId, players: { ...created.players } });
+    }
+    return Promise.resolve(active);
   }
 
   /** Test/local-dev transaction compensation used by the in-memory seek acceptor. */

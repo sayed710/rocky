@@ -59,6 +59,29 @@ test('exists reflects whether a game has any events', async () => {
   assert.equal(await s.exists('g1'), true);
 });
 
+test('findActiveGamesByPlayer derives participation from GameCreated through GameEnded', async () => {
+  const s = new InMemoryEventStore();
+  const active = { ...created, gameId: 'active', players: { white: 'target', black: 'other' } };
+  const finished = { ...created, gameId: 'finished', players: { white: 'other', black: 'target' } };
+  const unrelated = { ...created, gameId: 'unrelated', players: { white: 'third', black: 'fourth' } };
+  await s.append('active', -1, [active]);
+  await s.append('finished', -1, [finished]);
+  await s.append('finished', 0, [{
+    type: 'GameEnded',
+    result: '1-0',
+    termination: 'resignation',
+    winner: 'w',
+    at: 2,
+  }]);
+  await s.append('unrelated', -1, [unrelated]);
+
+  assert.deepEqual(await s.findActiveGamesByPlayer('target'), [{
+    gameId: 'active',
+    players: { white: 'target', black: 'other' },
+  }]);
+  assert.deepEqual(await s.findActiveGamesByPlayer('missing'), []);
+});
+
 test('stored events are isolated from later caller mutation', async () => {
   const s = new InMemoryEventStore();
   await s.append('g1', -1, [created]);

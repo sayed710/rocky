@@ -4,6 +4,7 @@
  */
 
 import type { StrengthSpec } from '@chess-platform/engine';
+import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
 
 export type BotLevel = 'novice' | 'club' | 'master';
 
@@ -17,19 +18,19 @@ export interface BotAccount {
 export const BOT_ACCOUNTS: readonly BotAccount[] = [
   {
     level: 'novice',
-    userId: '00000000-0000-7000-8000-000000000001',
+    userId: ENGINE_BOT_USER_IDS.novice,
     handle: 'gambit-novice',
     strength: { elo: 1350 },
   },
   {
     level: 'club',
-    userId: '00000000-0000-7000-8000-000000000002',
+    userId: ENGINE_BOT_USER_IDS.club,
     handle: 'gambit-club',
     strength: { elo: 1750 },
   },
   {
     level: 'master',
-    userId: '00000000-0000-7000-8000-000000000003',
+    userId: ENGINE_BOT_USER_IDS.master,
     handle: 'gambit-master',
     strength: { elo: 2200 },
   },
