@@ -50,6 +50,11 @@ export const SUITE_DEFINITIONS = [
     target: 'npm run test:diagnostics:abort -w @chess-platform/api',
   },
   {
+    name: 'api-posix-unit',
+    pattern: /^packages\/api\/test\/.*\.posix\.test\.ts$/,
+    target: 'npm run test:posix -w @chess-platform/api',
+  },
+  {
     name: 'api-unit',
     pattern: /^packages\/api\/test\/.*\.test\.ts$/,
     target: 'npm test -w @chess-platform/api (build-test)',
@@ -83,6 +88,11 @@ export const SUITE_DEFINITIONS = [
     name: 'scripts-unit',
     pattern: /^scripts\/test\/.*\.test\.mjs$/,
     target: 'npm run test:scripts (build-test)',
+  },
+  {
+    name: 'load-harness-posix',
+    pattern: /^deploy\/load\/test\/.*\.posix\.test\.mjs$/,
+    target: 'npm run test:load-harness:posix',
   },
   {
     name: 'load-harness-unit',

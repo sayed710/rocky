@@ -108,6 +108,15 @@ const SERVICE_JOBS = [
       ['trusted edge through real Nginx', 'npm run test:trusted-edge'],
     ],
   },
+  {
+    name: 'posix contract tests (Linux/macOS only)',
+    needs: 'POSIX platform',
+    available: process.platform !== 'win32',
+    steps: [
+      ['POSIX API tests', 'npm run test:posix -w @chess-platform/api'],
+      ['POSIX load harness tests', 'npm run test:load-harness:posix'],
+    ],
+  },
 ];
 
 /**

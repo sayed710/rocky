@@ -67,4 +67,21 @@ test('zero-skip enforcer: fails when child process is terminated by a signal', a
   assert.equal(code, 1, 'should return exit code 1 when child process is killed by signal');
 });
 
+test('zero-skip enforcer: fails when child process exits 0 with arbitrary text and no test summary', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("Hello world, no tests here");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when arbitrary text without test summary is output');
+});
+
+test('zero-skip enforcer: fails unconditionally when a skip is reported', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("not ok 1 - test # SKIP SIGTERM on Windows terminates without running handlers\\n# tests 1\\n# pass 0\\n# skipped 1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when test is skipped regardless of platform');
+});
+
+
 

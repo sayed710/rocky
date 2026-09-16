@@ -48,13 +48,43 @@ We establish an explicit, partitioned test architecture across all packages, gua
 
 7. **Zero-Skip Enforcer (`scripts/run-zero-skip.mjs`)**:
    - Wraps test invocations, streams runner output in real time, parses TAP/spec skip counts, and fails with exit code 1 if any test is skipped.
+   - Requires `totalTests > 0`: exits 1 with "No executed tests detected" when a process exits 0 with arbitrary text and no test summary, preventing false-green on misconfigured commands.
+   - Windows platform laundering removed: no skip bypass based on `process.platform`.
 
 8. **Topology Invariant Guard (`scripts/check-test-topology.mjs`)**:
-   - Scans all 390+ test files across the repository to verify that every test file is mapped to an explicit suite and no file is orphaned or unclassified.
+   - Scans all 396 test files across the repository to verify that every test file is mapped to an explicit suite and no file is orphaned or unclassified.
    - Enforced in `npm run check:test-topology` in `build-test` CI and `scripts/ci-local.mjs`.
+
+9. **POSIX Suite Partition**:
+   - Tests that require POSIX-only OS guarantees (SIGTERM process-tree teardown, `chmod`/permission bits) are extracted from cross-platform files into dedicated `*.posix.test.ts` / `*.posix.test.mjs` files.
+   - Affected files: `packages/api/test/diagnostics/signature-b-correlate.posix.test.ts` (2 tests) and `deploy/load/test/run-evidence.posix.test.mjs` (1 test).
+   - These suites run in dedicated `api-posix-unit` and `load-harness-posix` CI steps (Linux only) so they genuinely execute with `skipped = 0` on CI and are excluded from Windows runs without laundering.
+
+10. **Live Provider Self-Contained Build**:
+    - `test:live-provider` in `packages/ai-orchestrator` and `packages/ai-features` now unconditionally prepends `npm run build:test &&`, ensuring live integration test files are compiled before the runner is invoked.
+
+## Open PR Overlap
+
+PR #57 (`gemini/ci-zero-skip-architecture`) shares **4 files** with open PR #56
+(`gemini/web-delivery-cache-compression`):
+
+| File | PR #57 change | PR #56 change |
+|------|--------------|--------------|
+| `.github/workflows/ci.yml` | Adds POSIX suite steps and zero-skip enforcement | Adds cache/compression middleware step |
+| `docs/PROJECT_STATE.md` | Appends M15 Increment 59 entry | Appends its own increment entry |
+| `scripts/ci-local.mjs` | Adds posix contract tests job | Adds gateway compression job |
+| `services/gateway/package.json` | No direct change (topology reference only) | Adds compression middleware dependency |
+
+**Resolution order**: PR #57 is foundational CI infrastructure. PR #56 must be
+rebased onto the merge commit of PR #57 before it can land. The 4-file overlap
+is documented here so reviewers can coordinate the rebase.
+
+PR #55 (`fix/fair-play-live-game-containment`) has **zero file overlap** with PR #57.
 
 ## Consequences
 
 - Zero tests are skipped in PR CI: every executed test genuinely runs and asserts its specification against its required environment.
 - Flaky or unconfigured external services cannot cause false-green skipped test reports.
 - Developers and reviewers get immediate notification if a new test is unclassified or improperly self-skipped.
+- POSIX-only tests execute genuinely on Linux CI without any skip laundering; they are excluded on Windows without polluting hermetic suite counts.
+- False-green on arbitrary text output is eliminated by requiring a positive test count before accepting an exit-0 result.

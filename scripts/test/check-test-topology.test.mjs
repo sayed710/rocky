@@ -23,6 +23,7 @@ test('topology: classifyTestFile correctly maps each suite pattern', () => {
   assert.equal(classifyTestFile('packages/api/test/pg-security.integration.test.ts')?.name, 'api-postgres-integration');
   assert.equal(classifyTestFile('packages/api/test/analysis-stockfish-smoke.test.ts')?.name, 'api-engine-smoke');
   assert.equal(classifyTestFile('packages/api/test/diagnostics/signature-b-preload-abort.diag.ts')?.name, 'api-diagnostics');
+  assert.equal(classifyTestFile('packages/api/test/diagnostics/signature-b-correlate.posix.test.ts')?.name, 'api-posix-unit');
   assert.equal(classifyTestFile('packages/api/test/auth.test.ts')?.name, 'api-unit');
   assert.equal(classifyTestFile('packages/ai-orchestrator/test/adapters-live.integration.test.ts')?.name, 'ai-orchestrator-live-provider');
   assert.equal(classifyTestFile('packages/ai-orchestrator/test/orchestrator.test.ts')?.name, 'ai-orchestrator-unit');
@@ -30,6 +31,7 @@ test('topology: classifyTestFile correctly maps each suite pattern', () => {
   assert.equal(classifyTestFile('packages/ai-features/test/coach.test.ts')?.name, 'ai-features-unit');
   assert.equal(classifyTestFile('scripts/test/backup-restore-drill.integration.test.mjs')?.name, 'scripts-postgres-integration');
   assert.equal(classifyTestFile('scripts/test/zero-skip-enforcement.test.mjs')?.name, 'scripts-unit');
+  assert.equal(classifyTestFile('deploy/load/test/run-evidence.posix.test.mjs')?.name, 'load-harness-posix');
   assert.equal(classifyTestFile('deploy/load/test/run-evidence.test.mjs')?.name, 'load-harness-unit');
   assert.equal(classifyTestFile('packages/chess-core/test/fen.test.ts')?.name, 'domain-hermetic-unit');
 });

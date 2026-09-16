@@ -157,6 +157,12 @@ jobs:
       - name: Load harness contract tests
         run: npm run test:load-harness
 
+      - name: POSIX API tests
+        run: npm run test:posix -w @chess-platform/api
+
+      - name: POSIX load harness tests
+        run: npm run test:load-harness:posix
+
       # The container images build with their own package chain, which CI never exercises — it
       # builds from the root chain instead. That gap let `docker compose up --build` stay broken
       # from M11 inc 5 onwards while every gate here was green. Static, so it costs seconds.

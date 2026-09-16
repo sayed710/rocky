@@ -47,11 +47,18 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         return;
       }
 
-      // Guard against empty test runs (e.g. invalid glob or 0 tests executed)
-      const testsMatch = /\btests\s+(\d+)\b/i.exec(combinedOutput);
-      if (testsMatch && Number.parseInt(testsMatch[1], 10) === 0) {
+      // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed)
+      const testsMatch = /(?:^|\r?\n|\b)\s*[#ℹ]?\s*tests:?\s+(\d+)\b/i.exec(combinedOutput);
+      let totalTests = testsMatch ? Number.parseInt(testsMatch[1], 10) : null;
+      if (totalTests === null) {
+        const planMatch = /(?:^|\r?\n)1\.\.(\d+)/.exec(combinedOutput);
+        if (planMatch) {
+          totalTests = Number.parseInt(planMatch[1], 10);
+        }
+      }
+      if (totalTests === null || totalTests === 0) {
         process.stderr.write(
-          `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test runner reported 0 tests executed.\x1b[0m\n`
+          `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: No executed tests detected in output (total=${totalTests}).\x1b[0m\n`
         );
         resolve(1);
         return;
@@ -71,26 +78,6 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         skippedCount = Number.parseInt(summaryMatch[1], 10);
       } else if (individualSkipMatch) {
         skippedCount = 1;
-      }
-
-      // In Linux CI (ubuntu-latest), NO skips are permitted under ANY circumstances.
-      // On Windows local checkouts, exactly 3 POSIX-only tests cannot physically run because Windows
-      // lacks POSIX signal delivery (SIGTERM) and POSIX file permission bits.
-      if (skippedCount > 0 && process.platform === 'win32' && !process.env.STRICT_ZERO_SKIP) {
-        const windowsPlatformSkips = [
-          /SIGTERM on Windows terminates without running handlers/i,
-          /POSIX permission bits are not meaningful on Windows/i,
-          /Windows terminates on kill\(\) without running handlers/i,
-        ];
-        const skipLines = combinedOutput.split(/\r?\n/).filter((line) =>
-          /#\s*SKIP\b/i.test(line) || /[\ufe63\-]\s+[^\r\n]*\s+#\s*SKIP\b/i.test(line) || /#.*(?:Windows|POSIX)/i.test(line)
-        );
-        const allKnownPlatformSkips = skipLines.length > 0 && skipLines.every((line) =>
-          windowsPlatformSkips.some((re) => re.test(line))
-        );
-        if (allKnownPlatformSkips) {
-          skippedCount = 0;
-        }
       }
 
       if (skippedCount > 0) {

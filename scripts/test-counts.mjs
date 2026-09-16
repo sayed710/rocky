@@ -78,6 +78,18 @@ const SERVICE_SUITES = [
     envReq: 'OPENAI_API_KEY | ANTHROPIC_API_KEY',
     isAvailable: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY),
   },
+  {
+    name: 'api (posix unit)',
+    args: ['run', 'test:posix', '--workspace', '@chess-platform/api'],
+    envReq: 'POSIX platform required',
+    isAvailable: process.platform !== 'win32',
+  },
+  {
+    name: 'load-harness (posix)',
+    args: ['run', 'test:load-harness:posix'],
+    envReq: 'POSIX platform required',
+    isAvailable: process.platform !== 'win32',
+  },
 ];
 
 let total = 0;
@@ -107,7 +119,7 @@ for (const [name, args] of HERMETIC_SUITES) {
   console.log(`${name}: ${tests} passed, ${failed} failed, ${skipped} skipped`);
   total += tests;
   skippedTotal += skipped;
-  if (skipped > 0 && process.platform !== 'win32') {
+  if (skipped > 0) {
     hadError = true;
   }
 }

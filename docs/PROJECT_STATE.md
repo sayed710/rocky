@@ -6,7 +6,7 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-17 — M15 Increment 59: Zero test-skip CI architecture and suite partitioning._
+_Last updated: 2026-09-17 — M15 Increment 59a: Zero test-skip CI architecture — POSIX partition, false-green hardening, live-build self-containment, and PR #56 overlap disclosure._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
 
@@ -4253,6 +4253,17 @@ Per package: `cd packages/<pkg> && npm install && npm run build && npm test`.
   - `scripts/check-test-topology.mjs`: Invariant guard verifying that every test file in the monorepo is classified into an explicit suite and none are orphaned.
   - `scripts/test-counts.mjs`: Detailed test suite count and skip auditor reporting per-suite pass/fail/skip totals.
 - Detailed in `docs/adr/0142-zero-test-skip-ci-architecture.md`.
+
+## M15 Increment 59a — Zero test-skip CI architecture: ChatGPT blocker fixes and PR overlap disclosure — 2026-09-17
+
+Addresses four blocking review findings identified by ChatGPT independent review on PR #57 (`gemini/ci-zero-skip-architecture`, HEAD `27c3c66`):
+
+- **Blocker 1 — Live provider self-contained build**: `test:live-provider` in `packages/ai-orchestrator` and `packages/ai-features` now unconditionally prepends `npm run build:test &&`. Previously the script ran `dist-test` files without guaranteeing compilation, causing spurious failures when invoked in isolation.
+- **Blocker 2 — False-green on missing test output**: `scripts/run-zero-skip.mjs` now requires `totalTests !== null && totalTests > 0`. A process that exits 0 with arbitrary text and no test-count line fails with "No executed tests detected". Regex updated to recognise TAP plan (`1..N`) and `tests: N` formats. Two regression tests added to `scripts/test/zero-skip-enforcement.test.mjs`.
+- **Blocker 3 — POSIX suite partition and Windows laundering removal**: Three POSIX-only tests extracted into dedicated `*.posix.test.ts` / `*.posix.test.mjs` files. Dedicated `api-posix-unit` and `load-harness-posix` CI steps added (Linux only). The entire `if (process.platform === 'win32')` skip-laundering block removed from `scripts/run-zero-skip.mjs`. Topology passes: 396 files, 20 suites, 0 unclassified.
+- **Blocker 4 — PR #56 overlap disclosure**: PR #57 shares 4 files with open PR #56 (`gemini/web-delivery-cache-compression`): `.github/workflows/ci.yml`, `docs/PROJECT_STATE.md`, `scripts/ci-local.mjs`, `services/gateway/package.json`. PR #57 is foundational; PR #56 must be rebased after PR #57 lands. PR #55 has zero file overlap with PR #57. Overlap table documented in `docs/adr/0142-zero-test-skip-ci-architecture.md` §"Open PR Overlap".
+
+
 
 
 
