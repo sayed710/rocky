@@ -133,11 +133,21 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
       const stat = statSync(join(assetsDir, f));
       return stat.size >= 1024;
     });
-    hashedCssFile = assetEntries.find((f) => f.endsWith('.css'));
+    // Select a hashed CSS asset meeting or exceeding Nginx's gzip minimum compression threshold (1024 bytes)
+    hashedCssFile = assetEntries.find((f) => {
+      if (!f.endsWith('.css') || f.endsWith('.map')) return false;
+      const stat = statSync(join(assetsDir, f));
+      return stat.size >= 1024;
+    });
 
     if (!hashedJsFile) {
       throw new Error(
         `No compressible hashed JS asset (>= 1024 bytes) found in packages/web/dist/assets (found: ${assetEntries.join(', ')})`
+      );
+    }
+    if (!hashedCssFile) {
+      throw new Error(
+        `No compressible hashed CSS asset (>= 1024 bytes) found in packages/web/dist/assets (found: ${assetEntries.join(', ')})`
       );
     }
 
@@ -278,53 +288,59 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
   });
 
   test('4. gzip: compressible production resource with Accept-Encoding: gzip demonstrates Content-Encoding: gzip', async () => {
-    // 4a. Verify fetch sees Content-Encoding: gzip
-    const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${hashedJsFile}`, {
-      headers: {
-        'Accept-Encoding': 'gzip',
-      },
-    });
-    assert.equal(res.status, 200);
-    assert.equal(res.headers.get('content-encoding'), 'gzip', 'Compressible asset must be served with Content-Encoding: gzip');
-
-    // 4b. Fetch raw wire bytes via http.request to prove wire compression and decompress with gunzipSync
-    const { statusCode, headers, rawWireBody } = await new Promise((resolveReq, rejectReq) => {
-      const req = httpRequest({
-        hostname: '127.0.0.1',
-        port: nginxPort,
-        path: `/assets/${hashedJsFile}`,
-        method: 'GET',
+    for (const assetFile of [hashedJsFile, hashedCssFile]) {
+      // 4a. Verify fetch sees Content-Encoding: gzip
+      const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${assetFile}`, {
         headers: {
           'Accept-Encoding': 'gzip',
         },
-      }, (incoming) => {
-        const chunks = [];
-        incoming.on('data', (c) => chunks.push(c));
-        incoming.on('end', () => resolveReq({
-          statusCode: incoming.statusCode,
-          headers: incoming.headers,
-          rawWireBody: Buffer.concat(chunks),
-        }));
       });
-      req.on('error', rejectReq);
-      req.end();
-    });
+      assert.equal(res.status, 200);
+      assert.equal(
+        res.headers.get('content-encoding'),
+        'gzip',
+        `Compressible asset ${assetFile} must be served with Content-Encoding: gzip`,
+      );
 
-    assert.equal(statusCode, 200);
-    assert.equal(headers['content-encoding'], 'gzip', 'Wire response must declare content-encoding: gzip');
+      // 4b. Fetch raw wire bytes via http.request to prove wire compression and decompress with gunzipSync
+      const { statusCode, headers, rawWireBody } = await new Promise((resolveReq, rejectReq) => {
+        const req = httpRequest({
+          hostname: '127.0.0.1',
+          port: nginxPort,
+          path: `/assets/${assetFile}`,
+          method: 'GET',
+          headers: {
+            'Accept-Encoding': 'gzip',
+          },
+        }, (incoming) => {
+          const chunks = [];
+          incoming.on('data', (c) => chunks.push(c));
+          incoming.on('end', () => resolveReq({
+            statusCode: incoming.statusCode,
+            headers: incoming.headers,
+            rawWireBody: Buffer.concat(chunks),
+          }));
+        });
+        req.on('error', rejectReq);
+        req.end();
+      });
 
-    // Gzip magic bytes check (0x1f, 0x8b)
-    assert.equal(rawWireBody[0], 0x1f, 'First magic byte of gzip header must be 0x1f');
-    assert.equal(rawWireBody[1], 0x8b, 'Second magic byte of gzip header must be 0x8b');
+      assert.equal(statusCode, 200);
+      assert.equal(headers['content-encoding'], 'gzip', `Wire response for ${assetFile} must declare content-encoding: gzip`);
 
-    const diskContent = readFileSync(join(webDistPath, 'assets', hashedJsFile), 'utf8');
-    assert.ok(
-      rawWireBody.length < Buffer.byteLength(diskContent),
-      `Compressed wire size (${rawWireBody.length} bytes) must be smaller than raw size (${Buffer.byteLength(diskContent)} bytes)`,
-    );
+      // Gzip magic bytes check (0x1f, 0x8b)
+      assert.equal(rawWireBody[0], 0x1f, `First magic byte of gzip header for ${assetFile} must be 0x1f`);
+      assert.equal(rawWireBody[1], 0x8b, `Second magic byte of gzip header for ${assetFile} must be 0x8b`);
 
-    const decompressed = gunzipSync(rawWireBody).toString('utf8');
-    assert.equal(decompressed, diskContent, 'Decompressed wire bytes must match original disk content');
+      const diskContent = readFileSync(join(webDistPath, 'assets', assetFile), 'utf8');
+      assert.ok(
+        rawWireBody.length < Buffer.byteLength(diskContent),
+        `Compressed wire size for ${assetFile} (${rawWireBody.length} bytes) must be smaller than raw size (${Buffer.byteLength(diskContent)} bytes)`,
+      );
+
+      const decompressed = gunzipSync(rawWireBody).toString('utf8');
+      assert.equal(decompressed, diskContent, `Decompressed wire bytes for ${assetFile} must match original disk content`);
+    }
   });
 
   test('5. Vary: response includes Accept-Encoding variation', async () => {
@@ -419,16 +435,18 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
   });
 
   test('10. Hashed asset without gzip Accept-Encoding: returns valid original uncompressed representation', async () => {
-    const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${hashedJsFile}`, {
-      headers: {
-        'Accept-Encoding': 'identity',
-      },
-    });
-    assert.equal(res.status, 200);
-    assert.equal(res.headers.get('content-encoding'), null, 'Identity request must not receive Content-Encoding');
+    for (const assetFile of [hashedJsFile, hashedCssFile]) {
+      const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${assetFile}`, {
+        headers: {
+          'Accept-Encoding': 'identity',
+        },
+      });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-encoding'), null, `Identity request for ${assetFile} must not receive Content-Encoding`);
 
-    const text = await res.text();
-    const diskContent = readFileSync(join(webDistPath, 'assets', hashedJsFile), 'utf8');
-    assert.equal(text, diskContent, 'Uncompressed response body must exactly match disk content');
+      const text = await res.text();
+      const diskContent = readFileSync(join(webDistPath, 'assets', assetFile), 'utf8');
+      assert.equal(text, diskContent, `Uncompressed response body for ${assetFile} must exactly match disk content`);
+    }
   });
 });
