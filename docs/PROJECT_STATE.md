@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
+_Last updated: 2026-09-17 — M15 Increment 59: Zero test-skip CI architecture and suite partitioning._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
 
@@ -4235,6 +4237,23 @@ Per package: `cd packages/<pkg> && npm install && npm run build && npm test`.
 - Bounded generated target names to 63 ASCII bytes, reject oversized explicit names and connection query overrides, escape catalog-derived table identifiers, and preserve row counts for special property names.
 - Reserve backup files exclusively and clean up only resources created by the drill. Preserve restore and cleanup errors together while continuing other cleanup. Redact connection secrets from diagnostics, including CLI argument errors.
 - Verify append-only protection and valid, ready HNSW indexes on their specific public-schema relations. Added database-boundary and disposable-file regressions for native/Docker custom/plain orchestration and failure paths; live integration remains opt-in and was not run against an existing database.
+
+## M15 Increment 59 — Zero test-skip CI architecture and suite partitioning — 2026-09-17
+
+- **Problem solved**: The repository previously allowed test self-skipping across packages when services (PostgreSQL, Stockfish, live AI keys) were not provisioned. In PR CI, dozens of tests were skipped in `build-test` (`packages/persistence`, `packages/api`, `packages/ai-orchestrator`, `packages/ai-features`, `scripts/test`). This violated the owner's strict zero-test-skip gate (`failed = 0`, `skipped = 0`).
+- **Partitioned suite architecture**:
+  - Hermetic Unit Suites (`build-test`): `npm test` across all workspaces runs purely hermetic tests with zero services, zero network, zero skips.
+  - PostgreSQL Integration Suites (`postgres-integration`): `npm run test:integration:postgres` for `persistence` and `api`, and `npm run test:scripts:integration` run against real PostgreSQL 16 + pgvector (`DATABASE_URL`) with zero skips.
+  - Engine Smoke Suite (`analysis-smoke`): `npm run test:analysis-smoke -w @chess-platform/api` runs against pinned Stockfish 16, Fairy-Stockfish 14, and real PostgreSQL with zero skips.
+  - Gateway Service Suite (`gateway-service`): runs against real Redis 7 and Nginx with zero skips.
+  - Acceptance Suite (`m6-acceptance`): runs Playwright Chromium e2e tests with zero skips.
+  - Dedicated Live Provider Workflow (`.github/workflows/live-provider.yml`): third-party AI provider contract tests (OpenAI / Anthropic) extracted into dedicated files and run strictly via `workflow_dispatch` with verified secrets. They never run in PR CI and never produce misleading skipped counts.
+- **Enforcement & Invariant Guards**:
+  - `scripts/run-zero-skip.mjs`: Programmatic test runner wrapper that monitors TAP/spec output and fails if `skipped > 0`.
+  - `scripts/check-test-topology.mjs`: Invariant guard verifying that every test file in the monorepo is classified into an explicit suite and none are orphaned.
+  - `scripts/test-counts.mjs`: Detailed test suite count and skip auditor reporting per-suite pass/fail/skip totals.
+- Detailed in `docs/adr/0142-zero-test-skip-ci-architecture.md`.
+
 
 
 

@@ -30,7 +30,10 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.test.json && node --test --test-concurrency=1 \"dist-test/test/**/*.test.js\"",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test:unit": "node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/!(*.integration).test.js\"",
+    "test:integration:postgres": "node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/**/*.integration.test.js\"",
+    "test": "npm run build:test && npm run test:unit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "migrate": "node dist/pg/migrate-cli.js",
     "clean": "rm -rf dist dist-test"

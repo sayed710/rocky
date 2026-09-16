@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Run every suite through npm and report Node test-runner totals portably. */
+/** Run test suites through npm and report Node test-runner totals portably with zero-skip auditing. */
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,8 @@ if (!npmCli) {
   console.error('npm_execpath is unavailable; run this script through "npm run test:counts"');
   process.exit(1);
 }
-const suites = [
+
+const HERMETIC_SUITES = [
   ['core', ['test', '--workspace', '@chess-platform/core']],
   ['search', ['test', '--workspace', '@chess-platform/search']],
   ['social', ['test', '--workspace', '@chess-platform/social']],
@@ -23,21 +24,68 @@ const suites = [
   ['game', ['test', '--workspace', '@chess-platform/game']],
   ['tournament', ['test', '--workspace', '@chess-platform/tournament']],
   ['realtime-gateway', ['test', '--workspace', '@chess-platform/realtime-gateway']],
-  ['persistence', ['test', '--workspace', '@chess-platform/persistence']],
-  ['api', ['test', '--workspace', '@chess-platform/api']],
+  ['persistence (hermetic unit)', ['test', '--workspace', '@chess-platform/persistence']],
+  ['api (hermetic unit)', ['test', '--workspace', '@chess-platform/api']],
   ['engine', ['test', '--workspace', '@chess-platform/engine']],
-  ['web', ['test', '--workspace', '@chess-platform/web']],
+  ['web (hermetic unit)', ['test', '--workspace', '@chess-platform/web']],
   ['e2e-harness', ['test', '--workspace', '@chess-platform/e2e-harness']],
-  ['ai-orchestrator', ['test', '--workspace', '@chess-platform/ai-orchestrator']],
-  ['ai-features', ['test', '--workspace', '@chess-platform/ai-features']],
-  ['gateway-service', ['test', '--prefix', 'services/gateway']],
+  ['ai-orchestrator (hermetic unit)', ['test', '--workspace', '@chess-platform/ai-orchestrator']],
+  ['ai-features (hermetic unit)', ['test', '--workspace', '@chess-platform/ai-features']],
+  ['scripts (hermetic unit)', ['run', 'test:scripts']],
+  ['load-harness (hermetic unit)', ['run', 'test:load-harness']],
+];
+
+const SERVICE_SUITES = [
+  {
+    name: 'gateway-service (redis integration)',
+    args: ['test', '--prefix', 'services/gateway'],
+    envReq: 'REDIS_URL',
+    isAvailable: Boolean(process.env.REDIS_URL),
+  },
+  {
+    name: 'persistence (postgres integration)',
+    args: ['run', 'test:integration:postgres', '--workspace', '@chess-platform/persistence'],
+    envReq: 'DATABASE_URL',
+    isAvailable: Boolean(process.env.DATABASE_URL),
+  },
+  {
+    name: 'api (postgres integration)',
+    args: ['run', 'test:integration:postgres', '--workspace', '@chess-platform/api'],
+    envReq: 'DATABASE_URL',
+    isAvailable: Boolean(process.env.DATABASE_URL),
+  },
+  {
+    name: 'scripts (postgres integration)',
+    args: ['run', 'test:scripts:integration'],
+    envReq: 'DATABASE_URL',
+    isAvailable: Boolean(process.env.DATABASE_URL),
+  },
+  {
+    name: 'api (engine smoke)',
+    args: ['run', 'test:analysis-smoke', '--workspace', '@chess-platform/api'],
+    envReq: 'STOCKFISH_PATH & DATABASE_URL',
+    isAvailable: Boolean(process.env.STOCKFISH_PATH && process.env.DATABASE_URL),
+  },
+  {
+    name: 'ai-orchestrator (live provider contract)',
+    args: ['run', 'test:live-provider', '--workspace', '@chess-platform/ai-orchestrator'],
+    envReq: 'OPENAI_API_KEY | ANTHROPIC_API_KEY',
+    isAvailable: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY),
+  },
+  {
+    name: 'ai-features (live provider contract)',
+    args: ['run', 'test:live-provider', '--workspace', '@chess-platform/ai-features'],
+    envReq: 'OPENAI_API_KEY | ANTHROPIC_API_KEY',
+    isAvailable: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY),
+  },
 ];
 
 let total = 0;
 let skippedTotal = 0;
 let hadError = false;
 
-for (const [name, args] of suites) {
+console.log('\n=== Hermetic Unit Test Suites ===');
+for (const [name, args] of HERMETIC_SUITES) {
   const result = spawnSync(process.execPath, [npmCli, ...args], {
     cwd: root,
     encoding: 'utf8',
@@ -50,18 +98,54 @@ for (const [name, args] of suites) {
   const failed = metric(output, 'fail') ?? 0;
 
   if (result.status !== 0 || tests === null || failed > 0) {
-    console.error(`${name}: ERROR`);
+    console.error(`${name}: ERROR (status=${result.status}, tests=${tests}, failed=${failed})`);
     if (result.error) console.error(result.error.message);
     if (output.trim()) console.error(output.trim());
     hadError = true;
     continue;
   }
-  console.log(`${name}: ${tests} tests (${skipped} skipped)`);
+  console.log(`${name}: ${tests} passed, ${failed} failed, ${skipped} skipped`);
   total += tests;
   skippedTotal += skipped;
+  if (skipped > 0 && process.platform !== 'win32') {
+    hadError = true;
+  }
 }
 
-console.log(`Total: ${total} tests (${skippedTotal} skipped)`);
+console.log('\n=== Environment & Integration Test Suites ===');
+for (const suite of SERVICE_SUITES) {
+  if (!suite.isAvailable) {
+    console.log(`${suite.name}: NOT EXECUTED (${suite.envReq} not provided)`);
+    continue;
+  }
+
+  const result = spawnSync(process.execPath, [npmCli, ...suite.args], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+    env: process.env,
+  });
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  const tests = metric(output, 'tests');
+  const skipped = metric(output, 'skipped') ?? 0;
+  const failed = metric(output, 'fail') ?? 0;
+
+  if (result.status !== 0 || tests === null || failed > 0) {
+    console.error(`${suite.name}: ERROR (status=${result.status}, tests=${tests}, failed=${failed})`);
+    if (result.error) console.error(result.error.message);
+    if (output.trim()) console.error(output.trim());
+    hadError = true;
+    continue;
+  }
+  console.log(`${suite.name}: ${tests} passed, ${failed} failed, ${skipped} skipped`);
+  total += tests;
+  skippedTotal += skipped;
+  if (skipped > 0) {
+    hadError = true;
+  }
+}
+
+console.log(`\nGrand Total Executed: ${total} tests (${skippedTotal} skipped)`);
 if (hadError) process.exitCode = 1;
 
 function metric(output, name) {
