@@ -27,6 +27,7 @@
  * deterministic terminal state without unbounded random play.
  */
 import type { GameAuthority } from '@chess-platform/realtime-gateway';
+import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
 import { createRng, pick, seedFrom } from './rng.js';
 import type { PubSub, Broadcast, StateView } from '@chess-platform/realtime-gateway';
 
@@ -46,7 +47,7 @@ export class BotPlayer {
     private readonly pubsub: PubSub,
     private readonly seed = 0x9e3779b9,
   ) {
-    this.botUserId = 'bot-0000-0000-0000';
+    this.botUserId = ENGINE_BOT_USER_IDS.novice;
   }
 
   /** The bot's user id (used when creating games with the bot as a player). */

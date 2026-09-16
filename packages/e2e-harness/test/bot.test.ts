@@ -7,6 +7,7 @@
 import { describe, it } from 'node:test';
 import { notStrictEqual, deepStrictEqual } from 'node:assert/strict';
 import { BotPlayer } from '../src/bot.js';
+import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
 import type {
   GameAuthority,
   PubSub,
@@ -56,7 +57,7 @@ function makeCannedState(gameId: string, ply: number): StateView {
     gameId,
     variant: 'standard',
     players: {
-      white: 'bot-0000-0000-0000',
+      white: ENGINE_BOT_USER_IDS.novice,
       black: 'human-1',
     },
     timeControl: { initialMs: 300000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
