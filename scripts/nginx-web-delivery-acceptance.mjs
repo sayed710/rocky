@@ -351,7 +351,9 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
   });
 
   test('7. WebSocket proxy: Upgrade and connection behavior not regressed', async () => {
-    const ws = new WebSocket(`ws://127.0.0.1:${nginxPort}/ws`);
+    const ws = new WebSocket(`ws://127.0.0.1:${nginxPort}/ws`, {
+      origin: `http://127.0.0.1:${nginxPort}`,
+    });
     try {
       await waitForOpen(ws);
       assert.equal(ws.readyState, WebSocket.OPEN, 'WebSocket must connect successfully through Nginx');
