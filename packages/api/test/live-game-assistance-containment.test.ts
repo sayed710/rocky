@@ -213,6 +213,28 @@ test('Study Partner cannot reveal or extend an existing session during active hu
   assert.equal(turn.status, 409);
 });
 
+test('Study Partner writes acquire the player barrier before durable mutation', async (t) => {
+  const h = await startHarness();
+  t.after(() => h.close());
+  const player = await h.makeUser('study-write-barrier');
+  const release = await h.repos.events.acquirePlayerLock(player.userId);
+  let settled = false;
+  const pending = h.json('POST', '/v1/study-partner/sessions', {
+    token: player.token,
+    body: { variant: 'standard', initialFen: START_FEN },
+  }).then((response) => {
+    settled = true;
+    return response;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  await release();
+
+  const response = await pending;
+  assert.equal(response.status, 201);
+});
+
 test('a separate user remains eligible while another user has an active human game', async (t) => {
   const provider = new ControllableProvider();
   const h = await startHarness({}, { analysis: new AnalysisService({ provider }) });

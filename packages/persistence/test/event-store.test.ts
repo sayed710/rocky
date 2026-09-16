@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { GameEvent } from '@chess-platform/game';
+import { ENGINE_BOT_USER_IDS, type GameEvent } from '@chess-platform/game';
 import { InMemoryEventStore } from '../src/event-store';
 import { ConcurrencyError, PersistenceError } from '../src/errors';
 
@@ -80,6 +80,29 @@ test('findActiveGamesByPlayer derives participation from GameCreated through Gam
     players: { white: 'target', black: 'other' },
   }]);
   assert.deepEqual(await s.findActiveGamesByPlayer('missing'), []);
+});
+
+test('player locks serialize human-game creation but do not delay bot games', async () => {
+  const s = new InMemoryEventStore();
+  const release = await s.acquirePlayerLock('a');
+  let humanSettled = false;
+  const human = s.append('human', -1, [{ ...created, gameId: 'human' }]).then(() => {
+    humanSettled = true;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(humanSettled, false);
+
+  const bot = {
+    ...created,
+    gameId: 'bot',
+    players: { white: 'a', black: ENGINE_BOT_USER_IDS.novice },
+  };
+  assert.equal(await s.append('bot', -1, [bot]), 0);
+
+  await release();
+  await release();
+  await human;
+  assert.equal(humanSettled, true);
 });
 
 test('stored events are isolated from later caller mutation', async () => {

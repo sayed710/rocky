@@ -287,16 +287,17 @@ export class Router {
         signal: disconnect.signal,
       };
 
-      let result;
+      let result: HandlerResult | undefined;
       try {
         result = await route.handler(ctx);
+        writeResult(res, result);
       } finally {
         // The listener holds the controller, and the controller is reachable from any signal the
         // handler passed downstream. Removing it here keeps a long-lived socket from accumulating
         // one per request on a keep-alive connection.
         res.removeListener('close', onClose);
+        await result?.afterWrite?.();
       }
-      writeResult(res, result);
 
       const durationMs = Date.now() - startMs;
       logger.info('request completed', { status: result.status, durationMs });

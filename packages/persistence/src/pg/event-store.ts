@@ -13,6 +13,7 @@ import {
   type EventStore,
   type ActiveGameRecord,
   type StoredEvent,
+  humanGamePlayerIds,
 } from '../event-store';
 import { ConcurrencyError, PersistenceError } from '../errors';
 
@@ -64,6 +65,7 @@ export class PostgresEventStore implements EventStore {
     let committed = false;
     try {
       await client.query('BEGIN');
+      if (expectedSeq === -1) await lockGameCreationPlayers(client, events);
       const head = await this.headSeq(client, gameId);
       if (head !== expectedSeq) throw new ConcurrencyError(gameId, expectedSeq, head);
       if (head === -1 && events[0]!.type !== 'GameCreated') {
@@ -148,5 +150,45 @@ export class PostgresEventStore implements EventStore {
       }
       return { gameId: row.game_id, players: { ...event.players } };
     });
+  }
+
+  async acquirePlayerLock(userId: string): Promise<() => Promise<void>> {
+    const client = await this.pool.connect();
+    try {
+      await client.query(
+        `SELECT pg_advisory_lock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+        [userId],
+      );
+    } catch (error) {
+      client.release(error instanceof Error ? error : new Error('failed to acquire player lock'));
+      throw error;
+    }
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      try {
+        await client.query(
+          `SELECT pg_advisory_unlock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+          [userId],
+        );
+        client.release();
+      } catch (error) {
+        client.release(error instanceof Error ? error : new Error('failed to release player lock'));
+      }
+    };
+  }
+}
+
+/** Serialize human-game creation against assistance response commitment for both participants. */
+export async function lockGameCreationPlayers(
+  client: PoolClient,
+  events: readonly GameEvent[],
+): Promise<void> {
+  for (const playerId of humanGamePlayerIds(events)) {
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+      [playerId],
+    );
   }
 }

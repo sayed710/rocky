@@ -204,6 +204,22 @@ test('postgres event store finds only unended games for either player seat', { s
       gameId: activeGameId,
       players: { white: target, black: opponent },
     }]);
+
+    const lockedPlayer = uuidv7();
+    const blockedGameId = uuidv7();
+    const release = await store.acquirePlayerLock(lockedPlayer);
+    let appendSettled = false;
+    const blockedAppend = store.append(blockedGameId, -1, [event(blockedGameId, {
+      white: lockedPlayer,
+      black: uuidv7(),
+    })]).then(() => {
+      appendSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(appendSettled, false, 'human-game creation must wait for the delivery lock');
+    await release();
+    await blockedAppend;
+    assert.equal(appendSettled, true);
   }, isolated);
 });
 

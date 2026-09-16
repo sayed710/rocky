@@ -242,8 +242,32 @@ export function buildRouter(deps: RouteDeps): Router {
     const identity = requireAuth(ctx);
     await assistanceGuard.assertEligible(identity.userId);
     const result = await handler(ctx, identity);
-    await assistanceGuard.assertEligible(identity.userId);
-    return result;
+    const release = await repos.events.acquirePlayerLock(identity.userId);
+    try {
+      await assistanceGuard.assertEligible(identity.userId);
+      return { ...result, afterWrite: release };
+    } catch (error) {
+      await release();
+      throw error;
+    }
+  };
+  const withAssistanceWriteGuard = (
+    handler: (
+      ctx: RequestContext,
+      identity: NonNullable<RequestContext['auth']>,
+    ) => Promise<HandlerResult>,
+  ): Handler => async (ctx) => {
+    const identity = requireAuth(ctx);
+    const release = await repos.events.acquirePlayerLock(identity.userId);
+    try {
+      await assistanceGuard.assertEligible(identity.userId);
+      const result = await handler(ctx, identity);
+      await assistanceGuard.assertEligible(identity.userId);
+      return { ...result, afterWrite: release };
+    } catch (error) {
+      await release();
+      throw error;
+    }
   };
   const botService = new BotDetectionService(repos.botReports);
   const botAnalysis = deps.botTimingSource
@@ -1952,7 +1976,7 @@ export function buildRouter(deps: RouteDeps): Router {
       },
     }),
     AUTHED,
-    withAssistanceGuard(async (ctx, identity) => {
+    withAssistanceWriteGuard(async (ctx, identity) => {
       const actorId = identity.userId;
       const service = deps.studyPartner;
       if (!service) throw HttpError.unavailable('study partner is not configured');
@@ -2022,7 +2046,7 @@ export function buildRouter(deps: RouteDeps): Router {
       },
     }),
     AUTHED,
-    withAssistanceGuard(async (ctx, identity) => {
+    withAssistanceWriteGuard(async (ctx, identity) => {
       const service = deps.studyPartner;
       if (!service) throw HttpError.unavailable('study partner is not configured');
       const sessionId = parseUuid(ctx.params['id']!, 'id');
