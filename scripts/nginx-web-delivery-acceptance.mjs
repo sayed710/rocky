@@ -127,15 +127,15 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     }
 
     const assetEntries = readdirSync(assetsDir);
-    // Select a hashed JS asset meeting or exceeding Nginx's gzip minimum compression threshold (1024 bytes)
+    // Select a content-hashed JS asset meeting or exceeding Nginx's gzip minimum compression threshold (1024 bytes)
     hashedJsFile = assetEntries.find((f) => {
-      if (!f.endsWith('.js') || f.endsWith('.map')) return false;
+      if (!f.endsWith('.js') || f.endsWith('.map') || !/-[a-zA-Z0-9_-]{6,}\.js$/.test(f)) return false;
       const stat = statSync(join(assetsDir, f));
       return stat.size >= 1024;
     });
-    // Select a hashed CSS asset meeting or exceeding Nginx's gzip minimum compression threshold (1024 bytes)
+    // Select a content-hashed CSS asset meeting or exceeding Nginx's gzip minimum compression threshold (1024 bytes)
     hashedCssFile = assetEntries.find((f) => {
-      if (!f.endsWith('.css') || f.endsWith('.map')) return false;
+      if (!f.endsWith('.css') || f.endsWith('.map') || !/-[a-zA-Z0-9_-]{6,}\.css$/.test(f)) return false;
       const stat = statSync(join(assetsDir, f));
       return stat.size >= 1024;
     });
