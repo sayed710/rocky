@@ -3,6 +3,14 @@
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  parseCancelledCount,
+  parseFailCount,
+  parsePassCount,
+  parseSkippedCount,
+  parseTestCount,
+  parseTodoCount,
+} from './lib/test-output-parser.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const npmCli = process.env.npm_execpath;
@@ -113,12 +121,12 @@ for (const [name, args] of HERMETIC_SUITES) {
     env: process.env,
   });
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-  const tests = testCount(output);
-  const passMetric = metric(output, 'pass');
-  const failed = metric(output, 'fail') ?? 0;
-  const skipped = metric(output, 'skipped') ?? 0;
-  const todo = metric(output, 'todo') ?? 0;
-  const cancelled = metric(output, 'cancelled') ?? 0;
+  const tests = parseTestCount(output);
+  const passMetric = parsePassCount(output);
+  const failed = parseFailCount(output);
+  const skipped = parseSkippedCount(output);
+  const todo = parseTodoCount(output);
+  const cancelled = parseCancelledCount(output);
   const passed = passMetric ?? (failed === 0 && skipped === 0 && todo === 0 && cancelled === 0 ? (tests ?? 0) : 0);
 
   if (
@@ -163,12 +171,12 @@ for (const suite of SERVICE_SUITES) {
     env: process.env,
   });
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-  const tests = testCount(output);
-  const passMetric = metric(output, 'pass');
-  const failed = metric(output, 'fail') ?? 0;
-  const skipped = metric(output, 'skipped') ?? 0;
-  const todo = metric(output, 'todo') ?? 0;
-  const cancelled = metric(output, 'cancelled') ?? 0;
+  const tests = parseTestCount(output);
+  const passMetric = parsePassCount(output);
+  const failed = parseFailCount(output);
+  const skipped = parseSkippedCount(output);
+  const todo = parseTodoCount(output);
+  const cancelled = parseCancelledCount(output);
   const passed = passMetric ?? (failed === 0 && skipped === 0 && todo === 0 && cancelled === 0 ? (tests ?? 0) : 0);
 
   if (
@@ -203,35 +211,3 @@ console.log(
   `\nGrand Total Executed: ${totalTests} tests (${totalPassed} passed, ${totalFailed} failed, ${totalSkipped} skipped, ${totalTodo} todo, ${totalCancelled} cancelled)`
 );
 if (hadError) process.exitCode = 1;
-
-/**
- * Extracts an aggregated numeric test metric from TAP (`# <name> <N>`) or spec (`ℹ <name> <N>`) reporter summary output lines.
- *
- * @param {string} output - Combined stdout/stderr text output from a test runner.
- * @param {string} name - Metric name to search for ('tests', 'pass', 'fail', 'skipped', 'todo', 'cancelled').
- * @returns {number|null} Aggregated integer count across all reporter summaries, or null if not found.
- */
-function metric(output, name) {
-  const pattern = name === 'fail'
-    ? /^\s*(?:#|ℹ)\s+fail(?:ed)?:?\s+(\d+)\b/gim
-    : new RegExp(`^\\s*(?:#|ℹ)\\s+${name}:?\\s+(\\d+)\\b`, 'gim');
-  const matches = [...output.matchAll(pattern)];
-  if (matches.length === 0) return null;
-  return matches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
-}
-
-/**
- * Resolves the total tests count from reporter summary lines or TAP plan headers.
- *
- * @param {string} output - Combined stdout/stderr text output.
- * @returns {number|null} Total test count, or null if not detected.
- */
-function testCount(output) {
-  const summaryTests = metric(output, 'tests');
-  if (summaryTests !== null) return summaryTests;
-  const planMatches = [...output.matchAll(/^\s*1\.\.(\d+)\b/gm)];
-  if (planMatches.length > 0) {
-    return planMatches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
-  }
-  return null;
-}

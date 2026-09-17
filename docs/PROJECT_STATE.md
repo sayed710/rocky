@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-17 — M15 Increment 59e: Zero-skip enforcer and audit rejection of TODO and cancelled test metrics._
+_Last updated: 2026-09-17 — M15 Increment 59f: Shared test-output parser module and strict TAP directive/not-ok reconciliation._
+
+Prior: _Last updated: 2026-09-17 — M15 Increment 59e: Zero-skip enforcer and audit rejection of TODO and cancelled test metrics._
 
 Prior: _Last updated: 2026-09-17 — M15 Increment 59d: Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment._
 
@@ -4292,3 +4294,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Audited test counts alignment in `scripts/test-counts.mjs`**: Updated `test-counts.mjs` to parse `pass`, `fail`, `skipped`, `todo`, and `cancelled` metrics across both TAP and spec reporter formats. Executed suites fail the audit if `failed > 0`, `skipped > 0`, `todo > 0`, `cancelled > 0`, or `tests === 0`. Output clearly separates `tests` from `passed` per suite (`tests X, passed Y, failed 0, skipped 0, todo 0, cancelled 0`) and grand total (`Grand Total Executed: 3636 tests (3636 passed, 0 failed, 0 skipped, 0 todo, 0 cancelled)`).
 - **Regression coverage**: Added 10 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (34 tests total, all passing) covering TODO-only output rejection, mixed pass + TODO rejection, clean summary acceptance, decoy prose ignoring, cancelled count rejection, spec format TODO/cancelled rejection, individual `# TODO` directive rejection, and multi-summary TODO/cancelled rejection.
 
+## M15 Increment 59f — Shared test-output parser module and strict TAP directive/not-ok reconciliation — 2026-09-17
+
+- **Shared pure parser module (`scripts/lib/test-output-parser.mjs`)**: Centralized test metric, plan, and directive parsing across `scripts/run-zero-skip.mjs`, `scripts/test-counts.mjs`, and regression test suites. Fully annotated with complete JSDoc docstrings for CodeRabbit maintainability standards.
+- **Summary and directive independent evaluation**: Fixed the flaw where `# skipped 0` or `# todo 0` prevented evaluation of record-level `# SKIP` or `# TODO` directives. `parseSkippedCount` and `parseTodoCount` independently evaluate summaries and individual directives, guaranteeing that any genuine record-level skip or TODO results in at least count 1 and triggers gate failure.
+- **Line-anchored raw TAP failure detection (`RAW_TAP_FAILURE_REGEX`)**: Added detection for raw TAP `not ok` records lacking reporter summary lines when child processes exit 0. Preserves TAP semantics by properly isolating `# TODO` and `# SKIP` directives so they are not misclassified as ordinary failures while still failing their respective quality gates.
+- **Per-summary zero-test preservation**: `parseTestCount` fails closed (returns 0) if ANY recognized summary or plan header reports 0 executed tests, preventing multi-summary runs (such as `# tests 0 \n # tests 5`) from laundering unexecuted test suites.
+- **Auditor alignment in `scripts/test-counts.mjs`**: Replaced disparate ad-hoc regexes with shared parser helpers across both hermetic and service suite audit loops, enforcing identical zero-skip, zero-todo, and failure contracts across both execution and reporting paths.
+- **Regression coverage**: Added 14 new tests in `scripts/test/zero-skip-enforcement.test.mjs` (48 tests total, all passing) verifying summary + directive reconciliation, raw TAP not-ok detection, multi-summary zero-test preservation, decoy prose immunity, and parser helper unit contracts.

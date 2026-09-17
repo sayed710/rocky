@@ -2,6 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runWithZeroSkip } from '../run-zero-skip.mjs';
 import { runHermeticTests, HERMETIC_WORKSPACES } from '../run-hermetic-tests.mjs';
+import {
+  parseCancelledCount,
+  parseFailCount,
+  parsePassCount,
+  parseSkippedCount,
+  parseTestCount,
+  parseTodoCount,
+} from '../lib/test-output-parser.mjs';
 
 test('zero-skip enforcer: succeeds when a suite reports zero skips', async () => {
   const code = await runWithZeroSkip(process.execPath, [
@@ -289,4 +297,137 @@ test('zero-skip enforcer: fails when an earlier suite in a multi-summary run rep
     'console.log("# tests 3\\n# pass 2\\n# fail 0\\n# cancelled 1\\n# skipped 0\\n# todo 0\\n# tests 5\\n# pass 5\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 1, 'should return exit code 1 when earlier suite in multi-summary run has cancelled > 0');
+});
+
+test('zero-skip enforcer: fails when summary reports skipped 0 but individual test has # SKIP directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 1\\n# skipped 0\\nok 1 - deferred # SKIP reason");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when TAP # SKIP directive is present despite summary skipped 0');
+});
+
+test('zero-skip enforcer: succeeds when summary reports skipped 0 and normal test passes', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 1\\n# skipped 0\\nok 1 - normal");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when clean summary and no skip directive');
+});
+
+test('zero-skip enforcer: ignores prose mentioning SKIP reason when summary is clean', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("SKIP reason is logged in prose\\n# tests 1\\n# pass 1\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should ignore prose containing SKIP reason');
+});
+
+test('zero-skip enforcer: fails when summary reports todo 0 but individual test has # TODO directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 1\\n# todo 0\\nok 1 - pending # TODO reason");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when TAP # TODO directive is present despite summary todo 0');
+});
+
+test('zero-skip enforcer: succeeds when summary reports todo 0 and test is complete', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 1\\n# todo 0\\nok 1 - complete");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when clean summary and no todo directive');
+});
+
+test('zero-skip enforcer: ignores prose mentioning TODO 3 application tasks when summary is clean', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("TODO 3 application tasks remain in backlog\\n# tests 1\\n# pass 1\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should ignore prose containing TODO tasks');
+});
+
+test('zero-skip enforcer: fails when raw TAP output has not ok despite child exit 0 and positive plan', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("not ok 1 - failure\\n1..1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when raw TAP contains not ok');
+});
+
+test('zero-skip enforcer: succeeds when raw TAP output has ok and positive plan', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 1 - success\\n1..1");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when raw TAP has ok and valid plan');
+});
+
+test('zero-skip enforcer: fails when earlier summary reports tests 0 followed by positive tests', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 0\\n# tests 5\\n# pass 5\\n# fail 0\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when any summary reports tests 0');
+});
+
+test('zero-skip enforcer: succeeds when multiple positive summaries are reported', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 2\\n# pass 2\\n# skipped 0\\n# tests 5\\n# pass 5\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when multiple positive summaries pass');
+});
+
+test('test-output-parser: parseTestCount detects zero-test summaries and preserves failure', () => {
+  assert.equal(parseTestCount('# tests 0\n# tests 5'), 0, '# tests 0 should return 0 even when followed by positive summary');
+  assert.equal(parseTestCount('ℹ tests 0\nℹ tests 10'), 0, 'spec format 0 tests should return 0');
+  assert.equal(parseTestCount('# tests 2\n# tests 5'), 7, 'multiple positive summaries should aggregate');
+  assert.equal(parseTestCount('1..3\nok 1\nok 2\nok 3'), 3, 'TAP-only plan fallback should parse');
+  assert.equal(parseTestCount('1..0'), 0, 'TAP-only zero plan should return 0');
+  assert.equal(parseTestCount('arbitrary text with no test summary'), null, 'unrecognized output should return null');
+});
+
+test('test-output-parser: parseSkippedCount detects TAP and spec skip directives independently of summary', () => {
+  const mixedOutput = '# tests 1\n# skipped 0\nok 1 - deferred # SKIP temporary reason';
+  assert.equal(parseSkippedCount(mixedOutput), 1, 'individual # SKIP should raise count to at least 1 when summary is 0');
+
+  const cleanOutput = '# tests 1\n# skipped 0\nok 1 - normal';
+  assert.equal(parseSkippedCount(cleanOutput), 0, 'clean summary with normal test should be 0');
+
+  const proseDecoy = 'unrelated log: SKIP reason is handled\n# tests 1\n# skipped 0';
+  assert.equal(parseSkippedCount(proseDecoy), 0, 'decoy prose mentioning SKIP reason should be ignored');
+
+  const tapOnlySkip = 'ok 1 - unsupported platform # SKIP win32 not supported\n1..1';
+  assert.equal(parseSkippedCount(tapOnlySkip), 1, 'TAP-only # SKIP without summary should return 1');
+});
+
+test('test-output-parser: parseTodoCount detects TAP and spec todo directives independently of summary', () => {
+  const mixedOutput = '# tests 1\n# todo 0\nok 1 - pending # TODO implement soon';
+  assert.equal(parseTodoCount(mixedOutput), 1, 'individual # TODO should raise count to at least 1 when summary is 0');
+
+  const cleanOutput = '# tests 1\n# todo 0\nok 1 - complete';
+  assert.equal(parseTodoCount(cleanOutput), 0, 'clean summary with complete test should be 0');
+
+  const proseDecoy = 'TODO 3 application tasks remain in backlog\n# tests 1\n# todo 0';
+  assert.equal(parseTodoCount(proseDecoy), 0, 'decoy prose mentioning TODO should be ignored');
+
+  const tapOnlyTodo = 'ok 1 - deferred feature # TODO not yet ready\n1..1';
+  assert.equal(parseTodoCount(tapOnlyTodo), 1, 'TAP-only # TODO without summary should return 1');
+});
+
+test('test-output-parser: parseFailCount detects raw TAP not ok and differentiates TODO/SKIP directives', () => {
+  const rawFailure = 'not ok 1 - broken assertion\n1..1';
+  assert.equal(parseFailCount(rawFailure), 1, 'raw TAP not ok should register as failure');
+
+  const cleanTap = 'ok 1 - success\n1..1';
+  assert.equal(parseFailCount(cleanTap), 0, 'clean TAP ok should not register as failure');
+
+  const tapTodoNotOk = 'not ok 1 - planned feature # TODO will fix\n1..1';
+  assert.equal(parseFailCount(tapTodoNotOk), 0, 'TAP not ok with # TODO should not count as raw failure (handled by todo)');
+  assert.equal(parseTodoCount(tapTodoNotOk), 1, 'TAP not ok with # TODO must register as TODO');
+
+  const tapSkipNotOk = 'not ok 1 - skipped test # SKIP broken environment\n1..1';
+  assert.equal(parseFailCount(tapSkipNotOk), 0, 'TAP not ok with # SKIP should not count as raw failure (handled by skip)');
+  assert.equal(parseSkippedCount(tapSkipNotOk), 1, 'TAP not ok with # SKIP must register as SKIP');
 });

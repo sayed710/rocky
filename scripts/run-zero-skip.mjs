@@ -8,6 +8,13 @@
  */
 import { spawn } from 'node:child_process';
 import process from 'node:process';
+import {
+  parseCancelledCount,
+  parseFailCount,
+  parseSkippedCount,
+  parseTestCount,
+  parseTodoCount,
+} from './lib/test-output-parser.mjs';
 
 /**
  * Spawns a test command, buffers and streams its output, and strictly enforces
@@ -65,38 +72,7 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed).
       // Only accept genuine line-anchored reporter summary lines (# tests N, ℹ tests N) or TAP plan headers (1..N).
       // In multi-summary outputs, aggregate test counts and fail if any suite reports 0 executed tests.
-      const testSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim)];
-      let totalTests = null;
-      if (testSummaryMatches.length > 0) {
-        let aggregated = 0;
-        for (const match of testSummaryMatches) {
-          const count = Number.parseInt(match[1], 10);
-          if (count === 0) {
-            totalTests = 0;
-            break;
-          }
-          aggregated += count;
-        }
-        if (totalTests !== 0) {
-          totalTests = aggregated;
-        }
-      } else {
-        const planMatches = [...combinedOutput.matchAll(/^\s*1\.\.(\d+)\b/gm)];
-        if (planMatches.length > 0) {
-          let aggregated = 0;
-          for (const match of planMatches) {
-            const count = Number.parseInt(match[1], 10);
-            if (count === 0) {
-              totalTests = 0;
-              break;
-            }
-            aggregated += count;
-          }
-          if (totalTests !== 0) {
-            totalTests = aggregated;
-          }
-        }
-      }
+      const totalTests = parseTestCount(combinedOutput);
 
       if (totalTests === null || totalTests === 0) {
         if (!options.silent) {
@@ -108,25 +84,8 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         return;
       }
 
-      // Check for test runner skip indicators across TAP, spec format, and serialized test events.
-      // 1. Look for genuine line-anchored TAP or spec summary lines: "# skipped 0", "ℹ skipped 0", etc.
-      // In multi-summary outputs, accumulate skips across all suites so an earlier skip is never laundered.
-      const skipSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+skipped:?\s+(\d+)\b/gim)];
-      // 2. Look for individual test skip directives:
-      // TAP: "ok 1 - test # SKIP [reason]" or "not ok 1 - test # SKIP [reason]"
-      // Spec: "- test # SKIP [reason]" or "- test (skipped)"
-      const individualSkipRegex = /^\s*(?:(?:ok|not ok)\s+\d+\s+-[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\))/im;
-      const individualSkipMatch = individualSkipRegex.test(combinedOutput);
-
-      let skippedCount = 0;
-      if (skipSummaryMatches.length > 0) {
-        for (const match of skipSummaryMatches) {
-          skippedCount += Number.parseInt(match[1], 10);
-        }
-      } else if (individualSkipMatch) {
-        skippedCount = 1;
-      }
-
+      // Check for test runner skip indicators across TAP summaries and individual directives.
+      const skippedCount = parseSkippedCount(combinedOutput);
       if (skippedCount > 0) {
         if (!options.silent) {
           process.stderr.write(
@@ -137,24 +96,8 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         return;
       }
 
-      // Check for TODO tests across TAP and spec format summaries and directives.
-      // 1. Look for genuine line-anchored TAP or spec summary lines: "# todo 0", "ℹ todo 0", etc.
-      const todoSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+todo:?\s+(\d+)\b/gim)];
-      // 2. Look for individual test TODO directives:
-      // TAP: "ok 1 - test # TODO [reason]" or "not ok 1 - test # TODO [reason]"
-      // Spec: "- test # TODO [reason]" or "- test (todo)"
-      const individualTodoRegex = /^\s*(?:(?:ok|not ok)\s+\d+\s+-[^\r\n]*\s+#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*\s+#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*\((?:todo)\))/im;
-      const individualTodoMatch = individualTodoRegex.test(combinedOutput);
-
-      let todoCount = 0;
-      if (todoSummaryMatches.length > 0) {
-        for (const match of todoSummaryMatches) {
-          todoCount += Number.parseInt(match[1], 10);
-        }
-      } else if (individualTodoMatch) {
-        todoCount = 1;
-      }
-
+      // Check for TODO tests across TAP summaries and individual directives.
+      const todoCount = parseTodoCount(combinedOutput);
       if (todoCount > 0) {
         if (!options.silent) {
           process.stderr.write(
@@ -166,14 +109,7 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for cancelled tests across TAP and spec format summaries.
-      const cancelledSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+cancelled:?\s+(\d+)\b/gim)];
-      let cancelledCount = 0;
-      if (cancelledSummaryMatches.length > 0) {
-        for (const match of cancelledSummaryMatches) {
-          cancelledCount += Number.parseInt(match[1], 10);
-        }
-      }
-
+      const cancelledCount = parseCancelledCount(combinedOutput);
       if (cancelledCount > 0) {
         if (!options.silent) {
           process.stderr.write(
@@ -184,15 +120,8 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         return;
       }
 
-      // Check for fail/failed summaries in case child process exited 0 despite reporter failures.
-      const failSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+fail(?:ed)?:?\s+(\d+)\b/gim)];
-      let failCount = 0;
-      if (failSummaryMatches.length > 0) {
-        for (const match of failSummaryMatches) {
-          failCount += Number.parseInt(match[1], 10);
-        }
-      }
-
+      // Check for fail/failed summaries and raw TAP "not ok" test points.
+      const failCount = parseFailCount(combinedOutput);
       if (failCount > 0) {
         if (!options.silent) {
           process.stderr.write(
