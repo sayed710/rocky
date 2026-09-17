@@ -83,5 +83,58 @@ test('zero-skip enforcer: fails unconditionally when a skip is reported', async 
   assert.equal(code, 1, 'should return exit code 1 when test is skipped regardless of platform');
 });
 
+test('zero-skip enforcer: ignores decoy "skipped N" in ordinary output when summary has skipped 0', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("application skipped 1 old record\\n# tests 1\\n# pass 1\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when prose contains "skipped 1" but genuine summary reports skipped 0');
+});
 
+test('zero-skip enforcer: fails when summary reports skipped 1 even if ordinary output has decoy "skipped 0"', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("processed item, skipped 0 errors\\n# tests 1\\n# pass 0\\n# skipped 1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when genuine summary reports skipped 1 despite earlier "skipped 0"');
+});
 
+test('zero-skip enforcer: ignores decoy "tests 0" in ordinary output when summary has tests 5', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("unrelated tests 0\\n# tests 5\\n# pass 5\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when prose contains "tests 0" but genuine summary reports tests 5');
+});
+
+test('zero-skip enforcer: fails when ordinary output contains decoy "tests 5" without real reporter summary', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("we ran tests 5");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when prose contains "tests 5" but no genuine reporter summary exists');
+});
+
+test('zero-skip enforcer: succeeds with valid TAP plan "1..N"', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("1..3\\nok 1 - test a\\nok 2 - test b\\nok 3 - test c");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when genuine TAP plan 1..N is present');
+});
+
+test('zero-skip enforcer: fails on decoy "1..N" in ordinary prose without newline anchor', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("see section 1..5 in the manual for details");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when 1..N is unanchored prose');
+});
+
+test('zero-skip enforcer: succeeds with valid Node spec reporter output (ℹ tests 5)', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ℹ tests 5\\nℹ pass 5\\nℹ skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 for valid Node spec format summary');
+});

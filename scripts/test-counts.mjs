@@ -160,6 +160,14 @@ for (const suite of SERVICE_SUITES) {
 console.log(`\nGrand Total Executed: ${total} tests (${skippedTotal} skipped)`);
 if (hadError) process.exitCode = 1;
 
+/**
+ * Extracts a numeric test metric (e.g. 'tests', 'pass', 'fail', 'skipped') from TAP
+ * (`# <name> <N>`) or spec (`ℹ <name> <N>`) reporter summary output lines.
+ *
+ * @param {string} output - Combined stdout/stderr text output from a test runner.
+ * @param {string} name - Metric name to search for.
+ * @returns {number|null} Parsed integer count, or null if not found.
+ */
 function metric(output, name) {
   const patterns = [
     new RegExp(`^# ${name}\\s+(\\d+)`, 'm'),

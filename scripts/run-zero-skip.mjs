@@ -9,6 +9,19 @@
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 
+/**
+ * Spawns a test command, buffers and streams its output, and strictly enforces
+ * that the test runner reported at least one executed test and zero skipped tests.
+ *
+ * Scans only genuine line-anchored reporter summary lines (`# tests N`, `ℹ tests N`,
+ * `# skipped N`, `ℹ skipped N`) and TAP plan lines (`1..N`) to avoid false
+ * positives or false negatives caused by arbitrary prose in test output.
+ *
+ * @param {string} cmd - Command or binary to execute.
+ * @param {string[]} [args=[]] - Arguments to pass to the command.
+ * @param {import('node:child_process').SpawnOptions & { silent?: boolean }} [options={}] - Options for spawn and output suppression.
+ * @returns {Promise<number>} Resolves with process exit code (0 on valid zero-skip pass, non-zero on failure).
+ */
 export function runWithZeroSkip(cmd, args = [], options = {}) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
@@ -37,7 +50,9 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
 
     child.on('close', (code, signal) => {
       if (signal) {
-        process.stderr.write(`\n[run-zero-skip] Process terminated by signal: ${signal}\n`);
+        if (!options.silent) {
+          process.stderr.write(`\n[run-zero-skip] Process terminated by signal: ${signal}\n`);
+        }
         resolve(1);
         return;
       }
@@ -47,43 +62,51 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         return;
       }
 
-      // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed)
-      const testsMatch = /(?:^|\r?\n|\b)\s*[#ℹ]?\s*tests:?\s+(\d+)\b/i.exec(combinedOutput);
-      let totalTests = testsMatch ? Number.parseInt(testsMatch[1], 10) : null;
-      if (totalTests === null) {
-        const planMatch = /(?:^|\r?\n)1\.\.(\d+)/.exec(combinedOutput);
-        if (planMatch) {
-          totalTests = Number.parseInt(planMatch[1], 10);
+      // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed).
+      // Only accept genuine line-anchored reporter summary lines (# tests N, ℹ tests N) or TAP plan headers (1..N).
+      const testSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim)];
+      let totalTests = null;
+      if (testSummaryMatches.length > 0) {
+        totalTests = Number.parseInt(testSummaryMatches[testSummaryMatches.length - 1][1], 10);
+      } else {
+        const planMatches = [...combinedOutput.matchAll(/^\s*1\.\.(\d+)\b/gm)];
+        if (planMatches.length > 0) {
+          totalTests = Number.parseInt(planMatches[planMatches.length - 1][1], 10);
         }
       }
+
       if (totalTests === null || totalTests === 0) {
-        process.stderr.write(
-          `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: No executed tests detected in output (total=${totalTests}).\x1b[0m\n`
-        );
+        if (!options.silent) {
+          process.stderr.write(
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: No executed tests detected in output (total=${totalTests}).\x1b[0m\n`
+          );
+        }
         resolve(1);
         return;
       }
 
       // Check for test runner skip indicators across TAP, spec format, and serialized test events.
-      // 1. Look for TAP or spec summary line: "skipped 0", "skipped 1", etc.
-      const summaryMatch = /\bskipped:?\s+(\d+)\b/i.exec(combinedOutput);
+      // 1. Look for genuine line-anchored TAP or spec summary line: "# skipped 0", "ℹ skipped 0", etc.
+      const skipSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+skipped:?\s+(\d+)\b/gim)];
       // 2. Look for individual test skip directives:
       // TAP: "ok 1 - test # SKIP [reason]" or "not ok 1 - test # SKIP [reason]"
       // Spec: "- test # SKIP [reason]" or "- test (skipped)"
-      const individualSkipRegex = /(?:^|\r?\n)\s*(?:(?:ok|not ok)\s+\d+\s+-[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\))/i;
+      const individualSkipRegex = /^\s*(?:(?:ok|not ok)\s+\d+\s+-[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\))/im;
       const individualSkipMatch = individualSkipRegex.test(combinedOutput);
 
       let skippedCount = 0;
-      if (summaryMatch) {
-        skippedCount = Number.parseInt(summaryMatch[1], 10);
+      if (skipSummaryMatches.length > 0) {
+        skippedCount = Number.parseInt(skipSummaryMatches[skipSummaryMatches.length - 1][1], 10);
       } else if (individualSkipMatch) {
         skippedCount = 1;
       }
 
       if (skippedCount > 0) {
-        process.stderr.write(
-          `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${skippedCount} skipped test(s). The zero-skip policy requires skipped === 0.\x1b[0m\n`
-        );
+        if (!options.silent) {
+          process.stderr.write(
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${skippedCount} skipped test(s). The zero-skip policy requires skipped === 0.\x1b[0m\n`
+          );
+        }
         resolve(1);
         return;
       }

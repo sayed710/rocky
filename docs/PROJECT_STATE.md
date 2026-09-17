@@ -6,7 +6,7 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-17 — M15 Increment 59b: Zero test-skip CI architecture — PostgreSQL backup drill teardown error absorption and skip directive removal._
+_Last updated: 2026-09-17 — M15 Increment 59c: Zero test-skip CI architecture — anchored reporter summary parsing and decoy output hardening._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
 
@@ -4267,6 +4267,13 @@ Addresses four blocking review findings identified by ChatGPT independent review
 
 - **Backup-restore drill connection resilience**: Attached error handlers and tracked client sockets on `sourcePool`, `targetPool`, and `adminClient` in `scripts/db-backup-restore-drill.mjs`. When `DROP DATABASE ... WITH (FORCE)` terminates idle target pool connections, the resulting `FATAL: terminating connection due to administrator command` (57P01) or socket termination is absorbed rather than bubbling up as an `uncaughtException` in `node:test`.
 - **Zero-skip compliance**: Removed the lingering `skip: process.env.DATABASE_URL ? false : ...` condition from `scripts/test/backup-restore-drill.integration.test.mjs`, enforcing `DATABASE_URL` presence via assertion so the test never skips under any environment.
+
+## M15 Increment 59c — Zero test-skip parser anchoring and decoy output hardening — 2026-09-17
+
+- **Anchored skip count parsing**: In `scripts/run-zero-skip.mjs`, anchored the skip summary regex to genuine line-anchored reporter summary lines (`/^\s*(?:#|ℹ)\s+skipped:?\s+(\d+)\b/gim`). Prose outputs containing words like "skipped 1" (e.g. application logs) no longer trigger false-positive suite failures when the reporter summary reports 0 skips.
+- **Anchored test count parsing**: Anchored the test count regex strictly to reporter summary lines (`/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim`) and line-anchored TAP plan headers (`/^\s*1\.\.(\d+)\b/gm`). Arbitrary prose like "unrelated tests 0" or "we ran tests 5" can no longer cause false failures or false greens.
+- **Regression coverage**: Added 8 comprehensive regression tests in `scripts/test/zero-skip-enforcement.test.mjs` verifying that decoy prose ("skipped N", "tests N", unanchored "1..N") does not corrupt detection, and that genuine skips and missing test summaries are strictly enforced.
+- **Documentation coverage**: Added JSDoc docstrings across `scripts/run-zero-skip.mjs`, `scripts/check-test-topology.mjs`, and `scripts/test-counts.mjs` to satisfy CodeRabbit maintainability standards.
 
 
 

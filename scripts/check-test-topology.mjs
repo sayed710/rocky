@@ -106,6 +106,13 @@ export const SUITE_DEFINITIONS = [
   },
 ];
 
+/**
+ * Recursively scans the repository from the given root directory to discover all test files,
+ * excluding build artifacts, dependencies, and generated reports.
+ *
+ * @param {string} [root=REPO_ROOT] - Repository root directory to scan.
+ * @returns {string[]} Sorted array of repository-relative POSIX file paths for all discovered tests.
+ */
 export function findTestFiles(root = REPO_ROOT) {
   const testFiles = [];
 
@@ -146,6 +153,12 @@ export function findTestFiles(root = REPO_ROOT) {
   return testFiles.sort();
 }
 
+/**
+ * Matches a repository-relative test file path against known zero-skip suite definitions.
+ *
+ * @param {string} relPath - Repository-relative file path in POSIX format.
+ * @returns {object|null} The matching suite definition object, or null if unclassified.
+ */
 export function classifyTestFile(relPath) {
   for (const suite of SUITE_DEFINITIONS) {
     if (suite.pattern.test(relPath)) {
@@ -155,6 +168,13 @@ export function classifyTestFile(relPath) {
   return null;
 }
 
+/**
+ * Scans the repository and validates that 100% of test files map to an explicit zero-skip suite.
+ *
+ * @param {string} [root=REPO_ROOT] - Repository root directory to verify.
+ * @returns {{ totalFiles: number, unclassified: string[], categorized: Map<string, string[]> }}
+ *   Verification summary containing total count, any unclassified files, and categorized groupings.
+ */
 export function verifyTestTopology(root = REPO_ROOT) {
   const files = findTestFiles(root);
   const unclassified = [];
