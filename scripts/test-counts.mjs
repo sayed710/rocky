@@ -69,14 +69,18 @@ const SERVICE_SUITES = [
   {
     name: 'ai-orchestrator (live provider contract)',
     args: ['run', 'test:live-provider', '--workspace', '@chess-platform/ai-orchestrator'],
-    envReq: 'OPENAI_API_KEY | ANTHROPIC_API_KEY',
-    isAvailable: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY),
+    envReq: 'OPENAI_API_KEY & ANTHROPIC_API_KEY',
+    isAvailable: Boolean(process.env.OPENAI_API_KEY && process.env.ANTHROPIC_API_KEY),
   },
   {
     name: 'ai-features (live provider contract)',
     args: ['run', 'test:live-provider', '--workspace', '@chess-platform/ai-features'],
-    envReq: 'OPENAI_API_KEY | ANTHROPIC_API_KEY',
-    isAvailable: Boolean(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY),
+    envReq: 'OPENAI_API_KEY & ANTHROPIC_API_KEY & GAMBIT_TEST_INTEGRATION=1',
+    isAvailable: Boolean(
+      process.env.OPENAI_API_KEY &&
+      process.env.ANTHROPIC_API_KEY &&
+      process.env.GAMBIT_TEST_INTEGRATION === '1'
+    ),
   },
   {
     name: 'api (posix unit)',

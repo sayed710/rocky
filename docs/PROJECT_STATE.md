@@ -6,9 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-17 — M15 Increment 59c: Zero test-skip CI architecture — anchored reporter summary parsing and decoy output hardening._
+_Last updated: 2026-09-17 — M15 Increment 59d: Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment._
 
-Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
+Prior: _Last updated: 2026-09-17 — M15 Increment 59c: Zero test-skip CI architecture — anchored reporter summary parsing and decoy output hardening._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
 
@@ -4276,15 +4276,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Documentation coverage**: Added JSDoc docstrings across `scripts/run-zero-skip.mjs`, `scripts/check-test-topology.mjs`, and `scripts/test-counts.mjs` to satisfy CodeRabbit maintainability standards.
 - **Multi-summary aggregation**: Handled multi-suite test outputs in `scripts/run-zero-skip.mjs` by accumulating skips across all summary lines (preventing earlier skips from being laundered by later zero-skip suites) and requiring that every reported suite executed > 0 tests.
 
+## M15 Increment 59d — Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment — 2026-09-17
 
-
-
-
-
-
-
-
-
-
-
+- **Centralized hermetic zero-skip orchestrator (`scripts/run-hermetic-tests.mjs`)**: Established a centralized test runner executing all 19 hermetic workspace packages in sequence under programmatic `runWithZeroSkip` enforcement. Root `npm test` now routes directly to `node scripts/run-hermetic-tests.mjs`. Individual package test commands remain intact and untouched (preserving PR #55 boundaries). If any child workspace reports `skipped > 0`, zero executed tests, non-zero exit code, or signal termination, the orchestrator halts immediately and fails the run.
+- **Cross-platform programmatic invocation**: The orchestrator resolves `process.env.npm_execpath` and invokes `process.execPath` directly with `shell: false`, bypassing shell-specific `$npm_execpath`/`%npm_execpath%` expansion issues and Node CVE-2024-27980 Windows `.cmd` spawn restrictions.
+- **Live-provider contract alignment in `scripts/test-counts.mjs`**: Replaced permissive `OPENAI_API_KEY || ANTHROPIC_API_KEY` with strict conjunctions matching the actual runner contract: `OPENAI_API_KEY && ANTHROPIC_API_KEY` for `ai-orchestrator`, and `OPENAI_API_KEY && ANTHROPIC_API_KEY && GAMBIT_TEST_INTEGRATION=1` for `ai-features`. Incompletely provisioned suites are reported as `NOT EXECUTED` rather than invoked to self-skip.
+- **Regression coverage**: Added 5 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (24 tests total, all passing) demonstrating that child workspaces exiting 0 but reporting `# tests 1 \n # skipped 1` fail the repository-level runner, multi-workspace runs with multiple reporter summaries succeed when all report tests > 0 and skipped = 0, zero-test workspaces fail, and natural non-zero exit codes propagate.
 

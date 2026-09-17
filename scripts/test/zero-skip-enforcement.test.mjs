@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runWithZeroSkip } from '../run-zero-skip.mjs';
+import { runHermeticTests, HERMETIC_WORKSPACES } from '../run-hermetic-tests.mjs';
 
 test('zero-skip enforcer: succeeds when a suite reports zero skips', async () => {
   const code = await runWithZeroSkip(process.execPath, [
@@ -153,4 +154,59 @@ test('zero-skip enforcer: fails when an earlier suite in a multi-summary run rep
     'console.log("# tests 0\\n# pass 0\\n# skipped 0\\n# tests 5\\n# pass 5\\n# skipped 0");',
   ], { silent: true });
   assert.equal(code, 1, 'should return exit code 1 when any suite in a multi-summary run executes 0 tests');
+});
+
+test('repository-level hermetic runner: fails when a child workspace exits 0 but reports skipped > 0', async () => {
+  const code = await runHermeticTests({
+    workspaces: ['mock-pkg-a', 'mock-pkg-b'],
+    commandBuilder: (ws) =>
+      ws === 'mock-pkg-b'
+        ? { cmd: process.execPath, args: ['-e', 'console.log("# tests 1\\n# pass 0\\n# skipped 1");'] }
+        : { cmd: process.execPath, args: ['-e', 'console.log("# tests 3\\n# pass 3\\n# skipped 0");'] },
+    silent: true,
+  });
+  assert.equal(code, 1, 'should fail repository hermetic runner when child workspace reports skipped > 0');
+});
+
+test('repository-level hermetic runner: succeeds across multiple workspaces when all report tests > 0 and skipped = 0', async () => {
+  const code = await runHermeticTests({
+    workspaces: ['mock-pkg-a', 'mock-pkg-b', 'mock-pkg-c'],
+    commandBuilder: () => ({
+      cmd: process.execPath,
+      args: ['-e', 'console.log("ℹ tests 5\\nℹ pass 5\\nℹ skipped 0");'],
+    }),
+    silent: true,
+  });
+  assert.equal(code, 0, 'should succeed when all child workspaces report valid tests and zero skips');
+});
+
+test('repository-level hermetic runner: fails when a child workspace reports zero executed tests', async () => {
+  const code = await runHermeticTests({
+    workspaces: ['mock-pkg-a'],
+    commandBuilder: () => ({
+      cmd: process.execPath,
+      args: ['-e', 'console.log("# tests 0\\n# pass 0\\n# skipped 0");'],
+    }),
+    silent: true,
+  });
+  assert.equal(code, 1, 'should fail when a child workspace executes zero tests');
+});
+
+test('repository-level hermetic runner: propagates natural failure exit code when a child workspace fails', async () => {
+  const code = await runHermeticTests({
+    workspaces: ['mock-pkg-a'],
+    commandBuilder: () => ({
+      cmd: process.execPath,
+      args: ['-e', 'process.exit(42);'],
+    }),
+    silent: true,
+  });
+  assert.equal(code, 42, 'should propagate non-zero exit code of failing workspace');
+});
+
+test('repository-level hermetic runner: exports the 19 declared hermetic workspaces', () => {
+  assert.equal(HERMETIC_WORKSPACES.length, 19, 'should declare exactly 19 hermetic workspaces');
+  assert.ok(HERMETIC_WORKSPACES.includes('@chess-platform/core'));
+  assert.ok(HERMETIC_WORKSPACES.includes('@chess-platform/achievements'));
+  assert.ok(HERMETIC_WORKSPACES.includes('@chess-platform/ai-features'));
 });
