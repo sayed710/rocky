@@ -10,8 +10,8 @@ const migrationsDir = resolve(fileURLToPath(import.meta.url), '../../../packages
 
 test(
   'integration: full backup, isolated restore, and verification drill against live Postgres',
-  { skip: process.env.DATABASE_URL ? false : 'DATABASE_URL not set' },
   async () => {
+    assert.ok(process.env.DATABASE_URL, 'DATABASE_URL is required for live Postgres integration drill');
     await withTestDatabase(async ({ pool, connectionString }) => {
       pool.on('error', () => {});
       await migrate(pool, migrationsDir);

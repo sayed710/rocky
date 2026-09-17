@@ -6,7 +6,7 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-17 — M15 Increment 59a: Zero test-skip CI architecture — POSIX partition, false-green hardening, live-build self-containment, and PR #56 overlap disclosure._
+_Last updated: 2026-09-17 — M15 Increment 59b: Zero test-skip CI architecture — PostgreSQL backup drill teardown error absorption and skip directive removal._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
 
@@ -4262,6 +4262,12 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Blocker 2 — False-green on missing test output**: `scripts/run-zero-skip.mjs` now requires `totalTests !== null && totalTests > 0`. A process that exits 0 with arbitrary text and no test-count line fails with "No executed tests detected". Regex updated to recognise TAP plan (`1..N`) and `tests: N` formats. Two regression tests added to `scripts/test/zero-skip-enforcement.test.mjs`.
 - **Blocker 3 — POSIX suite partition and Windows laundering removal**: Three POSIX-only tests extracted into dedicated `*.posix.test.ts` / `*.posix.test.mjs` files. Dedicated `api-posix-unit` and `load-harness-posix` CI steps added (Linux only). The entire `if (process.platform === 'win32')` skip-laundering block removed from `scripts/run-zero-skip.mjs`. Topology passes: 396 files, 20 suites, 0 unclassified.
 - **Blocker 4 — PR #56 overlap disclosure**: PR #57 shares 4 files with open PR #56 (`gemini/web-delivery-cache-compression`): `.github/workflows/ci.yml`, `docs/PROJECT_STATE.md`, `scripts/ci-local.mjs`, `services/gateway/package.json`. PR #57 is foundational; PR #56 must be rebased after PR #57 lands. PR #55 has zero file overlap with PR #57. Overlap table documented in `docs/adr/0142-zero-test-skip-ci-architecture.md` §"Open PR Overlap".
+
+## M15 Increment 59b — PostgreSQL backup drill teardown resilience and skip removal — 2026-09-17
+
+- **Backup-restore drill connection resilience**: Attached error handlers and tracked client sockets on `sourcePool`, `targetPool`, and `adminClient` in `scripts/db-backup-restore-drill.mjs`. When `DROP DATABASE ... WITH (FORCE)` terminates idle target pool connections, the resulting `FATAL: terminating connection due to administrator command` (57P01) or socket termination is absorbed rather than bubbling up as an `uncaughtException` in `node:test`.
+- **Zero-skip compliance**: Removed the lingering `skip: process.env.DATABASE_URL ? false : ...` condition from `scripts/test/backup-restore-drill.integration.test.mjs`, enforcing `DATABASE_URL` presence via assertion so the test never skips under any environment.
+
 
 
 
