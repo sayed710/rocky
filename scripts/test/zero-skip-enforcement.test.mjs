@@ -275,7 +275,7 @@ test('zero-skip enforcer: fails when spec reporter format reports cancelled > 0'
   assert.equal(code, 1, 'should return exit code 1 when spec reporter reports cancelled > 0');
 });
 
-test('zero-skip enforcer: fails when TAP stream contains individual test # TODO directive', async () => {
+test('zero-skip enforcer: fails when TAP stream contains individual test TODO directive', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
     'console.log("ok 1 - pending feature # TODO implement next week\\n1..1");',
@@ -299,7 +299,7 @@ test('zero-skip enforcer: fails when an earlier suite in a multi-summary run rep
   assert.equal(code, 1, 'should return exit code 1 when earlier suite in multi-summary run has cancelled > 0');
 });
 
-test('zero-skip enforcer: fails when summary reports skipped 0 but individual test has # SKIP directive', async () => {
+test('zero-skip enforcer: fails when summary reports skipped 0 but individual test has TAP SKIP directive', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
     'console.log("# tests 1\\n# skipped 0\\nok 1 - deferred # SKIP reason");',
@@ -323,7 +323,7 @@ test('zero-skip enforcer: ignores prose mentioning SKIP reason when summary is c
   assert.equal(code, 0, 'should ignore prose containing SKIP reason');
 });
 
-test('zero-skip enforcer: fails when summary reports todo 0 but individual test has # TODO directive', async () => {
+test('zero-skip enforcer: fails when summary reports todo 0 but individual test has TAP TODO directive', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
     'console.log("# tests 1\\n# todo 0\\nok 1 - pending # TODO reason");',
@@ -379,9 +379,43 @@ test('zero-skip enforcer: succeeds when multiple positive summaries are reported
   assert.equal(code, 0, 'should return exit code 0 when multiple positive summaries pass');
 });
 
+test('zero-skip enforcer: fails when TAP plan declares 1..0 despite positive summary', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("1..0\\n# tests 5\\n# pass 5\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when TAP plan has 0 tests');
+});
+
+test('zero-skip enforcer: fails when unnumbered TAP test point has SKIP directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok - unnumbered test # SKIP not supported\\n1..1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when unnumbered TAP test has # SKIP');
+});
+
+test('zero-skip enforcer: fails when unnumbered TAP test point has TODO directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok - unnumbered test # TODO pending feature\\n1..1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when unnumbered TAP test has # TODO');
+});
+
+test('zero-skip enforcer: succeeds when test title contains escaped hash before SKIP keyword', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 1 - test title has \\\\# SKIP inside text\\n# tests 1\\n# pass 1\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when escaped hash is present in test description');
+});
+
 test('test-output-parser: parseTestCount detects zero-test summaries and preserves failure', () => {
   assert.equal(parseTestCount('# tests 0\n# tests 5'), 0, '# tests 0 should return 0 even when followed by positive summary');
   assert.equal(parseTestCount('ℹ tests 0\nℹ tests 10'), 0, 'spec format 0 tests should return 0');
+  assert.equal(parseTestCount('1..0\n# tests 5'), 0, 'zero-test plan header must return 0 even with positive summary');
+  assert.equal(parseTestCount('1..5\n# tests 0'), 0, 'zero-test summary must return 0 even with positive plan header');
   assert.equal(parseTestCount('# tests 2\n# tests 5'), 7, 'multiple positive summaries should aggregate');
   assert.equal(parseTestCount('1..3\nok 1\nok 2\nok 3'), 3, 'TAP-only plan fallback should parse');
   assert.equal(parseTestCount('1..0'), 0, 'TAP-only zero plan should return 0');
@@ -394,6 +428,12 @@ test('test-output-parser: parseSkippedCount detects TAP and spec skip directives
 
   const cleanOutput = '# tests 1\n# skipped 0\nok 1 - normal';
   assert.equal(parseSkippedCount(cleanOutput), 0, 'clean summary with normal test should be 0');
+
+  const unnumberedSkip = 'ok - deferred test # SKIP reason\n1..1';
+  assert.equal(parseSkippedCount(unnumberedSkip), 1, 'unnumbered ok with # SKIP should be detected');
+
+  const escapedHashTitle = 'ok 1 - test has \\# SKIP in title\n# tests 1\n# pass 1\n# skipped 0';
+  assert.equal(parseSkippedCount(escapedHashTitle), 0, 'escaped hash in test title should not be detected as SKIP');
 
   const proseDecoy = 'unrelated log: SKIP reason is handled\n# tests 1\n# skipped 0';
   assert.equal(parseSkippedCount(proseDecoy), 0, 'decoy prose mentioning SKIP reason should be ignored');
@@ -409,6 +449,12 @@ test('test-output-parser: parseTodoCount detects TAP and spec todo directives in
   const cleanOutput = '# tests 1\n# todo 0\nok 1 - complete';
   assert.equal(parseTodoCount(cleanOutput), 0, 'clean summary with complete test should be 0');
 
+  const unnumberedTodo = 'ok - pending test # TODO reason\n1..1';
+  assert.equal(parseTodoCount(unnumberedTodo), 1, 'unnumbered ok with # TODO should be detected');
+
+  const escapedHashTodoTitle = 'ok 1 - test has \\# TODO in title\n# tests 1\n# pass 1\n# todo 0';
+  assert.equal(parseTodoCount(escapedHashTodoTitle), 0, 'escaped hash in test title should not be detected as TODO');
+
   const proseDecoy = 'TODO 3 application tasks remain in backlog\n# tests 1\n# todo 0';
   assert.equal(parseTodoCount(proseDecoy), 0, 'decoy prose mentioning TODO should be ignored');
 
@@ -419,6 +465,9 @@ test('test-output-parser: parseTodoCount detects TAP and spec todo directives in
 test('test-output-parser: parseFailCount detects raw TAP not ok and differentiates TODO/SKIP directives', () => {
   const rawFailure = 'not ok 1 - broken assertion\n1..1';
   assert.equal(parseFailCount(rawFailure), 1, 'raw TAP not ok should register as failure');
+
+  const unnumberedRawFailure = 'not ok - broken assertion\n1..1';
+  assert.equal(parseFailCount(unnumberedRawFailure), 1, 'unnumbered raw TAP not ok should register as failure');
 
   const cleanTap = 'ok 1 - success\n1..1';
   assert.equal(parseFailCount(cleanTap), 0, 'clean TAP ok should not register as failure');

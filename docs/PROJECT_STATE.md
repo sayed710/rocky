@@ -6,9 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-17 — M15 Increment 59f: Shared test-output parser module and strict TAP directive/not-ok reconciliation._
+_Last updated: 2026-09-17 — M15 Increment 59g: Negative lookbehind directive isolation, unnumbered TAP directive support, and zero-plan fail closed._
 
-Prior: _Last updated: 2026-09-17 — M15 Increment 59e: Zero-skip enforcer and audit rejection of TODO and cancelled test metrics._
+Prior: _Last updated: 2026-09-17 — M15 Increment 59f: Shared test-output parser module and strict TAP directive/not-ok reconciliation._
 
 Prior: _Last updated: 2026-09-17 — M15 Increment 59d: Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment._
 
@@ -4302,3 +4302,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Per-summary zero-test preservation**: `parseTestCount` fails closed (returns 0) if ANY recognized summary or plan header reports 0 executed tests, preventing multi-summary runs (such as `# tests 0 \n # tests 5`) from laundering unexecuted test suites.
 - **Auditor alignment in `scripts/test-counts.mjs`**: Replaced disparate ad-hoc regexes with shared parser helpers across both hermetic and service suite audit loops, enforcing identical zero-skip, zero-todo, and failure contracts across both execution and reporting paths.
 - **Regression coverage**: Added 14 new tests in `scripts/test/zero-skip-enforcement.test.mjs` (48 tests total, all passing) verifying summary + directive reconciliation, raw TAP not-ok detection, multi-summary zero-test preservation, decoy prose immunity, and parser helper unit contracts.
+
+## M15 Increment 59g — Negative lookbehind directive isolation, unnumbered TAP directive support, and zero-plan fail closed — 2026-09-17
+
+- **Negative lookbehind directive isolation (`(?<!\\)#`)**: Replaced loose regex matching in `TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX`, `TAP_OR_SPEC_TODO_DIRECTIVE_REGEX`, and `RAW_TAP_FAILURE_REGEX` with modern ES2018 negative lookbehind `(?<!\\)#`. Prevents escaped hash symbols (`\#`) emitted by Node 22 TAP reporter in test titles from being misidentified as skip or todo directives.
+- **Unnumbered TAP test point support**: Extended regexes to match unnumbered TAP results (`ok - ... # SKIP`, `not ok - ... # TODO`, `not ok - ...`) matching standard TAP 13 specifications.
+- **Immediate fail-closed on zero-test TAP plans (`1..0`)**: `parseTestCount` now inspects both reporter summaries and TAP plan headers for `0` tests before computing sums, ensuring that `1..0` immediately triggers gate failure even if preceded or followed by positive summary lines.
+- **Test suite hygiene**: Renamed regression test descriptions in `scripts/test/zero-skip-enforcement.test.mjs` to eliminate literal `# SKIP` / `# TODO` strings from test titles, preventing runner-level escaping ambiguity.
+- **Regression coverage**: Added 4 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (52 tests total, all passing) verifying unnumbered TAP SKIP/TODO detection, unnumbered raw failures, escaped hash immunity in test titles, and zero-test plan fail-closed behavior.

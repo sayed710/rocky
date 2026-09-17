@@ -6,55 +6,53 @@
 
 /**
  * Line-anchored regex matching individual TAP or spec skip directives.
- * TAP: "ok 1 - test # SKIP [reason]" or "not ok 1 - test # SKIP [reason]"
+ * TAP: "ok 1 - test # SKIP [reason]", "ok - test # SKIP [reason]", or "not ok ... # SKIP"
  * Spec: "- test # SKIP [reason]" or "- test (skipped)"
+ * Ensures escaped hashes (`\#`) in descriptions are not misinterpreted as directives.
  */
 export const TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX =
-  /^\s*(?:(?:ok|not ok)\s+\d+.*#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\s+#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\))/im;
+  /^\s*(?:(?:ok|not ok)(?:\s+\d+)?\b[^\r\n]*?(?<!\\)#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\))/im;
 
 /**
  * Line-anchored regex matching individual TAP or spec TODO directives.
- * TAP: "ok 1 - test # TODO [reason]" or "not ok 1 - test # TODO [reason]"
+ * TAP: "ok 1 - test # TODO [reason]", "ok - test # TODO [reason]", or "not ok ... # TODO"
  * Spec: "- test # TODO [reason]" or "- test (todo)"
+ * Ensures escaped hashes (`\#`) in descriptions are not misinterpreted as directives.
  */
 export const TAP_OR_SPEC_TODO_DIRECTIVE_REGEX =
-  /^\s*(?:(?:ok|not ok)\s+\d+.*#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*\s+#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*\((?:todo)\))/im;
+  /^\s*(?:(?:ok|not ok)(?:\s+\d+)?\b[^\r\n]*?(?<!\\)#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*\((?:todo)\))/im;
 
 /**
  * Line-anchored regex matching raw TAP failure test points ("not ok") that do NOT
  * represent TODO or SKIP directives.
  */
 export const RAW_TAP_FAILURE_REGEX =
-  /^\s*not ok(?:\s+\d+)?\b(?:(?!#\s*(?:TODO|SKIP)\b).)*$/im;
+  /^\s*not ok(?:\s+\d+)?\b(?:(?!(?<!\\)#\s*(?:TODO|SKIP)\b).)*$/im;
 
 /**
  * Resolves the total tests count from reporter summary lines or TAP plan headers.
  * If ANY recognized summary line or TAP plan line reports 0 executed tests, returns 0
- * to signal an invalid zero-test run.
+ * to signal an invalid zero-test run immediately.
  *
  * @param {string} output - Combined stdout/stderr text output.
  * @returns {number|null} Total test count, 0 if any suite executed 0 tests, or null if not detected.
  */
 export function parseTestCount(output) {
   const summaryMatches = [...output.matchAll(/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim)];
-  if (summaryMatches.length > 0) {
-    let sum = 0;
-    for (const match of summaryMatches) {
-      const count = Number.parseInt(match[1], 10);
-      if (count === 0) return 0;
-      sum += count;
-    }
-    return sum;
-  }
   const planMatches = [...output.matchAll(/^\s*1\.\.(\d+)\b/gm)];
+
+  for (const match of summaryMatches) {
+    if (Number.parseInt(match[1], 10) === 0) return 0;
+  }
+  for (const match of planMatches) {
+    if (Number.parseInt(match[1], 10) === 0) return 0;
+  }
+
+  if (summaryMatches.length > 0) {
+    return summaryMatches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
+  }
   if (planMatches.length > 0) {
-    let sum = 0;
-    for (const match of planMatches) {
-      const count = Number.parseInt(match[1], 10);
-      if (count === 0) return 0;
-      sum += count;
-    }
-    return sum;
+    return planMatches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
   }
   return null;
 }
