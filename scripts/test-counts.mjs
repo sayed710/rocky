@@ -96,8 +96,12 @@ const SERVICE_SUITES = [
   },
 ];
 
-let total = 0;
-let skippedTotal = 0;
+let totalTests = 0;
+let totalPassed = 0;
+let totalFailed = 0;
+let totalSkipped = 0;
+let totalTodo = 0;
+let totalCancelled = 0;
 let hadError = false;
 
 console.log('\n=== Hermetic Unit Test Suites ===');
@@ -109,23 +113,40 @@ for (const [name, args] of HERMETIC_SUITES) {
     env: process.env,
   });
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-  const tests = metric(output, 'tests');
-  const skipped = metric(output, 'skipped') ?? 0;
+  const tests = testCount(output);
+  const passMetric = metric(output, 'pass');
   const failed = metric(output, 'fail') ?? 0;
+  const skipped = metric(output, 'skipped') ?? 0;
+  const todo = metric(output, 'todo') ?? 0;
+  const cancelled = metric(output, 'cancelled') ?? 0;
+  const passed = passMetric ?? (failed === 0 && skipped === 0 && todo === 0 && cancelled === 0 ? (tests ?? 0) : 0);
 
-  if (result.status !== 0 || tests === null || tests === 0 || failed > 0) {
-    console.error(`${name}: ERROR (status=${result.status}, tests=${tests}, failed=${failed})`);
+  if (
+    result.status !== 0 ||
+    tests === null ||
+    tests === 0 ||
+    failed > 0 ||
+    skipped > 0 ||
+    todo > 0 ||
+    cancelled > 0
+  ) {
+    console.error(
+      `${name}: ERROR (status=${result.status}, tests=${tests}, passed=${passed}, failed=${failed}, skipped=${skipped}, todo=${todo}, cancelled=${cancelled})`
+    );
     if (result.error) console.error(result.error.message);
     if (output.trim()) console.error(output.trim());
     hadError = true;
     continue;
   }
-  console.log(`${name}: ${tests} passed, ${failed} failed, ${skipped} skipped`);
-  total += tests;
-  skippedTotal += skipped;
-  if (skipped > 0) {
-    hadError = true;
-  }
+  console.log(
+    `${name}: tests ${tests}, passed ${passed}, failed ${failed}, skipped ${skipped}, todo ${todo}, cancelled ${cancelled}`
+  );
+  totalTests += tests;
+  totalPassed += passed;
+  totalFailed += failed;
+  totalSkipped += skipped;
+  totalTodo += todo;
+  totalCancelled += cancelled;
 }
 
 console.log('\n=== Environment & Integration Test Suites ===');
@@ -142,44 +163,75 @@ for (const suite of SERVICE_SUITES) {
     env: process.env,
   });
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-  const tests = metric(output, 'tests');
-  const skipped = metric(output, 'skipped') ?? 0;
+  const tests = testCount(output);
+  const passMetric = metric(output, 'pass');
   const failed = metric(output, 'fail') ?? 0;
+  const skipped = metric(output, 'skipped') ?? 0;
+  const todo = metric(output, 'todo') ?? 0;
+  const cancelled = metric(output, 'cancelled') ?? 0;
+  const passed = passMetric ?? (failed === 0 && skipped === 0 && todo === 0 && cancelled === 0 ? (tests ?? 0) : 0);
 
-  if (result.status !== 0 || tests === null || tests === 0 || failed > 0) {
-    console.error(`${suite.name}: ERROR (status=${result.status}, tests=${tests}, failed=${failed})`);
+  if (
+    result.status !== 0 ||
+    tests === null ||
+    tests === 0 ||
+    failed > 0 ||
+    skipped > 0 ||
+    todo > 0 ||
+    cancelled > 0
+  ) {
+    console.error(
+      `${suite.name}: ERROR (status=${result.status}, tests=${tests}, passed=${passed}, failed=${failed}, skipped=${skipped}, todo=${todo}, cancelled=${cancelled})`
+    );
     if (result.error) console.error(result.error.message);
     if (output.trim()) console.error(output.trim());
     hadError = true;
     continue;
   }
-  console.log(`${suite.name}: ${tests} passed, ${failed} failed, ${skipped} skipped`);
-  total += tests;
-  skippedTotal += skipped;
-  if (skipped > 0) {
-    hadError = true;
-  }
+  console.log(
+    `${suite.name}: tests ${tests}, passed ${passed}, failed ${failed}, skipped ${skipped}, todo ${todo}, cancelled ${cancelled}`
+  );
+  totalTests += tests;
+  totalPassed += passed;
+  totalFailed += failed;
+  totalSkipped += skipped;
+  totalTodo += todo;
+  totalCancelled += cancelled;
 }
 
-console.log(`\nGrand Total Executed: ${total} tests (${skippedTotal} skipped)`);
+console.log(
+  `\nGrand Total Executed: ${totalTests} tests (${totalPassed} passed, ${totalFailed} failed, ${totalSkipped} skipped, ${totalTodo} todo, ${totalCancelled} cancelled)`
+);
 if (hadError) process.exitCode = 1;
 
 /**
- * Extracts a numeric test metric (e.g. 'tests', 'pass', 'fail', 'skipped') from TAP
- * (`# <name> <N>`) or spec (`ℹ <name> <N>`) reporter summary output lines.
+ * Extracts an aggregated numeric test metric from TAP (`# <name> <N>`) or spec (`ℹ <name> <N>`) reporter summary output lines.
  *
  * @param {string} output - Combined stdout/stderr text output from a test runner.
- * @param {string} name - Metric name to search for.
- * @returns {number|null} Parsed integer count, or null if not found.
+ * @param {string} name - Metric name to search for ('tests', 'pass', 'fail', 'skipped', 'todo', 'cancelled').
+ * @returns {number|null} Aggregated integer count across all reporter summaries, or null if not found.
  */
 function metric(output, name) {
-  const patterns = [
-    new RegExp(`^# ${name}\\s+(\\d+)`, 'm'),
-    new RegExp(`^ℹ ${name}\\s+(\\d+)`, 'm'),
-  ];
-  for (const pattern of patterns) {
-    const match = pattern.exec(output);
-    if (match) return Number(match[1]);
+  const pattern = name === 'fail'
+    ? /^\s*(?:#|ℹ)\s+fail(?:ed)?:?\s+(\d+)\b/gim
+    : new RegExp(`^\\s*(?:#|ℹ)\\s+${name}:?\\s+(\\d+)\\b`, 'gim');
+  const matches = [...output.matchAll(pattern)];
+  if (matches.length === 0) return null;
+  return matches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
+}
+
+/**
+ * Resolves the total tests count from reporter summary lines or TAP plan headers.
+ *
+ * @param {string} output - Combined stdout/stderr text output.
+ * @returns {number|null} Total test count, or null if not detected.
+ */
+function testCount(output) {
+  const summaryTests = metric(output, 'tests');
+  if (summaryTests !== null) return summaryTests;
+  const planMatches = [...output.matchAll(/^\s*1\.\.(\d+)\b/gm)];
+  if (planMatches.length > 0) {
+    return planMatches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
   }
   return null;
 }

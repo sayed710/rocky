@@ -210,3 +210,83 @@ test('repository-level hermetic runner: exports the 19 declared hermetic workspa
   assert.ok(HERMETIC_WORKSPACES.includes('@chess-platform/achievements'));
   assert.ok(HERMETIC_WORKSPACES.includes('@chess-platform/ai-features'));
 });
+
+test('zero-skip enforcer: fails when a suite reports TODO-only Node test output (todo > 0)', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 1\\n# pass 0\\n# fail 0\\n# skipped 0\\n# todo 1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when todo > 0 (TODO-only)');
+});
+
+test('zero-skip enforcer: fails when a suite reports mixed pass + TODO (todo > 0)', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 2\\n# pass 1\\n# fail 0\\n# skipped 0\\n# todo 1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when mixed pass and todo > 0');
+});
+
+test('zero-skip enforcer: succeeds when a suite reports clean Node summary with todo 0', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 2\\n# pass 2\\n# fail 0\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when todo is 0');
+});
+
+test('zero-skip enforcer: ignores decoy TODO prose in ordinary output when summary has todo 0', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("todo 5 items remain in application backlog\\n# tests 1\\n# pass 1\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should ignore decoy TODO text in application logs');
+});
+
+test('zero-skip enforcer: fails when a suite reports cancelled > 0', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 2\\n# pass 1\\n# fail 0\\n# cancelled 1\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when cancelled > 0');
+});
+
+test('zero-skip enforcer: fails when spec reporter format reports todo > 0', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ℹ tests 3\\nℹ pass 2\\nℹ fail 0\\nℹ cancelled 0\\nℹ skipped 0\\nℹ todo 1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when spec reporter reports todo > 0');
+});
+
+test('zero-skip enforcer: fails when spec reporter format reports cancelled > 0', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ℹ tests 3\\nℹ pass 2\\nℹ fail 0\\nℹ cancelled 1\\nℹ skipped 0\\nℹ todo 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when spec reporter reports cancelled > 0');
+});
+
+test('zero-skip enforcer: fails when TAP stream contains individual test # TODO directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 1 - pending feature # TODO implement next week\\n1..1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when individual test has # TODO');
+});
+
+test('zero-skip enforcer: fails when an earlier suite in a multi-summary run reports todo 1', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 3\\n# pass 2\\n# fail 0\\n# skipped 0\\n# todo 1\\n# tests 5\\n# pass 5\\n# fail 0\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when earlier suite in multi-summary run has todo > 0');
+});
+
+test('zero-skip enforcer: fails when an earlier suite in a multi-summary run reports cancelled 1', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 3\\n# pass 2\\n# fail 0\\n# cancelled 1\\n# skipped 0\\n# todo 0\\n# tests 5\\n# pass 5\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when earlier suite in multi-summary run has cancelled > 0');
+});

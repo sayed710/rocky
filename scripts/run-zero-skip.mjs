@@ -137,9 +137,71 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         return;
       }
 
+      // Check for TODO tests across TAP and spec format summaries and directives.
+      // 1. Look for genuine line-anchored TAP or spec summary lines: "# todo 0", "ℹ todo 0", etc.
+      const todoSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+todo:?\s+(\d+)\b/gim)];
+      // 2. Look for individual test TODO directives:
+      // TAP: "ok 1 - test # TODO [reason]" or "not ok 1 - test # TODO [reason]"
+      // Spec: "- test # TODO [reason]" or "- test (todo)"
+      const individualTodoRegex = /^\s*(?:(?:ok|not ok)\s+\d+\s+-[^\r\n]*\s+#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*\s+#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*\((?:todo)\))/im;
+      const individualTodoMatch = individualTodoRegex.test(combinedOutput);
 
+      let todoCount = 0;
+      if (todoSummaryMatches.length > 0) {
+        for (const match of todoSummaryMatches) {
+          todoCount += Number.parseInt(match[1], 10);
+        }
+      } else if (individualTodoMatch) {
+        todoCount = 1;
+      }
 
+      if (todoCount > 0) {
+        if (!options.silent) {
+          process.stderr.write(
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${todoCount} TODO test(s). The zero-skip policy requires todo === 0.\x1b[0m\n`
+          );
+        }
+        resolve(1);
+        return;
+      }
 
+      // Check for cancelled tests across TAP and spec format summaries.
+      const cancelledSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+cancelled:?\s+(\d+)\b/gim)];
+      let cancelledCount = 0;
+      if (cancelledSummaryMatches.length > 0) {
+        for (const match of cancelledSummaryMatches) {
+          cancelledCount += Number.parseInt(match[1], 10);
+        }
+      }
+
+      if (cancelledCount > 0) {
+        if (!options.silent) {
+          process.stderr.write(
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${cancelledCount} cancelled test(s). The zero-skip policy requires cancelled === 0.\x1b[0m\n`
+          );
+        }
+        resolve(1);
+        return;
+      }
+
+      // Check for fail/failed summaries in case child process exited 0 despite reporter failures.
+      const failSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+fail(?:ed)?:?\s+(\d+)\b/gim)];
+      let failCount = 0;
+      if (failSummaryMatches.length > 0) {
+        for (const match of failSummaryMatches) {
+          failCount += Number.parseInt(match[1], 10);
+        }
+      }
+
+      if (failCount > 0) {
+        if (!options.silent) {
+          process.stderr.write(
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${failCount} failed test(s). The zero-skip policy requires fail === 0.\x1b[0m\n`
+          );
+        }
+        resolve(1);
+        return;
+      }
 
       resolve(0);
     });

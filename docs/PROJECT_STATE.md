@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-17 — M15 Increment 59d: Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment._
+_Last updated: 2026-09-17 — M15 Increment 59e: Zero-skip enforcer and audit rejection of TODO and cancelled test metrics._
+
+Prior: _Last updated: 2026-09-17 — M15 Increment 59d: Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment._
 
 Prior: _Last updated: 2026-09-17 — M15 Increment 59c: Zero test-skip CI architecture — anchored reporter summary parsing and decoy output hardening._
 
@@ -4282,4 +4284,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Cross-platform programmatic invocation**: The orchestrator resolves `process.env.npm_execpath` and invokes `process.execPath` directly with `shell: false`, bypassing shell-specific `$npm_execpath`/`%npm_execpath%` expansion issues and Node CVE-2024-27980 Windows `.cmd` spawn restrictions.
 - **Live-provider contract alignment in `scripts/test-counts.mjs`**: Replaced permissive `OPENAI_API_KEY || ANTHROPIC_API_KEY` with strict conjunctions matching the actual runner contract: `OPENAI_API_KEY && ANTHROPIC_API_KEY` for `ai-orchestrator`, and `OPENAI_API_KEY && ANTHROPIC_API_KEY && GAMBIT_TEST_INTEGRATION=1` for `ai-features`. Incompletely provisioned suites are reported as `NOT EXECUTED` rather than invoked to self-skip.
 - **Regression coverage**: Added 5 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (24 tests total, all passing) demonstrating that child workspaces exiting 0 but reporting `# tests 1 \n # skipped 1` fail the repository-level runner, multi-workspace runs with multiple reporter summaries succeed when all report tests > 0 and skipped = 0, zero-test workspaces fail, and natural non-zero exit codes propagate.
+
+## M15 Increment 59e — Zero-skip enforcer and audit rejection of TODO and cancelled test metrics — 2026-09-17
+
+- **TODO test rejection in `scripts/run-zero-skip.mjs`**: Enforced that `todo === 0` across all genuine line-anchored reporter summaries (`# todo N`, `ℹ todo N`) and individual test directives (`# TODO`). A Node test marked TODO is non-failing by default in Node.js, which previously allowed a suite with `pass = 0, todo = 1` to pass the quality gate without genuine passing assertions. The enforcer now strictly rejects `todo > 0` with exit code 1.
+- **Cancelled test rejection**: Added explicit rejection for `cancelled > 0` across reporter summaries (`# cancelled N`, `ℹ cancelled N`) to prevent cancelled test runs from passing CI.
+- **Audited test counts alignment in `scripts/test-counts.mjs`**: Updated `test-counts.mjs` to parse `pass`, `fail`, `skipped`, `todo`, and `cancelled` metrics across both TAP and spec reporter formats. Executed suites fail the audit if `failed > 0`, `skipped > 0`, `todo > 0`, `cancelled > 0`, or `tests === 0`. Output clearly separates `tests` from `passed` per suite (`tests X, passed Y, failed 0, skipped 0, todo 0, cancelled 0`) and grand total (`Grand Total Executed: 3636 tests (3636 passed, 0 failed, 0 skipped, 0 todo, 0 cancelled)`).
+- **Regression coverage**: Added 10 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (34 tests total, all passing) covering TODO-only output rejection, mixed pass + TODO rejection, clean summary acceptance, decoy prose ignoring, cancelled count rejection, spec format TODO/cancelled rejection, individual `# TODO` directive rejection, and multi-summary TODO/cancelled rejection.
 
