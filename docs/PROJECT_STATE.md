@@ -4274,6 +4274,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Anchored test count parsing**: Anchored the test count regex strictly to reporter summary lines (`/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim`) and line-anchored TAP plan headers (`/^\s*1\.\.(\d+)\b/gm`). Arbitrary prose like "unrelated tests 0" or "we ran tests 5" can no longer cause false failures or false greens.
 - **Regression coverage**: Added 8 comprehensive regression tests in `scripts/test/zero-skip-enforcement.test.mjs` verifying that decoy prose ("skipped N", "tests N", unanchored "1..N") does not corrupt detection, and that genuine skips and missing test summaries are strictly enforced.
 - **Documentation coverage**: Added JSDoc docstrings across `scripts/run-zero-skip.mjs`, `scripts/check-test-topology.mjs`, and `scripts/test-counts.mjs` to satisfy CodeRabbit maintainability standards.
+- **Multi-summary aggregation**: Handled multi-suite test outputs in `scripts/run-zero-skip.mjs` by accumulating skips across all summary lines (preventing earlier skips from being laundered by later zero-skip suites) and requiring that every reported suite executed > 0 tests.
 
 
 

@@ -64,14 +64,37 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
 
       // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed).
       // Only accept genuine line-anchored reporter summary lines (# tests N, ℹ tests N) or TAP plan headers (1..N).
+      // In multi-summary outputs, aggregate test counts and fail if any suite reports 0 executed tests.
       const testSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim)];
       let totalTests = null;
       if (testSummaryMatches.length > 0) {
-        totalTests = Number.parseInt(testSummaryMatches[testSummaryMatches.length - 1][1], 10);
+        let aggregated = 0;
+        for (const match of testSummaryMatches) {
+          const count = Number.parseInt(match[1], 10);
+          if (count === 0) {
+            totalTests = 0;
+            break;
+          }
+          aggregated += count;
+        }
+        if (totalTests !== 0) {
+          totalTests = aggregated;
+        }
       } else {
         const planMatches = [...combinedOutput.matchAll(/^\s*1\.\.(\d+)\b/gm)];
         if (planMatches.length > 0) {
-          totalTests = Number.parseInt(planMatches[planMatches.length - 1][1], 10);
+          let aggregated = 0;
+          for (const match of planMatches) {
+            const count = Number.parseInt(match[1], 10);
+            if (count === 0) {
+              totalTests = 0;
+              break;
+            }
+            aggregated += count;
+          }
+          if (totalTests !== 0) {
+            totalTests = aggregated;
+          }
         }
       }
 
@@ -86,7 +109,8 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for test runner skip indicators across TAP, spec format, and serialized test events.
-      // 1. Look for genuine line-anchored TAP or spec summary line: "# skipped 0", "ℹ skipped 0", etc.
+      // 1. Look for genuine line-anchored TAP or spec summary lines: "# skipped 0", "ℹ skipped 0", etc.
+      // In multi-summary outputs, accumulate skips across all suites so an earlier skip is never laundered.
       const skipSummaryMatches = [...combinedOutput.matchAll(/^\s*(?:#|ℹ)\s+skipped:?\s+(\d+)\b/gim)];
       // 2. Look for individual test skip directives:
       // TAP: "ok 1 - test # SKIP [reason]" or "not ok 1 - test # SKIP [reason]"
@@ -96,7 +120,9 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
 
       let skippedCount = 0;
       if (skipSummaryMatches.length > 0) {
-        skippedCount = Number.parseInt(skipSummaryMatches[skipSummaryMatches.length - 1][1], 10);
+        for (const match of skipSummaryMatches) {
+          skippedCount += Number.parseInt(match[1], 10);
+        }
       } else if (individualSkipMatch) {
         skippedCount = 1;
       }

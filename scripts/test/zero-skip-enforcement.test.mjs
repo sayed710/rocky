@@ -138,3 +138,19 @@ test('zero-skip enforcer: succeeds with valid Node spec reporter output (ℹ tes
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 for valid Node spec format summary');
 });
+
+test('zero-skip enforcer: fails when an earlier suite in a multi-summary run reports skipped 1 even if later suite reports skipped 0', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 5\\n# pass 4\\n# skipped 1\\n# tests 5\\n# pass 5\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when any suite in a multi-summary run reports skipped > 0');
+});
+
+test('zero-skip enforcer: fails when an earlier suite in a multi-summary run reports 0 tests executed', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 0\\n# pass 0\\n# skipped 0\\n# tests 5\\n# pass 5\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when any suite in a multi-summary run executes 0 tests');
+});
