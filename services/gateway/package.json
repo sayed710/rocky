@@ -8,8 +8,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/serve.js",
-    "test": "tsc -p tsconfig.test.json && node --test \"dist-test/test/**/*.test.js\"",
-    "test:trusted-edge": "npm --prefix ../.. run build:server && npm run build && node --test ../../scripts/nginx-trusted-edge-acceptance.mjs",
+    "test": "tsc -p tsconfig.test.json && node ../../scripts/run-zero-skip.mjs -- node --test \"dist-test/test/**/*.test.js\"",
+    "test:trusted-edge": "npm --prefix ../.. run build:server && npm run build && node ../../scripts/run-zero-skip.mjs -- node --test ../../scripts/nginx-trusted-edge-acceptance.mjs",
     "lint": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist dist-test"
   },

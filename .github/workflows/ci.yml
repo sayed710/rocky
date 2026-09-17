@@ -157,6 +157,12 @@ jobs:
       - name: Load harness contract tests
         run: npm run test:load-harness
 
+      - name: POSIX API tests
+        run: npm run test:posix -w @chess-platform/api
+
+      - name: POSIX load harness tests
+        run: npm run test:load-harness:posix
+
       # The container images build with their own package chain, which CI never exercises — it
       # builds from the root chain instead. That gap let `docker compose up --build` stay broken
       # from M11 inc 5 onwards while every gate here was green. Static, so it costs seconds.
@@ -199,6 +205,10 @@ jobs:
       # stopped looking at anything. These drive it against synthetic sources: a commented-out
       # entry, a forward migration, a constraint replaced rather than edited, a renamed
       # declaration. Pure functions over temp files, no services.
+      # Every test file in the repository must belong to an explicit, appropriately provisioned suite.
+      - name: Test topology check
+        run: npm run check:test-topology
+
       - name: Guard script tests
         run: npm run test:scripts
 
@@ -403,10 +413,13 @@ jobs:
         run: npm run build
 
       - name: Test persistence against Postgres
-        run: npm test --workspace @chess-platform/persistence
+        run: npm run test:integration:postgres --workspace @chess-platform/persistence
 
       - name: Test API concurrency controls against Postgres
-        run: npm test --workspace @chess-platform/api
+        run: npm run test:integration:postgres --workspace @chess-platform/api
+
+      - name: Test scripts integration against Postgres
+        run: npm run test:scripts:integration
 
   # The only job that runs a real engine binary (ADR-0113). Every other analysis test drives a
   # fake transport or a provider double, which keeps the main suite hermetic but leaves the
