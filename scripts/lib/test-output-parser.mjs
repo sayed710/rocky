@@ -11,7 +11,7 @@
  * Ensures escaped hashes (`\#`) in descriptions are not misinterpreted as directives.
  */
 export const TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX =
-  /^\s*(?:(?:ok|not ok)(?:\s+\d+)?\b[^\r\n]*?(?<!\\)#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*SKIP\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\))/im;
+  /^\s*(?:(?:ok|not ok)(?:\s+\d+)?\b[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\b[^)]*\))/im;
 
 /**
  * Line-anchored regex matching individual TAP or spec TODO directives.
@@ -20,14 +20,14 @@ export const TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX =
  * Ensures escaped hashes (`\#`) in descriptions are not misinterpreted as directives.
  */
 export const TAP_OR_SPEC_TODO_DIRECTIVE_REGEX =
-  /^\s*(?:(?:ok|not ok)(?:\s+\d+)?\b[^\r\n]*?(?<!\\)#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*TODO\b|[\ufe63\-]\s+[^\r\n]*\((?:todo)\))/im;
+  /^\s*(?:(?:ok|not ok)(?:\s+\d+)?\b[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*\((?:to-?do)\b[^)]*\))/im;
 
 /**
  * Line-anchored regex matching raw TAP failure test points ("not ok") that do NOT
  * represent TODO or SKIP directives.
  */
 export const RAW_TAP_FAILURE_REGEX =
-  /^\s*not ok(?:\s+\d+)?\b(?:(?!(?<!\\)#\s*(?:TODO|SKIP)\b).)*$/im;
+  /^\s*not ok(?:\s+\d+)?\b(?:(?!(?<!\\)#\s*(?:TO-?DO|SKIP(?:PED)?)\b).)*$/im;
 
 /**
  * Resolves the total tests count from reporter summary lines or TAP plan headers.

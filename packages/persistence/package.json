@@ -31,7 +31,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
-    "test:unit": "node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/!(*.integration).test.js\"",
+    "test:unit": "node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/**/!(*.integration).test.js\"",
     "test:integration:postgres": "npm run build:test && node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/**/*.integration.test.js\"",
     "test": "npm run build:test && npm run test:unit",
     "lint": "tsc -p tsconfig.json --noEmit",

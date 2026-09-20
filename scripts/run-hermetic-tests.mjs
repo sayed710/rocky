@@ -11,35 +11,16 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { getHermeticWorkspaces } from './lib/workspace-topology.mjs';
 import { runWithZeroSkip } from './run-zero-skip.mjs';
 
 /**
- * Ordered list of all 19 hermetic packages executed during root `npm test`.
+ * Derived list of all hermetic packages executed during root `npm test`.
  * These packages contain hermetic unit tests with zero external service dependencies.
  *
  * @type {readonly string[]}
  */
-export const HERMETIC_WORKSPACES = Object.freeze([
-  '@chess-platform/core',
-  '@chess-platform/search',
-  '@chess-platform/social',
-  '@chess-platform/messaging',
-  '@chess-platform/community',
-  '@chess-platform/achievements',
-  '@chess-platform/studies',
-  '@chess-platform/learning',
-  '@chess-platform/game',
-  '@chess-platform/tournament',
-  '@chess-platform/realtime-gateway',
-  '@chess-platform/engine',
-  '@chess-platform/anti-cheat',
-  '@chess-platform/persistence',
-  '@chess-platform/api',
-  '@chess-platform/web',
-  '@chess-platform/e2e-harness',
-  '@chess-platform/ai-orchestrator',
-  '@chess-platform/ai-features',
-]);
+export const HERMETIC_WORKSPACES = getHermeticWorkspaces();
 
 /**
  * Resolves the path to the npm-cli.js executable without relying on shell expansion.

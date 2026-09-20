@@ -11,6 +11,7 @@ import {
   parseTestCount,
   parseTodoCount,
 } from './lib/test-output-parser.mjs';
+import { getHermeticWorkspaces, PARTITIONED_PACKAGES } from './lib/workspace-topology.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const npmCli = process.env.npm_execpath;
@@ -20,25 +21,11 @@ if (!npmCli) {
 }
 
 const HERMETIC_SUITES = [
-  ['core', ['test', '--workspace', '@chess-platform/core']],
-  ['search', ['test', '--workspace', '@chess-platform/search']],
-  ['social', ['test', '--workspace', '@chess-platform/social']],
-  ['messaging', ['test', '--workspace', '@chess-platform/messaging']],
-  ['community', ['test', '--workspace', '@chess-platform/community']],
-  ['achievements', ['test', '--workspace', '@chess-platform/achievements']],
-  ['studies', ['test', '--workspace', '@chess-platform/studies']],
-  ['learning', ['test', '--workspace', '@chess-platform/learning']],
-  ['anti-cheat', ['test', '--workspace', '@chess-platform/anti-cheat']],
-  ['game', ['test', '--workspace', '@chess-platform/game']],
-  ['tournament', ['test', '--workspace', '@chess-platform/tournament']],
-  ['realtime-gateway', ['test', '--workspace', '@chess-platform/realtime-gateway']],
-  ['persistence (hermetic unit)', ['test', '--workspace', '@chess-platform/persistence']],
-  ['api (hermetic unit)', ['test', '--workspace', '@chess-platform/api']],
-  ['engine', ['test', '--workspace', '@chess-platform/engine']],
-  ['web (hermetic unit)', ['test', '--workspace', '@chess-platform/web']],
-  ['e2e-harness', ['test', '--workspace', '@chess-platform/e2e-harness']],
-  ['ai-orchestrator (hermetic unit)', ['test', '--workspace', '@chess-platform/ai-orchestrator']],
-  ['ai-features (hermetic unit)', ['test', '--workspace', '@chess-platform/ai-features']],
+  ...getHermeticWorkspaces().map((pkg) => {
+    const base = pkg.replace('@chess-platform/', '');
+    const label = PARTITIONED_PACKAGES.includes(pkg) ? `${base} (hermetic unit)` : base;
+    return [label, ['test', '--workspace', pkg]];
+  }),
   ['scripts (hermetic unit)', ['run', 'test:scripts']],
   ['load-harness (hermetic unit)', ['run', 'test:load-harness']],
 ];
@@ -119,6 +106,7 @@ for (const [name, args] of HERMETIC_SUITES) {
     encoding: 'utf8',
     windowsHide: true,
     env: process.env,
+    maxBuffer: 64 * 1024 * 1024,
   });
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
   const tests = parseTestCount(output);
@@ -131,6 +119,7 @@ for (const [name, args] of HERMETIC_SUITES) {
 
   if (
     result.status !== 0 ||
+    result.error ||
     tests === null ||
     tests === 0 ||
     failed > 0 ||
@@ -138,9 +127,13 @@ for (const [name, args] of HERMETIC_SUITES) {
     todo > 0 ||
     cancelled > 0
   ) {
-    console.error(
-      `${name}: ERROR (status=${result.status}, tests=${tests}, passed=${passed}, failed=${failed}, skipped=${skipped}, todo=${todo}, cancelled=${cancelled})`
-    );
+    if (result.error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      console.error(`${name}: ERROR (output exceeded maxBuffer of 64MB)`);
+    } else {
+      console.error(
+        `${name}: ERROR (status=${result.status}, tests=${tests}, passed=${passed}, failed=${failed}, skipped=${skipped}, todo=${todo}, cancelled=${cancelled})`
+      );
+    }
     if (result.error) console.error(result.error.message);
     if (output.trim()) console.error(output.trim());
     hadError = true;
@@ -169,6 +162,7 @@ for (const suite of SERVICE_SUITES) {
     encoding: 'utf8',
     windowsHide: true,
     env: process.env,
+    maxBuffer: 64 * 1024 * 1024,
   });
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
   const tests = parseTestCount(output);
@@ -181,6 +175,7 @@ for (const suite of SERVICE_SUITES) {
 
   if (
     result.status !== 0 ||
+    result.error ||
     tests === null ||
     tests === 0 ||
     failed > 0 ||
@@ -188,9 +183,13 @@ for (const suite of SERVICE_SUITES) {
     todo > 0 ||
     cancelled > 0
   ) {
-    console.error(
-      `${suite.name}: ERROR (status=${result.status}, tests=${tests}, passed=${passed}, failed=${failed}, skipped=${skipped}, todo=${todo}, cancelled=${cancelled})`
-    );
+    if (result.error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      console.error(`${suite.name}: ERROR (output exceeded maxBuffer of 64MB)`);
+    } else {
+      console.error(
+        `${suite.name}: ERROR (status=${result.status}, tests=${tests}, passed=${passed}, failed=${failed}, skipped=${skipped}, todo=${todo}, cancelled=${cancelled})`
+      );
+    }
     if (result.error) console.error(result.error.message);
     if (output.trim()) console.error(output.trim());
     hadError = true;

@@ -480,3 +480,56 @@ test('test-output-parser: parseFailCount detects raw TAP not ok and differentiat
   assert.equal(parseFailCount(tapSkipNotOk), 0, 'TAP not ok with # SKIP should not count as raw failure (handled by skip)');
   assert.equal(parseSkippedCount(tapSkipNotOk), 1, 'TAP not ok with # SKIP must register as SKIP');
 });
+
+test('zero-skip enforcer: fails when child output contains # SKIPPED directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 1 - feature # SKIPPED not ready\\n# tests 1\\n# pass 1\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when # SKIPPED is present');
+});
+
+test('zero-skip enforcer: fails when child output contains unnumbered # SKIPPED directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok - feature # SKIPPED not ready\\n1..1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when unnumbered # SKIPPED is present');
+});
+
+test('zero-skip enforcer: fails when child output contains # TO-DO directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 1 - feature # TO-DO future item\\n# tests 1\\n# pass 1\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when # TO-DO is present');
+});
+
+test('zero-skip enforcer: fails when child output contains unnumbered # TO-DO directive', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok - feature # TO-DO future item\\n1..1");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should return exit code 1 when unnumbered # TO-DO is present');
+});
+
+test('zero-skip enforcer: succeeds when test title contains escaped hash before SKIPPED keyword', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 1 - title has \\\\# SKIPPED inside\\n# tests 1\\n# pass 1\\n# skipped 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when escaped hash is present in test description');
+});
+
+test('test-output-parser: parseSkippedCount and parseTodoCount detect SKIPPED and TO-DO variants', () => {
+  assert.equal(parseSkippedCount('ok 1 - item # SKIPPED reason\n1..1'), 1);
+  assert.equal(parseSkippedCount('ok - item # SKIPPED reason\n1..1'), 1);
+  assert.equal(parseSkippedCount('not ok 1 - item # SKIPPED reason\n1..1'), 1);
+  assert.equal(parseSkippedCount('ok 1 - item with \\# SKIPPED escaped\n# tests 1\n# skipped 0'), 0);
+
+  assert.equal(parseTodoCount('ok 1 - item # TO-DO reason\n1..1'), 1);
+  assert.equal(parseTodoCount('ok - item # TO-DO reason\n1..1'), 1);
+  assert.equal(parseTodoCount('not ok 1 - item # TO-DO reason\n1..1'), 1);
+  assert.equal(parseTodoCount('ok 1 - item with \\# TO-DO escaped\n# tests 1\n# todo 0'), 0);
+});
+

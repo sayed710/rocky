@@ -37,17 +37,32 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       ...options,
     });
 
-    let combinedOutput = '';
+    let lineBuffer = '';
+    const reporterLines = [];
+    const recentLines = [];
+    const MAX_RECENT_LINES = 100;
 
-    child.stdout?.on('data', (chunk) => {
-      if (!options.silent) process.stdout.write(chunk);
-      combinedOutput += chunk.toString('utf8');
-    });
+    function processChunk(chunk, isStderr = false) {
+      if (!options.silent) {
+        if (isStderr) process.stderr.write(chunk);
+        else process.stdout.write(chunk);
+      }
+      lineBuffer += chunk.toString('utf8');
+      const lines = lineBuffer.split(/\r?\n/);
+      lineBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (/^\s*(?:#|ℹ|1\.\.|ok\b|not ok\b|[\ufe63\-])/i.test(line)) {
+          reporterLines.push(line);
+        }
+        recentLines.push(line);
+        if (recentLines.length > MAX_RECENT_LINES) {
+          recentLines.shift();
+        }
+      }
+    }
 
-    child.stderr?.on('data', (chunk) => {
-      if (!options.silent) process.stderr.write(chunk);
-      combinedOutput += chunk.toString('utf8');
-    });
+    child.stdout?.on('data', (chunk) => processChunk(chunk, false));
+    child.stderr?.on('data', (chunk) => processChunk(chunk, true));
 
 
     child.on('error', (err) => {
@@ -69,10 +84,18 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         return;
       }
 
+      if (lineBuffer.trim().length > 0) {
+        if (/^\s*(?:#|ℹ|1\.\.|ok\b|not ok\b|[\ufe63\-])/i.test(lineBuffer)) {
+          reporterLines.push(lineBuffer);
+        }
+        recentLines.push(lineBuffer);
+      }
+      const parserOutput = reporterLines.join('\n');
+
       // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed).
       // Only accept genuine line-anchored reporter summary lines (# tests N, ℹ tests N) or TAP plan headers (1..N).
       // In multi-summary outputs, aggregate test counts and fail if any suite reports 0 executed tests.
-      const totalTests = parseTestCount(combinedOutput);
+      const totalTests = parseTestCount(parserOutput);
 
       if (totalTests === null || totalTests === 0) {
         if (!options.silent) {
@@ -85,7 +108,7 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for test runner skip indicators across TAP summaries and individual directives.
-      const skippedCount = parseSkippedCount(combinedOutput);
+      const skippedCount = parseSkippedCount(parserOutput);
       if (skippedCount > 0) {
         if (!options.silent) {
           process.stderr.write(
@@ -97,7 +120,7 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for TODO tests across TAP summaries and individual directives.
-      const todoCount = parseTodoCount(combinedOutput);
+      const todoCount = parseTodoCount(parserOutput);
       if (todoCount > 0) {
         if (!options.silent) {
           process.stderr.write(
@@ -109,7 +132,7 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for cancelled tests across TAP and spec format summaries.
-      const cancelledCount = parseCancelledCount(combinedOutput);
+      const cancelledCount = parseCancelledCount(parserOutput);
       if (cancelledCount > 0) {
         if (!options.silent) {
           process.stderr.write(
@@ -121,7 +144,7 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for fail/failed summaries and raw TAP "not ok" test points.
-      const failCount = parseFailCount(combinedOutput);
+      const failCount = parseFailCount(parserOutput);
       if (failCount > 0) {
         if (!options.silent) {
           process.stderr.write(

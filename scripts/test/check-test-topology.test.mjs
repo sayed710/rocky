@@ -4,13 +4,30 @@ import {
   findTestFiles,
   classifyTestFile,
   verifyTestTopology,
+  isAllowedPlacement,
   SUITE_DEFINITIONS,
 } from '../check-test-topology.mjs';
 
 test('topology: all test files in the repository are classified into explicit suites', () => {
   const result = verifyTestTopology();
+  assert.equal(result.misplaced.length, 0, `Found misplaced test files: ${result.misplaced.join(', ')}`);
   assert.equal(result.unclassified.length, 0, `Found unclassified test files: ${result.unclassified.join(', ')}`);
+  assert.equal(result.unreachable.length, 0, `Found unreachable test files: ${result.unreachable.map((u) => `${u.file} (${u.suite})`).join(', ')}`);
   assert.ok(result.totalFiles > 300, `Expected over 300 test files, got ${result.totalFiles}`);
+});
+
+test('topology: isAllowedPlacement rejects misplaced test files in unauthorized locations', () => {
+  assert.equal(isAllowedPlacement('packages/chess-core/src/fen.test.ts'), false);
+  assert.equal(isAllowedPlacement('test/root.test.ts'), false);
+  assert.equal(isAllowedPlacement('root.test.js'), false);
+  assert.equal(isAllowedPlacement('services/gateway/src/server.test.ts'), false);
+
+  assert.equal(isAllowedPlacement('packages/chess-core/test/fen.test.ts'), true);
+  assert.equal(isAllowedPlacement('packages/web/e2e/game.spec.ts'), true);
+  assert.equal(isAllowedPlacement('services/gateway/test/engine-bot.test.ts'), true);
+  assert.equal(isAllowedPlacement('scripts/test/zero-skip-enforcement.test.mjs'), true);
+  assert.equal(isAllowedPlacement('scripts/nginx-trusted-edge-acceptance.mjs'), true);
+  assert.equal(isAllowedPlacement('deploy/load/test/run-evidence.test.mjs'), true);
 });
 
 test('topology: classifyTestFile correctly maps each suite pattern', () => {
@@ -36,6 +53,26 @@ test('topology: classifyTestFile correctly maps each suite pattern', () => {
   assert.equal(classifyTestFile('packages/chess-core/test/fen.test.ts')?.name, 'domain-hermetic-unit');
 });
 
+test('topology: runner reachability detects tests outside execution globs', () => {
+  const smokeSuite = SUITE_DEFINITIONS.find((s) => s.name === 'api-engine-smoke');
+  assert.ok(smokeSuite?.isReachable);
+  assert.equal(smokeSuite.isReachable('packages/api/test/analysis-stockfish-smoke.test.ts'), true);
+  assert.equal(smokeSuite.isReachable('packages/api/test/analysis-unknown-smoke.test.ts'), false);
+
+  const persistenceUnitSuite = SUITE_DEFINITIONS.find((s) => s.name === 'persistence-unit');
+  assert.ok(persistenceUnitSuite?.isReachable);
+  assert.equal(persistenceUnitSuite.isReachable('packages/persistence/test/event-store.test.ts'), true);
+  assert.equal(persistenceUnitSuite.isReachable('packages/persistence/test/pg.integration.test.ts'), false);
+
+  const apiUnitSuite = SUITE_DEFINITIONS.find((s) => s.name === 'api-unit');
+  assert.ok(apiUnitSuite?.isReachable);
+  assert.equal(apiUnitSuite.isReachable('packages/api/test/auth.test.ts'), true);
+  assert.equal(apiUnitSuite.isReachable('packages/api/test/analysis-stockfish-smoke.test.ts'), false);
+  assert.equal(apiUnitSuite.isReachable('packages/api/test/signature.posix.test.ts'), false);
+  assert.equal(apiUnitSuite.isReachable('packages/api/test/pg.integration.test.ts'), false);
+});
+
 test('topology: classifyTestFile returns null for unknown files', () => {
   assert.equal(classifyTestFile('random/path/unknown.test.ts'), null);
 });
+
