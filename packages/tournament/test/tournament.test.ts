@@ -515,6 +515,21 @@ describe('Tournament Aggregate (round-by-round)', () => {
     assert.strictEqual(t.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, true);
   });
 
+  test('snapshot omits withdrawalRounds key when no withdrawals occurred', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.start();
+
+    const snap = t.toSnapshot();
+    assert.strictEqual('withdrawalRounds' in snap, false);
+    assert.strictEqual(snap.withdrawalRounds, undefined);
+
+    const restored = Tournament.restore(snap, new RoundRobinPairing());
+    const restoredSnap = restored.toSnapshot();
+    assert.strictEqual('withdrawalRounds' in restoredSnap, false);
+  });
+
   test('snapshot withdrawalRounds is isolated from live aggregate mutations', () => {
     const t = new Tournament(config, new RoundRobinPairing());
     t.register('A');
@@ -525,10 +540,11 @@ describe('Tournament Aggregate (round-by-round)', () => {
     t.withdraw('D');
 
     const snap = t.toSnapshot();
-    assert.ok(snap.withdrawalRounds);
-    (snap.withdrawalRounds as unknown as [string, number][]).push(['MUTATED', 99]);
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 0]]);
 
-    const snap2 = t.toSnapshot();
-    assert.deepStrictEqual(snap2.withdrawalRounds, [['D', 0]]);
+    t.withdraw('C');
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 0]], 'previous snapshot unaffected by later withdrawal');
+    assert.deepStrictEqual(t.toSnapshot().withdrawalRounds, [['D', 0], ['C', 0]]);
   });
 });
+

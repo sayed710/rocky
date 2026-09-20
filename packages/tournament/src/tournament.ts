@@ -76,10 +76,9 @@ export class Tournament {
 
     if (this.state === 'registration') {
       const idx = this.participants.indexOf(playerId);
-      if (idx >= 0) {
+      if (idx !== -1) {
         this.participants.splice(idx, 1);
       }
-      this.withdrawalRounds.delete(playerId);
       return;
     }
 
@@ -474,7 +473,9 @@ export class Tournament {
       pairingsByMatchId: Array.from(this.pairingsByMatchId.entries()).map(([k, v]) => [k, { ...v }]),
       gameLinks: Array.from(this.gameLinks.entries()),
       gameAttempts: Array.from(this.gameAttempts.entries()),
-      withdrawalRounds: Array.from(this.withdrawalRounds.entries())
+      ...(this.withdrawalRounds.size > 0
+        ? { withdrawalRounds: Array.from(this.withdrawalRounds.entries()) }
+        : {}),
     };
   }
 
