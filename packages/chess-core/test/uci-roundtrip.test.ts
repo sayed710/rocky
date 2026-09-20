@@ -13,7 +13,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Position } from '../src/position';
-import type { Move } from '../src/types';
+import { MoveFlag, type Move, type PieceType } from '../src/types';
 
 /**
  * Asserts the UCI round-trip invariant across every legal move in the given position.
@@ -77,6 +77,44 @@ function assertPositionUciRoundTrip(pos: Position): number {
   return moves.length;
 }
 
+/**
+ * Asserts that a specific legal move exists in pos, optionally carries the expected flag,
+ * and produces identical results whether played via Move object or via UCI string.
+ */
+function assertSpecificMoveRoundTrip(
+  pos: Position,
+  expectedUci: string,
+  expectedFlag?: MoveFlag
+): { move: Move; after: Position } {
+  const move = pos.legalMoves().find((m) => pos.toUci(m) === expectedUci);
+  assert.ok(move, `Expected legal move '${expectedUci}' not found in position ${pos.fen()}`);
+  if (expectedFlag !== undefined) {
+    assert.strictEqual(
+      (move.flags & expectedFlag),
+      expectedFlag,
+      `Move '${expectedUci}' in position ${pos.fen()} expected flag ${expectedFlag}, got ${move.flags}`
+    );
+  }
+  const viaObject = pos.play(move);
+  const viaString = pos.play(expectedUci);
+  assert.strictEqual(
+    viaString.fen(),
+    viaObject.fen(),
+    `FEN mismatch for move '${expectedUci}' in position ${pos.fen()}`
+  );
+  assert.deepStrictEqual(
+    viaString.status(),
+    viaObject.status(),
+    `Status mismatch for move '${expectedUci}' in position ${pos.fen()}`
+  );
+  assert.deepStrictEqual(
+    viaString.snapshot(),
+    viaObject.snapshot(),
+    `Snapshot mismatch for move '${expectedUci}' in position ${pos.fen()}`
+  );
+  return { move, after: viaString };
+}
+
 test('Standard chess starting position: all legal moves round-trip through UCI', () => {
   const pos = Position.initial('standard');
   const count = assertPositionUciRoundTrip(pos);
@@ -88,11 +126,15 @@ test('Standard position with legal castling: kingside and queenside for both col
   const whitePos = Position.fromFen('r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1');
   const whiteCount = assertPositionUciRoundTrip(whitePos);
   assert.ok(whiteCount > 0);
+  assertSpecificMoveRoundTrip(whitePos, 'e1g1', MoveFlag.KingCastle);
+  assertSpecificMoveRoundTrip(whitePos, 'e1c1', MoveFlag.QueenCastle);
 
   // Black to move with both wings open
   const blackPos = Position.fromFen('r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1');
   const blackCount = assertPositionUciRoundTrip(blackPos);
   assert.ok(blackCount > 0);
+  assertSpecificMoveRoundTrip(blackPos, 'e8g8', MoveFlag.KingCastle);
+  assertSpecificMoveRoundTrip(blackPos, 'e8c8', MoveFlag.QueenCastle);
 });
 
 test('En passant position: en passant capture and non-capture alternatives round-trip through UCI', () => {
@@ -100,11 +142,23 @@ test('En passant position: en passant capture and non-capture alternatives round
   const whiteEp = Position.fromFen('rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3');
   const whiteCount = assertPositionUciRoundTrip(whiteEp);
   assert.ok(whiteCount > 0);
+  const { after: afterWhite } = assertSpecificMoveRoundTrip(whiteEp, 'e5f6', MoveFlag.EnPassant);
+  assert.strictEqual(
+    afterWhite.fen(),
+    'rnbqkbnr/ppp1p1pp/5P2/3p4/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 3',
+    'En passant capture e5f6 must remove the captured black pawn at f5'
+  );
 
   // Black en-passant on d3
   const blackEp = Position.fromFen('4k3/8/8/8/3Pp3/8/8/4K3 b - d3 0 1');
   const blackCount = assertPositionUciRoundTrip(blackEp);
   assert.ok(blackCount > 0);
+  const { after: afterBlack } = assertSpecificMoveRoundTrip(blackEp, 'e4d3', MoveFlag.EnPassant);
+  assert.strictEqual(
+    afterBlack.fen(),
+    '4k3/8/8/8/8/3p4/8/4K3 w - - 0 2',
+    'En passant capture e4d3 must remove the captured white pawn at d4'
+  );
 });
 
 test('Pawn promotions: queen, rook, bishop, knight underpromotions round-trip through UCI', () => {
@@ -134,11 +188,17 @@ test('Capture promotions: promotions capturing enemy pieces round-trip through U
   const whiteCapPromo = Position.fromFen('3rk3/4P3/8/8/8/8/8/4K3 w - - 0 1');
   const whiteCount = assertPositionUciRoundTrip(whiteCapPromo);
   assert.strictEqual(whiteCount, 7);
+  for (const uci of ['e7d8q', 'e7d8r', 'e7d8b', 'e7d8n']) {
+    assertSpecificMoveRoundTrip(whiteCapPromo, uci, MoveFlag.Promotion | MoveFlag.Capture);
+  }
 
   // Black capture-promotions on d1 (4 promo types), king captures d1 (1 move), king to f2 (1 move) = 6 legal moves
   const blackCapPromo = Position.fromFen('4K3/8/8/8/8/8/4p3/3Rk3 b - - 0 1');
   const blackCount = assertPositionUciRoundTrip(blackCapPromo);
   assert.strictEqual(blackCount, 6);
+  for (const uci of ['e2d1q', 'e2d1r', 'e2d1b', 'e2d1n']) {
+    assertSpecificMoveRoundTrip(blackCapPromo, uci, MoveFlag.Promotion | MoveFlag.Capture);
+  }
 });
 
 test('Tactical complex position (Kiwipete): pins, checks, captures round-trip through UCI', () => {
@@ -162,26 +222,37 @@ test('Chess960 castling-specific edge cases: UCI_Chess960 king-takes-rook encodi
   // 1. King on b1, not on e-file (rooks on a1 and h1)
   const kingNotOnE = Position.fromFen('8/8/8/k7/8/8/8/RK5R w KQ - 0 1', 'chess960');
   assertPositionUciRoundTrip(kingNotOnE);
+  assertSpecificMoveRoundTrip(kingNotOnE, 'b1h1', MoveFlag.KingCastle);
+  assertSpecificMoveRoundTrip(kingNotOnE, 'b1a1', MoveFlag.QueenCastle);
 
   // 2. Inner rook on b1 (rook not on a/h file)
   const innerRook = Position.fromFen('8/8/8/k7/8/8/8/1R2K2R w KQ - 0 1', 'chess960');
   assertPositionUciRoundTrip(innerRook);
+  assertSpecificMoveRoundTrip(innerRook, 'e1h1', MoveFlag.KingCastle);
+  assertSpecificMoveRoundTrip(innerRook, 'e1b1', MoveFlag.QueenCastle);
 
   // 3. King already on destination square g1 (UCI is g1h1)
   const kingOnDest = Position.fromFen('8/8/8/k7/8/8/8/R5KR w KQ - 0 1', 'chess960');
   assertPositionUciRoundTrip(kingOnDest);
+  assertSpecificMoveRoundTrip(kingOnDest, 'g1h1', MoveFlag.KingCastle);
+  assertSpecificMoveRoundTrip(kingOnDest, 'g1a1', MoveFlag.QueenCastle);
 
   // 4. Rook already on destination square f1 (UCI is e1f1)
   const rookOnDest = Position.fromFen('8/8/8/k7/8/8/8/R3KR2 w KQ - 0 1', 'chess960');
   assertPositionUciRoundTrip(rookOnDest);
+  assertSpecificMoveRoundTrip(rookOnDest, 'e1f1', MoveFlag.KingCastle);
+  assertSpecificMoveRoundTrip(rookOnDest, 'e1a1', MoveFlag.QueenCastle);
 
   // 5. King and rook crossover / swap (King on b1, rook on c1)
   const crossover = Position.fromFen('8/8/8/k7/8/8/8/RKR5 w K - 0 1', 'chess960');
   assertPositionUciRoundTrip(crossover);
+  assertSpecificMoveRoundTrip(crossover, 'b1c1', MoveFlag.KingCastle);
 
   // 6. King and rook directly adjacent (King on f1, rook on g1)
   const adjacent = Position.fromFen('8/8/8/k7/8/8/8/R4KR1 w KQ - 0 1', 'chess960');
   assertPositionUciRoundTrip(adjacent);
+  assertSpecificMoveRoundTrip(adjacent, 'f1g1', MoveFlag.KingCastle);
+  assertSpecificMoveRoundTrip(adjacent, 'f1a1', MoveFlag.QueenCastle);
 });
 
 test('Crazyhouse: legal moves and pocket drops round-trip through UCI', () => {
@@ -190,31 +261,40 @@ test('Crazyhouse: legal moves and pocket drops round-trip through UCI', () => {
   const count = assertPositionUciRoundTrip(fullPocket);
   assert.ok(count > 20, 'Crazyhouse with pockets must have drop moves exceeding standard moves');
 
+  // Representative drops for each pocket piece type: P@e4, N@c3, B@e3, R@d3, Q@d4
+  const representativeDrops: [string, PieceType][] = [
+    ['P@e4', 'p'],
+    ['N@c3', 'n'],
+    ['B@e3', 'b'],
+    ['R@d3', 'r'],
+    ['Q@d4', 'q'],
+  ];
+  for (const [uci, piece] of representativeDrops) {
+    const { move } = assertSpecificMoveRoundTrip(fullPocket, uci);
+    assert.strictEqual(move.from, -1, `Drop move '${uci}' must have from === -1`);
+    assert.strictEqual(move.drop, piece, `Drop move '${uci}' must have drop === '${piece}'`);
+  }
+
   // Interposing drop to block check
   const blockCheck = Position.fromFen('4k3/8/8/8/8/8/8/4K2r[B] w - - 0 1', 'crazyhouse');
   const blockCount = assertPositionUciRoundTrip(blockCheck);
   assert.ok(blockCount > 0);
-  const interposeMove = blockCheck.legalMoves().find((m) => blockCheck.toUci(m) === 'B@f1');
-  assert.ok(interposeMove, 'B@f1 must be a legal interposing drop');
-  assert.strictEqual(blockCheck.play('B@f1').fen(), blockCheck.play(interposeMove).fen());
+  const { move: interposeMove } = assertSpecificMoveRoundTrip(blockCheck, 'B@f1');
+  assert.strictEqual(interposeMove.from, -1);
+  assert.strictEqual(interposeMove.drop, 'b');
 
   // Checkmating drop
   const dropMate = Position.fromFen('7k/5ppp/8/8/8/8/8/4K3[Q] w - - 0 1', 'crazyhouse');
   const mateCount = assertPositionUciRoundTrip(dropMate);
   assert.ok(mateCount > 0);
-  const matingDropMove = dropMate.legalMoves().find((m) => dropMate.toUci(m) === 'Q@e8');
-  assert.ok(matingDropMove, 'Q@e8 must be a legal drop');
-  const dropViaObj = dropMate.play(matingDropMove);
-  const dropViaStr = dropMate.play('Q@e8');
-  const objStatus = dropViaObj.status();
-  const strStatus = dropViaStr.status();
-  assert.ok(objStatus.over, 'Object move must result in game over');
-  assert.ok(strStatus.over, 'String move must result in game over');
-  if (objStatus.over && strStatus.over) {
-    assert.strictEqual(objStatus.reason, 'checkmate');
-    assert.strictEqual(strStatus.reason, 'checkmate');
+  const { move: matingDropMove, after: dropAfter } = assertSpecificMoveRoundTrip(dropMate, 'Q@e8');
+  assert.strictEqual(matingDropMove.from, -1);
+  assert.strictEqual(matingDropMove.drop, 'q');
+  const dropStatus = dropAfter.status();
+  assert.ok(dropStatus.over, 'Q@e8 must result in game over');
+  if (dropStatus.over) {
+    assert.strictEqual(dropStatus.reason, 'checkmate');
   }
-  assert.strictEqual(dropViaStr.fen(), dropViaObj.fen());
 });
 
 test('Three-check: move round-trip preserves check-counter semantics and terminal win', () => {
@@ -225,55 +305,69 @@ test('Three-check: move round-trip preserves check-counter semantics and termina
   // Single check delivery (3+3 -> 2+3)
   const singleCheck = Position.fromFen('4k3/8/8/8/8/8/8/3R3K w - - 3+3 0 1', 'threecheck');
   assertPositionUciRoundTrip(singleCheck);
+  const { after: afterSingle } = assertSpecificMoveRoundTrip(singleCheck, 'd1e1');
+  assert.strictEqual(
+    afterSingle.fen(),
+    '4k3/8/8/8/8/8/8/4R2K b - - 2+3 1 1',
+    'Delivering first check must transition counter from 3+3 to 2+3'
+  );
+  assert.deepStrictEqual(
+    afterSingle.snapshot().checkCount,
+    { w: 1, b: 0 },
+    'Delivering first check must record 1 check delivered by White in snapshot'
+  );
 
   // Second check delivery (2+3 -> 1+3)
   const secondCheck = Position.fromFen('4k3/8/8/8/8/8/8/3R3K w - - 2+3 0 1', 'threecheck');
   assertPositionUciRoundTrip(secondCheck);
+  const { after: afterSecond } = assertSpecificMoveRoundTrip(secondCheck, 'd1e1');
+  assert.strictEqual(
+    afterSecond.fen(),
+    '4k3/8/8/8/8/8/8/4R2K b - - 1+3 1 1',
+    'Delivering second check must transition counter from 2+3 to 1+3'
+  );
+  assert.deepStrictEqual(
+    afterSecond.snapshot().checkCount,
+    { w: 2, b: 0 },
+    'Delivering second check must record 2 checks delivered by White in snapshot'
+  );
 
   // Terminal third check delivery
   const terminalCheck = Position.fromFen('4k3/8/8/8/8/8/8/3R3K w - - 1+3 0 1', 'threecheck');
   assertPositionUciRoundTrip(terminalCheck);
-  const winCheckMove = terminalCheck.legalMoves().find((m) => terminalCheck.toUci(m) === 'd1e1');
-  assert.ok(winCheckMove, 'd1e1 must deliver terminal third check');
-  const tcViaObj = terminalCheck.play(winCheckMove);
-  const tcViaStr = terminalCheck.play('d1e1');
-  const tcObjStatus = tcViaObj.status();
-  const tcStrStatus = tcViaStr.status();
-  assert.ok(tcObjStatus.over, 'Terminal check must end game');
-  assert.ok(tcStrStatus.over, 'Terminal check string must end game');
-  if (tcObjStatus.over && tcStrStatus.over) {
-    assert.strictEqual(tcObjStatus.reason, 'variant_win');
-    assert.strictEqual(tcObjStatus.winner, 'w');
+  const { after: afterTerminal } = assertSpecificMoveRoundTrip(terminalCheck, 'd1e1');
+  const tcStatus = afterTerminal.status();
+  assert.ok(tcStatus.over, 'Terminal check must end game');
+  if (tcStatus.over) {
+    assert.strictEqual(tcStatus.reason, 'variant_win');
+    assert.strictEqual(tcStatus.winner, 'w');
   }
-  assert.strictEqual(tcViaStr.fen(), tcViaObj.fen());
 });
 
 test('Atomic: captures with non-pawn explosion round-trip through UCI', () => {
   // Queen capture explosion
   const queenExplosion = Position.fromFen('4k3/8/8/7q/8/8/8/3QK3 w - - 0 1', 'atomic');
   assertPositionUciRoundTrip(queenExplosion);
-  const queenCapture = queenExplosion.legalMoves().find((m) => queenExplosion.toUci(m) === 'd1h5');
-  assert.ok(queenCapture, 'd1h5 capture explosion must be legal');
-  const queenViaObj = queenExplosion.play(queenCapture);
-  const queenViaStr = queenExplosion.play('d1h5');
-  assert.strictEqual(queenViaStr.fen(), '4k3/8/8/8/8/8/8/4K3 b - - 0 1');
-  assert.strictEqual(queenViaObj.fen(), queenViaStr.fen());
+  const { after: afterQueen } = assertSpecificMoveRoundTrip(queenExplosion, 'd1h5', MoveFlag.Capture);
+  assert.strictEqual(afterQueen.fen(), '4k3/8/8/8/8/8/8/4K3 b - - 0 1');
 
   // Capture promotion explosion
   const capPromoExplosion = Position.fromFen('k2r4/4P3/8/8/8/8/8/4K3 w - - 0 1', 'atomic');
   assertPositionUciRoundTrip(capPromoExplosion);
   for (const uci of ['e7d8q', 'e7d8r', 'e7d8b', 'e7d8n']) {
-    const move = capPromoExplosion.legalMoves().find((m) => capPromoExplosion.toUci(m) === uci);
-    assert.ok(move, `Atomic capture promotion ${uci} must be legal`);
-    const viaObj = capPromoExplosion.play(move);
-    const viaStr = capPromoExplosion.play(uci);
-    assert.strictEqual(viaStr.fen(), 'k7/8/8/8/8/8/8/4K3 b - - 0 1');
-    assert.strictEqual(viaObj.fen(), viaStr.fen());
+    const { after } = assertSpecificMoveRoundTrip(capPromoExplosion, uci, MoveFlag.Promotion | MoveFlag.Capture);
+    assert.strictEqual(after.fen(), 'k7/8/8/8/8/8/8/4K3 b - - 0 1');
   }
 
   // En passant capture explosion
   const epExplosion = Position.fromFen('4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1', 'atomic');
   assertPositionUciRoundTrip(epExplosion);
+  const { after: afterEp } = assertSpecificMoveRoundTrip(epExplosion, 'e5d6', MoveFlag.EnPassant);
+  assert.strictEqual(
+    afterEp.fen(),
+    '4k3/8/8/8/8/8/8/4K3 b - - 0 1',
+    'Atomic en passant capture e5d6 must explode both pawns leaving board empty of pawns'
+  );
 });
 
 test('Horde: kingless pawn army and standard Black army round-trip through UCI', () => {
@@ -285,10 +379,13 @@ test('Horde: kingless pawn army and standard Black army round-trip through UCI',
   // Rank 1 double push
   const rank1Push = Position.fromFen('k7/8/8/8/8/8/8/P7 w - - 0 1', 'horde');
   assertPositionUciRoundTrip(rank1Push);
+  assertSpecificMoveRoundTrip(rank1Push, 'a1a3', MoveFlag.DoublePawnPush);
 
   // Black castling in horde
   const blackCastle = Position.fromFen('r3k2r/pppppppp/8/8/8/8/PPPPPPPP/PPPPPPPP b kq - 0 1', 'horde');
   assertPositionUciRoundTrip(blackCastle);
+  assertSpecificMoveRoundTrip(blackCastle, 'e8g8', MoveFlag.KingCastle);
+  assertSpecificMoveRoundTrip(blackCastle, 'e8c8', MoveFlag.QueenCastle);
 
   // Open flank position
   const openFlank = Position.fromFen('4k3/pp4q1/3P2p1/8/P3PP2/PPP2r2/PPP5/PPPP4 b - - 0 1', 'horde');
@@ -304,24 +401,25 @@ test('Racing Kings: check-free race to rank 8 round-trip through UCI', () => {
   // White winning position (White reaches rank 8 and Black cannot equalize)
   const whiteWin = Position.fromFen('8/2K5/8/8/8/8/8/4k3 w - - 0 1', 'racingkings');
   assertPositionUciRoundTrip(whiteWin);
-  const raceWinMove = whiteWin.legalMoves().find((m) => whiteWin.toUci(m) === 'c7c8');
-  assert.ok(raceWinMove, 'c7c8 must be a legal race-winning move');
   assert.strictEqual(whiteWin.status().over, false);
-  const rkAfterObj = whiteWin.play(raceWinMove);
-  const rkAfterStr = whiteWin.play('c7c8');
-  const rkObjStatus = rkAfterObj.status();
-  const rkStrStatus = rkAfterStr.status();
-  assert.ok(rkObjStatus.over, 'Reaching rank 8 must end game when Black cannot equalize');
-  assert.ok(rkStrStatus.over, 'String move reaching rank 8 must end game');
-  if (rkObjStatus.over && rkStrStatus.over) {
-    assert.strictEqual(rkObjStatus.reason, 'variant_win');
-    assert.strictEqual(rkObjStatus.winner, 'w');
+  const { after: afterWhiteWin } = assertSpecificMoveRoundTrip(whiteWin, 'c7c8');
+  const rkWinStatus = afterWhiteWin.status();
+  assert.ok(rkWinStatus.over, 'Reaching rank 8 must end game when Black cannot equalize');
+  if (rkWinStatus.over) {
+    assert.strictEqual(rkWinStatus.reason, 'variant_win');
+    assert.strictEqual(rkWinStatus.winner, 'w');
   }
-  assert.strictEqual(rkAfterStr.fen(), rkAfterObj.fen());
 
   // Equalizing position (Black reaches rank 8 for draw)
   const equalizeDraw = Position.fromFen('2K5/4k3/8/8/8/8/8/8 b - - 0 1', 'racingkings');
   assertPositionUciRoundTrip(equalizeDraw);
+  assert.strictEqual(equalizeDraw.status().over, false);
+  const { after: afterEqualize } = assertSpecificMoveRoundTrip(equalizeDraw, 'e7e8');
+  assert.deepStrictEqual(
+    afterEqualize.status(),
+    { over: true, reason: 'variant_draw' },
+    'Black equalizing king move to rank 8 must yield variant_draw'
+  );
 });
 
 test('King of the Hill: standard move generation and center occupation round-trip through UCI', () => {
@@ -333,18 +431,12 @@ test('King of the Hill: standard move generation and center occupation round-tri
   // Center occupation step: king moves from outside center (c3) into center (d4) to win
   const centerWin = Position.fromFen('8/8/8/8/8/2K5/8/7k w - - 0 1', 'kingofthehill');
   assertPositionUciRoundTrip(centerWin);
-  const winMove = centerWin.legalMoves().find((m) => centerWin.toUci(m) === 'c3d4');
-  assert.ok(winMove, 'c3d4 must be a legal move');
   assert.strictEqual(centerWin.status().over, false);
-  const afterObj = centerWin.play(winMove);
-  const afterStr = centerWin.play('c3d4');
-  const objStatus = afterObj.status();
-  const strStatus = afterStr.status();
-  assert.ok(objStatus.over, 'Object move must result in game over');
-  assert.ok(strStatus.over, 'String move must result in game over');
-  if (objStatus.over && strStatus.over) {
-    assert.strictEqual(objStatus.reason, 'variant_win');
-    assert.strictEqual(objStatus.winner, 'w');
+  const { after: afterWin } = assertSpecificMoveRoundTrip(centerWin, 'c3d4');
+  const kothStatus = afterWin.status();
+  assert.ok(kothStatus.over, 'Object move must result in game over');
+  if (kothStatus.over) {
+    assert.strictEqual(kothStatus.reason, 'variant_win');
+    assert.strictEqual(kothStatus.winner, 'w');
   }
-  assert.strictEqual(afterStr.fen(), afterObj.fen());
 });
