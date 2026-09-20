@@ -109,14 +109,24 @@ test('En passant position: en passant capture and non-capture alternatives round
 
 test('Pawn promotions: queen, rook, bishop, knight underpromotions round-trip through UCI', () => {
   // White quiet promotions to q, r, b, n
-  const whitePromo = Position.fromFen('4k3/4P3/8/8/8/8/8/4K3 w - - 0 1');
+  const whitePromo = Position.fromFen('k7/4P3/8/8/8/8/8/4K3 w - - 0 1');
   const count = assertPositionUciRoundTrip(whitePromo);
   assert.ok(count >= 4);
+  for (const uci of ['e7e8q', 'e7e8r', 'e7e8b', 'e7e8n']) {
+    const move = whitePromo.legalMoves().find((m) => whitePromo.toUci(m) === uci);
+    assert.ok(move, `White quiet promotion ${uci} must be legal`);
+    assert.strictEqual(whitePromo.play(uci).fen(), whitePromo.play(move).fen());
+  }
 
   // Black quiet promotions
-  const blackPromo = Position.fromFen('4k3/8/8/8/8/8/4p3/4K3 b - - 0 1');
+  const blackPromo = Position.fromFen('4k3/8/8/8/8/8/4p3/K7 b - - 0 1');
   const blackCount = assertPositionUciRoundTrip(blackPromo);
   assert.ok(blackCount >= 4);
+  for (const uci of ['e2e1q', 'e2e1r', 'e2e1b', 'e2e1n']) {
+    const move = blackPromo.legalMoves().find((m) => blackPromo.toUci(m) === uci);
+    assert.ok(move, `Black quiet promotion ${uci} must be legal`);
+    assert.strictEqual(blackPromo.play(uci).fen(), blackPromo.play(move).fen());
+  }
 });
 
 test('Capture promotions: promotions capturing enemy pieces round-trip through UCI', () => {
@@ -186,9 +196,22 @@ test('Crazyhouse: legal moves and pocket drops round-trip through UCI', () => {
   assert.ok(blockCount > 0);
 
   // Checkmating drop
-  const dropMate = Position.fromFen('rnb1kbnr/pppp1ppp/8/8/8/8/PPPP1PPP/RNBQKBNR[Q] w KQkq - 0 1', 'crazyhouse');
+  const dropMate = Position.fromFen('7k/5ppp/8/8/8/8/8/4K3[Q] w - - 0 1', 'crazyhouse');
   const mateCount = assertPositionUciRoundTrip(dropMate);
   assert.ok(mateCount > 0);
+  const matingDropMove = dropMate.legalMoves().find((m) => dropMate.toUci(m) === 'Q@e8');
+  assert.ok(matingDropMove, 'Q@e8 must be a legal drop');
+  const dropViaObj = dropMate.play(matingDropMove);
+  const dropViaStr = dropMate.play('Q@e8');
+  const objStatus = dropViaObj.status();
+  const strStatus = dropViaStr.status();
+  assert.ok(objStatus.over, 'Object move must result in game over');
+  assert.ok(strStatus.over, 'String move must result in game over');
+  if (objStatus.over && strStatus.over) {
+    assert.strictEqual(objStatus.reason, 'checkmate');
+    assert.strictEqual(strStatus.reason, 'checkmate');
+  }
+  assert.strictEqual(dropViaStr.fen(), dropViaObj.fen());
 });
 
 test('Three-check: move round-trip preserves check-counter semantics and terminal win', () => {
@@ -211,12 +234,26 @@ test('Three-check: move round-trip preserves check-counter semantics and termina
 
 test('Atomic: captures with non-pawn explosion round-trip through UCI', () => {
   // Queen capture explosion
-  const queenExplosion = Position.fromFen('4k3/8/8/4q3/8/8/8/3QK3 w - - 0 1', 'atomic');
+  const queenExplosion = Position.fromFen('4k3/8/8/7q/8/8/8/3QK3 w - - 0 1', 'atomic');
   assertPositionUciRoundTrip(queenExplosion);
+  const queenCapture = queenExplosion.legalMoves().find((m) => queenExplosion.toUci(m) === 'd1h5');
+  assert.ok(queenCapture, 'd1h5 capture explosion must be legal');
+  const queenViaObj = queenExplosion.play(queenCapture);
+  const queenViaStr = queenExplosion.play('d1h5');
+  assert.strictEqual(queenViaStr.fen(), '4k3/8/8/8/8/8/8/4K3 b - - 0 1');
+  assert.strictEqual(queenViaObj.fen(), queenViaStr.fen());
 
   // Capture promotion explosion
-  const capPromoExplosion = Position.fromFen('4k3/3rP3/8/8/8/8/8/4K3 w - - 0 1', 'atomic');
+  const capPromoExplosion = Position.fromFen('k2r4/4P3/8/8/8/8/8/4K3 w - - 0 1', 'atomic');
   assertPositionUciRoundTrip(capPromoExplosion);
+  for (const uci of ['e7d8q', 'e7d8r', 'e7d8b', 'e7d8n']) {
+    const move = capPromoExplosion.legalMoves().find((m) => capPromoExplosion.toUci(m) === uci);
+    assert.ok(move, `Atomic capture promotion ${uci} must be legal`);
+    const viaObj = capPromoExplosion.play(move);
+    const viaStr = capPromoExplosion.play(uci);
+    assert.strictEqual(viaStr.fen(), 'k7/8/8/8/8/8/8/4K3 b - - 0 1');
+    assert.strictEqual(viaObj.fen(), viaStr.fen());
+  }
 
   // En passant capture explosion
   const epExplosion = Position.fromFen('4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1', 'atomic');
@@ -263,7 +300,21 @@ test('King of the Hill: standard move generation and center occupation round-tri
   const kothCount = assertPositionUciRoundTrip(kothStart);
   assert.strictEqual(kothCount, 20);
 
-  // Center occupation step
-  const centerWin = Position.fromFen('8/8/8/3K4/8/8/8/7k w - - 0 1', 'kingofthehill');
+  // Center occupation step: king moves from outside center (c3) into center (d4) to win
+  const centerWin = Position.fromFen('8/8/8/8/8/2K5/8/7k w - - 0 1', 'kingofthehill');
   assertPositionUciRoundTrip(centerWin);
+  const winMove = centerWin.legalMoves().find((m) => centerWin.toUci(m) === 'c3d4');
+  assert.ok(winMove, 'c3d4 must be a legal move');
+  assert.strictEqual(centerWin.status().over, false);
+  const afterObj = centerWin.play(winMove);
+  const afterStr = centerWin.play('c3d4');
+  const objStatus = afterObj.status();
+  const strStatus = afterStr.status();
+  assert.ok(objStatus.over, 'Object move must result in game over');
+  assert.ok(strStatus.over, 'String move must result in game over');
+  if (objStatus.over && strStatus.over) {
+    assert.strictEqual(objStatus.reason, 'variant_win');
+    assert.strictEqual(objStatus.winner, 'w');
+  }
+  assert.strictEqual(afterStr.fen(), afterObj.fen());
 });
