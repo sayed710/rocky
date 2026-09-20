@@ -359,6 +359,12 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     const res = await fetch(`http://127.0.0.1:${nginxPort}/v1/health`);
     assert.equal(res.status, 200, '/v1/health must proxy successfully');
 
+    assert.equal(
+      res.headers.get('content-encoding'),
+      null,
+      'API upstream response must not receive nginx gzip compression (gzip off)',
+    );
+
     const cacheControl = res.headers.get('cache-control');
     if (cacheControl) {
       assert.doesNotMatch(cacheControl, /immutable/, 'API response must not have immutable caching');
@@ -425,28 +431,115 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     }
   });
 
-  test('9. Nonexistent route: does not receive misleading immutable caching', async () => {
+  test('9. Nonexistent route: does not receive misleading immutable caching and preserves security headers', async () => {
     const resMissingAsset = await fetch(`http://127.0.0.1:${nginxPort}/assets/nonexistent-hash-file.js`);
     assert.equal(resMissingAsset.status, 404, 'Missing asset under /assets/ must return 404');
     const missingAssetCache = resMissingAsset.headers.get('cache-control');
     if (missingAssetCache) {
       assert.doesNotMatch(missingAssetCache, /immutable/, '404 asset must NOT have immutable cache-control');
     }
+
+    // Verify all 7 security headers survive 404 responses via 'always' directive
+    assert.equal(
+      resMissingAsset.headers.get('content-security-policy'),
+      "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+      'Content-Security-Policy must be present on 404 via always',
+    );
+    assert.equal(
+      resMissingAsset.headers.get('cross-origin-resource-policy'),
+      'same-origin',
+      'Cross-Origin-Resource-Policy must be present on 404 via always',
+    );
+    assert.equal(
+      resMissingAsset.headers.get('permissions-policy'),
+      'camera=(), geolocation=(), microphone=(), payment=()',
+      'Permissions-Policy must be present on 404 via always',
+    );
+    assert.equal(
+      resMissingAsset.headers.get('referrer-policy'),
+      'no-referrer',
+      'Referrer-Policy must be present on 404 via always',
+    );
+    assert.equal(
+      resMissingAsset.headers.get('strict-transport-security'),
+      'max-age=31536000; includeSubDomains',
+      'Strict-Transport-Security must be present on 404 via always',
+    );
+    assert.equal(
+      resMissingAsset.headers.get('x-content-type-options'),
+      'nosniff',
+      'X-Content-Type-Options must be present on 404 via always',
+    );
+    assert.equal(
+      resMissingAsset.headers.get('x-frame-options'),
+      'DENY',
+      'X-Frame-Options must be present on 404 via always',
+    );
   });
 
-  test('10. Hashed asset without gzip Accept-Encoding: returns valid original uncompressed representation', async () => {
+  test('10. Hashed asset without gzip Accept-Encoding: returns valid original uncompressed representation with Vary header', async () => {
     for (const assetFile of [hashedJsFile, hashedCssFile]) {
-      const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${assetFile}`, {
+      const diskContent = readFileSync(join(webDistPath, 'assets', assetFile), 'utf8');
+
+      // 10a. Explicit identity encoding
+      const resIdentity = await fetch(`http://127.0.0.1:${nginxPort}/assets/${assetFile}`, {
         headers: {
           'Accept-Encoding': 'identity',
         },
       });
-      assert.equal(res.status, 200);
-      assert.equal(res.headers.get('content-encoding'), null, `Identity request for ${assetFile} must not receive Content-Encoding`);
+      assert.equal(resIdentity.status, 200);
+      assert.equal(resIdentity.headers.get('content-encoding'), null, `Identity request for ${assetFile} must not receive Content-Encoding`);
+      assert.match(
+        resIdentity.headers.get('vary') || '',
+        /Accept-Encoding/i,
+        `Identity request for ${assetFile} must include Vary: Accept-Encoding (gzip_vary on)`,
+      );
 
-      const text = await res.text();
-      const diskContent = readFileSync(join(webDistPath, 'assets', assetFile), 'utf8');
-      assert.equal(text, diskContent, `Uncompressed response body for ${assetFile} must exactly match disk content`);
+      const identityText = await resIdentity.text();
+      assert.equal(identityText, diskContent, `Uncompressed response body for ${assetFile} must exactly match disk content`);
+
+      // 10b. Omitted Accept-Encoding header (using httpRequest to avoid fetch's automatic Accept-Encoding header)
+      const { statusCode, headers, body } = await new Promise((resolveReq, rejectReq) => {
+        const req = httpRequest({
+          hostname: '127.0.0.1',
+          port: nginxPort,
+          path: `/assets/${assetFile}`,
+          method: 'GET',
+          headers: {},
+        }, (incoming) => {
+          const chunks = [];
+          incoming.on('data', (c) => chunks.push(c));
+          incoming.on('end', () => resolveReq({
+            statusCode: incoming.statusCode,
+            headers: incoming.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+          }));
+        });
+        req.on('error', rejectReq);
+        req.end();
+      });
+
+      assert.equal(statusCode, 200);
+      assert.equal(headers['content-encoding'], undefined, `Omitted encoding request for ${assetFile} must not receive Content-Encoding`);
+      assert.match(
+        headers['vary'] || '',
+        /Accept-Encoding/i,
+        `Omitted encoding request for ${assetFile} must include Vary: Accept-Encoding (gzip_vary on)`,
+      );
+      assert.equal(body, diskContent, `Uncompressed response body for ${assetFile} must exactly match disk content`);
     }
+
+    // 10c. index.html also includes Vary: Accept-Encoding
+    const resIndex = await fetch(`http://127.0.0.1:${nginxPort}/index.html`, {
+      headers: {
+        'Accept-Encoding': 'identity',
+      },
+    });
+    assert.equal(resIndex.status, 200);
+    assert.match(
+      resIndex.headers.get('vary') || '',
+      /Accept-Encoding/i,
+      'index.html must include Vary: Accept-Encoding (gzip_vary on)',
+    );
   });
 });

@@ -76,6 +76,7 @@ server {
     # literal at config load, so a wrong value is a startup failure ("host not found in
     # upstream"), not a runtime 502 — see ADR-0075.
     location /v1/ {
+        gzip off;
         proxy_pass http://${API_UPSTREAM};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
