@@ -19,12 +19,16 @@ export interface TournamentSnapshot {
   readonly gameLinks?: readonly (readonly [string, string])[];
   /** matchId -> number of games launched so far (bumped when a game is abandoned). */
   readonly gameAttempts?: readonly (readonly [string, number])[];
+  /** playerId -> 0-based round index at which the participant withdrew. */
+  readonly withdrawalRounds?: readonly (readonly [string, number])[];
 }
 
 export class Tournament {
   private state: TournamentState = 'registration';
   private readonly participants: string[] = [];
   private readonly withdrawn = new Set<string>();
+  // playerId -> 0-based round index where player withdrew
+  private readonly withdrawalRounds = new Map<string, number>();
   private readonly rounds: Round[] = [];
 
   // matchId -> result
@@ -75,6 +79,7 @@ export class Tournament {
       if (idx >= 0) {
         this.participants.splice(idx, 1);
       }
+      this.withdrawalRounds.delete(playerId);
       return;
     }
 
@@ -86,7 +91,9 @@ export class Tournament {
       return;
     }
 
+    const currentRoundIndex = this.rounds.length > 0 ? this.rounds[this.rounds.length - 1].roundIndex : 0;
     this.withdrawn.add(playerId);
+    this.withdrawalRounds.set(playerId, currentRoundIndex);
 
     // Forfeit their UNFINISHED game in the current round, if any
     if (this.rounds.length > 0) {
@@ -258,17 +265,10 @@ export class Tournament {
    * requested, round 4 may already have decided games, and presenting the current table beside
    * round 3's results would label later facts with an earlier round's number.
    *
-   * **The `withdrawn` flag on each row is current, not historical.** Results are filtered by round;
-   * withdrawals are not, because the aggregate records *that* a player withdrew and not *when*.
-   * A player who withdrew in round 4 is therefore flagged withdrawn in a round-3 table where they
-   * were still playing. Every other field — points, tiebreaks, ordering, the ranking itself — is
-   * computed from the filtered results and is correct as of the round.
-   *
-   * No caller publishes the flag today: `RecapStanding` in the commentary service carries rank,
-   * name and points only. Fixing it means recording a withdrawal round and migrating
-   * {@link TournamentSnapshot}, which is a change to the persisted format and belongs in its own
-   * increment. Raised in the CodeRabbit review of PR #153; recorded here so the next caller that
-   * wants the flag finds out before publishing it rather than after.
+   * The `withdrawn` flag reflects the player's withdrawal status at that round: false if the player
+   * was active at the requested round, true if they withdrew in or prior to that round.
+   * Legacy snapshots that omit per-player withdrawal round metadata preserve their previous
+   * observable semantics (applying withdrawal across all historical rounds).
    */
   standingsAfterRound(roundIndex: number): PlayerStanding[] {
     const upTo = new Map<string, GameResult | 'bye' | 'void'>();
@@ -276,12 +276,27 @@ export class Tournament {
       const round = Number.parseInt(matchId.slice(0, matchId.indexOf('-')), 10);
       if (Number.isFinite(round) && round <= roundIndex) upTo.set(matchId, result);
     }
+
+    const historicalWithdrawn = new Set<string>();
+    for (const pid of this.withdrawn) {
+      const withdrawalRound = this.withdrawalRounds.get(pid);
+      if (withdrawalRound !== undefined) {
+        if (roundIndex >= withdrawalRound) {
+          historicalWithdrawn.add(pid);
+        }
+      } else {
+        // Legacy snapshot compatibility: player was marked withdrawn, but no round was recorded.
+        // Preserve legacy observable behavior where withdrawal applied to all rounds.
+        historicalWithdrawn.add(pid);
+      }
+    }
+
     return computeStandings(
       this.getParticipants(),
       upTo,
       this.pairingsByMatchId,
       this.config.tiebreakOrder,
-      this.withdrawn,
+      historicalWithdrawn,
     );
   }
 
@@ -458,7 +473,8 @@ export class Tournament {
       results: Array.from(this.results.entries()),
       pairingsByMatchId: Array.from(this.pairingsByMatchId.entries()).map(([k, v]) => [k, { ...v }]),
       gameLinks: Array.from(this.gameLinks.entries()),
-      gameAttempts: Array.from(this.gameAttempts.entries())
+      gameAttempts: Array.from(this.gameAttempts.entries()),
+      withdrawalRounds: Array.from(this.withdrawalRounds.entries())
     };
   }
 
@@ -470,6 +486,11 @@ export class Tournament {
     if (snapshot.withdrawn) {
       for (const w of snapshot.withdrawn) {
         t.withdrawn.add(w);
+      }
+    }
+    if (snapshot.withdrawalRounds) {
+      for (const [playerId, roundIndex] of snapshot.withdrawalRounds) {
+        t.withdrawalRounds.set(playerId, roundIndex);
       }
     }
     t.rounds.push(...snapshot.rounds);

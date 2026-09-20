@@ -118,4 +118,26 @@ describe('Tournament Snapshot & Restore', () => {
     assert.deepStrictEqual(tRestored.getRounds(), tControl.getRounds());
     assert.deepStrictEqual(tRestored.standings(), tControl.standings());
   });
+
+  test('snapshot preserves withdrawal history and historical standings accurately', () => {
+    const t = new Tournament(rrConfig, new RoundRobinPairing());
+    const players = ['A', 'B', 'C', 'D'];
+    players.forEach((p) => t.register(p));
+    t.start();
+
+    // Round 0: complete both games
+    t.recordResult(0, 0, 'white_win');
+    t.recordResult(0, 1, 'draw');
+
+    // Round 1: player D withdraws
+    t.withdraw('D');
+
+    const snap = t.toSnapshot();
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 1]]);
+
+    const restored = Tournament.restore(snap, new RoundRobinPairing());
+    assert.strictEqual(restored.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, false);
+    assert.strictEqual(restored.standingsAfterRound(1).find((s) => s.playerId === 'D')?.withdrawn, true);
+    assert.strictEqual(restored.standings().find((s) => s.playerId === 'D')?.withdrawn, true);
+  });
 });
