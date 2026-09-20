@@ -389,14 +389,28 @@ test('Horde: kingless pawn army and standard Black army round-trip through UCI',
 
   // Open flank position
   const openFlank = Position.fromFen('4k3/pp4q1/3P2p1/8/P3PP2/PPP2r2/PPP5/PPPP4 b - - 0 1', 'horde');
-  assertPositionUciRoundTrip(openFlank);
+  const openFlankCount = assertPositionUciRoundTrip(openFlank);
+  assert.strictEqual(openFlankCount, 30, 'Horde openFlank must have exactly 30 legal moves');
+  assertSpecificMoveRoundTrip(openFlank, 'f3f4', MoveFlag.Capture);
+  assertSpecificMoveRoundTrip(openFlank, 'f3c3', MoveFlag.Capture);
+  assertSpecificMoveRoundTrip(openFlank, 'g7c3', MoveFlag.Capture);
+  assertSpecificMoveRoundTrip(openFlank, 'a7a5', MoveFlag.DoublePawnPush);
+  assertSpecificMoveRoundTrip(openFlank, 'e8d7');
 });
 
 test('Racing Kings: check-free race to rank 8 round-trip through UCI', () => {
   // Start position
   const rkStart = Position.initial('racingkings');
   const rkCount = assertPositionUciRoundTrip(rkStart);
-  assert.ok(rkCount > 0);
+  assert.strictEqual(rkCount, 21, 'Racing Kings startpos must have exactly 21 legal moves');
+  // Forward race moves round-trip cleanly
+  assertSpecificMoveRoundTrip(rkStart, 'h2h3');
+  assertSpecificMoveRoundTrip(rkStart, 'g2g3');
+  assertSpecificMoveRoundTrip(rkStart, 'e2d4');
+  // Anti-check rule: moves that would deliver check to the enemy king are illegal in Racing Kings
+  const rkLegalUcis = rkStart.legalMoves().map((m) => rkStart.toUci(m));
+  assert.strictEqual(rkLegalUcis.includes('e2c3'), false, 'Knight move e2c3 giving check must be filtered out');
+  assert.strictEqual(rkLegalUcis.includes('e2c1'), false, 'Knight move e2c1 giving check must be filtered out');
 
   // White winning position (White reaches rank 8 and Black cannot equalize)
   const whiteWin = Position.fromFen('8/2K5/8/8/8/8/8/4k3 w - - 0 1', 'racingkings');
