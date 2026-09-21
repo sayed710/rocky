@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { runWithZeroSkip } from '../run-zero-skip.mjs';
 import { runHermeticTests, HERMETIC_WORKSPACES } from '../run-hermetic-tests.mjs';
 import {
+  createStreamingTestParser,
   parseCancelledCount,
   parseFailCount,
   parsePassCount,
@@ -531,5 +532,50 @@ test('test-output-parser: parseSkippedCount and parseTodoCount detect SKIPPED an
   assert.equal(parseTodoCount('ok - item # TO-DO reason\n1..1'), 1);
   assert.equal(parseTodoCount('not ok 1 - item # TO-DO reason\n1..1'), 1);
   assert.equal(parseTodoCount('ok 1 - item with \\# TO-DO escaped\n# tests 1\n# todo 0'), 0);
+});
+
+test('streaming-test-parser: maintains O(1) bounded state with identical metrics to static parsers', () => {
+  const fixtures = [
+    '# tests 10\n# pass 8\n# skipped 2\n# fail 0\n# todo 0',
+    'ℹ tests 5\nℹ pass 4\nℹ skipped 0\nℹ fail 0\nℹ todo 1',
+    '1..20\nok 1 - first\nnot ok 2 - fail\nok 3 - skip # SKIP reason',
+    'ok 1 - escaped \\# SKIP in title\n# tests 1\n# pass 1\n# skipped 0',
+    '- test (skipped)\nℹ tests 1\nℹ pass 0\nℹ skipped 0',
+    '- test (cancelled)\nℹ tests 2\nℹ pass 1\nℹ cancelled 0',
+    'not ok 1 - raw unsummarized failure',
+    '# tests 0\n# pass 0\n# skipped 0',
+    '1..0',
+  ];
+
+  for (const fixture of fixtures) {
+    const parser = createStreamingTestParser();
+    for (const line of fixture.split('\n')) {
+      parser.pushLine(line);
+    }
+    const streamed = parser.getResults();
+
+    assert.equal(streamed.totalTests, parseTestCount(fixture), `totalTests mismatch on: ${fixture}`);
+    assert.equal(streamed.skippedCount, parseSkippedCount(fixture), `skippedCount mismatch on: ${fixture}`);
+    assert.equal(streamed.todoCount, parseTodoCount(fixture), `todoCount mismatch on: ${fixture}`);
+    assert.equal(streamed.cancelledCount, parseCancelledCount(fixture), `cancelledCount mismatch on: ${fixture}`);
+    assert.equal(streamed.failCount, parseFailCount(fixture), `failCount mismatch on: ${fixture}`);
+  }
+});
+
+test('streaming-test-parser: processes large transcripts with strictly bounded memory', () => {
+  const parser = createStreamingTestParser();
+  for (let i = 1; i <= 20000; i++) {
+    parser.pushLine(`ok ${i} - synthetic pass item`);
+  }
+  parser.pushLine('# tests 20000');
+  parser.pushLine('# pass 20000');
+  parser.pushLine('# skipped 0');
+  parser.pushLine('# fail 0');
+
+  const results = parser.getResults();
+  assert.equal(results.totalTests, 20000);
+  assert.equal(results.skippedCount, 0);
+  assert.equal(results.failCount, 0);
+  assert.equal(results.todoCount, 0);
 });
 

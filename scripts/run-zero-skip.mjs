@@ -9,20 +9,14 @@
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 import {
-  parseCancelledCount,
-  parseFailCount,
-  parseSkippedCount,
-  parseTestCount,
-  parseTodoCount,
+  createStreamingTestParser,
 } from './lib/test-output-parser.mjs';
 
 /**
- * Spawns a test command, buffers and streams its output, and strictly enforces
- * that the test runner reported at least one executed test and zero skipped tests.
- *
- * Scans only genuine line-anchored reporter summary lines (`# tests N`, `ℹ tests N`,
- * `# skipped N`, `ℹ skipped N`) and TAP plan lines (`1..N`) to avoid false
- * positives or false negatives caused by arbitrary prose in test output.
+ * Spawns a test command, streams its output, and strictly enforces that the test
+ * runner reported at least one executed test and zero skipped tests.
+ * Maintains strictly O(1) bounded memory state by streaming lines directly to
+ * createStreamingTestParser, preventing transcript accumulation in memory.
  *
  * @param {string} cmd - Command or binary to execute.
  * @param {string[]} [args=[]] - Arguments to pass to the command.
@@ -38,9 +32,7 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
     });
 
     let lineBuffer = '';
-    const reporterLines = [];
-    const recentLines = [];
-    const MAX_RECENT_LINES = 100;
+    const parser = createStreamingTestParser();
 
     function processChunk(chunk, isStderr = false) {
       if (!options.silent) {
@@ -51,19 +43,12 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       const lines = lineBuffer.split(/\r?\n/);
       lineBuffer = lines.pop() ?? '';
       for (const line of lines) {
-        if (/^\s*(?:#|ℹ|1\.\.|ok\b|not ok\b|[\ufe63\-])/i.test(line)) {
-          reporterLines.push(line);
-        }
-        recentLines.push(line);
-        if (recentLines.length > MAX_RECENT_LINES) {
-          recentLines.shift();
-        }
+        parser.pushLine(line);
       }
     }
 
     child.stdout?.on('data', (chunk) => processChunk(chunk, false));
     child.stderr?.on('data', (chunk) => processChunk(chunk, true));
-
 
     child.on('error', (err) => {
       console.error(`[run-zero-skip] Failed to start process: ${err.message}`);
@@ -85,22 +70,17 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       if (lineBuffer.trim().length > 0) {
-        if (/^\s*(?:#|ℹ|1\.\.|ok\b|not ok\b|[\ufe63\-])/i.test(lineBuffer)) {
-          reporterLines.push(lineBuffer);
-        }
-        recentLines.push(lineBuffer);
+        parser.pushLine(lineBuffer);
       }
-      const parserOutput = reporterLines.join('\n');
+      const results = parser.getResults();
 
       // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed).
       // Only accept genuine line-anchored reporter summary lines (# tests N, ℹ tests N) or TAP plan headers (1..N).
       // In multi-summary outputs, aggregate test counts and fail if any suite reports 0 executed tests.
-      const totalTests = parseTestCount(parserOutput);
-
-      if (totalTests === null || totalTests === 0) {
+      if (results.totalTests === null || results.totalTests === 0) {
         if (!options.silent) {
           process.stderr.write(
-            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: No executed tests detected in output (total=${totalTests}).\x1b[0m\n`
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: No executed tests detected in output (total=${results.totalTests}).\x1b[0m\n`
           );
         }
         resolve(1);
@@ -108,11 +88,10 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for test runner skip indicators across TAP summaries and individual directives.
-      const skippedCount = parseSkippedCount(parserOutput);
-      if (skippedCount > 0) {
+      if (results.skippedCount > 0) {
         if (!options.silent) {
           process.stderr.write(
-            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${skippedCount} skipped test(s). The zero-skip policy requires skipped === 0.\x1b[0m\n`
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${results.skippedCount} skipped test(s). The zero-skip policy requires skipped === 0.\x1b[0m\n`
           );
         }
         resolve(1);
@@ -120,11 +99,10 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for TODO tests across TAP summaries and individual directives.
-      const todoCount = parseTodoCount(parserOutput);
-      if (todoCount > 0) {
+      if (results.todoCount > 0) {
         if (!options.silent) {
           process.stderr.write(
-            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${todoCount} TODO test(s). The zero-skip policy requires todo === 0.\x1b[0m\n`
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${results.todoCount} TODO test(s). The zero-skip policy requires todo === 0.\x1b[0m\n`
           );
         }
         resolve(1);
@@ -132,11 +110,10 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for cancelled tests across TAP and spec format summaries.
-      const cancelledCount = parseCancelledCount(parserOutput);
-      if (cancelledCount > 0) {
+      if (results.cancelledCount > 0) {
         if (!options.silent) {
           process.stderr.write(
-            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${cancelledCount} cancelled test(s). The zero-skip policy requires cancelled === 0.\x1b[0m\n`
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${results.cancelledCount} cancelled test(s). The zero-skip policy requires cancelled === 0.\x1b[0m\n`
           );
         }
         resolve(1);
@@ -144,11 +121,10 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       }
 
       // Check for fail/failed summaries and raw TAP "not ok" test points.
-      const failCount = parseFailCount(parserOutput);
-      if (failCount > 0) {
+      if (results.failCount > 0) {
         if (!options.silent) {
           process.stderr.write(
-            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${failCount} failed test(s). The zero-skip policy requires fail === 0.\x1b[0m\n`
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${results.failCount} failed test(s). The zero-skip policy requires fail === 0.\x1b[0m\n`
           );
         }
         resolve(1);

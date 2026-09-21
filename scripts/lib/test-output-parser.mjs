@@ -143,3 +143,139 @@ export function parseCancelledCount(output) {
   }
   return count;
 }
+
+/**
+ * Creates a stateful streaming test runner output parser that maintains strictly O(1)
+ * bounded memory by updating scalar counters and flags line-by-line as chunks arrive.
+ * Eliminates transcript accumulation while guaranteeing exact parity with static summary
+ * and directive quality gates (zero skip, zero todo, zero cancelled, zero unhandled failures).
+ *
+ * @returns {{
+ *   pushLine: (line: string) => void,
+ *   getResults: () => {
+ *     totalTests: number | null,
+ *     passCount: number | null,
+ *     failCount: number,
+ *     skippedCount: number,
+ *     todoCount: number,
+ *     cancelledCount: number
+ *   }
+ * }}
+ */
+export function createStreamingTestParser() {
+  let summaryTests = 0;
+  let summaryTestsCount = 0;
+  let planTests = 0;
+  let planTestsCount = 0;
+  let hasZeroTestSummary = false;
+
+  let summaryPass = 0;
+  let summaryPassCount = 0;
+
+  let summarySkipped = 0;
+  let hasSkipDirective = false;
+
+  let summaryTodo = 0;
+  let hasTodoDirective = false;
+
+  let summaryCancelled = 0;
+  let hasCancelledDirective = false;
+
+  let summaryFail = 0;
+  let hasRawFailure = false;
+
+  return {
+    pushLine(line) {
+      // 1. Tests summary: # tests N or ℹ tests N
+      const testMatch = line.match(/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/i);
+      if (testMatch) {
+        const val = Number.parseInt(testMatch[1], 10);
+        if (val === 0) hasZeroTestSummary = true;
+        summaryTests += val;
+        summaryTestsCount++;
+      }
+
+      // 2. TAP plan: 1..N
+      const planMatch = line.match(/^\s*1\.\.(\d+)\b/);
+      if (planMatch) {
+        const val = Number.parseInt(planMatch[1], 10);
+        if (val === 0) hasZeroTestSummary = true;
+        planTests += val;
+        planTestsCount++;
+      }
+
+      // 3. Pass summary: # pass N or ℹ pass N
+      const passMatch = line.match(/^\s*(?:#|ℹ)\s+pass(?:ed)?:?\s+(\d+)\b/i);
+      if (passMatch) {
+        summaryPass += Number.parseInt(passMatch[1], 10);
+        summaryPassCount++;
+      }
+
+      // 4. Skipped summary or directive: # skipped N or ℹ skipped N or TAP/spec skip
+      const skipMatch = line.match(/^\s*(?:#|ℹ)\s+skipped:?\s+(\d+)\b/i);
+      if (skipMatch) {
+        summarySkipped += Number.parseInt(skipMatch[1], 10);
+      } else if (TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX.test(line)) {
+        hasSkipDirective = true;
+      }
+
+      // 5. TODO summary or directive: # todo N or ℹ todo N or TAP/spec todo
+      const todoMatch = line.match(/^\s*(?:#|ℹ)\s+todo:?\s+(\d+)\b/i);
+      if (todoMatch) {
+        summaryTodo += Number.parseInt(todoMatch[1], 10);
+      } else if (TAP_OR_SPEC_TODO_DIRECTIVE_REGEX.test(line)) {
+        hasTodoDirective = true;
+      }
+
+      // 6. Cancelled summary or directive: # cancelled N or spec (cancelled)
+      const cancelledMatch = line.match(/^\s*(?:#|ℹ)\s+cancelled:?\s+(\d+)\b/i);
+      if (cancelledMatch) {
+        summaryCancelled += Number.parseInt(cancelledMatch[1], 10);
+      } else if (/^\s*[\ufe63\-]\s+[^\r\n]*\((?:cancelled)\)/i.test(line)) {
+        hasCancelledDirective = true;
+      }
+
+      // 7. Fail summary or raw TAP "not ok": # fail N or not ok
+      const failMatch = line.match(/^\s*(?:#|ℹ)\s+fail(?:ed)?:?\s+(\d+)\b/i);
+      if (failMatch) {
+        summaryFail += Number.parseInt(failMatch[1], 10);
+      } else if (RAW_TAP_FAILURE_REGEX.test(line)) {
+        hasRawFailure = true;
+      }
+    },
+
+    getResults() {
+      let totalTests = null;
+      if (hasZeroTestSummary) {
+        totalTests = 0;
+      } else if (summaryTestsCount > 0) {
+        totalTests = summaryTests;
+      } else if (planTestsCount > 0) {
+        totalTests = planTests;
+      }
+
+      const passCount = summaryPassCount > 0 ? summaryPass : null;
+
+      let skippedCount = summarySkipped;
+      if (skippedCount === 0 && hasSkipDirective) skippedCount = 1;
+
+      let todoCount = summaryTodo;
+      if (todoCount === 0 && hasTodoDirective) todoCount = 1;
+
+      let cancelledCount = summaryCancelled;
+      if (cancelledCount === 0 && hasCancelledDirective) cancelledCount = 1;
+
+      let failCount = summaryFail;
+      if (failCount === 0 && hasRawFailure) failCount = 1;
+
+      return {
+        totalTests,
+        passCount,
+        failCount,
+        skippedCount,
+        todoCount,
+        cancelledCount,
+      };
+    },
+  };
+}

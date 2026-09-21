@@ -5,6 +5,8 @@ import {
   classifyTestFile,
   verifyTestTopology,
   isAllowedPlacement,
+  extractRunnerPatterns,
+  isTestFileReachableByRunner,
   SUITE_DEFINITIONS,
 } from '../check-test-topology.mjs';
 
@@ -53,7 +55,23 @@ test('topology: classifyTestFile correctly maps each suite pattern', () => {
   assert.equal(classifyTestFile('packages/chess-core/test/fen.test.ts')?.name, 'domain-hermetic-unit');
 });
 
-test('topology: runner reachability detects tests outside execution globs', () => {
+test('topology: extractRunnerPatterns mechanically extracts globs and files from package runner scripts', () => {
+  assert.deepEqual(
+    extractRunnerPatterns('node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 "dist-test/test/**/*.posix.test.js"'),
+    ['dist-test/test/**/*.posix.test.js']
+  );
+  assert.deepEqual(
+    extractRunnerPatterns('tsc -p tsconfig.test.json && node ../../scripts/run-zero-skip.mjs -- node --test dist-test/test/a.test.js dist-test/test/b.test.js'),
+    ['dist-test/test/a.test.js', 'dist-test/test/b.test.js']
+  );
+  assert.deepEqual(
+    extractRunnerPatterns('playwright test'),
+    ['e2e/**/*.spec.ts']
+  );
+  assert.deepEqual(extractRunnerPatterns('echo "not a test runner"'), []);
+});
+
+test('topology: runner reachability mechanically validates package manifest configuration', () => {
   const smokeSuite = SUITE_DEFINITIONS.find((s) => s.name === 'api-engine-smoke');
   assert.ok(smokeSuite?.isReachable);
   assert.equal(smokeSuite.isReachable('packages/api/test/analysis-stockfish-smoke.test.ts'), true);
@@ -68,8 +86,53 @@ test('topology: runner reachability detects tests outside execution globs', () =
   assert.ok(apiUnitSuite?.isReachable);
   assert.equal(apiUnitSuite.isReachable('packages/api/test/auth.test.ts'), true);
   assert.equal(apiUnitSuite.isReachable('packages/api/test/analysis-stockfish-smoke.test.ts'), false);
-  assert.equal(apiUnitSuite.isReachable('packages/api/test/signature.posix.test.ts'), false);
-  assert.equal(apiUnitSuite.isReachable('packages/api/test/pg.integration.test.ts'), false);
+  assert.equal(apiUnitSuite.isReachable('packages/api/test/diagnostics/signature-b-correlate.posix.test.ts'), false);
+  assert.equal(apiUnitSuite.isReachable('packages/api/test/pg-security.integration.test.ts'), false);
+});
+
+test('topology: falsification regression proves validation fails when runner glob narrows', () => {
+  // Falsification Case 1: Narrowing api test:posix in manifest causes nested posix test to become unreachable
+  const falsifiedPosix = verifyTestTopology(undefined, {
+    manifestOverrides: {
+      'packages/api/package.json': {
+        scripts: {
+          'test:posix': 'npm run build:test && node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 "dist-test/test/*.posix.test.js"',
+        },
+      },
+    },
+  });
+  assert.ok(falsifiedPosix.unreachable.length > 0, 'Topology check must fail when runner glob is non-recursive');
+  const posixFailure = falsifiedPosix.unreachable.find((u) => u.file === 'packages/api/test/diagnostics/signature-b-correlate.posix.test.ts');
+  assert.ok(posixFailure, 'signature-b-correlate.posix.test.ts must be flagged unreachable when glob does not recurse');
+  assert.equal(posixFailure.suite, 'api-posix-unit');
+
+  // Falsification Case 2: Narrowing test:scripts in root manifest causes unlisted scripts test to become unreachable
+  const falsifiedScripts = verifyTestTopology(undefined, {
+    manifestOverrides: {
+      'package.json': {
+        scripts: {
+          'test:scripts': 'node scripts/run-zero-skip.mjs -- node --test "scripts/test/zero-skip-enforcement.test.mjs"',
+        },
+      },
+    },
+  });
+  assert.ok(falsifiedScripts.unreachable.length > 0, 'Topology check must fail when root script runner is narrowed');
+  const scriptsFailure = falsifiedScripts.unreachable.find((u) => u.file === 'scripts/test/check-test-topology.test.mjs');
+  assert.ok(scriptsFailure, 'check-test-topology.test.mjs must be flagged unreachable when test:scripts is narrowed');
+  assert.equal(scriptsFailure.suite, 'scripts-unit');
+
+  // Falsification Case 3: Narrowing persistence test:unit to a non-existent pattern causes all persistence tests to be unreachable
+  const falsifiedPersistence = verifyTestTopology(undefined, {
+    manifestOverrides: {
+      'packages/persistence/package.json': {
+        scripts: {
+          'test:unit': 'node ../../scripts/run-zero-skip.mjs -- node --test "dist-test/test/none.test.js"',
+        },
+      },
+    },
+  });
+  assert.ok(falsifiedPersistence.unreachable.length >= 7, 'All persistence unit tests must be flagged unreachable');
+  assert.ok(falsifiedPersistence.unreachable.every((u) => u.suite === 'persistence-unit'));
 });
 
 test('topology: classifyTestFile returns null for unknown files', () => {
