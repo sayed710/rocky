@@ -1,5 +1,8 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, posix, relative, resolve, sep } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { randomBytes } from 'node:crypto';
 
 const REPO_ROOT = resolve(process.cwd());
 
@@ -256,6 +259,171 @@ export function extractDirectProperties(objectBody) {
 }
 
 /**
+ * Recursively collects discovered test files from Playwright JSON report suites.
+ *
+ * @param {object} suite - Suite or project object from Playwright JSON report.
+ * @param {string} rootDir - Root directory reported by Playwright.
+ * @param {Set<string>} discovered - Set of repository-relative POSIX paths.
+ * @param {string} repoRoot - Repository root directory.
+ */
+function collectPlaywrightFiles(suite, rootDir, discovered, repoRoot) {
+  if (!suite) return;
+  if (typeof suite.file === 'string' && suite.file.length > 0) {
+    const absPath = resolve(rootDir, suite.file);
+    const relPath = relative(repoRoot, absPath).split(sep).join('/');
+    discovered.add(relPath);
+  }
+  if (Array.isArray(suite.suites)) {
+    for (const child of suite.suites) {
+      collectPlaywrightFiles(child, rootDir, discovered, repoRoot);
+    }
+  }
+}
+
+/**
+ * Derives the exact set of reachable test files directly from Playwright's discovery engine
+ * (`playwright test --list --reporter=json`).
+ *
+ * Evaluates real Playwright configuration including:
+ * - Top-level and project-specific `testDir`
+ * - Top-level and project-specific `testMatch`
+ * - Top-level and project-specific `testIgnore`
+ * - Object spreads, variables, and dynamic configuration
+ *
+ * Fails closed: if Playwright configuration cannot be resolved, compiled, or executed,
+ * throws an explicit Error instead of substituting false-green assumptions.
+ *
+ * @param {string} [manifestDir='packages/web'] - Directory containing Playwright config and package.json.
+ * @param {object} [options={}] - Options (root, playwrightConfigOverrides, playwrightDiscoveredCache, scriptCmd).
+ * @returns {Set<string>} Set of repository-relative POSIX file paths discovered by Playwright.
+ */
+export function getPlaywrightDiscoveredFiles(manifestDir = 'packages/web', options = {}) {
+  const root = options.root || REPO_ROOT;
+  const manifestDirFull = resolve(root, manifestDir);
+
+  const cache = options.playwrightDiscoveredCache;
+  const cacheKey = `${manifestDirFull}::${options.playwrightConfigOverrides ? JSON.stringify(options.playwrightConfigOverrides) : ''}::${options.scriptCmd || ''}`;
+  if (cache && cache.has(cacheKey)) {
+    return cache.get(cacheKey);
+  }
+
+  const req = createRequire(import.meta.url);
+  let cliPath;
+  try {
+    cliPath = req.resolve('@playwright/test/cli', {
+      paths: [manifestDirFull, root, REPO_ROOT],
+    });
+  } catch {
+    throw new Error(
+      `Cannot mechanically resolve Playwright test runner in ${manifestDir}: @playwright/test/cli could not be resolved. Topology validation must fail closed.`
+    );
+  }
+
+  let tempConfigPath = null;
+  let customConfigArg = null;
+  let overrideContent = null;
+  if (options.playwrightConfigOverrides) {
+    for (const [key, val] of Object.entries(options.playwrightConfigOverrides)) {
+      const normKey = key.replace(/^\.\//, '').split(sep).join('/');
+      if (
+        normKey === `${manifestDir}/playwright.config.ts` ||
+        normKey === `${manifestDir}/playwright.config.js` ||
+        normKey === `${manifestDir}/playwright.config.mjs` ||
+        normKey === `${manifestDir}/playwright.config.cjs`
+      ) {
+        overrideContent = val;
+        break;
+      }
+    }
+  }
+
+  if (overrideContent) {
+    const rand = randomBytes(6).toString('hex');
+    const tempFileName = `.playwright.topology-temp-${rand}.ts`;
+    tempConfigPath = join(manifestDirFull, tempFileName);
+    writeFileSync(tempConfigPath, overrideContent, 'utf8');
+    customConfigArg = `--config=${tempFileName}`;
+  } else if (options.scriptCmd) {
+    const configMatch = options.scriptCmd.match(/(?:--config|-c)[=\s]+(\S+)/);
+    if (configMatch) {
+      customConfigArg = `--config=${configMatch[1]}`;
+    }
+  }
+
+  try {
+    const args = ['test', '--list', '--reporter=json'];
+    if (customConfigArg) {
+      args.push(customConfigArg);
+    }
+
+    const res = spawnSync(process.execPath, [cliPath, ...args], {
+      cwd: manifestDirFull,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
+      },
+      maxBuffer: 16 * 1024 * 1024,
+    });
+
+    if (res.error) {
+      throw new Error(
+        `Failed to execute Playwright discovery in ${manifestDir}: ${res.error.message}. Topology validation must fail closed.`
+      );
+    }
+
+    let parsed = null;
+    if (res.stdout && res.stdout.trim().startsWith('{')) {
+      try {
+        parsed = JSON.parse(res.stdout);
+      } catch {
+        parsed = null;
+      }
+    }
+
+    const isZeroTestsFound =
+      parsed &&
+      Array.isArray(parsed.suites) &&
+      parsed.suites.length === 0 &&
+      Array.isArray(parsed.errors) &&
+      parsed.errors.every((e) => typeof e?.message === 'string' && e.message.includes('No tests found'));
+
+    if (res.status !== 0 && !isZeroTestsFound) {
+      const errorMsg = (res.stderr || res.stdout || `process exited with status ${res.status}`).trim();
+      throw new Error(
+        `Cannot mechanically resolve Playwright configuration in ${manifestDir}: ${errorMsg}. Topology validation must fail closed.`
+      );
+    }
+
+    if (!parsed || !Array.isArray(parsed.suites)) {
+      throw new Error(
+        `Cannot mechanically resolve Playwright configuration in ${manifestDir}: invalid or empty discovery payload. Topology validation must fail closed.`
+      );
+    }
+
+    const discovered = new Set();
+    const configRootDir = parsed.config?.rootDir || manifestDirFull;
+    for (const suite of parsed.suites) {
+      collectPlaywrightFiles(suite, configRootDir, discovered, root);
+    }
+
+    if (cache) {
+      cache.set(cacheKey, discovered);
+    }
+
+    return discovered;
+  } finally {
+    if (tempConfigPath && existsSync(tempConfigPath)) {
+      try {
+        unlinkSync(tempConfigPath);
+      } catch {
+        // Ignore cleanup failure
+      }
+    }
+  }
+}
+
+/**
  * Mechanically resolves test patterns from a Playwright configuration file.
  * Reads the actual Playwright config file from the workspace to extract `testDir` and `testMatch`,
  * eliminating hard-coded duplicate reachability definitions.
@@ -445,9 +613,16 @@ export function isTestFileReachableByRunner(suite, relPath, options = {}) {
   if (!manifest) return false;
 
   const scriptCmd = manifest.scripts?.[suite.script];
-  if (!scriptCmd) return false;
-
   const manifestDir = dirname(manifestPath);
+
+  if (scriptCmd.includes('playwright test')) {
+    const discovered = getPlaywrightDiscoveredFiles(manifestDir, {
+      ...options,
+      scriptCmd,
+    });
+    return discovered.has(relPath);
+  }
+
   const patterns = extractRunnerPatterns(scriptCmd, {
     manifestDir,
     root,
@@ -730,6 +905,7 @@ export function verifyTestTopology(root = REPO_ROOT, options = {}) {
   const unreachable = [];
   const categorized = new Map();
   const manifestCache = new Map();
+  const playwrightDiscoveredCache = options.playwrightDiscoveredCache || new Map();
 
   for (const file of files) {
     if (!isAllowedPlacement(file)) {
@@ -743,7 +919,7 @@ export function verifyTestTopology(root = REPO_ROOT, options = {}) {
       continue;
     }
 
-    if (suite.isReachable && !suite.isReachable(file, { root, manifestCache, ...options })) {
+    if (suite.isReachable && !suite.isReachable(file, { root, manifestCache, playwrightDiscoveredCache, ...options })) {
       unreachable.push({ file, suite: suite.name });
       continue;
     }

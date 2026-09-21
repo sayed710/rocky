@@ -10,6 +10,7 @@ import {
   isAllowedPlacement,
   extractRunnerPatterns,
   extractPlaywrightPatterns,
+  getPlaywrightDiscoveredFiles,
   matchRunnerPattern,
   isTestFileReachableByRunner,
   SUITE_DEFINITIONS,
@@ -375,26 +376,18 @@ test('topology: extractPlaywrightPatterns confidently resolves literal testDir a
   );
 });
 
-test('topology: falsification regression proves validation fails closed on non-literal/unsupported testDir', () => {
-  // Falsification Case 5A: testDir references a variable (const dir = './other-e2e'; testDir: dir)
+test('topology: extractPlaywrightPatterns fails closed on non-literal static expressions', () => {
   const overrideVar = {
     'packages/web/playwright.config.ts': `
       const dir = './other-e2e';
       export default { testDir: dir };
     `,
   };
-
   assert.throws(
     () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideVar }),
     /Cannot mechanically resolve Playwright 'testDir'.*property is present but non-literal or unparseable/
   );
 
-  assert.throws(
-    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideVar }),
-    /Cannot mechanically resolve Playwright 'testDir'.*property is present but non-literal or unparseable/
-  );
-
-  // Falsification Case 5B: testDir uses function expression (path.join(...))
   const overrideExpr = {
     'packages/web/playwright.config.ts': `
       export default {
@@ -402,21 +395,12 @@ test('topology: falsification regression proves validation fails closed on non-l
       };
     `,
   };
-
   assert.throws(
     () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideExpr }),
     /Cannot mechanically resolve Playwright 'testDir'/
   );
 
-  assert.throws(
-    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideExpr }),
-    /Cannot mechanically resolve Playwright 'testDir'/
-  );
-});
-
-test('topology: falsification regression proves validation fails closed on unsupported/non-literal testMatch', () => {
-  // Falsification Case 6A: testMatch references a variable
-  const overrideVar = {
+  const overrideMatchVar = {
     'packages/web/playwright.config.ts': `
       const customMatch = '**/*.spec.ts';
       export default {
@@ -425,91 +409,159 @@ test('topology: falsification regression proves validation fails closed on unsup
       };
     `,
   };
-
   assert.throws(
-    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideVar }),
+    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideMatchVar }),
     /Cannot mechanically resolve Playwright 'testMatch'.*property is present but non-literal or unsupported/
-  );
-
-  assert.throws(
-    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideVar }),
-    /Cannot mechanically resolve Playwright 'testMatch'.*property is present but non-literal or unsupported/
-  );
-
-  // Falsification Case 6B: testMatch is a RegExp literal
-  const overrideRegex = {
-    'packages/web/playwright.config.ts': `
-      export default {
-        testDir: './e2e',
-        testMatch: /.*\\.spec\\.ts/,
-      };
-    `,
-  };
-
-  assert.throws(
-    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideRegex }),
-    /Cannot mechanically resolve Playwright 'testMatch'/
-  );
-
-  assert.throws(
-    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideRegex }),
-    /Cannot mechanically resolve Playwright 'testMatch'/
-  );
-
-  // Falsification Case 6C: testMatch is an array containing non-literal element
-  const overrideArray = {
-    'packages/web/playwright.config.ts': `
-      const dynamicPattern = '**/*.dyn.ts';
-      export default {
-        testDir: './e2e',
-        testMatch: ['**/*.spec.ts', dynamicPattern],
-      };
-    `,
-  };
-
-  assert.throws(
-    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideArray }),
-    /Cannot mechanically resolve Playwright 'testMatch'.*contains non-literal or unparseable array elements/
-  );
-
-  assert.throws(
-    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideArray }),
-    /Cannot mechanically resolve Playwright 'testMatch'.*contains non-literal or unparseable array elements/
   );
 });
 
-test('topology: falsification regression proves validation fails closed when Playwright exported structure cannot be statically resolved', () => {
-  // Case 7A: export default calls an opaque function without object literal
-  const overrideFn = {
-    'packages/web/playwright.config.ts': `
-      export default buildDynamicConfig();
-    `,
-  };
+test('topology: getPlaywrightDiscoveredFiles derives reachable files directly from Playwright CLI', () => {
+  const discovered = getPlaywrightDiscoveredFiles('packages/web');
+  assert.equal(discovered.size, 26);
+  assert.ok(discovered.has('packages/web/e2e/game-actions.spec.ts'));
+  assert.ok(discovered.has('packages/web/e2e/app-loads.spec.ts'));
+});
 
+test('topology: falsification regression proves validation flags ignored test files unreachable', () => {
+  const falsified = verifyTestTopology(undefined, {
+    playwrightConfigOverrides: {
+      'packages/web/playwright.config.ts': `
+        export default {
+          testDir: './e2e',
+          testIgnore: '**/game-actions.spec.ts',
+        };
+      `,
+    },
+  });
+  assert.ok(falsified.unreachable.length > 0, 'Test file excluded by testIgnore must be unreachable');
+  const ignoredFailure = falsified.unreachable.find((u) => u.file === 'packages/web/e2e/game-actions.spec.ts');
+  assert.ok(ignoredFailure, 'game-actions.spec.ts must be flagged unreachable');
+  assert.equal(ignoredFailure.suite, 'acceptance-playwright');
+});
+
+test('topology: falsification regression proves project-level testDir overrides are respected', () => {
+  const falsified = verifyTestTopology(undefined, {
+    playwrightConfigOverrides: {
+      'packages/web/playwright.config.ts': `
+        export default {
+          projects: [
+            {
+              name: 'other',
+              testDir: './drifted-e2e',
+            },
+          ],
+        };
+      `,
+    },
+  });
+  assert.ok(falsified.unreachable.length >= 25, 'Files outside project testDir must be unreachable');
+  assert.ok(falsified.unreachable.every((u) => u.suite === 'acceptance-playwright'));
+});
+
+test('topology: falsification regression proves project-level testIgnore excludes files', () => {
+  const falsified = verifyTestTopology(undefined, {
+    playwrightConfigOverrides: {
+      'packages/web/playwright.config.ts': `
+        export default {
+          testDir: './e2e',
+          projects: [
+            {
+              name: 'chromium',
+              testIgnore: '**/game-actions.spec.ts',
+            },
+          ],
+        };
+      `,
+    },
+  });
+  const ignoredFailure = falsified.unreachable.find((u) => u.file === 'packages/web/e2e/game-actions.spec.ts');
+  assert.ok(ignoredFailure, 'game-actions.spec.ts must be flagged unreachable by project testIgnore');
+});
+
+test('topology: object spreads and dynamic variables in Playwright config are evaluated by Playwright discovery engine', () => {
+  // Case A: variable testDir pointing to drifted directory flags e2e files unreachable
+  const falsifiedVar = verifyTestTopology(undefined, {
+    playwrightConfigOverrides: {
+      'packages/web/playwright.config.ts': `
+        const dir = './other-e2e';
+        export default { testDir: dir };
+      `,
+    },
+  });
+  assert.ok(falsifiedVar.unreachable.length >= 25, 'Variable testDir pointing to ./other-e2e must flag e2e files unreachable');
+
+  // Case B: spread config pointing to ./e2e discovers all files
+  const spreadSuccess = verifyTestTopology(undefined, {
+    playwrightConfigOverrides: {
+      'packages/web/playwright.config.ts': `
+        const base = { testDir: './e2e' };
+        export default { ...base };
+      `,
+    },
+  });
+  assert.equal(spreadSuccess.unreachable.length, 0, 'Spread config pointing to ./e2e must reach all test files');
+
+  // Case C: spread config pointing to ./other-e2e flags e2e files unreachable
+  const spreadDrift = verifyTestTopology(undefined, {
+    playwrightConfigOverrides: {
+      'packages/web/playwright.config.ts': `
+        const base = { testDir: './other-e2e' };
+        export default { ...base };
+      `,
+    },
+  });
+  assert.ok(spreadDrift.unreachable.length >= 25, 'Spread config pointing to ./other-e2e must flag e2e files unreachable');
+});
+
+test('topology: omitting testMatch uses real Playwright default pattern', () => {
+  const defaultMatch = verifyTestTopology(undefined, {
+    playwrightConfigOverrides: {
+      'packages/web/playwright.config.ts': `
+        export default {
+          testDir: './e2e',
+        };
+      `,
+    },
+  });
+  assert.equal(defaultMatch.unreachable.length, 0, 'Omitting testMatch must use Playwright default and discover all e2e spec files');
+});
+
+test('topology: unresolvable or errored Playwright configuration fails closed', () => {
+  // Case A: export default calls an undefined function
   assert.throws(
-    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideFn }),
-    /Cannot mechanically resolve Playwright configuration object/
+    () => verifyTestTopology(undefined, {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          export default buildDynamicConfig();
+        `,
+      },
+    }),
+    /Cannot mechanically resolve Playwright configuration/
   );
 
+  // Case B: export default references an undeclared identifier
   assert.throws(
-    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideFn }),
-    /Cannot mechanically resolve Playwright configuration object/
+    () => verifyTestTopology(undefined, {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          export default nonExistentConfig;
+        `,
+      },
+    }),
+    /Cannot mechanically resolve Playwright configuration/
   );
 
-  // Case 7B: exported identifier is never declared
-  const overrideUndeclared = {
-    'packages/web/playwright.config.ts': `
-      export default nonExistentConfig;
-    `,
-  };
-
+  // Case C: unimported module / function expression throws runtime error
   assert.throws(
-    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideUndeclared }),
-    /Cannot mechanically resolve Playwright configuration object/
-  );
-
-  assert.throws(
-    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideUndeclared }),
-    /Cannot mechanically resolve Playwright configuration object/
+    () => verifyTestTopology(undefined, {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          export default {
+            testDir: path.join(__dirname, 'e2e'),
+          };
+        `,
+      },
+    }),
+    /Cannot mechanically resolve Playwright configuration/
   );
 });

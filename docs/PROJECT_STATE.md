@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-17 — M15 Increment 59g: Negative lookbehind directive isolation, unnumbered TAP directive support, and zero-plan fail closed._
+_Last updated: 2026-09-21 — M15 Increment 59h: Authoritative Playwright CLI test reachability discovery and fail-closed validation._
+
+Prior: _Last updated: 2026-09-17 — M15 Increment 59g: Negative lookbehind directive isolation, unnumbered TAP directive support, and zero-plan fail closed._
 
 Prior: _Last updated: 2026-09-17 — M15 Increment 59f: Shared test-output parser module and strict TAP directive/not-ok reconciliation._
 
@@ -4310,3 +4312,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Immediate fail-closed on zero-test TAP plans (`1..0`)**: `parseTestCount` now inspects both reporter summaries and TAP plan headers for `0` tests before computing sums, ensuring that `1..0` immediately triggers gate failure even if preceded or followed by positive summary lines.
 - **Test suite hygiene**: Renamed regression test descriptions in `scripts/test/zero-skip-enforcement.test.mjs` to eliminate literal `# SKIP` / `# TODO` strings from test titles, preventing runner-level escaping ambiguity.
 - **Regression coverage**: Added 4 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (52 tests total, all passing) verifying unnumbered TAP SKIP/TODO detection, unnumbered raw failures, escaped hash immunity in test titles, and zero-test plan fail-closed behavior.
+
+## M15 Increment 59h — Authoritative Playwright CLI test reachability discovery and fail-closed validation — 2026-09-21
+
+- **Authoritative Playwright discovery engine (`getPlaywrightDiscoveredFiles`)**: In `scripts/check-test-topology.mjs`, replaced custom regex and AST extraction for Playwright reachability with Playwright's actual discovery CLI (`playwright test --list --reporter=json`). Evaluates real configuration including top-level and project-specific `testDir`, `testMatch`, and `testIgnore`, as well as object spreads and dynamic configuration.
+- **Fail-closed validation on unresolvable configurations**: If Playwright configuration cannot be resolved or throws an evaluation error (e.g. undeclared identifiers or runtime exceptions), topology verification fails closed immediately with an explicit error.
+- **Run-level discovery caching**: Cached discovered Playwright test file sets during `verifyTestTopology` runs, allowing all 26 web e2e tests to be validated against Playwright reachability in ~1.4 seconds total without re-executing discovery per file.
+- **Regression coverage**: In `scripts/test/check-test-topology.test.mjs`, added comprehensive falsification regressions proving that: (1) top-level and project-specific `testIgnore` exclusions are flagged unreachable, (2) project-specific `testDir` overrides are respected, (3) spread-composed configurations are dynamically evaluated, (4) default `testMatch` patterns are recognized when omitted, and (5) unresolvable or errored configurations fail closed.
+
