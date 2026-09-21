@@ -4,9 +4,93 @@ import { dirname, join, posix, relative, resolve, sep } from 'node:path';
 const REPO_ROOT = resolve(process.cwd());
 
 /**
+ * Strips single-line and multi-line comments from JS/TS code while preserving string literals.
+ *
+ * @param {string} code
+ * @returns {string}
+ */
+export function stripComments(code) {
+  return code.replace(
+    /("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
+    (match, str) => (str ? str : '')
+  );
+}
+
+/**
+ * Extracts a static string literal starting at index 0 of str.
+ * Supports single quotes, double quotes, and template literals without interpolation (${...).
+ *
+ * @param {string} str
+ * @returns {{ value: string, endIndex: number } | null}
+ */
+export function extractStringLiteralAtStart(str) {
+  const quote = str[0];
+  if (quote !== "'" && quote !== '"' && quote !== '`') return null;
+  let i = 1;
+  let escaped = false;
+  while (i < str.length) {
+    const ch = str[i];
+    if (escaped) {
+      escaped = false;
+    } else if (ch === '\\') {
+      escaped = true;
+    } else if (ch === quote) {
+      const content = str.slice(1, i);
+      if (quote === '`' && content.includes('${')) {
+        return null;
+      }
+      return {
+        value: content,
+        endIndex: i + 1,
+      };
+    }
+    i++;
+  }
+  return null;
+}
+
+/**
+ * Parses an array literal of static string literals (e.g. ['**\/*.spec.ts', '**\/*.test.ts']).
+ * Fails closed (returns null) if any element is non-literal or unparseable.
+ *
+ * @param {string} str
+ * @returns {string[] | null}
+ */
+export function parseStringLiteralArray(str) {
+  if (!str.startsWith('[')) return null;
+  let i = 1;
+  const elements = [];
+  while (i < str.length) {
+    while (i < str.length && /\s/.test(str[i])) i++;
+    if (i >= str.length) return null;
+    if (str[i] === ']') {
+      return elements;
+    }
+    const literal = extractStringLiteralAtStart(str.slice(i));
+    if (!literal) {
+      return null;
+    }
+    elements.push(literal.value);
+    i += literal.endIndex;
+    while (i < str.length && /\s/.test(str[i])) i++;
+    if (i < str.length && str[i] === ',') {
+      i++;
+    } else if (i < str.length && str[i] === ']') {
+      return elements;
+    } else {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
  * Mechanically resolves test patterns from a Playwright configuration file.
  * Reads the actual Playwright config file from the workspace to extract `testDir` and `testMatch`,
  * eliminating hard-coded duplicate reachability definitions.
+ *
+ * Fails closed: if `testDir` or `testMatch` is present but non-literal or unparseable,
+ * it explicitly throws an Error instead of substituting false-green defaults.
  *
  * @param {string} [manifestDir='packages/web'] - Directory containing playwright.config.* or package manifest.
  * @param {object} [options={}] - Options containing root or config overrides.
@@ -40,14 +124,61 @@ export function extractPlaywrightPatterns(manifestDir = 'packages/web', options 
     return ['**/*.@(spec|test).ts'];
   }
 
-  const testDirMatch = content.match(/testDir\s*:\s*['"`]([^'"`]+)['"`]/);
-  const testDir = testDirMatch ? testDirMatch[1].replace(/^\.\//, '').replace(/\/+$/, '') : '.';
+  const stripped = stripComments(content);
 
-  const testMatchMatch = content.match(/testMatch\s*:\s*['"`]([^'"`]+)['"`]/);
-  const testMatch = testMatchMatch ? testMatchMatch[1] : '**/*.spec.ts';
+  let testDir = null;
+  const testDirKeyRegex = /(?:^|[{,\s])(?:['"]?testDir['"]?)\s*:\s*/g;
+  const testDirKeyMatch = testDirKeyRegex.exec(stripped);
+  if (!testDirKeyMatch) {
+    // Property absent -> Playwright default ('.' relative to manifestDir) is allowed
+    testDir = '.';
+  } else {
+    const valStartIndex = testDirKeyMatch.index + testDirKeyMatch[0].length;
+    const valSnippet = stripped.slice(valStartIndex).trimStart();
+    const parsedLiteral = extractStringLiteralAtStart(valSnippet);
+    if (parsedLiteral === null) {
+      const endMatch = valSnippet.match(/[,};\r\n]/);
+      const rawExpr = endMatch ? valSnippet.slice(0, endMatch.index).trim() : valSnippet.trim();
+      throw new Error(
+        `Cannot mechanically resolve Playwright 'testDir' in ${configRel}: property is present but non-literal or unparseable ("${rawExpr}"). Topology validation must fail closed.`
+      );
+    }
+    testDir = parsedLiteral.value.replace(/^\.\//, '').replace(/\/+$/, '') || '.';
+  }
 
-  const pattern = testDir === '.' ? testMatch : `${testDir}/${testMatch}`;
-  return [pattern];
+  let testMatchPatterns = null;
+  const testMatchKeyRegex = /(?:^|[{,\s])(?:['"]?testMatch['"]?)\s*:\s*/g;
+  const testMatchKeyMatch = testMatchKeyRegex.exec(stripped);
+  if (!testMatchKeyMatch) {
+    // Property absent -> Playwright default ('**/*.spec.ts') is allowed
+    testMatchPatterns = ['**/*.spec.ts'];
+  } else {
+    const valStartIndex = testMatchKeyMatch.index + testMatchKeyMatch[0].length;
+    const valSnippet = stripped.slice(valStartIndex).trimStart();
+    if (valSnippet.startsWith('[')) {
+      const parsedArray = parseStringLiteralArray(valSnippet);
+      if (parsedArray === null) {
+        throw new Error(
+          `Cannot mechanically resolve Playwright 'testMatch' in ${configRel}: property is present but contains non-literal or unparseable array elements. Topology validation must fail closed.`
+        );
+      }
+      testMatchPatterns = parsedArray;
+    } else {
+      const parsedLiteral = extractStringLiteralAtStart(valSnippet);
+      if (parsedLiteral === null) {
+        const endMatch = valSnippet.match(/[,};\r\n]/);
+        const rawExpr = endMatch ? valSnippet.slice(0, endMatch.index).trim() : valSnippet.trim();
+        throw new Error(
+          `Cannot mechanically resolve Playwright 'testMatch' in ${configRel}: property is present but non-literal or unsupported ("${rawExpr}"). Topology validation must fail closed.`
+        );
+      }
+      testMatchPatterns = [parsedLiteral.value];
+    }
+  }
+
+  return testMatchPatterns.map((matchPattern) => {
+    return testDir === '.' ? matchPattern : `${testDir}/${matchPattern}`;
+  });
 }
 
 /**
@@ -469,7 +600,13 @@ export function verifyTestTopology(root = REPO_ROOT, options = {}) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  const result = verifyTestTopology();
+  let result;
+  try {
+    result = verifyTestTopology();
+  } catch (err) {
+    console.error(`[TEST TOPOLOGY] FAILED: ${err.message}`);
+    process.exit(1);
+  }
   console.log(`[TEST TOPOLOGY] Verified ${result.totalFiles} test files across ${result.categorized.size} suites.`);
 
   for (const [suiteName, files] of result.categorized.entries()) {

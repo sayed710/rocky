@@ -254,7 +254,175 @@ test('topology: regex fallback matches **/ as zero or more directory segments', 
   assert.equal(re.test('other/game-actions.spec.ts'), false, 'different directory must not match');
 });
 
+test('topology: extractPlaywrightPatterns confidently resolves literal testDir and defaults testMatch when omitted', () => {
+  // Case 1: Real project config (testDir: './e2e', testMatch omitted)
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web'),
+    ['e2e/**/*.spec.ts']
+  );
 
+  // Case 2: testDir omitted, testMatch omitted -> real Playwright defaults used
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web', {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          export default {
+            timeout: 30000,
+          };
+        `,
+      },
+    }),
+    ['**/*.spec.ts']
+  );
 
+  // Case 3: testDir omitted, testMatch provided as literal
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web', {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          export default {
+            testMatch: '**/*.acceptance.ts',
+          };
+        `,
+      },
+    }),
+    ['**/*.acceptance.ts']
+  );
 
+  // Case 4: testDir provided, testMatch provided as array of string literals
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web', {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          export default {
+            testDir: './e2e',
+            testMatch: [
+              '**/*.spec.ts',
+              '**/*.acceptance.ts',
+            ],
+          };
+        `,
+      },
+    }),
+    ['e2e/**/*.spec.ts', 'e2e/**/*.acceptance.ts']
+  );
 
+  // Case 5: Comments containing testDir or testMatch are ignored
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web', {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          // testDir: unparseableVariable,
+          /* testMatch: unparseableMatch, */
+          export default {
+            testDir: './e2e',
+          };
+        `,
+      },
+    }),
+    ['e2e/**/*.spec.ts']
+  );
+});
+
+test('topology: falsification regression proves validation fails closed on non-literal/unsupported testDir', () => {
+  // Falsification Case 5A: testDir references a variable (const dir = './other-e2e'; testDir: dir)
+  const overrideVar = {
+    'packages/web/playwright.config.ts': `
+      const dir = './other-e2e';
+      export default { testDir: dir };
+    `,
+  };
+
+  assert.throws(
+    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideVar }),
+    /Cannot mechanically resolve Playwright 'testDir'.*property is present but non-literal or unparseable/
+  );
+
+  assert.throws(
+    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideVar }),
+    /Cannot mechanically resolve Playwright 'testDir'.*property is present but non-literal or unparseable/
+  );
+
+  // Falsification Case 5B: testDir uses function expression (path.join(...))
+  const overrideExpr = {
+    'packages/web/playwright.config.ts': `
+      export default {
+        testDir: path.join(__dirname, 'e2e'),
+      };
+    `,
+  };
+
+  assert.throws(
+    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideExpr }),
+    /Cannot mechanically resolve Playwright 'testDir'/
+  );
+
+  assert.throws(
+    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideExpr }),
+    /Cannot mechanically resolve Playwright 'testDir'/
+  );
+});
+
+test('topology: falsification regression proves validation fails closed on unsupported/non-literal testMatch', () => {
+  // Falsification Case 6A: testMatch references a variable
+  const overrideVar = {
+    'packages/web/playwright.config.ts': `
+      const customMatch = '**/*.spec.ts';
+      export default {
+        testDir: './e2e',
+        testMatch: customMatch,
+      };
+    `,
+  };
+
+  assert.throws(
+    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideVar }),
+    /Cannot mechanically resolve Playwright 'testMatch'.*property is present but non-literal or unsupported/
+  );
+
+  assert.throws(
+    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideVar }),
+    /Cannot mechanically resolve Playwright 'testMatch'.*property is present but non-literal or unsupported/
+  );
+
+  // Falsification Case 6B: testMatch is a RegExp literal
+  const overrideRegex = {
+    'packages/web/playwright.config.ts': `
+      export default {
+        testDir: './e2e',
+        testMatch: /.*\\.spec\\.ts/,
+      };
+    `,
+  };
+
+  assert.throws(
+    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideRegex }),
+    /Cannot mechanically resolve Playwright 'testMatch'/
+  );
+
+  assert.throws(
+    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideRegex }),
+    /Cannot mechanically resolve Playwright 'testMatch'/
+  );
+
+  // Falsification Case 6C: testMatch is an array containing non-literal element
+  const overrideArray = {
+    'packages/web/playwright.config.ts': `
+      const dynamicPattern = '**/*.dyn.ts';
+      export default {
+        testDir: './e2e',
+        testMatch: ['**/*.spec.ts', dynamicPattern],
+      };
+    `,
+  };
+
+  assert.throws(
+    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideArray }),
+    /Cannot mechanically resolve Playwright 'testMatch'.*contains non-literal or unparseable array elements/
+  );
+
+  assert.throws(
+    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideArray }),
+    /Cannot mechanically resolve Playwright 'testMatch'.*contains non-literal or unparseable array elements/
+  );
+});
