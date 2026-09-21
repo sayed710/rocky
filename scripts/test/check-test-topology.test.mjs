@@ -322,6 +322,57 @@ test('topology: extractPlaywrightPatterns confidently resolves literal testDir a
     }),
     ['e2e/**/*.spec.ts']
   );
+
+  // Case 6: Preceding string literals containing testMatch or testDir are ignored
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web', {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          const note = "Note that testMatch: '**/*.legacy.ts' was deprecated";
+          export default {
+            testDir: './e2e',
+          };
+        `,
+      },
+    }),
+    ['e2e/**/*.spec.ts']
+  );
+
+  // Case 7: Nested project properties do not override direct config properties
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web', {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          export default {
+            projects: [
+              {
+                name: 'legacy',
+                testDir: './nested-legacy',
+                testMatch: '**/*.legacy.ts',
+              },
+            ],
+            testDir: './e2e',
+          };
+        `,
+      },
+    }),
+    ['e2e/**/*.spec.ts']
+  );
+
+  // Case 8: Direct property value containing property keywords in string literals is safely skipped
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web', {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': `
+          export default {
+            name: "e2e runner with testMatch: '**/*.decoy.ts'",
+            testDir: './e2e',
+          };
+        `,
+      },
+    }),
+    ['e2e/**/*.spec.ts']
+  );
 });
 
 test('topology: falsification regression proves validation fails closed on non-literal/unsupported testDir', () => {
@@ -424,5 +475,41 @@ test('topology: falsification regression proves validation fails closed on unsup
   assert.throws(
     () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideArray }),
     /Cannot mechanically resolve Playwright 'testMatch'.*contains non-literal or unparseable array elements/
+  );
+});
+
+test('topology: falsification regression proves validation fails closed when Playwright exported structure cannot be statically resolved', () => {
+  // Case 7A: export default calls an opaque function without object literal
+  const overrideFn = {
+    'packages/web/playwright.config.ts': `
+      export default buildDynamicConfig();
+    `,
+  };
+
+  assert.throws(
+    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideFn }),
+    /Cannot mechanically resolve Playwright configuration object/
+  );
+
+  assert.throws(
+    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideFn }),
+    /Cannot mechanically resolve Playwright configuration object/
+  );
+
+  // Case 7B: exported identifier is never declared
+  const overrideUndeclared = {
+    'packages/web/playwright.config.ts': `
+      export default nonExistentConfig;
+    `,
+  };
+
+  assert.throws(
+    () => extractPlaywrightPatterns('packages/web', { playwrightConfigOverrides: overrideUndeclared }),
+    /Cannot mechanically resolve Playwright configuration object/
+  );
+
+  assert.throws(
+    () => verifyTestTopology(undefined, { playwrightConfigOverrides: overrideUndeclared }),
+    /Cannot mechanically resolve Playwright configuration object/
   );
 });

@@ -84,6 +84,177 @@ export function parseStringLiteralArray(str) {
   return null;
 }
 
+export function parseStaticStringLiteral(raw) {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/^(['"`])([\s\S]*)\1$/);
+  if (!match) return null;
+  const quote = match[1];
+  const content = match[2];
+  if (quote === '`' && content.includes('${')) {
+    return null;
+  }
+  return content;
+}
+
+/**
+ * Locates the opening and closing curly braces of an object literal in str starting from fromIndex.
+ *
+ * @param {string} str - Source string.
+ * @param {number} fromIndex - Index to search from.
+ * @returns {string | null} The object literal body (between { and }), or null if not found.
+ */
+export function extractObjectBody(str, fromIndex = 0) {
+  let openBrace = -1;
+  let i = fromIndex;
+  while (i < str.length) {
+    const lit = extractStringLiteralAtStart(str.slice(i));
+    if (lit) {
+      i += lit.endIndex;
+      continue;
+    }
+    if (str[i] === '{') {
+      openBrace = i;
+      break;
+    }
+    i++;
+  }
+  if (openBrace === -1) return null;
+
+  let braceDepth = 0;
+  i = openBrace;
+  while (i < str.length) {
+    const lit = extractStringLiteralAtStart(str.slice(i));
+    if (lit) {
+      i += lit.endIndex;
+      continue;
+    }
+    if (str[i] === '{') {
+      braceDepth++;
+    } else if (str[i] === '}') {
+      braceDepth--;
+      if (braceDepth === 0) {
+        return str.slice(openBrace + 1, i);
+      }
+    }
+    i++;
+  }
+  return null;
+}
+
+/**
+ * Finds the body of the exported Playwright configuration object.
+ *
+ * @param {string} stripped - Source code with comments removed.
+ * @param {string} configRel - Relative path for diagnostics.
+ * @returns {string} The inner body of the exported configuration object.
+ */
+export function findExportedPlaywrightConfigBody(stripped, configRel) {
+  const exportMatch = stripped.match(/(?:export\s+default|module\.exports\s*=)\s*([\s\S]*)/);
+  if (exportMatch) {
+    const afterExport = exportMatch[1].trimStart();
+    const idMatch = afterExport.match(/^([A-Za-z0-9_$]+)\s*;?/);
+    if (idMatch && idMatch[1] !== 'defineConfig') {
+      const varName = idMatch[1];
+      const declRegex = new RegExp(`(?:const|let|var)\\s+${varName}\\s*(?::\\s*[^=]+)?=\\s*([\\s\\S]*)`);
+      const declMatch = stripped.match(declRegex);
+      if (!declMatch) {
+        throw new Error(
+          `Cannot mechanically resolve Playwright configuration object in ${configRel}: exported identifier '${varName}' declaration cannot be statically resolved. Topology validation must fail closed.`
+        );
+      }
+      const body = extractObjectBody(declMatch[1], 0);
+      if (body === null) {
+        throw new Error(
+          `Cannot mechanically resolve Playwright configuration object in ${configRel}: exported object structure cannot be statically resolved. Topology validation must fail closed.`
+        );
+      }
+      return body;
+    }
+
+    const body = extractObjectBody(afterExport, 0);
+    if (body === null) {
+      throw new Error(
+        `Cannot mechanically resolve Playwright configuration object in ${configRel}: exported object structure cannot be statically resolved. Topology validation must fail closed.`
+      );
+    }
+    return body;
+  }
+
+  const body = extractObjectBody(stripped, 0);
+  if (body !== null) {
+    return body;
+  }
+  return stripped;
+}
+
+/**
+ * Scans an object literal body for direct properties at depth 0.
+ * Ignores properties in nested objects (like projects: [{ ... }]) or string literals.
+ *
+ * @param {string} objectBody
+ * @returns {Map<string, string>} Map of direct property keys to their raw value expressions.
+ */
+export function extractDirectProperties(objectBody) {
+  const properties = new Map();
+  let depth = { brace: 0, bracket: 0, paren: 0 };
+  let idx = 0;
+
+  while (idx < objectBody.length) {
+    const literal = extractStringLiteralAtStart(objectBody.slice(idx));
+    if (literal) {
+      idx += literal.endIndex;
+      continue;
+    }
+
+    const ch = objectBody[idx];
+    if (ch === '{') { depth.brace++; idx++; continue; }
+    if (ch === '}') { depth.brace--; idx++; continue; }
+    if (ch === '[') { depth.bracket++; idx++; continue; }
+    if (ch === ']') { depth.bracket--; idx++; continue; }
+    if (ch === '(') { depth.paren++; idx++; continue; }
+    if (ch === ')') { depth.paren--; idx++; continue; }
+
+    if (depth.brace === 0 && depth.bracket === 0 && depth.paren === 0) {
+      const propMatch = objectBody.slice(idx).match(/^(?:([A-Za-z0-9_$]+)|['"]([A-Za-z0-9_$]+)['"])\s*:\s*/);
+      if (propMatch) {
+        const key = propMatch[1] || propMatch[2];
+        idx += propMatch[0].length;
+        const valStart = idx;
+        let valDepth = { brace: 0, bracket: 0, paren: 0 };
+        while (idx < objectBody.length) {
+          const valLit = extractStringLiteralAtStart(objectBody.slice(idx));
+          if (valLit) {
+            idx += valLit.endIndex;
+            continue;
+          }
+          const vch = objectBody[idx];
+          if (vch === '{') { valDepth.brace++; idx++; continue; }
+          if (vch === '}') { valDepth.brace--; idx++; continue; }
+          if (vch === '[') { valDepth.bracket++; idx++; continue; }
+          if (vch === ']') { valDepth.bracket--; idx++; continue; }
+          if (vch === '(') { valDepth.paren++; idx++; continue; }
+          if (vch === ')') { valDepth.paren--; idx++; continue; }
+
+          if (vch === ',' && valDepth.brace === 0 && valDepth.bracket === 0 && valDepth.paren === 0) {
+            break;
+          }
+          idx++;
+        }
+        const rawVal = objectBody.slice(valStart, idx).trim();
+        properties.set(key, rawVal);
+        if (idx < objectBody.length && objectBody[idx] === ',') {
+          idx++;
+        }
+        continue;
+      }
+    }
+
+    idx++;
+  }
+
+  return properties;
+}
+
 /**
  * Mechanically resolves test patterns from a Playwright configuration file.
  * Reads the actual Playwright config file from the workspace to extract `testDir` and `testMatch`,
@@ -125,38 +296,32 @@ export function extractPlaywrightPatterns(manifestDir = 'packages/web', options 
   }
 
   const stripped = stripComments(content);
+  const objectBody = findExportedPlaywrightConfigBody(stripped, configRel);
+  const directProps = extractDirectProperties(objectBody);
 
   let testDir = null;
-  const testDirKeyRegex = /(?:^|[{,\s])(?:['"]?testDir['"]?)\s*:\s*/g;
-  const testDirKeyMatch = testDirKeyRegex.exec(stripped);
-  if (!testDirKeyMatch) {
+  if (!directProps.has('testDir')) {
     // Property absent -> Playwright default ('.' relative to manifestDir) is allowed
     testDir = '.';
   } else {
-    const valStartIndex = testDirKeyMatch.index + testDirKeyMatch[0].length;
-    const valSnippet = stripped.slice(valStartIndex).trimStart();
-    const parsedLiteral = extractStringLiteralAtStart(valSnippet);
+    const rawVal = directProps.get('testDir');
+    const parsedLiteral = parseStaticStringLiteral(rawVal);
     if (parsedLiteral === null) {
-      const endMatch = valSnippet.match(/[,};\r\n]/);
-      const rawExpr = endMatch ? valSnippet.slice(0, endMatch.index).trim() : valSnippet.trim();
       throw new Error(
-        `Cannot mechanically resolve Playwright 'testDir' in ${configRel}: property is present but non-literal or unparseable ("${rawExpr}"). Topology validation must fail closed.`
+        `Cannot mechanically resolve Playwright 'testDir' in ${configRel}: property is present but non-literal or unparseable ("${rawVal}"). Topology validation must fail closed.`
       );
     }
-    testDir = parsedLiteral.value.replace(/^\.\//, '').replace(/\/+$/, '') || '.';
+    testDir = parsedLiteral.replace(/^\.\//, '').replace(/\/+$/, '') || '.';
   }
 
   let testMatchPatterns = null;
-  const testMatchKeyRegex = /(?:^|[{,\s])(?:['"]?testMatch['"]?)\s*:\s*/g;
-  const testMatchKeyMatch = testMatchKeyRegex.exec(stripped);
-  if (!testMatchKeyMatch) {
+  if (!directProps.has('testMatch')) {
     // Property absent -> Playwright default ('**/*.spec.ts') is allowed
     testMatchPatterns = ['**/*.spec.ts'];
   } else {
-    const valStartIndex = testMatchKeyMatch.index + testMatchKeyMatch[0].length;
-    const valSnippet = stripped.slice(valStartIndex).trimStart();
-    if (valSnippet.startsWith('[')) {
-      const parsedArray = parseStringLiteralArray(valSnippet);
+    const rawVal = directProps.get('testMatch');
+    if (rawVal.startsWith('[')) {
+      const parsedArray = parseStringLiteralArray(rawVal);
       if (parsedArray === null) {
         throw new Error(
           `Cannot mechanically resolve Playwright 'testMatch' in ${configRel}: property is present but contains non-literal or unparseable array elements. Topology validation must fail closed.`
@@ -164,15 +329,13 @@ export function extractPlaywrightPatterns(manifestDir = 'packages/web', options 
       }
       testMatchPatterns = parsedArray;
     } else {
-      const parsedLiteral = extractStringLiteralAtStart(valSnippet);
+      const parsedLiteral = parseStaticStringLiteral(rawVal);
       if (parsedLiteral === null) {
-        const endMatch = valSnippet.match(/[,};\r\n]/);
-        const rawExpr = endMatch ? valSnippet.slice(0, endMatch.index).trim() : valSnippet.trim();
         throw new Error(
-          `Cannot mechanically resolve Playwright 'testMatch' in ${configRel}: property is present but non-literal or unsupported ("${rawExpr}"). Topology validation must fail closed.`
+          `Cannot mechanically resolve Playwright 'testMatch' in ${configRel}: property is present but non-literal or unsupported ("${rawVal}"). Topology validation must fail closed.`
         );
       }
-      testMatchPatterns = [parsedLiteral.value];
+      testMatchPatterns = [parsedLiteral];
     }
   }
 
