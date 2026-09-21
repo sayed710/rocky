@@ -10,6 +10,7 @@ import {
   isAllowedPlacement,
   extractRunnerPatterns,
   extractPlaywrightPatterns,
+  matchRunnerPattern,
   isTestFileReachableByRunner,
   SUITE_DEFINITIONS,
 } from '../check-test-topology.mjs';
@@ -228,5 +229,32 @@ test('workspace topology: filters hermetic workspaces by packages/ filesystem lo
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('topology: matchRunnerPattern correctly matches glob patterns across directory levels', () => {
+  assert.equal(matchRunnerPattern('e2e/**/*.spec.ts', 'e2e/game-actions.spec.ts'), true);
+  assert.equal(matchRunnerPattern('e2e/**/*.spec.ts', 'e2e/nested/deep/game-actions.spec.ts'), true);
+  assert.equal(matchRunnerPattern('e2e/**/*.spec.ts', 'packages/web/e2e/game-actions.spec.ts'), false);
+  assert.equal(matchRunnerPattern('dist-test/test/**/*.posix.test.js', 'dist-test/test/diagnostics/signature-b-correlate.posix.test.js'), true);
+  assert.equal(matchRunnerPattern('dist-test/test/**/*.posix.test.js', 'dist-test/test/foo.posix.test.js'), true);
+});
+
+test('topology: regex fallback matches **/ as zero or more directory segments', () => {
+  const normPattern = 'e2e/**/*.spec.ts';
+  const reStr = normPattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*\/|\*\*|\*/g, (token) => {
+      if (token === '**/') return '(?:[^/]+/)*';
+      if (token === '**') return '.*';
+      return '[^/]*';
+    });
+  const re = new RegExp(`^${reStr}$`);
+  assert.equal(re.test('e2e/game-actions.spec.ts'), true, 'zero directory segments under e2e must match');
+  assert.equal(re.test('e2e/nested/game-actions.spec.ts'), true, 'one directory segment under e2e must match');
+  assert.equal(re.test('e2e/nested/deep/game-actions.spec.ts'), true, 'multiple directory segments under e2e must match');
+  assert.equal(re.test('other/game-actions.spec.ts'), false, 'different directory must not match');
+});
+
+
+
 
 

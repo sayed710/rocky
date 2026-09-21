@@ -99,8 +99,11 @@ export function matchRunnerPattern(pattern, candidate) {
   }
   const reStr = normPattern
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, '.*')
-    .replace(/\*/g, '[^/]*');
+    .replace(/\*\*\/|\*\*|\*/g, (token) => {
+      if (token === '**/') return '(?:[^/]+/)*';
+      if (token === '**') return '.*';
+      return '[^/]*';
+    });
   return new RegExp(`^${reStr}$`).test(normCandidate);
 }
 
