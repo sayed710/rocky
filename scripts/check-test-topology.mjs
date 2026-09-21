@@ -613,6 +613,8 @@ export function isTestFileReachableByRunner(suite, relPath, options = {}) {
   if (!manifest) return false;
 
   const scriptCmd = manifest.scripts?.[suite.script];
+  if (!scriptCmd) return false;
+
   const manifestDir = dirname(manifestPath);
 
   if (scriptCmd.includes('playwright test')) {

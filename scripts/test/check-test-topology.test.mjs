@@ -565,3 +565,18 @@ test('topology: unresolvable or errored Playwright configuration fails closed', 
     /Cannot mechanically resolve Playwright configuration/
   );
 });
+
+test('topology: isTestFileReachableByRunner returns false when manifest script is missing', () => {
+  const missingScript = verifyTestTopology(undefined, {
+    manifestOverrides: {
+      'packages/web/package.json': {
+        scripts: {
+          e2e: undefined,
+        },
+      },
+    },
+  });
+  assert.ok(missingScript.unreachable.length >= 25, 'All web e2e tests must be flagged unreachable when e2e script is missing');
+  assert.ok(missingScript.unreachable.every((u) => u.suite === 'acceptance-playwright'));
+});
+
