@@ -4,6 +4,7 @@ import { runWithZeroSkip } from '../run-zero-skip.mjs';
 import { runHermeticTests, HERMETIC_WORKSPACES } from '../run-hermetic-tests.mjs';
 import {
   createStreamingTestParser,
+  createStreamLineProcessor,
   parseCancelledCount,
   parseFailCount,
   parsePassCount,
@@ -11,6 +12,7 @@ import {
   parseTestCount,
   parseTodoCount,
 } from '../lib/test-output-parser.mjs';
+
 
 test('zero-skip enforcer: succeeds when a suite reports zero skips', async () => {
   const code = await runWithZeroSkip(process.execPath, [
@@ -578,4 +580,105 @@ test('streaming-test-parser: processes large transcripts with strictly bounded m
   assert.equal(results.failCount, 0);
   assert.equal(results.todoCount, 0);
 });
+
+test('streaming-stream-processor: correctly handles TAP and report lines split across arbitrary chunks', () => {
+  const parser = createStreamingTestParser();
+  const processor = createStreamLineProcessor(parser);
+
+  // Split line across 4 separate chunks
+  processor.pushStdoutChunk(Buffer.from('# '));
+  processor.pushStdoutChunk(Buffer.from('te'));
+  processor.pushStdoutChunk(Buffer.from('sts '));
+  processor.pushStdoutChunk(Buffer.from('12\n'));
+
+  // Split directives across chunks
+  processor.pushStdoutChunk(Buffer.from('# pass 10\n# skip'));
+  processor.pushStdoutChunk(Buffer.from('ped 0\n# todo 0\n# cancelled 0\n# fail 2\n'));
+
+  const results = processor.getResults();
+  assert.equal(results.totalTests, 12);
+  assert.equal(results.passCount, 10);
+  assert.equal(results.skippedCount, 0);
+  assert.equal(results.failCount, 2);
+});
+
+test('streaming-stream-processor: prevents cross-stream corruption between interleaved stdout and stderr chunks', () => {
+  const parser = createStreamingTestParser();
+  const processor = createStreamLineProcessor(parser);
+
+  // stdout emits a partial line with a SKIP directive
+  processor.pushStdoutChunk(Buffer.from('ok 1 - dynamic test # SK'));
+
+  // stderr emits log output in between
+  processor.pushStderrChunk(Buffer.from('[WARN] connecting to redis replica...\n'));
+  processor.pushStderrChunk(Buffer.from('[INFO] connected\n'));
+
+  // stdout completes the line
+  processor.pushStdoutChunk(Buffer.from('IP skipped intentionally\n# tests 1\n# pass 0\n# skipped 1\n'));
+
+  const results = processor.getResults();
+  assert.equal(results.totalTests, 1);
+  assert.equal(results.skippedCount, 1);
+});
+
+test('streaming-stream-processor: correctly reconstructs multibyte UTF-8 ℹ sequence split across chunk boundaries', () => {
+  const parser = createStreamingTestParser();
+  const processor = createStreamLineProcessor(parser);
+
+  // 'ℹ' is U+2139: UTF-8 bytes 0xE2 0x84 0xB9
+  // Chunk 1 has the first 2 bytes:
+  const chunk1 = Buffer.from([0xe2, 0x84]);
+  // Chunk 2 has the 3rd byte plus " tests 8\n":
+  const chunk2 = Buffer.concat([
+    Buffer.from([0xb9]),
+    Buffer.from(' tests 8\nℹ pass 8\nℹ skipped 0\nℹ todo 0\nℹ cancelled 0\nℹ fail 0\n'),
+  ]);
+
+  processor.pushStdoutChunk(chunk1);
+  processor.pushStdoutChunk(chunk2);
+
+  const results = processor.getResults();
+  assert.equal(results.totalTests, 8, 'totalTests should be 8 from reconstructed ℹ tests 8');
+  assert.equal(results.passCount, 8);
+  assert.equal(results.skippedCount, 0);
+  assert.equal(results.failCount, 0);
+});
+
+test('streaming-stream-processor: falsification proves naive chunk.toString and shared lineBuffer fail', () => {
+  // Falsification Case 1: Naive chunk.toString('utf8') splits multibyte 'ℹ' into replacement characters
+  const chunk1 = Buffer.from([0xe2, 0x84]);
+  const chunk2 = Buffer.from([0xb9, 0x20, 0x74, 0x65, 0x73, 0x74, 0x73, 0x20, 0x35, 0x0a]); // " tests 5\n"
+  const naiveText = chunk1.toString('utf8') + chunk2.toString('utf8');
+  assert.ok(naiveText.includes('\ufffd'), 'Naive toString must contain Unicode replacement characters');
+  assert.ok(!naiveText.startsWith('ℹ tests 5'), 'Naive toString must fail to reconstruct "ℹ tests 5"');
+
+  // Falsification Case 2: Shared line buffer between stdout and stderr corrupts anchored TAP directives
+  let sharedBuffer = '';
+  const fakeStdout1 = 'ok 1 - test # SK';
+  const fakeStderr = '[LOG] db query error\n';
+  const fakeStdout2 = 'IP reason\n';
+
+  sharedBuffer += fakeStdout1;
+  sharedBuffer += fakeStderr;
+  const corruptedLines = sharedBuffer.split('\n');
+  assert.equal(corruptedLines[0], 'ok 1 - test # SK[LOG] db query error', 'Shared buffer line was corrupted');
+  assert.ok(!corruptedLines[0].includes('# SKIP'), 'Anchored SKIP directive was corrupted into # SK[LOG]');
+});
+
+test('zero-skip enforcer: preserves zero-skip pass when child process streams split multibyte UTF-8 summary', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    `
+      // Write first 2 bytes of ℹ (0xE2, 0x84)
+      process.stdout.write(Buffer.from([0xe2, 0x84]));
+      // Follow with remaining byte (0xB9) + rest of summary
+      process.stdout.write(Buffer.concat([
+        Buffer.from([0xb9]),
+        Buffer.from(" tests 4\\nℹ pass 4\\nℹ skipped 0\\nℹ todo 0\\nℹ cancelled 0\\nℹ fail 0\\n")
+      ]));
+    `,
+  ], { silent: true });
+  assert.equal(code, 0, 'should return exit code 0 when multibyte ℹ is split across child writes');
+});
+
 

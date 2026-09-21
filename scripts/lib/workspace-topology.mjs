@@ -4,8 +4,9 @@
  * between hermetic runners, test count auditors, and topology checkers.
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(SCRIPT_DIR, '../..');
@@ -40,7 +41,7 @@ export function discoverWorkspacePackages(root = REPO_ROOT) {
           packages.push({
             name: manifest.name,
             dir: pkgDir,
-            relDir: `packages/${entry.name}`,
+            relDir: relative(root, pkgDir).replace(/\\/g, '/'),
             manifest,
           });
         }
@@ -53,7 +54,7 @@ export function discoverWorkspacePackages(root = REPO_ROOT) {
         packages.push({
           name: manifest.name,
           dir: pkgDir,
-          relDir: pattern,
+          relDir: relative(root, pkgDir).replace(/\\/g, '/'),
           manifest,
         });
       }
@@ -83,6 +84,16 @@ export const PARTITIONED_PACKAGES = Object.freeze([
  * @returns {readonly string[]} Sorted list of workspace package names.
  */
 export function getHermeticWorkspaces(root = REPO_ROOT) {
+  const packagesDir = resolve(root, 'packages');
   const discovered = discoverWorkspacePackages(root);
-  return Object.freeze(discovered.map((pkg) => pkg.name));
+  return Object.freeze(
+    discovered
+      .filter((pkg) => {
+        const resolvedPkgDir = resolve(pkg.dir);
+        const rel = relative(packagesDir, resolvedPkgDir);
+        return !rel.startsWith('..') && !isAbsolute(rel) && rel !== '';
+      })
+      .map((pkg) => pkg.name)
+  );
 }
+

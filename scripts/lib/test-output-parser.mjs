@@ -3,6 +3,8 @@
  * Supports TAP and Node.js spec reporter formats, strictly enforcing zero-skip,
  * zero-todo, and zero-cancelled test quality gates.
  */
+import { StringDecoder } from 'node:string_decoder';
+
 
 /**
  * Line-anchored regex matching individual TAP or spec skip directives.
@@ -279,3 +281,65 @@ export function createStreamingTestParser() {
     },
   };
 }
+
+/**
+ * Wraps a parser or test receiver to process streaming binary or string chunks from stdout
+ * and stderr independently.
+ *
+ * Maintains separate UTF-8 StringDecoder instances and line buffers for stdout and stderr,
+ * preventing cross-stream line interleaving corruption and multibyte sequence splitting.
+ *
+ * @param {ReturnType<typeof createStreamingTestParser>} parser
+ * @returns {{
+ *   pushStdoutChunk: (chunk: Buffer|string) => void,
+ *   pushStderrChunk: (chunk: Buffer|string) => void,
+ *   flush: () => void,
+ *   getResults: () => ReturnType<typeof parser.getResults>
+ * }}
+ */
+export function createStreamLineProcessor(parser) {
+  const stdoutDecoder = new StringDecoder('utf8');
+  const stderrDecoder = new StringDecoder('utf8');
+  let stdoutLineBuffer = '';
+  let stderrLineBuffer = '';
+
+  function processChunk(chunk, decoder, getBuffer, setBuffer) {
+    const text = typeof chunk === 'string' ? chunk : decoder.write(chunk);
+    const combined = getBuffer() + text;
+    const lines = combined.split(/\r?\n/);
+    setBuffer(lines.pop() ?? '');
+    for (const line of lines) {
+      parser.pushLine(line);
+    }
+  }
+
+  function flushStream(decoder, getBuffer, setBuffer) {
+    const finalStr = decoder.end();
+    const combined = getBuffer() + finalStr;
+    const lines = combined.split(/\r?\n/);
+    setBuffer('');
+    for (const line of lines) {
+      if (line.length > 0) {
+        parser.pushLine(line);
+      }
+    }
+  }
+
+  return {
+    pushStdoutChunk(chunk) {
+      processChunk(chunk, stdoutDecoder, () => stdoutLineBuffer, (v) => { stdoutLineBuffer = v; });
+    },
+    pushStderrChunk(chunk) {
+      processChunk(chunk, stderrDecoder, () => stderrLineBuffer, (v) => { stderrLineBuffer = v; });
+    },
+    flush() {
+      flushStream(stdoutDecoder, () => stdoutLineBuffer, (v) => { stdoutLineBuffer = v; });
+      flushStream(stderrDecoder, () => stderrLineBuffer, (v) => { stderrLineBuffer = v; });
+    },
+    getResults() {
+      this.flush();
+      return parser.getResults();
+    },
+  };
+}
+

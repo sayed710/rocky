@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import process from 'node:process';
 import {
   createStreamingTestParser,
+  createStreamLineProcessor,
 } from './lib/test-output-parser.mjs';
 
 /**
@@ -17,6 +18,8 @@ import {
  * runner reported at least one executed test and zero skipped tests.
  * Maintains strictly O(1) bounded memory state by streaming lines directly to
  * createStreamingTestParser, preventing transcript accumulation in memory.
+ * Uses independent StringDecoder instances and line buffers for stdout and stderr
+ * to prevent multibyte corruption and cross-stream line interleaving.
  *
  * @param {string} cmd - Command or binary to execute.
  * @param {string[]} [args=[]] - Arguments to pass to the command.
@@ -31,24 +34,22 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
       ...options,
     });
 
-    let lineBuffer = '';
     const parser = createStreamingTestParser();
+    const processor = createStreamLineProcessor(parser);
 
-    function processChunk(chunk, isStderr = false) {
+    child.stdout?.on('data', (chunk) => {
       if (!options.silent) {
-        if (isStderr) process.stderr.write(chunk);
-        else process.stdout.write(chunk);
+        process.stdout.write(chunk);
       }
-      lineBuffer += chunk.toString('utf8');
-      const lines = lineBuffer.split(/\r?\n/);
-      lineBuffer = lines.pop() ?? '';
-      for (const line of lines) {
-        parser.pushLine(line);
-      }
-    }
+      processor.pushStdoutChunk(chunk);
+    });
 
-    child.stdout?.on('data', (chunk) => processChunk(chunk, false));
-    child.stderr?.on('data', (chunk) => processChunk(chunk, true));
+    child.stderr?.on('data', (chunk) => {
+      if (!options.silent) {
+        process.stderr.write(chunk);
+      }
+      processor.pushStderrChunk(chunk);
+    });
 
     child.on('error', (err) => {
       console.error(`[run-zero-skip] Failed to start process: ${err.message}`);
@@ -69,10 +70,8 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         return;
       }
 
-      if (lineBuffer.trim().length > 0) {
-        parser.pushLine(lineBuffer);
-      }
-      const results = parser.getResults();
+      const results = processor.getResults();
+
 
       // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed).
       // Only accept genuine line-anchored reporter summary lines (# tests N, ℹ tests N) or TAP plan headers (1..N).

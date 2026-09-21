@@ -1,22 +1,71 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
-import picomatch from 'picomatch';
+import { dirname, join, posix, relative, resolve, sep } from 'node:path';
 
 const REPO_ROOT = resolve(process.cwd());
+
+/**
+ * Mechanically resolves test patterns from a Playwright configuration file.
+ * Reads the actual Playwright config file from the workspace to extract `testDir` and `testMatch`,
+ * eliminating hard-coded duplicate reachability definitions.
+ *
+ * @param {string} [manifestDir='packages/web'] - Directory containing playwright.config.* or package manifest.
+ * @param {object} [options={}] - Options containing root or config overrides.
+ * @returns {string[]} Resolved patterns relative to manifestDir.
+ */
+export function extractPlaywrightPatterns(manifestDir = 'packages/web', options = {}) {
+  const root = options.root || REPO_ROOT;
+  const configRel = join(manifestDir, 'playwright.config.ts').split(sep).join('/');
+  let content = options.playwrightConfigOverrides?.[configRel];
+  if (!content) {
+    const fullPath = join(root, configRel);
+    if (existsSync(fullPath)) {
+      content = readFileSync(fullPath, 'utf8');
+    }
+  }
+  if (!content) {
+    for (const ext of ['.js', '.mjs', '.cjs']) {
+      const altRel = join(manifestDir, `playwright.config${ext}`).split(sep).join('/');
+      if (options.playwrightConfigOverrides?.[altRel]) {
+        content = options.playwrightConfigOverrides[altRel];
+        break;
+      }
+      const altFull = join(root, altRel);
+      if (existsSync(altFull)) {
+        content = readFileSync(altFull, 'utf8');
+        break;
+      }
+    }
+  }
+  if (!content) {
+    return ['**/*.@(spec|test).ts'];
+  }
+
+  const testDirMatch = content.match(/testDir\s*:\s*['"`]([^'"`]+)['"`]/);
+  const testDir = testDirMatch ? testDirMatch[1].replace(/^\.\//, '').replace(/\/+$/, '') : '.';
+
+  const testMatchMatch = content.match(/testMatch\s*:\s*['"`]([^'"`]+)['"`]/);
+  const testMatch = testMatchMatch ? testMatchMatch[1] : '**/*.spec.ts';
+
+  const pattern = testDir === '.' ? testMatch : `${testDir}/${testMatch}`;
+  return [pattern];
+}
 
 /**
  * Mechanically extracts test runner target file globs/paths from a package.json script command.
  * Parses flags and options out of `node --test` or `playwright test` command invocations.
  *
  * @param {string} scriptCmd - Script command from package.json manifest.
+ * @param {object} [options={}] - Context options (e.g. manifestDir, root, playwrightConfigOverrides).
  * @returns {string[]} Array of extracted target globs or file paths.
  */
-export function extractRunnerPatterns(scriptCmd) {
+export function extractRunnerPatterns(scriptCmd, options = {}) {
   if (!scriptCmd) return [];
   const parts = scriptCmd.split('&&').map((s) => s.trim());
   const testSubCmd = parts.find((s) => s.includes('node --test') || s.includes('playwright test'));
   if (!testSubCmd) return [];
-  if (testSubCmd.includes('playwright test')) return ['e2e/**/*.spec.ts'];
+  if (testSubCmd.includes('playwright test')) {
+    return extractPlaywrightPatterns(options.manifestDir || 'packages/web', options);
+  }
 
   const afterTest = testSubCmd.slice(testSubCmd.indexOf('node --test') + 'node --test'.length).trim();
   const tokenRegex = /(?:\"([^\"]+)\"|'([^']+)'|(\S+))/g;
@@ -32,23 +81,27 @@ export function extractRunnerPatterns(scriptCmd) {
 
 /**
  * Evaluates whether a candidate path matches a runner glob pattern.
- * Uses picomatch with a fallback pattern matcher.
+ * Uses native node:path posix.matchesGlob with a regex fallback.
  *
  * @param {string} pattern - Glob or file path pattern.
  * @param {string} candidate - Relative candidate file path to match.
  * @returns {boolean}
  */
 export function matchRunnerPattern(pattern, candidate) {
+  const normPattern = pattern.replace(/\\/g, '/');
+  const normCandidate = candidate.replace(/\\/g, '/');
   try {
-    const isMatch = picomatch(pattern);
-    return isMatch(candidate);
+    if (typeof posix.matchesGlob === 'function') {
+      return posix.matchesGlob(normCandidate, normPattern);
+    }
   } catch {
-    const reStr = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*\*/g, '.*')
-      .replace(/\*/g, '[^/]*');
-    return new RegExp(`^${reStr}$`).test(candidate);
+    // Fall through to regex matcher
   }
+  const reStr = normPattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '.*')
+    .replace(/\*/g, '[^/]*');
+  return new RegExp(`^${reStr}$`).test(normCandidate);
 }
 
 /**
@@ -97,10 +150,14 @@ export function isTestFileReachableByRunner(suite, relPath, options = {}) {
   const scriptCmd = manifest.scripts?.[suite.script];
   if (!scriptCmd) return false;
 
-  const patterns = extractRunnerPatterns(scriptCmd);
+  const manifestDir = dirname(manifestPath);
+  const patterns = extractRunnerPatterns(scriptCmd, {
+    manifestDir,
+    root,
+    playwrightConfigOverrides: options.playwrightConfigOverrides,
+  });
   if (!patterns || patterns.length === 0) return false;
 
-  const manifestDir = dirname(manifestPath);
   const relToManifest = manifestDir === '.' ? relPath : relative(manifestDir, relPath).split(sep).join('/');
   const compiledPath = relToManifest.startsWith('test/')
     ? 'dist-test/test/' + relToManifest.slice(5).replace(/\.ts$/, '.js')

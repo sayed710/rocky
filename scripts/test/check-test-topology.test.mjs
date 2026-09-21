@@ -1,14 +1,23 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   findTestFiles,
   classifyTestFile,
   verifyTestTopology,
   isAllowedPlacement,
   extractRunnerPatterns,
+  extractPlaywrightPatterns,
   isTestFileReachableByRunner,
   SUITE_DEFINITIONS,
 } from '../check-test-topology.mjs';
+import {
+  discoverWorkspacePackages,
+  getHermeticWorkspaces,
+} from '../lib/workspace-topology.mjs';
+
 
 test('topology: all test files in the repository are classified into explicit suites', () => {
   const result = verifyTestTopology();
@@ -64,12 +73,26 @@ test('topology: extractRunnerPatterns mechanically extracts globs and files from
     extractRunnerPatterns('tsc -p tsconfig.test.json && node ../../scripts/run-zero-skip.mjs -- node --test dist-test/test/a.test.js dist-test/test/b.test.js'),
     ['dist-test/test/a.test.js', 'dist-test/test/b.test.js']
   );
+  // Mechanically extracts from packages/web/playwright.config.ts testDir ('./e2e')
   assert.deepEqual(
-    extractRunnerPatterns('playwright test'),
+    extractRunnerPatterns('playwright test', { manifestDir: 'packages/web' }),
     ['e2e/**/*.spec.ts']
+  );
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web'),
+    ['e2e/**/*.spec.ts']
+  );
+  assert.deepEqual(
+    extractPlaywrightPatterns('packages/web', {
+      playwrightConfigOverrides: {
+        'packages/web/playwright.config.ts': "testDir: './smoke-e2e', testMatch: '**/*.acceptance.ts'",
+      },
+    }),
+    ['smoke-e2e/**/*.acceptance.ts']
   );
   assert.deepEqual(extractRunnerPatterns('echo "not a test runner"'), []);
 });
+
 
 test('topology: runner reachability mechanically validates package manifest configuration', () => {
   const smokeSuite = SUITE_DEFINITIONS.find((s) => s.name === 'api-engine-smoke');
@@ -138,4 +161,72 @@ test('topology: falsification regression proves validation fails when runner glo
 test('topology: classifyTestFile returns null for unknown files', () => {
   assert.equal(classifyTestFile('random/path/unknown.test.ts'), null);
 });
+
+test('topology: falsification regression proves validation fails when Playwright testDir drifts', () => {
+  // Falsification Case 4: Changing testDir in Playwright config causes web e2e tests to become unreachable
+  const falsifiedPlaywright = verifyTestTopology(undefined, {
+    playwrightConfigOverrides: {
+      'packages/web/playwright.config.ts': `
+        import type { PlaywrightTestConfig } from '@playwright/test';
+        const config: PlaywrightTestConfig = {
+          testDir: './drifted-e2e',
+        };
+        export default config;
+      `,
+    },
+  });
+  assert.ok(falsifiedPlaywright.unreachable.length >= 25, 'Topology check must fail when Playwright testDir drifts');
+  assert.ok(falsifiedPlaywright.unreachable.every((u) => u.suite === 'acceptance-playwright'));
+  const webFailure = falsifiedPlaywright.unreachable.find((u) => u.file === 'packages/web/e2e/game-actions.spec.ts');
+  assert.ok(webFailure, 'packages/web/e2e/game-actions.spec.ts must be flagged unreachable when Playwright testDir is changed to ./drifted-e2e');
+  assert.equal(webFailure.suite, 'acceptance-playwright');
+});
+
+test('workspace topology: filters hermetic workspaces by packages/ filesystem location and derives relDir dynamically', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'synth-workspace-'));
+  try {
+    writeFileSync(
+      join(tmpDir, 'package.json'),
+      JSON.stringify({
+        name: 'synthetic-monorepo',
+        workspaces: ['packages/*', 'services/*', 'tools/cli'],
+      })
+    );
+    mkdirSync(join(tmpDir, 'packages', 'core'), { recursive: true });
+    writeFileSync(
+      join(tmpDir, 'packages', 'core', 'package.json'),
+      JSON.stringify({ name: '@chess-platform/core' })
+    );
+    mkdirSync(join(tmpDir, 'services', 'gateway'), { recursive: true });
+    writeFileSync(
+      join(tmpDir, 'services', 'gateway', 'package.json'),
+      JSON.stringify({ name: '@chess-platform/gateway' })
+    );
+    mkdirSync(join(tmpDir, 'tools', 'cli'), { recursive: true });
+    writeFileSync(
+      join(tmpDir, 'tools', 'cli', 'package.json'),
+      JSON.stringify({ name: 'custom-cli' })
+    );
+
+    const discovered = discoverWorkspacePackages(tmpDir);
+    assert.equal(discovered.length, 3);
+    const corePkg = discovered.find((p) => p.name === '@chess-platform/core');
+    const gatewayPkg = discovered.find((p) => p.name === '@chess-platform/gateway');
+    const cliPkg = discovered.find((p) => p.name === 'custom-cli');
+
+    // relDir must be derived from actual relative path, not hardcoded packages/*
+    assert.equal(corePkg?.relDir, 'packages/core');
+    assert.equal(gatewayPkg?.relDir, 'services/gateway');
+    assert.equal(cliPkg?.relDir, 'tools/cli');
+
+    // getHermeticWorkspaces must ONLY include packages physically located under packages/
+    const hermetic = getHermeticWorkspaces(tmpDir);
+    assert.deepEqual([...hermetic], ['@chess-platform/core']);
+    assert.ok(!hermetic.includes('@chess-platform/gateway'), 'services/* workspace must not be included in hermetic fan-out');
+    assert.ok(!hermetic.includes('custom-cli'), 'tools/* workspace must not be included in hermetic fan-out');
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 
