@@ -1,12 +1,8 @@
 /**
- * Integration tests for the OpenAI-compatible and Anthropic adapters.
+ * Hermetic tests for the OpenAI-compatible and Anthropic adapters.
  *
- * These tests are env-gated: they skip unless the relevant API key
- * is present in the environment, exactly like the Postgres-gated
- * persistence tests (gated on `DATABASE_URL`).
- *
- * Run with: OPENAI_API_KEY=sk-... npm test
- *           ANTHROPIC_API_KEY=sk-ant-... npm test
+ * Live provider contracts are isolated in `adapters-live.integration.test.ts` and run through the
+ * provider-specific zero-skip package commands.
  */
 
 import { test, describe } from 'node:test';
