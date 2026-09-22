@@ -36,6 +36,22 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
 
     const parser = createStreamingTestParser();
     const processor = createStreamLineProcessor(parser);
+    const forwardedSignals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+    const signalHandlers = new Map();
+
+    for (const signal of forwardedSignals) {
+      const handler = () => {
+        if (!child.killed) child.kill(signal);
+      };
+      signalHandlers.set(signal, handler);
+      process.on(signal, handler);
+    }
+
+    const cleanupSignalHandlers = () => {
+      for (const [signal, handler] of signalHandlers) {
+        process.off(signal, handler);
+      }
+    };
 
     child.stdout?.on('data', (chunk) => {
       if (!options.silent) {
@@ -52,11 +68,13 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
     });
 
     child.on('error', (err) => {
+      cleanupSignalHandlers();
       console.error(`[run-zero-skip] Failed to start process: ${err.message}`);
       resolve(1);
     });
 
     child.on('close', (code, signal) => {
+      cleanupSignalHandlers();
       if (signal) {
         if (!options.silent) {
           process.stderr.write(`\n[run-zero-skip] Process terminated by signal: ${signal}\n`);
@@ -72,6 +90,15 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
 
       const results = processor.getResults();
 
+      if (!results.accountingValid) {
+        if (!options.silent) {
+          process.stderr.write(
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Reporter accounting is incomplete or contradictory: ${results.accountingError}.\x1b[0m\n`
+          );
+        }
+        resolve(1);
+        return;
+      }
 
       // Guard against missing or empty test runs (e.g. invalid glob, non-test command, or 0 tests executed).
       // Only accept genuine line-anchored reporter summary lines (# tests N, ℹ tests N) or TAP plan headers (1..N).
@@ -124,6 +151,16 @@ export function runWithZeroSkip(cmd, args = [], options = {}) {
         if (!options.silent) {
           process.stderr.write(
             `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Test suite finished with ${results.failCount} failed test(s). The zero-skip policy requires fail === 0.\x1b[0m\n`
+          );
+        }
+        resolve(1);
+        return;
+      }
+
+      if (results.passCount === null || results.passCount !== results.totalTests) {
+        if (!options.silent) {
+          process.stderr.write(
+            `\n\x1b[31m[ZERO-SKIP ENFORCER] FAILED: Passing-test accounting does not equal the executed total (pass=${results.passCount}, total=${results.totalTests}).\x1b[0m\n`
           );
         }
         resolve(1);

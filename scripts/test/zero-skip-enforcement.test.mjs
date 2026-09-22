@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
 import { runWithZeroSkip } from '../run-zero-skip.mjs';
+import { selectLiveProviders } from '../run-live-provider-tests.mjs';
+import ZeroSkipReporter, { summarizePlaywrightOutcomes } from '../playwright-zero-skip-reporter.mjs';
 import { runHermeticTests, HERMETIC_WORKSPACES } from '../run-hermetic-tests.mjs';
 import {
   createStreamingTestParser,
@@ -17,9 +20,115 @@ import {
 test('zero-skip enforcer: succeeds when a suite reports zero skips', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("# tests 5\\n# pass 5\\n# skipped 0");',
+    'console.log("# tests 5\\n# pass 5\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when skipped is 0');
+});
+
+test('zero-skip enforcer: fails closed on an incomplete reporter summary', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 3\\n# pass 3");',
+  ], { silent: true });
+  assert.equal(code, 1);
+});
+
+test('zero-skip enforcer: fails closed on contradictory reporter accounting', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 3\\n# pass 3\\n# fail 0\\n# cancelled 0\\n# skipped 1\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 1);
+});
+
+test('zero-skip enforcer: accepts a complete ANSI-colored reporter summary', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("\\u001b[32m# tests 2\\u001b[0m\\n# pass 2\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 0);
+});
+
+test('zero-skip enforcer: rejects a truncated TAP plan', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 1 - first\\n1..2");',
+  ], { silent: true });
+  assert.equal(code, 1);
+});
+
+test('live-provider selector supports either credential independently and fails when none exist', () => {
+  assert.deepEqual(selectLiveProviders('all', { OPENAI_API_KEY: 'present' }), ['openai']);
+  assert.deepEqual(selectLiveProviders('all', { ANTHROPIC_API_KEY: 'present' }), ['anthropic']);
+  assert.deepEqual(
+    selectLiveProviders('all', { OPENAI_API_KEY: 'present', ANTHROPIC_API_KEY: 'present' }),
+    ['openai', 'anthropic']
+  );
+  assert.throws(() => selectLiveProviders('all', {}), /at least one/);
+  assert.throws(() => selectLiveProviders('openai', { ANTHROPIC_API_KEY: 'present' }), /OPENAI_API_KEY/);
+});
+
+test('live-provider workflow and package scripts execute each provisioned provider independently', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/live-provider.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /outputs\.has_openai == 'true'/);
+  assert.match(workflow, /outputs\.has_anthropic == 'true'/);
+  assert.match(workflow, /test:live-provider:openai --workspace @chess-platform\/ai-orchestrator/);
+  assert.match(workflow, /test:live-provider:anthropic --workspace @chess-platform\/ai-features/);
+  assert.doesNotMatch(workflow, /Both OPENAI_API_KEY and ANTHROPIC_API_KEY/);
+
+  for (const packagePath of [
+    '../../packages/ai-orchestrator/package.json',
+    '../../packages/ai-features/package.json',
+  ]) {
+    const manifest = JSON.parse(readFileSync(new URL(packagePath, import.meta.url), 'utf8'));
+    assert.match(manifest.scripts['test:live-provider:openai'], /run-live-provider-tests\.mjs openai/);
+    assert.match(manifest.scripts['test:live-provider:anthropic'], /run-live-provider-tests\.mjs anthropic/);
+  }
+
+  for (const testDir of [
+    '../../packages/ai-orchestrator/test/',
+    '../../packages/ai-features/test/',
+  ]) {
+    const directory = new URL(testDir, import.meta.url);
+    for (const entry of readdirSync(directory)) {
+      if (!entry.endsWith('integration.test.ts')) continue;
+      const source = readFileSync(new URL(entry, directory), 'utf8');
+      assert.doesNotMatch(source, /\bskip\s*:/, `${entry} must not register skipped live tests`);
+    }
+  }
+});
+
+test('Playwright zero-skip accounting rejects skipped, empty, and interrupted suites', () => {
+  assert.deepEqual(summarizePlaywrightOutcomes(['expected', 'flaky'], 'passed'), {
+    tests: 2, pass: 2, fail: 0, skipped: 0, todo: 0, cancelled: 0,
+  });
+  assert.equal(summarizePlaywrightOutcomes(['skipped'], 'passed').skipped, 1);
+  assert.equal(summarizePlaywrightOutcomes(['unexpected'], 'failed').fail, 1);
+  assert.deepEqual(summarizePlaywrightOutcomes(['expected'], 'interrupted'), {
+    tests: 1, pass: 0, fail: 0, skipped: 0, todo: 0, cancelled: 1,
+  });
+  assert.deepEqual(summarizePlaywrightOutcomes(['expected'], 'timedout'), {
+    tests: 1, pass: 0, fail: 1, skipped: 0, todo: 0, cancelled: 0,
+  });
+  assert.equal(summarizePlaywrightOutcomes([], 'passed').tests, 0);
+});
+
+test('Playwright zero-skip reporter overrides a green run when any test is skipped', () => {
+  const reporter = new ZeroSkipReporter();
+  reporter.onBegin({}, {
+    allTests: () => [{ outcome: () => 'expected' }, { outcome: () => 'skipped' }],
+  });
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    assert.deepEqual(reporter.onEnd({ status: 'passed' }), { status: 'failed' });
+    reporter.onBegin({}, { allTests: () => [{ outcome: () => 'expected' }] });
+    assert.deepEqual(reporter.onEnd({ status: 'passed' }), { status: 'passed' });
+    reporter.onBegin({}, { allTests: () => [] });
+    assert.deepEqual(reporter.onEnd({ status: 'passed' }), { status: 'failed' });
+  } finally {
+    console.log = originalLog;
+  }
 });
 
 test('zero-skip enforcer: fails when a suite reports skipped > 0 (TAP format)', async () => {
@@ -58,7 +167,7 @@ test('zero-skip enforcer: detects real child test process self-skipping', async 
 test('zero-skip enforcer: does not falsely fail on test names containing the word skipped', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("ok 145 - a stored game whose chess960 metadata is corrupt is skipped, not thrown from\\n# tests 1\\n# pass 1\\n# skipped 0");',
+    'console.log("ok 145 - a stored game whose chess960 metadata is corrupt is skipped, not thrown from\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when test name contains the word skipped');
 });
@@ -77,6 +186,19 @@ test('zero-skip enforcer: fails when child process is terminated by a signal', a
     'process.kill(process.pid, "SIGTERM");',
   ], { silent: true });
   assert.equal(code, 1, 'should return exit code 1 when child process is killed by signal');
+});
+
+test('zero-skip enforcer: forwards termination signals and removes temporary handlers', async () => {
+  const before = new Set(process.listeners('SIGTERM'));
+  const running = runWithZeroSkip(process.execPath, [
+    '-e',
+    'setInterval(() => {}, 1000);',
+  ], { silent: true });
+  const handler = process.listeners('SIGTERM').find((listener) => !before.has(listener));
+  assert.ok(handler, 'wrapper must install a temporary SIGTERM forwarding handler');
+  handler('SIGTERM');
+  assert.equal(await running, 1);
+  assert.deepEqual(new Set(process.listeners('SIGTERM')), before);
 });
 
 test('zero-skip enforcer: fails when child process exits 0 with arbitrary text and no test summary', async () => {
@@ -98,7 +220,7 @@ test('zero-skip enforcer: fails unconditionally when a skip is reported', async 
 test('zero-skip enforcer: ignores decoy "skipped N" in ordinary output when summary has skipped 0', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("application skipped 1 old record\\n# tests 1\\n# pass 1\\n# skipped 0");',
+    'console.log("application skipped 1 old record\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when prose contains "skipped 1" but genuine summary reports skipped 0');
 });
@@ -114,7 +236,7 @@ test('zero-skip enforcer: fails when summary reports skipped 1 even if ordinary 
 test('zero-skip enforcer: ignores decoy "tests 0" in ordinary output when summary has tests 5', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("unrelated tests 0\\n# tests 5\\n# pass 5\\n# skipped 0");',
+    'console.log("unrelated tests 0\\n# tests 5\\n# pass 5\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when prose contains "tests 0" but genuine summary reports tests 5');
 });
@@ -146,7 +268,7 @@ test('zero-skip enforcer: fails on decoy "1..N" in ordinary prose without newlin
 test('zero-skip enforcer: succeeds with valid Node spec reporter output (ℹ tests 5)', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("ℹ tests 5\\nℹ pass 5\\nℹ skipped 0");',
+    'console.log("ℹ tests 5\\nℹ pass 5\\nℹ fail 0\\nℹ cancelled 0\\nℹ skipped 0\\nℹ todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 for valid Node spec format summary');
 });
@@ -184,7 +306,7 @@ test('repository-level hermetic runner: succeeds across multiple workspaces when
     workspaces: ['mock-pkg-a', 'mock-pkg-b', 'mock-pkg-c'],
     commandBuilder: () => ({
       cmd: process.execPath,
-      args: ['-e', 'console.log("ℹ tests 5\\nℹ pass 5\\nℹ skipped 0");'],
+      args: ['-e', 'console.log("ℹ tests 5\\nℹ pass 5\\nℹ fail 0\\nℹ cancelled 0\\nℹ skipped 0\\nℹ todo 0");'],
     }),
     silent: true,
   });
@@ -241,7 +363,7 @@ test('zero-skip enforcer: fails when a suite reports mixed pass + TODO (todo > 0
 test('zero-skip enforcer: succeeds when a suite reports clean Node summary with todo 0', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("# tests 2\\n# pass 2\\n# fail 0\\n# skipped 0\\n# todo 0");',
+    'console.log("# tests 2\\n# pass 2\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when todo is 0');
 });
@@ -249,7 +371,7 @@ test('zero-skip enforcer: succeeds when a suite reports clean Node summary with 
 test('zero-skip enforcer: ignores decoy TODO prose in ordinary output when summary has todo 0', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("todo 5 items remain in application backlog\\n# tests 1\\n# pass 1\\n# skipped 0\\n# todo 0");',
+    'console.log("todo 5 items remain in application backlog\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should ignore decoy TODO text in application logs');
 });
@@ -313,7 +435,7 @@ test('zero-skip enforcer: fails when summary reports skipped 0 but individual te
 test('zero-skip enforcer: succeeds when summary reports skipped 0 and normal test passes', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("# tests 1\\n# skipped 0\\nok 1 - normal");',
+    'console.log("# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\nok 1 - normal");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when clean summary and no skip directive');
 });
@@ -321,7 +443,7 @@ test('zero-skip enforcer: succeeds when summary reports skipped 0 and normal tes
 test('zero-skip enforcer: ignores prose mentioning SKIP reason when summary is clean', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("SKIP reason is logged in prose\\n# tests 1\\n# pass 1\\n# skipped 0");',
+    'console.log("SKIP reason is logged in prose\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should ignore prose containing SKIP reason');
 });
@@ -337,7 +459,7 @@ test('zero-skip enforcer: fails when summary reports todo 0 but individual test 
 test('zero-skip enforcer: succeeds when summary reports todo 0 and test is complete', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("# tests 1\\n# todo 0\\nok 1 - complete");',
+    'console.log("# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\nok 1 - complete");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when clean summary and no todo directive');
 });
@@ -345,7 +467,7 @@ test('zero-skip enforcer: succeeds when summary reports todo 0 and test is compl
 test('zero-skip enforcer: ignores prose mentioning TODO 3 application tasks when summary is clean', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("TODO 3 application tasks remain in backlog\\n# tests 1\\n# pass 1\\n# todo 0");',
+    'console.log("TODO 3 application tasks remain in backlog\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should ignore prose containing TODO tasks');
 });
@@ -377,7 +499,7 @@ test('zero-skip enforcer: fails when earlier summary reports tests 0 followed by
 test('zero-skip enforcer: succeeds when multiple positive summaries are reported', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("# tests 2\\n# pass 2\\n# skipped 0\\n# tests 5\\n# pass 5\\n# skipped 0");',
+    'console.log("# tests 2\\n# pass 2\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\n# tests 5\\n# pass 5\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when multiple positive summaries pass');
 });
@@ -409,7 +531,7 @@ test('zero-skip enforcer: fails when unnumbered TAP test point has TODO directiv
 test('zero-skip enforcer: succeeds when test title contains escaped hash before SKIP keyword', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("ok 1 - test title has \\\\# SKIP inside text\\n# tests 1\\n# pass 1\\n# skipped 0");',
+    'console.log("ok 1 - test title has \\\\# SKIP inside text\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when escaped hash is present in test description');
 });
@@ -519,7 +641,7 @@ test('zero-skip enforcer: fails when child output contains unnumbered # TO-DO di
 test('zero-skip enforcer: succeeds when test title contains escaped hash before SKIPPED keyword', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("ok 1 - title has \\\\# SKIPPED inside\\n# tests 1\\n# pass 1\\n# skipped 0");',
+    'console.log("ok 1 - title has \\\\# SKIPPED inside\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when escaped hash is present in test description');
 });

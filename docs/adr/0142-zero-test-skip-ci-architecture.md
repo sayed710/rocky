@@ -31,29 +31,34 @@ We establish an explicit, partitioned test architecture across all packages, gua
    - Genuinely executes production composition tests with `skipped = 0`.
 
 4. **Gateway Service Suites (`gateway-service` CI job)**:
-   - Run via `npm test` and `npm run test:trusted-edge` in `services/gateway`.
+   - Run via `npm test`, `npm run test:trusted-edge`, and `npm run test:web-delivery` in `services/gateway`.
    - Requires real Redis 7 (`REDIS_URL`) and Docker/Nginx (`REQUIRE_DOCKER=1`).
-   - Genuinely executes command routing, lease ownership, and edge proxy tests with `skipped = 0`.
+   - Genuinely executes command routing, lease ownership, edge proxy, and production cache/compression tests with `skipped = 0`.
 
 5. **M6 Acceptance Suite (`m6-acceptance` CI job)**:
    - Run via `npm run e2e` in `packages/web`.
    - Requires Playwright Chromium and the in-memory backend harness.
    - Genuinely executes end-to-end user journeys with `skipped = 0`.
+   - `scripts/playwright-zero-skip-reporter.mjs` evaluates every discovered `TestCase.outcome()` and overrides an otherwise-green Playwright result when the suite is empty, skipped, interrupted, or has an unexpected result. Discovery-only `--list` commands remain read-only and do not apply execution policy.
 
 6. **Dedicated Live Provider Workflow (`.github/workflows/live-provider.yml`)**:
    - Third-party live OpenAI and Anthropic contract tests are separated into `test:live-provider` scripts.
    - Extracted live tests from `packages/ai-orchestrator/test/adapters.test.ts` into `packages/ai-orchestrator/test/adapters-live.integration.test.ts`.
    - Extracted live backup restore test from `scripts/test/backup-restore-drill.test.mjs` into `scripts/test/backup-restore-drill.integration.test.mjs`.
-   - Live tests run strictly on demand via `workflow_dispatch` with verified repository secrets. They do not run in PR CI and are never marked as passed without credentials.
+   - Live tests run strictly on demand via `workflow_dispatch`. OpenAI and Anthropic are selected and executed independently, so either single credential runs its complete provider contract; both credentials run both contracts, and no credentials fail the workflow. Test registration is controlled by `GAMBIT_LIVE_PROVIDER` without `skip` annotations.
+   - They do not run in PR CI and are never marked as passed without at least one selected credential.
 
 7. **Zero-Skip Enforcer (`scripts/run-zero-skip.mjs`)**:
    - Wraps test invocations, streams runner output in real time, parses TAP/spec skip counts, and fails with exit code 1 if any test is skipped.
    - Requires `totalTests > 0`: exits 1 with "No executed tests detected" when a process exits 0 with arbitrary text and no test summary, preventing false-green on misconfigured commands.
    - Windows platform laundering removed: no skip bypass based on `process.platform`.
+   - ANSI control sequences are removed before parsing. Complete Node summaries must contain consistent tests/pass/fail/cancelled/skipped/todo accounting; plan-only TAP must contain one complete top-level plan with the matching number of test points. Partial, malformed, truncated, or contradictory output fails closed.
+   - Parent termination signals are forwarded to the child process and temporary signal handlers are removed on every exit path.
 
 8. **Topology Invariant Guard (`scripts/check-test-topology.mjs`)**:
-   - Scans all 396 test files across the repository to verify that every test file is mapped to an explicit suite and no file is orphaned or unclassified.
+   - Scans all 397 test files across 21 explicit suites to verify that every test file is mapped and no file is orphaned or unclassified, including `scripts/nginx-web-delivery-acceptance.mjs` imported from merged PR #56.
    - Enforced in `npm run check:test-topology` in `build-test` CI and `scripts/ci-local.mjs`.
+   - Deployment-only exclusions are path-scoped to `deploy/helm` and `deploy/observability`; identically named directories under packages cannot hide test files. The Node fallback matcher supports globstar and the negative extglob used by package scripts.
 
 9. **POSIX Suite Partition**:
    - Tests that require POSIX-only OS guarantees (SIGTERM process-tree teardown, `chmod`/permission bits) are extracted from cross-platform files into dedicated `*.posix.test.ts` / `*.posix.test.mjs` files.
@@ -63,23 +68,9 @@ We establish an explicit, partitioned test architecture across all packages, gua
 10. **Live Provider Self-Contained Build**:
     - `test:live-provider` in `packages/ai-orchestrator` and `packages/ai-features` now unconditionally prepends `npm run build:test &&`, ensuring live integration test files are compiled before the runner is invoked.
 
-## Open PR Overlap
+## PR #56 Integration
 
-PR #57 (`gemini/ci-zero-skip-architecture`) shares **4 files** with open PR #56
-(`gemini/web-delivery-cache-compression`):
-
-| File | PR #57 change | PR #56 change |
-|------|--------------|--------------|
-| `.github/workflows/ci.yml` | Adds POSIX suite steps and zero-skip enforcement | Adds cache/compression middleware step |
-| `docs/PROJECT_STATE.md` | Appends M15 Increment 59 entry | Appends its own increment entry |
-| `scripts/ci-local.mjs` | Adds posix contract tests job | Adds gateway compression job |
-| `services/gateway/package.json` | No direct change (topology reference only) | Adds compression middleware dependency |
-
-**Resolution order**: PR #57 is foundational CI infrastructure. PR #56 must be
-rebased onto the merge commit of PR #57 before it can land. The 4-file overlap
-is documented here so reviewers can coordinate the rebase.
-
-PR #55 (`fix/fair-play-live-game-containment`) has **zero file overlap** with PR #57.
+PR #56 (`perf(web): harden production caching and compression`) was merged to `main` before this correction. PR #57 merges that exact mainline state without rewriting its published history. The imported Nginx configuration, hash-aware cache contract, gzip acceptance assertions, `packages/web` delivery trigger, and local/hosted gateway job parity are preserved. Its new `scripts/nginx-web-delivery-acceptance.mjs` file is now an explicit topology and test-count suite rather than an unclassified exception.
 
 ## Consequences
 

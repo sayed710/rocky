@@ -19,13 +19,18 @@
  */
 import type { PlaywrightTestConfig } from '@playwright/test';
 import { cpus } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const isBackend = !!process.env['GAMBIT_E2E_BACKEND'];
+const zeroSkipReporter = fileURLToPath(
+  new URL('../../scripts/playwright-zero-skip-reporter.mjs', import.meta.url)
+);
 
 const config: PlaywrightTestConfig = {
   testDir: './e2e',
   timeout: 300_000,
   retries: 1,
+  reporter: [['list'], [zeroSkipReporter]],
   // Ceiling, not a fixed count: pinning `workers: 4` would RAISE parallelism on a 2-core CI
   // runner, which is the opposite of the fix. The backend-gated suite drives one shared single-process
   // `e2e-harness` and one vite preview server, and unbounded local parallelism starves them.

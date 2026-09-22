@@ -21,7 +21,9 @@
     "build": "tsc -p tsconfig.json",
     "build:test": "tsc -p tsconfig.test.json",
     "test:unit": "node ../../scripts/run-zero-skip.mjs -- node --test \"dist-test/test/**/!(*integration).test.js\"",
-    "test:live-provider": "npm run build:test && node ../../scripts/run-zero-skip.mjs -- node --test \"dist-test/test/**/*integration.test.js\"",
+    "test:live-provider": "npm run build:test && node ../../scripts/run-live-provider-tests.mjs all -- node --test \"dist-test/test/**/*integration.test.js\"",
+    "test:live-provider:openai": "npm run build:test && node ../../scripts/run-live-provider-tests.mjs openai -- node --test \"dist-test/test/**/*integration.test.js\"",
+    "test:live-provider:anthropic": "npm run build:test && node ../../scripts/run-live-provider-tests.mjs anthropic -- node --test \"dist-test/test/**/*integration.test.js\"",
     "test": "npm run build:test && npm run test:unit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist dist-test"

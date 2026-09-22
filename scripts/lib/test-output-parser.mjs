@@ -5,6 +5,17 @@
  */
 import { StringDecoder } from 'node:string_decoder';
 
+const ANSI_ESCAPE_REGEX = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+
+/**
+ * Removes terminal color/control sequences before matching line-anchored reporter records.
+ *
+ * @param {string} value - Raw reporter output.
+ * @returns {string} Output without ANSI CSI escape sequences.
+ */
+export function stripAnsi(value) {
+  return value.replace(ANSI_ESCAPE_REGEX, '');
+}
 
 /**
  * Line-anchored regex matching individual TAP or spec skip directives.
@@ -40,6 +51,7 @@ export const RAW_TAP_FAILURE_REGEX =
  * @returns {number|null} Total test count, 0 if any suite executed 0 tests, or null if not detected.
  */
 export function parseTestCount(output) {
+  output = stripAnsi(output);
   const summaryMatches = [...output.matchAll(/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim)];
   const planMatches = [...output.matchAll(/^\s*1\.\.(\d+)\b/gm)];
 
@@ -66,6 +78,7 @@ export function parseTestCount(output) {
  * @returns {number|null} Aggregated passing count, or null if no pass summary lines exist.
  */
 export function parsePassCount(output) {
+  output = stripAnsi(output);
   const matches = [...output.matchAll(/^\s*(?:#|ℹ)\s+pass(?:ed)?:?\s+(\d+)\b/gim)];
   if (matches.length === 0) return null;
   return matches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
@@ -78,6 +91,7 @@ export function parsePassCount(output) {
  * @returns {number} Aggregated failure count across summaries and raw TAP records.
  */
 export function parseFailCount(output) {
+  output = stripAnsi(output);
   let count = 0;
   const matches = [...output.matchAll(/^\s*(?:#|ℹ)\s+fail(?:ed)?:?\s+(\d+)\b/gim)];
   for (const match of matches) {
@@ -97,6 +111,7 @@ export function parseFailCount(output) {
  * @returns {number} Aggregated skipped count across summaries and directives.
  */
 export function parseSkippedCount(output) {
+  output = stripAnsi(output);
   let count = 0;
   const matches = [...output.matchAll(/^\s*(?:#|ℹ)\s+skipped:?\s+(\d+)\b/gim)];
   for (const match of matches) {
@@ -116,6 +131,7 @@ export function parseSkippedCount(output) {
  * @returns {number} Aggregated TODO count across summaries and directives.
  */
 export function parseTodoCount(output) {
+  output = stripAnsi(output);
   let count = 0;
   const matches = [...output.matchAll(/^\s*(?:#|ℹ)\s+todo:?\s+(\d+)\b/gim)];
   for (const match of matches) {
@@ -134,6 +150,7 @@ export function parseTodoCount(output) {
  * @returns {number} Aggregated cancelled count.
  */
 export function parseCancelledCount(output) {
+  output = stripAnsi(output);
   let count = 0;
   const matches = [...output.matchAll(/^\s*(?:#|ℹ)\s+cancelled:?\s+(\d+)\b/gim)];
   for (const match of matches) {
@@ -186,8 +203,34 @@ export function createStreamingTestParser() {
   let summaryFail = 0;
   let hasRawFailure = false;
 
+  const summaryValues = {
+    tests: [],
+    pass: [],
+    fail: [],
+    skipped: [],
+    todo: [],
+    cancelled: [],
+  };
+  let topLevelPlanCount = 0;
+  let topLevelPlanValue = null;
+  let topLevelTapPoints = 0;
+  let malformedSummary = null;
+
+  const metricPrefixRegex = /^\s*(?:#|ℹ)\s+(tests|pass(?:ed)?|fail(?:ed)?|skipped|todo|cancelled)\b/i;
+
+  function recordSummaryMetric(metric, value) {
+    summaryValues[metric].push(value);
+  }
+
   return {
     pushLine(line) {
+      line = stripAnsi(line);
+
+      const summaryLike = line.match(metricPrefixRegex);
+      if (summaryLike && !/^\s*(?:#|ℹ)\s+(?:tests|pass(?:ed)?|fail(?:ed)?|skipped|todo|cancelled):?\s+\d+\b/i.test(line)) {
+        malformedSummary ??= `Malformed ${summaryLike[1]} summary line: ${line}`;
+      }
+
       // 1. Tests summary: # tests N or ℹ tests N
       const testMatch = line.match(/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/i);
       if (testMatch) {
@@ -195,6 +238,7 @@ export function createStreamingTestParser() {
         if (val === 0) hasZeroTestSummary = true;
         summaryTests += val;
         summaryTestsCount++;
+        recordSummaryMetric('tests', val);
       }
 
       // 2. TAP plan: 1..N
@@ -204,19 +248,31 @@ export function createStreamingTestParser() {
         if (val === 0) hasZeroTestSummary = true;
         planTests += val;
         planTestsCount++;
+        if (/^1\.\./.test(line)) {
+          topLevelPlanCount++;
+          topLevelPlanValue = val;
+        }
+      }
+
+      if (/^(?:ok|not ok)(?:\s+\d+)?\b/i.test(line)) {
+        topLevelTapPoints++;
       }
 
       // 3. Pass summary: # pass N or ℹ pass N
       const passMatch = line.match(/^\s*(?:#|ℹ)\s+pass(?:ed)?:?\s+(\d+)\b/i);
       if (passMatch) {
-        summaryPass += Number.parseInt(passMatch[1], 10);
+        const val = Number.parseInt(passMatch[1], 10);
+        summaryPass += val;
         summaryPassCount++;
+        recordSummaryMetric('pass', val);
       }
 
       // 4. Skipped summary or directive: # skipped N or ℹ skipped N or TAP/spec skip
       const skipMatch = line.match(/^\s*(?:#|ℹ)\s+skipped:?\s+(\d+)\b/i);
       if (skipMatch) {
-        summarySkipped += Number.parseInt(skipMatch[1], 10);
+        const val = Number.parseInt(skipMatch[1], 10);
+        summarySkipped += val;
+        recordSummaryMetric('skipped', val);
       } else if (TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX.test(line)) {
         hasSkipDirective = true;
       }
@@ -224,7 +280,9 @@ export function createStreamingTestParser() {
       // 5. TODO summary or directive: # todo N or ℹ todo N or TAP/spec todo
       const todoMatch = line.match(/^\s*(?:#|ℹ)\s+todo:?\s+(\d+)\b/i);
       if (todoMatch) {
-        summaryTodo += Number.parseInt(todoMatch[1], 10);
+        const val = Number.parseInt(todoMatch[1], 10);
+        summaryTodo += val;
+        recordSummaryMetric('todo', val);
       } else if (TAP_OR_SPEC_TODO_DIRECTIVE_REGEX.test(line)) {
         hasTodoDirective = true;
       }
@@ -232,7 +290,9 @@ export function createStreamingTestParser() {
       // 6. Cancelled summary or directive: # cancelled N or spec (cancelled)
       const cancelledMatch = line.match(/^\s*(?:#|ℹ)\s+cancelled:?\s+(\d+)\b/i);
       if (cancelledMatch) {
-        summaryCancelled += Number.parseInt(cancelledMatch[1], 10);
+        const val = Number.parseInt(cancelledMatch[1], 10);
+        summaryCancelled += val;
+        recordSummaryMetric('cancelled', val);
       } else if (/^\s*[\ufe63\-]\s+[^\r\n]*\((?:cancelled)\)/i.test(line)) {
         hasCancelledDirective = true;
       }
@@ -240,7 +300,9 @@ export function createStreamingTestParser() {
       // 7. Fail summary or raw TAP "not ok": # fail N or not ok
       const failMatch = line.match(/^\s*(?:#|ℹ)\s+fail(?:ed)?:?\s+(\d+)\b/i);
       if (failMatch) {
-        summaryFail += Number.parseInt(failMatch[1], 10);
+        const val = Number.parseInt(failMatch[1], 10);
+        summaryFail += val;
+        recordSummaryMetric('fail', val);
       } else if (RAW_TAP_FAILURE_REGEX.test(line)) {
         hasRawFailure = true;
       }
@@ -256,7 +318,40 @@ export function createStreamingTestParser() {
         totalTests = planTests;
       }
 
-      const passCount = summaryPassCount > 0 ? summaryPass : null;
+      let passCount = summaryPassCount > 0 ? summaryPass : null;
+
+      let accountingError = malformedSummary;
+      if (!accountingError && summaryTestsCount > 0) {
+        for (const metric of ['pass', 'fail', 'skipped', 'todo', 'cancelled']) {
+          if (summaryValues[metric].length !== summaryValues.tests.length) {
+            accountingError = `Incomplete reporter summary: found ${summaryValues.tests.length} tests field(s) but ${summaryValues[metric].length} ${metric} field(s)`;
+            break;
+          }
+        }
+        if (!accountingError) {
+          const accounted = summaryPass + summaryFail + summarySkipped + summaryTodo + summaryCancelled;
+          if (accounted !== summaryTests) {
+            accountingError = `Contradictory reporter summaries: tests=${summaryTests} but pass+fail+skipped+todo+cancelled=${accounted}`;
+          } else if (
+            summaryFail === 0 && summarySkipped === 0 && summaryTodo === 0 && summaryCancelled === 0
+          ) {
+            const testsSorted = [...summaryValues.tests].sort((a, b) => a - b);
+            const passSorted = [...summaryValues.pass].sort((a, b) => a - b);
+            if (testsSorted.some((value, index) => value !== passSorted[index])) {
+              accountingError = 'Contradictory clean summaries: per-suite pass totals do not match per-suite test totals';
+            }
+          }
+        }
+      } else if (!accountingError && planTestsCount > 0) {
+        if (topLevelPlanCount !== 1 || topLevelPlanValue === null) {
+          accountingError = `Incomplete TAP evidence: expected exactly one top-level plan, found ${topLevelPlanCount}`;
+        } else if (topLevelTapPoints !== topLevelPlanValue) {
+          accountingError = `Incomplete TAP evidence: plan declares ${topLevelPlanValue} test point(s) but ${topLevelTapPoints} top-level point(s) were observed`;
+        } else {
+          passCount = topLevelTapPoints;
+          totalTests = topLevelPlanValue;
+        }
+      }
 
       let skippedCount = summarySkipped;
       if (skippedCount === 0 && hasSkipDirective) skippedCount = 1;
@@ -277,9 +372,26 @@ export function createStreamingTestParser() {
         skippedCount,
         todoCount,
         cancelledCount,
+        accountingValid: accountingError === null,
+        accountingError,
       };
     },
   };
+}
+
+/**
+ * Parses a completed in-memory transcript with the same strict accounting rules used by the
+ * streaming zero-skip runner.
+ *
+ * @param {string} output - Complete stdout/stderr transcript.
+ * @returns {ReturnType<ReturnType<typeof createStreamingTestParser>['getResults']>}
+ */
+export function parseCompleteTestOutput(output) {
+  const parser = createStreamingTestParser();
+  for (const line of output.split(/\r?\n/)) {
+    if (line.length > 0) parser.pushLine(line);
+  }
+  return parser.getResults();
 }
 
 /**

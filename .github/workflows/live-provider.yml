@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   live-provider-contract:
-    name: live provider contract tests (OpenAI + Anthropic)
+    name: live provider contract tests (provisioned providers)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -33,25 +33,43 @@ jobs:
       - name: Build (dependency order)
         run: npm run build
 
-      - name: Verify credentials presence
+      - name: Detect provisioned credentials
+        id: credentials
         run: |
-          if [ -z "${OPENAI_API_KEY}" ] || [ -z "${ANTHROPIC_API_KEY}" ]; then
-            echo "::error::Both OPENAI_API_KEY and ANTHROPIC_API_KEY must be provided in secrets to run the complete live provider contract suite."
+          has_openai=false
+          has_anthropic=false
+          if [ -n "${OPENAI_API_KEY}" ]; then has_openai=true; fi
+          if [ -n "${ANTHROPIC_API_KEY}" ]; then has_anthropic=true; fi
+          echo "has_openai=${has_openai}" >> "$GITHUB_OUTPUT"
+          echo "has_anthropic=${has_anthropic}" >> "$GITHUB_OUTPUT"
+          if [ "${has_openai}" = false ] && [ "${has_anthropic}" = false ]; then
+            echo "::error::At least one live-provider credential must be configured."
             exit 1
           fi
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-      - name: Test AI orchestrator live provider contract
-        run: npm run test:live-provider --workspace @chess-platform/ai-orchestrator
+      - name: Test AI orchestrator OpenAI contract
+        if: steps.credentials.outputs.has_openai == 'true'
+        run: npm run test:live-provider:openai --workspace @chess-platform/ai-orchestrator
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Test AI orchestrator Anthropic contract
+        if: steps.credentials.outputs.has_anthropic == 'true'
+        run: npm run test:live-provider:anthropic --workspace @chess-platform/ai-orchestrator
+        env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-      - name: Test AI features live provider contract
-        run: npm run test:live-provider --workspace @chess-platform/ai-features
+      - name: Test AI features OpenAI contract
+        if: steps.credentials.outputs.has_openai == 'true'
+        run: npm run test:live-provider:openai --workspace @chess-platform/ai-features
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Test AI features Anthropic contract
+        if: steps.credentials.outputs.has_anthropic == 'true'
+        run: npm run test:live-provider:anthropic --workspace @chess-platform/ai-features
+        env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GAMBIT_TEST_INTEGRATION: 1

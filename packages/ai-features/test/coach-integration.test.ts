@@ -1,7 +1,7 @@
 /**
  * Env-gated integration test for `Coach`.
  *
- * Skips without an API key, same pattern as the other five features.
+ * The live-provider runner registers this file only for the selected, provisioned provider.
  */
 
 import { test, describe } from 'node:test';
@@ -26,8 +26,8 @@ const fakeEngine: AnalysisProvider = {
 
 const openaiKey = process.env['OPENAI_API_KEY'];
 
-describe('Coach integration (OpenAI)', () => {
-  test('real narrative with composed feature results', { skip: !openaiKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'openai') describe('Coach integration (OpenAI)', () => {
+  test('real narrative with composed feature results', async () => {
     const ai = new OpenAiCompatibleAdapter({ id: 'openai', apiKey: openaiKey, defaultModel: 'gpt-4o-mini' });
     const coach = new Coach({ engine: fakeEngine, ai });
 
@@ -41,8 +41,8 @@ describe('Coach integration (OpenAI)', () => {
 
 const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 
-describe('Coach integration (Anthropic)', () => {
-  test('real narrative with composed feature results', { skip: !anthropicKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('Coach integration (Anthropic)', () => {
+  test('real narrative with composed feature results', async () => {
     const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-3-5-sonnet-20241022' });
     const coach = new Coach({ engine: fakeEngine, ai });
 

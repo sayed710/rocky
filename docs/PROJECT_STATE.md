@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-22 — M15 Increment 60: hash-aware immutable asset delivery contract._
+_Last updated: 2026-09-22 — M15 Increment 61: exact-accounting zero-skip correction and PR #56 integration._
+
+Prior: _Last updated: 2026-09-22 — M15 Increment 60: hash-aware immutable asset delivery contract._
 
 Prior: _Last updated: 2026-09-21 — M15 Increment 59h: Authoritative Playwright CLI test reachability discovery and fail-closed validation._
 
@@ -4338,3 +4340,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 
 - Restricted one-year immutable caching to Vite-style content-hashed filenames under `/assets/`; existing unhashed assets now use `Cache-Control: no-cache`, and both hashed and unhashed missing assets remain strict 404 responses without immutable headers.
 - Extended the real-Nginx acceptance suite with a deterministic unhashed `/assets/runtime-config.json` fixture, hashed JS and CSS cache assertions, root static-file revalidation checks, both hashed/unhashed 404 paths, and shared security-header assertions while preserving gzip, SPA, REST, and WebSocket coverage.
+
+## M15 Increment 61 — Exact-accounting zero-skip correction and PR #56 integration (2026-09-22)
+
+- Integrated merged PR #56/current `main` into PR #57 with a history-preserving merge and retained its hash-aware immutable caching, gzip, WebSocket, CI trigger, and real-Nginx acceptance behavior. Classified `scripts/nginx-web-delivery-acceptance.mjs` as the twenty-first explicit suite; topology now verifies 397 test files across 21 suites.
+- Added a Playwright reporter that fails an executed browser suite on zero tests, skipped outcomes, unexpected outcomes, or interrupted execution while leaving `--list` discovery non-executing. The `m6-acceptance` job therefore enforces zero skips on actual Playwright outcomes rather than trusting a green process status.
+- Split live OpenAI and Anthropic contracts into independently selectable scripts and workflow steps. One provisioned credential now runs its full provider surface without registering the absent provider as skipped; both credentials run both surfaces, and no credentials fail closed.
+- Hardened TAP/spec processing with ANSI removal, complete six-field summary accounting, complete plan-only TAP validation, pass/total reconciliation, malformed and contradictory transcript rejection, UTF-8-safe independent stdout/stderr streaming, and child signal forwarding with listener cleanup. `test-counts.mjs` consumes the same exact accounting and no longer synthesizes pass totals.
+- Scoped deployment exclusions to the exact `deploy/helm` and `deploy/observability` trees, added portable negative-extglob fallback coverage, and added falsification regressions for package directories with colliding names, partial summaries, contradictory summaries, truncated plans, ANSI output, provider credential matrices, and Playwright skipped outcomes.

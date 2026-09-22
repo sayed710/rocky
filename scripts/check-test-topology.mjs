@@ -559,14 +559,41 @@ export function matchRunnerPattern(pattern, candidate) {
   } catch {
     // Fall through to regex matcher
   }
-  const reStr = normPattern
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*\/|\*\*|\*/g, (token) => {
-      if (token === '**/') return '(?:[^/]+/)*';
-      if (token === '**') return '.*';
-      return '[^/]*';
-    });
-  return new RegExp(`^${reStr}$`).test(normCandidate);
+  return matchRunnerPatternFallback(normPattern, normCandidate);
+}
+
+function globSegmentToRegex(segment) {
+  const escapeLiteral = (value) => value.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const simple = (value) => escapeLiteral(value)
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]');
+
+  const negative = segment.match(/^!\(([^)]+)\)(.*)$/);
+  if (negative) {
+    const suffix = simple(negative[2]);
+    const alternatives = negative[1].split('|').map(simple).join('|');
+    return `(?!(?:${alternatives})${suffix}$)[^/]*${suffix}`;
+  }
+  return simple(segment);
+}
+
+/**
+ * Portable fallback for the runner globs used by this repository. Supports `*`, `?`,
+ * globstar directory segments, and the negative extglob used by hermetic unit scripts.
+ */
+export function matchRunnerPatternFallback(pattern, candidate) {
+  const segments = pattern.replace(/\\/g, '/').split('/');
+  let reStr = '';
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index];
+    if (index > 0 && segments[index - 1] !== '**') reStr += '/';
+    if (segment === '**') {
+      reStr += index < segments.length - 1 ? '(?:[^/]+/)*' : '.*';
+      continue;
+    }
+    reStr += globSegmentToRegex(segment);
+  }
+  return new RegExp(`^${reStr}$`).test(candidate.replace(/\\/g, '/'));
 }
 
 /**
@@ -685,6 +712,13 @@ const RAW_SUITE_DEFINITIONS = [
     target: 'npm run test:trusted-edge in services/gateway (gateway-service)',
     manifest: 'services/gateway/package.json',
     script: 'test:trusted-edge',
+  },
+  {
+    name: 'gateway-web-delivery',
+    pattern: /^scripts\/nginx-web-delivery-acceptance\.mjs$/,
+    target: 'npm run test:web-delivery in services/gateway (gateway-service)',
+    manifest: 'services/gateway/package.json',
+    script: 'test:web-delivery',
   },
   {
     name: 'persistence-postgres-integration',
@@ -814,7 +848,10 @@ export const SUITE_DEFINITIONS = RAW_SUITE_DEFINITIONS.map((suite) => ({
  * @returns {boolean} True if the path resides in an approved test location.
  */
 export function isAllowedPlacement(relPath) {
-  if (relPath === 'scripts/nginx-trusted-edge-acceptance.mjs') return true;
+  if (
+    relPath === 'scripts/nginx-trusted-edge-acceptance.mjs' ||
+    relPath === 'scripts/nginx-web-delivery-acceptance.mjs'
+  ) return true;
   if (/^packages\/[^/]+\/test\/.+/.test(relPath)) return true;
   if (/^packages\/web\/e2e\/.+/.test(relPath)) return true;
   if (/^services\/[^/]+\/test\/.+/.test(relPath)) return true;
@@ -849,8 +886,8 @@ export function findTestFiles(root = REPO_ROOT) {
           entry.name === 'coverage' ||
           entry.name === 'playwright-report' ||
           entry.name === 'test-results' ||
-          entry.name === 'helm' ||
-          entry.name === 'observability'
+          relPath === 'deploy/helm' ||
+          relPath === 'deploy/observability'
         ) {
           continue;
         }
@@ -858,6 +895,7 @@ export function findTestFiles(root = REPO_ROOT) {
       } else if (entry.isFile()) {
         if (
           relPath === 'scripts/nginx-trusted-edge-acceptance.mjs' ||
+          relPath === 'scripts/nginx-web-delivery-acceptance.mjs' ||
           /\.(test|spec|diag)\.(ts|js|mjs|cjs)$/.test(relPath)
         ) {
           testFiles.push(relPath);

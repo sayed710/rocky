@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   findTestFiles,
@@ -12,6 +12,7 @@ import {
   extractPlaywrightPatterns,
   getPlaywrightDiscoveredFiles,
   matchRunnerPattern,
+  matchRunnerPatternFallback,
   isTestFileReachableByRunner,
   SUITE_DEFINITIONS,
 } from '../check-test-topology.mjs';
@@ -40,6 +41,7 @@ test('topology: isAllowedPlacement rejects misplaced test files in unauthorized 
   assert.equal(isAllowedPlacement('services/gateway/test/engine-bot.test.ts'), true);
   assert.equal(isAllowedPlacement('scripts/test/zero-skip-enforcement.test.mjs'), true);
   assert.equal(isAllowedPlacement('scripts/nginx-trusted-edge-acceptance.mjs'), true);
+  assert.equal(isAllowedPlacement('scripts/nginx-web-delivery-acceptance.mjs'), true);
   assert.equal(isAllowedPlacement('deploy/load/test/run-evidence.test.mjs'), true);
 });
 
@@ -48,6 +50,7 @@ test('topology: classifyTestFile correctly maps each suite pattern', () => {
   assert.equal(classifyTestFile('services/gateway/test/redis-ownership.integration.test.ts')?.name, 'gateway-redis-integration');
   assert.equal(classifyTestFile('services/gateway/test/engine-bot.test.ts')?.name, 'gateway-unit');
   assert.equal(classifyTestFile('scripts/nginx-trusted-edge-acceptance.mjs')?.name, 'gateway-trusted-edge');
+  assert.equal(classifyTestFile('scripts/nginx-web-delivery-acceptance.mjs')?.name, 'gateway-web-delivery');
   assert.equal(classifyTestFile('packages/persistence/test/pg.integration.test.ts')?.name, 'persistence-postgres-integration');
   assert.equal(classifyTestFile('packages/persistence/test/event-store.test.ts')?.name, 'persistence-unit');
   assert.equal(classifyTestFile('packages/api/test/pg-security.integration.test.ts')?.name, 'api-postgres-integration');
@@ -253,6 +256,36 @@ test('topology: regex fallback matches **/ as zero or more directory segments', 
   assert.equal(re.test('e2e/nested/game-actions.spec.ts'), true, 'one directory segment under e2e must match');
   assert.equal(re.test('e2e/nested/deep/game-actions.spec.ts'), true, 'multiple directory segments under e2e must match');
   assert.equal(re.test('other/game-actions.spec.ts'), false, 'different directory must not match');
+});
+
+test('topology: portable glob fallback supports the repository negative extglob', () => {
+  const pattern = 'dist-test/test/**/!(*integration).test.js';
+  assert.equal(matchRunnerPatternFallback(pattern, 'dist-test/test/unit.test.js'), true);
+  assert.equal(matchRunnerPatternFallback(pattern, 'dist-test/test/nested/unit.test.js'), true);
+  assert.equal(matchRunnerPatternFallback(pattern, 'dist-test/test/provider.integration.test.js'), false);
+});
+
+test('topology: deployment exclusions do not hide colliding package directories', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'topology-exclusions-'));
+  try {
+    const visible = [
+      'packages/example/helm/test/visible.test.ts',
+      'packages/example/observability/test/visible.test.ts',
+    ];
+    const excluded = [
+      'deploy/helm/test/chart.test.ts',
+      'deploy/observability/test/dashboard.test.ts',
+    ];
+    for (const relPath of [...visible, ...excluded]) {
+      const fullPath = join(tmpDir, ...relPath.split('/'));
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, '');
+    }
+    const found = findTestFiles(tmpDir);
+    assert.deepEqual(found, visible);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 test('topology: extractPlaywrightPatterns confidently resolves literal testDir and defaults testMatch when omitted', () => {

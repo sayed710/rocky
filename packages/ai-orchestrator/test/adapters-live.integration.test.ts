@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { OpenAiCompatibleAdapter, AnthropicAdapter } from '../src/index.js';
 
-// Env-gated integration test (skips without OPENAI_API_KEY)
 const openaiKey = process.env['OPENAI_API_KEY'];
-test('OpenAI adapter: real completion', { skip: !openaiKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'openai') test('OpenAI adapter: real completion', async () => {
   const adapter = new OpenAiCompatibleAdapter({
     id: 'openai',
     apiKey: openaiKey,
@@ -19,9 +18,8 @@ test('OpenAI adapter: real completion', { skip: !openaiKey }, async () => {
   assert.equal(response.providerId, 'openai');
 });
 
-// Env-gated integration test (skips without ANTHROPIC_API_KEY)
 const anthropicKey = process.env['ANTHROPIC_API_KEY'];
-test('Anthropic adapter: real completion', { skip: !anthropicKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') test('Anthropic adapter: real completion', async () => {
   const adapter = new AnthropicAdapter({
     apiKey: anthropicKey,
     defaultModel: 'claude-sonnet-4-6',
