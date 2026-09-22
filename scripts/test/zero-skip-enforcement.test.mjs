@@ -504,6 +504,22 @@ test('zero-skip enforcer: succeeds when multiple positive summaries are reported
   assert.equal(code, 0, 'should return exit code 0 when multiple positive summaries pass');
 });
 
+test('zero-skip enforcer: fails when per-suite test and pass counts are swapped across summaries', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 2\\n# pass 3\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\n# tests 3\\n# pass 2\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 1, 'should fail when aggregate totals hide contradictory per-suite accounting');
+});
+
+test('zero-skip enforcer: succeeds when distinct per-suite test and pass counts each match', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests 2\\n# pass 2\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\n# tests 3\\n# pass 3\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 0, 'should accept multiple summaries whose accounting is valid suite by suite');
+});
+
 test('zero-skip enforcer: fails when TAP plan declares 1..0 despite positive summary', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
@@ -686,21 +702,25 @@ test('streaming-test-parser: maintains O(1) bounded state with identical metrics
   }
 });
 
-test('streaming-test-parser: processes large transcripts with strictly bounded memory', () => {
+test('streaming-test-parser: reconciles many reporter summaries with strictly bounded memory', () => {
   const parser = createStreamingTestParser();
-  for (let i = 1; i <= 20000; i++) {
-    parser.pushLine(`ok ${i} - synthetic pass item`);
+  for (let i = 0; i < 20000; i++) {
+    parser.pushLine('# tests 1');
+    parser.pushLine('# pass 1');
+    parser.pushLine('# fail 0');
+    parser.pushLine('# cancelled 0');
+    parser.pushLine('# skipped 0');
+    parser.pushLine('# todo 0');
   }
-  parser.pushLine('# tests 20000');
-  parser.pushLine('# pass 20000');
-  parser.pushLine('# skipped 0');
-  parser.pushLine('# fail 0');
 
   const results = parser.getResults();
   assert.equal(results.totalTests, 20000);
+  assert.equal(results.passCount, 20000);
   assert.equal(results.skippedCount, 0);
   assert.equal(results.failCount, 0);
   assert.equal(results.todoCount, 0);
+  assert.equal(results.cancelledCount, 0);
+  assert.equal(results.accountingValid, true);
 });
 
 test('streaming-stream-processor: correctly handles TAP and report lines split across arbitrary chunks', () => {

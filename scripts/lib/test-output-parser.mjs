@@ -203,14 +203,9 @@ export function createStreamingTestParser() {
   let summaryFail = 0;
   let hasRawFailure = false;
 
-  const summaryValues = {
-    tests: [],
-    pass: [],
-    fail: [],
-    skipped: [],
-    todo: [],
-    cancelled: [],
-  };
+  const summaryMetricNames = ['tests', 'pass', 'fail', 'skipped', 'todo', 'cancelled'];
+  let currentSummary = null;
+  let completedSummaryCount = 0;
   let topLevelPlanCount = 0;
   let topLevelPlanValue = null;
   let topLevelTapPoints = 0;
@@ -219,7 +214,45 @@ export function createStreamingTestParser() {
   const metricPrefixRegex = /^\s*(?:#|ℹ)\s+(tests|pass(?:ed)?|fail(?:ed)?|skipped|todo|cancelled)\b/i;
 
   function recordSummaryMetric(metric, value) {
-    summaryValues[metric].push(value);
+    if (metric === 'tests') {
+      if (currentSummary !== null) {
+        const missing = summaryMetricNames.filter((name) => currentSummary[name] === null);
+        malformedSummary ??= `Incomplete reporter summary before next tests field: missing ${missing.join(', ')}`;
+      }
+      currentSummary = {
+        tests: value,
+        pass: null,
+        fail: null,
+        skipped: null,
+        todo: null,
+        cancelled: null,
+      };
+      return;
+    }
+
+    if (currentSummary === null) {
+      malformedSummary ??= `Reporter ${metric} field appeared without a preceding tests field`;
+      return;
+    }
+
+    if (currentSummary[metric] !== null) {
+      malformedSummary ??= `Duplicate ${metric} field in reporter summary`;
+      return;
+    }
+
+    currentSummary[metric] = value;
+    if (summaryMetricNames.some((name) => currentSummary[name] === null)) return;
+
+    const accounted = currentSummary.pass
+      + currentSummary.fail
+      + currentSummary.skipped
+      + currentSummary.todo
+      + currentSummary.cancelled;
+    if (accounted !== currentSummary.tests) {
+      malformedSummary ??= `Contradictory reporter summary: tests=${currentSummary.tests} but pass+fail+skipped+todo+cancelled=${accounted}`;
+    }
+    completedSummaryCount++;
+    currentSummary = null;
   }
 
   return {
@@ -322,24 +355,15 @@ export function createStreamingTestParser() {
 
       let accountingError = malformedSummary;
       if (!accountingError && summaryTestsCount > 0) {
-        for (const metric of ['pass', 'fail', 'skipped', 'todo', 'cancelled']) {
-          if (summaryValues[metric].length !== summaryValues.tests.length) {
-            accountingError = `Incomplete reporter summary: found ${summaryValues.tests.length} tests field(s) but ${summaryValues[metric].length} ${metric} field(s)`;
-            break;
-          }
-        }
-        if (!accountingError) {
+        if (currentSummary !== null) {
+          const missing = summaryMetricNames.filter((name) => currentSummary[name] === null);
+          accountingError = `Incomplete reporter summary: missing ${missing.join(', ')}`;
+        } else if (completedSummaryCount !== summaryTestsCount) {
+          accountingError = `Incomplete reporter summaries: completed ${completedSummaryCount} of ${summaryTestsCount}`;
+        } else {
           const accounted = summaryPass + summaryFail + summarySkipped + summaryTodo + summaryCancelled;
           if (accounted !== summaryTests) {
             accountingError = `Contradictory reporter summaries: tests=${summaryTests} but pass+fail+skipped+todo+cancelled=${accounted}`;
-          } else if (
-            summaryFail === 0 && summarySkipped === 0 && summaryTodo === 0 && summaryCancelled === 0
-          ) {
-            const testsSorted = [...summaryValues.tests].sort((a, b) => a - b);
-            const passSorted = [...summaryValues.pass].sort((a, b) => a - b);
-            if (testsSorted.some((value, index) => value !== passSorted[index])) {
-              accountingError = 'Contradictory clean summaries: per-suite pass totals do not match per-suite test totals';
-            }
           }
         }
       } else if (!accountingError && planTestsCount > 0) {
