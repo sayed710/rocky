@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-21 — M15 Increment 59h: Authoritative Playwright CLI test reachability discovery and fail-closed validation._
+_Last updated: 2026-09-22 — M15 Increment 60: hash-aware immutable asset delivery contract._
+
+Prior: _Last updated: 2026-09-21 — M15 Increment 59h: Authoritative Playwright CLI test reachability discovery and fail-closed validation._
 
 Prior: _Last updated: 2026-09-17 — M15 Increment 59g: Negative lookbehind directive isolation, unnumbered TAP directive support, and zero-plan fail closed._
 
@@ -15,6 +17,10 @@ Prior: _Last updated: 2026-09-17 — M15 Increment 59f: Shared test-output parse
 Prior: _Last updated: 2026-09-17 — M15 Increment 59d: Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment._
 
 Prior: _Last updated: 2026-09-17 — M15 Increment 59c: Zero test-skip CI architecture — anchored reporter summary parsing and decoy output hardening._
+
+Prior: _Last updated: 2026-09-16 — M15 Increment 59: production web delivery caching and compression contract._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
 
@@ -4320,3 +4326,15 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Run-level discovery caching**: Cached discovered Playwright test file sets during `verifyTestTopology` runs, allowing all 26 web e2e tests to be validated against Playwright reachability in ~1.4 seconds total without re-executing discovery per file.
 - **Regression coverage**: In `scripts/test/check-test-topology.test.mjs`, added comprehensive falsification regressions proving that: (1) top-level and project-specific `testIgnore` exclusions are flagged unreachable, (2) project-specific `testDir` overrides are respected, (3) spread-composed configurations are dynamically evaluated, (4) default `testMatch` patterns are recognized when omitted, and (5) unresolvable or errored configurations fail closed.
 
+## M15 Increment 59 — Production web delivery caching and compression contract (2026-09-16)
+
+- Hardened production web delivery in `docker/web/nginx.conf.template` to implement optimized HTTP compression and safe caching headers.
+- **Compression**: Enabled `gzip on;`, `gzip_vary on;`, `gzip_proxied any;`, `gzip_comp_level 6;`, `gzip_min_length 1024;`, and MIME types for text/plain, text/css, text/xml, application/json, application/javascript, text/javascript, application/xml, image/svg+xml, and application/manifest+json.
+- **Content-Hashed Assets**: Route `/assets/*` enforces long-lived immutable caching (`Cache-Control: public, max-age=31536000, immutable`), returns 404 for missing assets without attaching immutable headers, and preserves all 7 security headers with `always`.
+- **SPA Shell & Static Mutable Files**: Root route `/` enforces safe revalidation (`Cache-Control: no-cache`), ensuring `index.html` and SPA deep-link fallback routes (`try_files $uri $uri/ /index.html;`) cannot permanently pin clients to stale asset references after deployments.
+- **Real Nginx Acceptance Suite**: Added `scripts/nginx-web-delivery-acceptance.mjs` and `npm run test:web-delivery` in `services/gateway`, validating all 10 delivery assertions (hashed asset caching, SPA shell freshness, deep-link fallback, gzip encoding, Vary header, API proxy safety, WebSocket upgrades, security headers preservation, 404 error routes, and uncompressed representation) through real Nginx containers in CI and local runners with zero test skips.
+
+## M15 Increment 60 — Hash-aware immutable asset delivery contract (2026-09-22)
+
+- Restricted one-year immutable caching to Vite-style content-hashed filenames under `/assets/`; existing unhashed assets now use `Cache-Control: no-cache`, and both hashed and unhashed missing assets remain strict 404 responses without immutable headers.
+- Extended the real-Nginx acceptance suite with a deterministic unhashed `/assets/runtime-config.json` fixture, hashed JS and CSS cache assertions, root static-file revalidation checks, both hashed/unhashed 404 paths, and shared security-header assertions while preserving gzip, SPA, REST, and WebSocket coverage.

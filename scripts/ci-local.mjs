@@ -106,6 +106,7 @@ const SERVICE_JOBS = [
     env: { REQUIRE_DOCKER: '1' },
     steps: [
       ['trusted edge through real Nginx', 'npm run test:trusted-edge'],
+      ['web delivery caching and compression through real Nginx', 'npm run test:web-delivery'],
     ],
   },
   {
