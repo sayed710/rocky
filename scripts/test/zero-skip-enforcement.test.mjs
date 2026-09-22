@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { runWithZeroSkip } from '../run-zero-skip.mjs';
 import { selectLiveProviders } from '../run-live-provider-tests.mjs';
@@ -16,6 +17,20 @@ import {
   parseTestCount,
   parseTodoCount,
 } from '../lib/test-output-parser.mjs';
+
+const NESTED_TAP_SOURCE = 'const { describe, it } = require("node:test"); describe("outer", () => { it("a", () => {}); it("b", () => {}); });';
+const nestedTapEnv = { ...process.env };
+delete nestedTapEnv.NODE_TEST_CONTEXT;
+
+function actualNestedTap() {
+  const result = spawnSync(process.execPath, ['--test-reporter=tap', '-e', NESTED_TAP_SOURCE], { encoding: 'utf8', env: nestedTapEnv });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^    1\.\.2$/m, 'fixture must contain a nested plan');
+  assert.match(result.stdout, /^ok 1 - outer$/m, 'fixture must contain a top-level point');
+  assert.match(result.stdout, /^1\.\.1$/m, 'fixture must contain a top-level plan');
+  assert.match(result.stdout, /^# tests 2$/m, 'fixture must contain the real Node summary');
+  return result.stdout;
+}
 
 
 test('zero-skip enforcer: succeeds when a suite reports zero skips', async () => {
@@ -89,6 +104,71 @@ test('test-output-parser: mixed TAP and summary evidence agrees in a clean run',
   const result = parseCompleteTestOutput('ok 1 - first\nok 2 - second\n1..2\n# tests 2\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n');
   assert.equal(result.accountingValid, true);
   assert.equal(result.totalTests, 2);
+});
+
+test('zero-skip enforcer: accepts real Node TAP with nested suites and a complete summary', async () => {
+  const code = await runWithZeroSkip(process.execPath, ['--test-reporter=tap', '-e', NESTED_TAP_SOURCE], { silent: true, env: nestedTapEnv });
+  assert.equal(code, 0);
+  const parsed = parseCompleteTestOutput(actualNestedTap());
+  assert.equal(parsed.accountingValid, true);
+  assert.equal(parsed.totalTests, 2);
+  assert.equal(parsed.passCount, 2);
+});
+
+test('test-output-parser: nested TAP without summary counts the top-level plan only', () => {
+  const planOnly = actualNestedTap().replace(/^# (?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms) .*\r?\n/gm, '');
+  const parsed = parseCompleteTestOutput(planOnly);
+  assert.equal(parsed.accountingValid, true);
+  assert.equal(parsed.totalTests, 1);
+  assert.equal(parsed.passCount, 1);
+  assert.equal(parseTestCount(planOnly), 1);
+});
+
+test('test-output-parser: nested TAP rejects incorrect, duplicate, or missing top-level plans and points', () => {
+  const tap = actualNestedTap();
+  const invalid = [
+    tap.replace(/^1\.\.1$/m, '1..2'),
+    tap.replace(/^1\.\.1$/m, '1..1\n1..1'),
+    tap.replace(/^1\.\.1\r?\n/m, ''),
+    tap.replace(/^ok 1 - outer\r?\n/m, ''),
+  ];
+  for (const output of invalid) {
+    assert.equal(parseCompleteTestOutput(output).accountingValid, false);
+  }
+});
+
+test('test-output-parser: nested TAP zero plan cannot be rescued by a positive summary', () => {
+  const output = actualNestedTap().replace(/^1\.\.1$/m, '1..0');
+  const parsed = parseCompleteTestOutput(output);
+  assert.equal(parsed.totalTests, 0);
+});
+
+test('test-output-parser: ordinary TAP comments do not corrupt nested summary accounting', () => {
+  const output = actualNestedTap().replace(/^# tests 2$/m, '# tests initialized\n# tests 2');
+  assert.equal(parseCompleteTestOutput(output).accountingValid, true);
+});
+
+test('test-output-parser: spec summaries ignore ordinary logs resembling TAP prefixes', () => {
+  const summary = 'ℹ tests 1\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0';
+  for (const log of ['ok: connected', 'not ok: retrying', 'ok (status 200)', '1..10 batches processed', '  1..10 batches processed']) {
+    const parsed = parseCompleteTestOutput(`${summary}\n${log}`);
+    assert.equal(parsed.accountingValid, true, log);
+    assert.equal(parsed.totalTests, 1, log);
+  }
+});
+
+test('test-output-parser: TAP-only passing count excludes failing points', () => {
+  const parsed = parseCompleteTestOutput('ok 1 - passes\nnot ok 2 - fails\n1..2');
+  assert.equal(parsed.accountingValid, true);
+  assert.equal(parsed.totalTests, 2);
+  assert.equal(parsed.passCount, 1);
+  assert.equal(parsed.failCount, 1);
+});
+
+test('test-output-parser: static TAP fallback rejects duplicate top-level plans', () => {
+  assert.equal(parseTestCount('ok 1 - first\n1..1\nok 1 - second\n1..1'), null);
+  assert.equal(parseCompleteTestOutput('ok 1 - first\n1..1\nok 1 - second\n1..1').accountingValid, false);
+  assert.equal(parseTestCount('ok 1 - first\n1..1 # optional comment'), 1);
 });
 
 test('live-provider selector supports either credential independently and fails when none exist', () => {
@@ -201,7 +281,7 @@ test('zero-skip enforcer: detects real child test process self-skipping', async 
 test('zero-skip enforcer: does not falsely fail on test names containing the word skipped', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("ok 145 - a stored game whose chess960 metadata is corrupt is skipped, not thrown from\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+    'console.log("ok 1 - a stored game whose chess960 metadata is corrupt is skipped, not thrown from\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when test name contains the word skipped');
 });
@@ -469,7 +549,7 @@ test('zero-skip enforcer: fails when summary reports skipped 0 but individual te
 test('zero-skip enforcer: succeeds when summary reports skipped 0 and normal test passes', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\nok 1 - normal");',
+    'console.log("ok 1 - normal\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when clean summary and no skip directive');
 });
@@ -493,7 +573,7 @@ test('zero-skip enforcer: fails when summary reports todo 0 but individual test 
 test('zero-skip enforcer: succeeds when summary reports todo 0 and test is complete', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0\\nok 1 - complete");',
+    'console.log("ok 1 - complete\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when clean summary and no todo directive');
 });
@@ -581,7 +661,7 @@ test('zero-skip enforcer: fails when unnumbered TAP test point has TODO directiv
 test('zero-skip enforcer: succeeds when test title contains escaped hash before SKIP keyword', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("ok 1 - test title has \\\\# SKIP inside text\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+    'console.log("ok 1 - test title has \\\\# SKIP inside text\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when escaped hash is present in test description');
 });
@@ -691,7 +771,7 @@ test('zero-skip enforcer: fails when child output contains unnumbered # TO-DO di
 test('zero-skip enforcer: succeeds when test title contains escaped hash before SKIPPED keyword', async () => {
   const code = await runWithZeroSkip(process.execPath, [
     '-e',
-    'console.log("ok 1 - title has \\\\# SKIPPED inside\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+    'console.log("ok 1 - title has \\\\# SKIPPED inside\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
   ], { silent: true });
   assert.equal(code, 0, 'should return exit code 0 when escaped hash is present in test description');
 });

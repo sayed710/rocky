@@ -24,7 +24,7 @@ export function stripAnsi(value) {
  * Ensures escaped hashes (`\#`) in descriptions are not misinterpreted as directives.
  */
 export const TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX =
-  /^\s*(?:(?:ok|not ok)(?:\s+\d+)?\b[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\b[^)]*\))/im;
+  /^[ \t]*(?:(?:ok|not ok)(?:[ \t]+\d+)?(?=[ \t]+(?:-|#)(?:[ \t]|$)|$)[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\b[^)]*\))/im;
 
 /**
  * Line-anchored regex matching individual TAP or spec TODO directives.
@@ -33,14 +33,14 @@ export const TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX =
  * Ensures escaped hashes (`\#`) in descriptions are not misinterpreted as directives.
  */
 export const TAP_OR_SPEC_TODO_DIRECTIVE_REGEX =
-  /^\s*(?:(?:ok|not ok)(?:\s+\d+)?\b[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*\((?:to-?do)\b[^)]*\))/im;
+  /^[ \t]*(?:(?:ok|not ok)(?:[ \t]+\d+)?(?=[ \t]+(?:-|#)(?:[ \t]|$)|$)[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*\((?:to-?do)\b[^)]*\))/im;
 
 /**
  * Line-anchored regex matching raw TAP failure test points ("not ok") that do NOT
  * represent TODO or SKIP directives.
  */
 export const RAW_TAP_FAILURE_REGEX =
-  /^\s*not ok(?:\s+\d+)?\b(?:(?!(?<!\\)#\s*(?:TO-?DO|SKIP(?:PED)?)\b).)*$/im;
+  /^[ \t]*not ok(?:[ \t]+\d+)?(?=[ \t]+(?:-|#)(?:[ \t]|$)|$)(?:(?!(?<!\\)#\s*(?:TO-?DO|SKIP(?:PED)?)\b).)*$/im;
 
 /**
  * Resolves the total tests count from reporter summary lines or TAP plan headers.
@@ -53,7 +53,8 @@ export const RAW_TAP_FAILURE_REGEX =
 export function parseTestCount(output) {
   output = stripAnsi(output);
   const summaryMatches = [...output.matchAll(/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim)];
-  const planMatches = [...output.matchAll(/^\s*1\.\.(\d+)\b/gm)];
+  const planMatches = [...output.matchAll(/^[ \t]*1\.\.(\d+)(?:[ \t]*#.*)?[ \t]*\r?$/gm)];
+  const topLevelPlanMatches = [...output.matchAll(/^1\.\.(\d+)(?:[ \t]*#.*)?[ \t]*\r?$/gm)];
 
   for (const match of summaryMatches) {
     if (Number.parseInt(match[1], 10) === 0) return 0;
@@ -65,8 +66,8 @@ export function parseTestCount(output) {
   if (summaryMatches.length > 0) {
     return summaryMatches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
   }
-  if (planMatches.length > 0) {
-    return planMatches.reduce((sum, m) => sum + Number.parseInt(m[1], 10), 0);
+  if (topLevelPlanMatches.length === 1) {
+    return Number.parseInt(topLevelPlanMatches[0][1], 10);
   }
   return null;
 }
@@ -184,7 +185,6 @@ export function parseCancelledCount(output) {
 export function createStreamingTestParser() {
   let summaryTests = 0;
   let summaryTestsCount = 0;
-  let planTests = 0;
   let planTestsCount = 0;
   let hasZeroTestSummary = false;
 
@@ -209,6 +209,7 @@ export function createStreamingTestParser() {
   let topLevelPlanCount = 0;
   let topLevelPlanValue = null;
   let topLevelTapPoints = 0;
+  let topLevelPassPoints = 0;
   let malformedSummary = null;
 
   const metricPrefixRegex = /^\s*(?:#|ℹ)\s+(tests|pass(?:ed)?|fail(?:ed)?|skipped|todo|cancelled)(?::|\s*$|\s+[-+\d])/i;
@@ -283,11 +284,10 @@ export function createStreamingTestParser() {
       }
 
       // 2. TAP plan: 1..N
-      const planMatch = line.match(/^\s*1\.\.(\d+)\b/);
+      const planMatch = line.match(/^[ \t]*1\.\.(\d+)(?:[ \t]*#.*)?[ \t]*$/);
       if (planMatch) {
         const val = Number.parseInt(planMatch[1], 10);
         if (val === 0) hasZeroTestSummary = true;
-        planTests += val;
         planTestsCount++;
         if (/^1\.\./.test(line)) {
           topLevelPlanCount++;
@@ -295,8 +295,14 @@ export function createStreamingTestParser() {
         }
       }
 
-      if (/^(?:ok|not ok)(?:\s+\d+)?\b/i.test(line)) {
+      const tapPoint = line.match(/^(ok|not ok)(?:[ \t]+\d+)?(?=[ \t]+(?:-|#)(?:[ \t]|$)|$)/i);
+      if (tapPoint) {
         topLevelTapPoints++;
+        if (tapPoint[1].toLowerCase() === 'ok'
+          && !TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX.test(line)
+          && !TAP_OR_SPEC_TODO_DIRECTIVE_REGEX.test(line)) {
+          topLevelPassPoints++;
+        }
       }
 
       // 3. Pass summary: # pass N or ℹ pass N
@@ -355,8 +361,8 @@ export function createStreamingTestParser() {
         totalTests = 0;
       } else if (summaryTestsCount > 0) {
         totalTests = summaryTests;
-      } else if (planTestsCount > 0) {
-        totalTests = planTests;
+      } else if (topLevelPlanCount === 1) {
+        totalTests = topLevelPlanValue;
       }
 
       let passCount = summaryPassCount > 0 ? summaryPass : null;
@@ -374,21 +380,18 @@ export function createStreamingTestParser() {
             accountingError = `Contradictory reporter summaries: tests=${summaryTests} but pass+fail+skipped+todo+cancelled=${accounted}`;
           }
         }
-      } else if (!accountingError && planTestsCount > 0) {
+      }
+
+      // A reporter summary does not excuse missing or contradictory top-level TAP evidence.
+      // Indented subtest plans describe a different scope and cannot be added to this plan.
+      if (!accountingError && (planTestsCount > 0 || topLevelTapPoints > 0)) {
         if (topLevelPlanCount !== 1 || topLevelPlanValue === null) {
           accountingError = `Incomplete TAP evidence: expected exactly one top-level plan, found ${topLevelPlanCount}`;
         } else if (topLevelTapPoints !== topLevelPlanValue) {
-          accountingError = `Incomplete TAP evidence: plan declares ${topLevelPlanValue} test point(s) but ${topLevelTapPoints} top-level point(s) were observed`;
-        } else {
-          passCount = topLevelTapPoints;
-          totalTests = topLevelPlanValue;
+          accountingError = `Contradictory TAP evidence: top-level plan declares ${topLevelPlanValue} test point(s) but ${topLevelTapPoints} top-level point(s) were observed`;
+        } else if (summaryTestsCount === 0) {
+          passCount = topLevelPassPoints;
         }
-      }
-
-      // A reporter summary does not make contradictory top-level TAP evidence safe.
-      // Nested TAP plans are indented and are deliberately excluded from this check.
-      if (!accountingError && summaryTestsCount > 0 && topLevelPlanCount > 0 && topLevelTapPoints !== planTests) {
-        accountingError = `Contradictory TAP evidence: plans declare ${planTests} test point(s) but ${topLevelTapPoints} top-level point(s) were observed`;
       }
 
       let skippedCount = summarySkipped;
