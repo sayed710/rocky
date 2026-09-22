@@ -294,7 +294,7 @@ function collectPlaywrightFiles(suite, rootDir, discovered, repoRoot) {
  * throws an explicit Error instead of substituting false-green assumptions.
  *
  * @param {string} [manifestDir='packages/web'] - Directory containing Playwright config and package.json.
- * @param {object} [options={}] - Options (root, playwrightConfigOverrides, playwrightDiscoveredCache, scriptCmd).
+ * @param {object} [options={}] - Options (root, backend, playwrightConfigOverrides, playwrightDiscoveredCache, scriptCmd).
  * @returns {Set<string>} Set of repository-relative POSIX file paths discovered by Playwright.
  */
 export function getPlaywrightDiscoveredFiles(manifestDir = 'packages/web', options = {}) {
@@ -302,7 +302,7 @@ export function getPlaywrightDiscoveredFiles(manifestDir = 'packages/web', optio
   const manifestDirFull = resolve(root, manifestDir);
 
   const cache = options.playwrightDiscoveredCache;
-  const cacheKey = `${manifestDirFull}::${options.playwrightConfigOverrides ? JSON.stringify(options.playwrightConfigOverrides) : ''}::${options.scriptCmd || ''}`;
+  const cacheKey = `${manifestDirFull}::${options.backend === false ? 'offline' : 'backend'}::${options.playwrightConfigOverrides ? JSON.stringify(options.playwrightConfigOverrides) : ''}::${options.scriptCmd || ''}`;
   if (cache && cache.has(cacheKey)) {
     return cache.get(cacheKey);
   }
@@ -362,6 +362,9 @@ export function getPlaywrightDiscoveredFiles(manifestDir = 'packages/web', optio
       env: {
         ...process.env,
         PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
+        // Validate reachability in the complete CI acceptance suite. The local
+        // backend-free mode intentionally discovers only offline specs.
+        GAMBIT_E2E_BACKEND: options.backend === false ? '' : '1',
       },
       maxBuffer: 16 * 1024 * 1024,
     });

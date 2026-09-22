@@ -8,6 +8,7 @@ import { runHermeticTests, HERMETIC_WORKSPACES } from '../run-hermetic-tests.mjs
 import {
   createStreamingTestParser,
   createStreamLineProcessor,
+  parseCompleteTestOutput,
   parseCancelledCount,
   parseFailCount,
   parsePassCount,
@@ -55,6 +56,39 @@ test('zero-skip enforcer: rejects a truncated TAP plan', async () => {
     'console.log("ok 1 - first\\n1..2");',
   ], { silent: true });
   assert.equal(code, 1);
+});
+
+test('zero-skip enforcer: rejects contradictory TAP points even with a complete clean summary', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("ok 1 - first\\nok 2 - second\\n1..1\\n# tests 2\\n# pass 2\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 1);
+});
+
+test('zero-skip enforcer: accepts ordinary TAP comments resembling metric names', async () => {
+  const code = await runWithZeroSkip(process.execPath, [
+    '-e',
+    'console.log("# tests initialized\\nok 1 - first\\n1..1\\n# tests 1\\n# pass 1\\n# fail 0\\n# cancelled 0\\n# skipped 0\\n# todo 0");',
+  ], { silent: true });
+  assert.equal(code, 0);
+});
+
+test('streaming-stream-processor: oversized unterminated lines fail closed', () => {
+  const parser = createStreamingTestParser();
+  const processor = createStreamLineProcessor(parser);
+  const chunk = Buffer.alloc(64 * 1024, 120);
+  for (let i = 0; i < 20; i++) processor.pushStdoutChunk(chunk);
+  processor.pushStdoutChunk(Buffer.from('\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n'));
+  const result = processor.getResults();
+  assert.equal(result.accountingValid, false);
+  assert.match(result.accountingError, /line exceeds/);
+});
+
+test('test-output-parser: mixed TAP and summary evidence agrees in a clean run', () => {
+  const result = parseCompleteTestOutput('ok 1 - first\nok 2 - second\n1..2\n# tests 2\n# pass 2\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n');
+  assert.equal(result.accountingValid, true);
+  assert.equal(result.totalTests, 2);
 });
 
 test('live-provider selector supports either credential independently and fails when none exist', () => {

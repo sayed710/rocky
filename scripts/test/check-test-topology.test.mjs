@@ -455,6 +455,15 @@ test('topology: getPlaywrightDiscoveredFiles derives reachable files directly fr
   assert.ok(discovered.has('packages/web/e2e/app-loads.spec.ts'));
 });
 
+test('topology: backend-free Playwright discovers only the seven offline specs', () => {
+  const offline = getPlaywrightDiscoveredFiles('packages/web', { backend: false });
+  const full = getPlaywrightDiscoveredFiles('packages/web');
+  assert.equal(offline.size, 7);
+  assert.ok(offline.has('packages/web/e2e/app-loads.spec.ts'));
+  assert.ok(!offline.has('packages/web/e2e/game-actions.spec.ts'));
+  assert.equal(full.size, 26);
+});
+
 test('topology: falsification regression proves validation flags ignored test files unreachable', () => {
   const falsified = verifyTestTopology(undefined, {
     playwrightConfigOverrides: {
