@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-16 — M15 Increment 59: production web delivery caching and compression contract._
+_Last updated: 2026-09-22 — M15 Increment 60: hash-aware immutable asset delivery contract._
+
+Prior: _Last updated: 2026-09-16 — M15 Increment 59: production web delivery caching and compression contract._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
 
@@ -4245,3 +4247,8 @@ Per package: `cd packages/<pkg> && npm install && npm run build && npm test`.
 - **Content-Hashed Assets**: Route `/assets/*` enforces long-lived immutable caching (`Cache-Control: public, max-age=31536000, immutable`), returns 404 for missing assets without attaching immutable headers, and preserves all 7 security headers with `always`.
 - **SPA Shell & Static Mutable Files**: Root route `/` enforces safe revalidation (`Cache-Control: no-cache`), ensuring `index.html` and SPA deep-link fallback routes (`try_files $uri $uri/ /index.html;`) cannot permanently pin clients to stale asset references after deployments.
 - **Real Nginx Acceptance Suite**: Added `scripts/nginx-web-delivery-acceptance.mjs` and `npm run test:web-delivery` in `services/gateway`, validating all 10 delivery assertions (hashed asset caching, SPA shell freshness, deep-link fallback, gzip encoding, Vary header, API proxy safety, WebSocket upgrades, security headers preservation, 404 error routes, and uncompressed representation) through real Nginx containers in CI and local runners with zero test skips.
+
+## M15 Increment 60 — Hash-aware immutable asset delivery contract (2026-09-22)
+
+- Restricted one-year immutable caching to Vite-style content-hashed filenames under `/assets/`; existing unhashed assets now use `Cache-Control: no-cache`, and both hashed and unhashed missing assets remain strict 404 responses without immutable headers.
+- Extended the real-Nginx acceptance suite with a deterministic unhashed `/assets/runtime-config.json` fixture, hashed JS and CSS cache assertions, root static-file revalidation checks, both hashed/unhashed 404 paths, and shared security-header assertions while preserving gzip, SPA, REST, and WebSocket coverage.

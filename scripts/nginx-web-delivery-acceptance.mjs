@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import WebSocket from 'ws';
 import { waitForHealth } from './lib/wait-for-health.mjs';
@@ -99,6 +99,29 @@ async function waitForOpen(ws, timeoutMs = 5_000) {
   });
 }
 
+/** Assert the production security-header contract for either successful or error responses. */
+function assertSecurityHeaders(headers, context) {
+  assert.equal(
+    headers.get('content-security-policy'),
+    "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+    `Content-Security-Policy missing or wrong on ${context}`,
+  );
+  assert.equal(headers.get('cross-origin-resource-policy'), 'same-origin', `Cross-Origin-Resource-Policy missing or wrong on ${context}`);
+  assert.equal(
+    headers.get('permissions-policy'),
+    'camera=(), geolocation=(), microphone=(), payment=()',
+    `Permissions-Policy missing or wrong on ${context}`,
+  );
+  assert.equal(headers.get('referrer-policy'), 'no-referrer', `Referrer-Policy missing or wrong on ${context}`);
+  assert.equal(
+    headers.get('strict-transport-security'),
+    'max-age=31536000; includeSubDomains',
+    `Strict-Transport-Security missing or wrong on ${context}`,
+  );
+  assert.equal(headers.get('x-content-type-options'), 'nosniff', `X-Content-Type-Options missing or wrong on ${context}`);
+  assert.equal(headers.get('x-frame-options'), 'DENY', `X-Frame-Options missing or wrong on ${context}`);
+}
+
 describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contract', { skip: !dockerAvailable }, () => {
   let apiPort;
   let gwPort;
@@ -112,6 +135,9 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
 
   let hashedJsFile;
   let hashedCssFile;
+  const unhashedAssetFile = 'runtime-config.json';
+  const unhashedAssetContent = '{"cachePolicy":"must-revalidate"}\n';
+  const unhashedAssetPath = join(webDistPath, 'assets', unhashedAssetFile);
 
   const secret = 'test-secret-at-least-32-bytes-long-1234567890';
 
@@ -150,6 +176,9 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
         `No compressible hashed CSS asset (>= 1024 bytes) found in packages/web/dist/assets (found: ${assetEntries.join(', ')})`
       );
     }
+
+    // Deterministically exercise the runtime fallback for an existing unhashed /assets/ file.
+    writeFileSync(unhashedAssetPath, unhashedAssetContent, 'utf8');
 
     apiPort = await getFreePort();
     gwPort = await getFreePort();
@@ -227,6 +256,7 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
   });
 
   after(async () => {
+    rmSync(unhashedAssetPath, { force: true });
     if (nginxContainerName) {
       try {
         execSync(`docker rm -f ${nginxContainerName}`, { stdio: 'ignore' });
@@ -246,17 +276,32 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
   });
 
   test('1. Content-hashed static asset: HTTP 200, long-lived Cache-Control with immutable', async () => {
-    const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${hashedJsFile}`);
-    assert.equal(res.status, 200, 'Hashed asset must return 200 OK');
+    for (const assetFile of [hashedJsFile, hashedCssFile]) {
+      const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${assetFile}`);
+      assert.equal(res.status, 200, `Hashed asset ${assetFile} must return 200 OK`);
 
-    const cacheControl = res.headers.get('cache-control');
-    assert.ok(cacheControl, 'Cache-Control header must be present on hashed asset');
-    assert.match(cacheControl, /public/, 'Cache-Control must declare public');
-    assert.match(cacheControl, /max-age=31536000/, 'Cache-Control must set 1-year max-age (31536000)');
-    assert.match(cacheControl, /immutable/, 'Cache-Control must include immutable');
+      const cacheControl = res.headers.get('cache-control');
+      assert.ok(cacheControl, `Cache-Control header must be present on hashed asset ${assetFile}`);
+      assert.match(cacheControl, /public/, `Cache-Control must declare public for ${assetFile}`);
+      assert.match(cacheControl, /max-age=31536000/, `Cache-Control must set a one-year max-age for ${assetFile}`);
+      assert.match(cacheControl, /immutable/, `Cache-Control must include immutable for ${assetFile}`);
+    }
   });
 
-  test('2. index.html / SPA shell: NOT year-long immutable, explicit safe freshness/revalidation policy', async () => {
+  test('2. Existing unhashed /assets/ files revalidate and never receive immutable caching', async () => {
+    const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${unhashedAssetFile}`);
+    assert.equal(res.status, 200, 'Existing unhashed asset must remain reachable');
+    assert.equal(await res.text(), unhashedAssetContent, 'Unhashed asset body must be served directly, not as the SPA shell');
+
+    const cacheControl = res.headers.get('cache-control');
+    assert.ok(cacheControl, 'Unhashed asset must receive an explicit cache policy');
+    assert.match(cacheControl, /no-cache/, 'Unhashed asset must require revalidation');
+    assert.doesNotMatch(cacheControl, /immutable/, 'Unhashed asset must not receive immutable caching');
+    assert.doesNotMatch(cacheControl, /max-age=31536000/, 'Unhashed asset must not receive a one-year max-age');
+    assertSecurityHeaders(res.headers, `/assets/${unhashedAssetFile}`);
+  });
+
+  test('3. index.html, SPA shell, and root static files use safe freshness/revalidation', async () => {
     const resIndex = await fetch(`http://127.0.0.1:${nginxPort}/index.html`);
     assert.equal(resIndex.status, 200, 'index.html must return 200 OK');
 
@@ -272,9 +317,18 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     assert.ok(cacheControlRoot, 'Cache-Control header must be present on /');
     assert.doesNotMatch(cacheControlRoot, /immutable/, 'root route / MUST NOT be immutable');
     assert.match(cacheControlRoot, /no-cache/, 'root route / must specify no-cache revalidation policy');
+
+    for (const staticPath of ['/icon.svg', '/manifest.webmanifest', '/sw.js']) {
+      const staticRes = await fetch(`http://127.0.0.1:${nginxPort}${staticPath}`);
+      assert.equal(staticRes.status, 200, `${staticPath} must return 200 OK`);
+      const staticCache = staticRes.headers.get('cache-control');
+      assert.ok(staticCache, `Cache-Control header must be present on ${staticPath}`);
+      assert.match(staticCache, /no-cache/, `${staticPath} must require revalidation`);
+      assert.doesNotMatch(staticCache, /immutable/, `${staticPath} must not be immutable`);
+    }
   });
 
-  test('3. SPA deep-link fallback: returns shell correctly without inheriting immutable asset policy', async () => {
+  test('4. SPA deep-link fallback: returns shell correctly without inheriting immutable asset policy', async () => {
     const res = await fetch(`http://127.0.0.1:${nginxPort}/play`);
     assert.equal(res.status, 200, 'Deep link /play must resolve to 200 OK via SPA fallback');
 
@@ -287,7 +341,7 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     assert.match(cacheControl, /no-cache/, 'SPA fallback must use safe revalidation policy');
   });
 
-  test('4. gzip: compressible production resource with Accept-Encoding: gzip demonstrates Content-Encoding: gzip', async () => {
+  test('5. gzip: compressible production resource with Accept-Encoding: gzip demonstrates Content-Encoding: gzip', async () => {
     for (const assetFile of [hashedJsFile, hashedCssFile]) {
       // 4a. Verify fetch sees Content-Encoding: gzip
       const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${assetFile}`, {
@@ -343,7 +397,7 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     }
   });
 
-  test('5. Vary: response includes Accept-Encoding variation', async () => {
+  test('6. Vary: response includes Accept-Encoding variation', async () => {
     const res = await fetch(`http://127.0.0.1:${nginxPort}/assets/${hashedJsFile}`, {
       headers: {
         'Accept-Encoding': 'gzip',
@@ -355,7 +409,7 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     assert.match(vary, /Accept-Encoding/i, 'Vary header must include Accept-Encoding');
   });
 
-  test('6. API proxy: continues routing correctly and avoids accidental public immutable caching', async () => {
+  test('7. API proxy: continues routing correctly and avoids accidental public immutable caching', async () => {
     const res = await fetch(`http://127.0.0.1:${nginxPort}/v1/health`);
     assert.equal(res.status, 200, '/v1/health must proxy successfully');
 
@@ -372,7 +426,7 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     }
   });
 
-  test('7. WebSocket proxy: Upgrade and connection behavior not regressed', async () => {
+  test('8. WebSocket proxy: Upgrade and connection behavior not regressed', async () => {
     const ws = new WebSocket(`ws://127.0.0.1:${nginxPort}/ws`, {
       origin: `http://127.0.0.1:${nginxPort}`,
     });
@@ -386,98 +440,31 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     }
   });
 
-  test('8. Security headers: all existing security headers preserved on responses', async () => {
-    const paths = ['/', `/assets/${hashedJsFile}`];
+  test('9. Security headers: all existing security headers preserved on responses', async () => {
+    const paths = ['/', `/assets/${hashedJsFile}`, `/assets/${unhashedAssetFile}`];
 
     for (const path of paths) {
       const res = await fetch(`http://127.0.0.1:${nginxPort}${path}`);
       assert.equal(res.status, 200, `${path} must return 200 OK`);
 
-      assert.equal(
-        res.headers.get('content-security-policy'),
-        "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
-        `Content-Security-Policy missing or wrong on ${path}`,
-      );
-      assert.equal(
-        res.headers.get('cross-origin-resource-policy'),
-        'same-origin',
-        `Cross-Origin-Resource-Policy missing or wrong on ${path}`,
-      );
-      assert.equal(
-        res.headers.get('permissions-policy'),
-        'camera=(), geolocation=(), microphone=(), payment=()',
-        `Permissions-Policy missing or wrong on ${path}`,
-      );
-      assert.equal(
-        res.headers.get('referrer-policy'),
-        'no-referrer',
-        `Referrer-Policy missing or wrong on ${path}`,
-      );
-      assert.equal(
-        res.headers.get('strict-transport-security'),
-        'max-age=31536000; includeSubDomains',
-        `Strict-Transport-Security missing or wrong on ${path}`,
-      );
-      assert.equal(
-        res.headers.get('x-content-type-options'),
-        'nosniff',
-        `X-Content-Type-Options missing or wrong on ${path}`,
-      );
-      assert.equal(
-        res.headers.get('x-frame-options'),
-        'DENY',
-        `X-Frame-Options missing or wrong on ${path}`,
-      );
+      assertSecurityHeaders(res.headers, path);
     }
   });
 
-  test('9. Nonexistent route: does not receive misleading immutable caching and preserves security headers', async () => {
-    const resMissingAsset = await fetch(`http://127.0.0.1:${nginxPort}/assets/nonexistent-hash-file.js`);
-    assert.equal(resMissingAsset.status, 404, 'Missing asset under /assets/ must return 404');
-    const missingAssetCache = resMissingAsset.headers.get('cache-control');
-    if (missingAssetCache) {
-      assert.doesNotMatch(missingAssetCache, /immutable/, '404 asset must NOT have immutable cache-control');
+  test('10. Missing hashed and unhashed assets return 404 without immutable caching', async () => {
+    for (const missingPath of ['/assets/nonexistent-AbCd1234.js', '/assets/nonexistent.js']) {
+      const resMissingAsset = await fetch(`http://127.0.0.1:${nginxPort}${missingPath}`);
+      assert.equal(resMissingAsset.status, 404, `${missingPath} must return 404`);
+      const missingAssetCache = resMissingAsset.headers.get('cache-control');
+      if (missingAssetCache) {
+        assert.doesNotMatch(missingAssetCache, /immutable/, `${missingPath} must not have immutable cache-control`);
+        assert.doesNotMatch(missingAssetCache, /max-age=31536000/, `${missingPath} must not have a one-year max-age`);
+      }
+      assertSecurityHeaders(resMissingAsset.headers, `${missingPath} 404`);
     }
-
-    // Verify all 7 security headers survive 404 responses via 'always' directive
-    assert.equal(
-      resMissingAsset.headers.get('content-security-policy'),
-      "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
-      'Content-Security-Policy must be present on 404 via always',
-    );
-    assert.equal(
-      resMissingAsset.headers.get('cross-origin-resource-policy'),
-      'same-origin',
-      'Cross-Origin-Resource-Policy must be present on 404 via always',
-    );
-    assert.equal(
-      resMissingAsset.headers.get('permissions-policy'),
-      'camera=(), geolocation=(), microphone=(), payment=()',
-      'Permissions-Policy must be present on 404 via always',
-    );
-    assert.equal(
-      resMissingAsset.headers.get('referrer-policy'),
-      'no-referrer',
-      'Referrer-Policy must be present on 404 via always',
-    );
-    assert.equal(
-      resMissingAsset.headers.get('strict-transport-security'),
-      'max-age=31536000; includeSubDomains',
-      'Strict-Transport-Security must be present on 404 via always',
-    );
-    assert.equal(
-      resMissingAsset.headers.get('x-content-type-options'),
-      'nosniff',
-      'X-Content-Type-Options must be present on 404 via always',
-    );
-    assert.equal(
-      resMissingAsset.headers.get('x-frame-options'),
-      'DENY',
-      'X-Frame-Options must be present on 404 via always',
-    );
   });
 
-  test('10. Hashed asset without gzip Accept-Encoding: returns valid original uncompressed representation with Vary header', async () => {
+  test('11. Hashed asset without gzip Accept-Encoding: returns valid original uncompressed representation with Vary header', async () => {
     for (const assetFile of [hashedJsFile, hashedCssFile]) {
       const diskContent = readFileSync(join(webDistPath, 'assets', assetFile), 'utf8');
 
