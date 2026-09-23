@@ -2,7 +2,8 @@ import { test, describe } from 'node:test';
 import * as assert from 'node:assert';
 import { Tournament } from '../src/tournament';
 import { RoundRobinPairing } from '../src/round-robin';
-import type { RoundRobinConfig } from '../src/config';
+import { SwissPairing } from '../src/swiss';
+import type { RoundRobinConfig, SwissConfig } from '../src/config';
 
 describe('Tournament Aggregate (round-by-round)', () => {
   const config: RoundRobinConfig = {
@@ -336,4 +337,334 @@ describe('Tournament Aggregate (round-by-round)', () => {
     assert.strictEqual(standings.find((s) => s.playerId === 'A')!.points, 0);
     assert.strictEqual(standings.find((s) => s.playerId === 'B')!.points, 0);
   });
+
+  test('standingsAfterRound reports truthful historical withdrawal state', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.register('C');
+    t.register('D');
+    t.start();
+
+    // Round 0: 4 players -> 2 games. Play them both.
+    const r0 = t.getRounds()[0];
+    for (let i = 0; i < r0.pairings.length; i++) {
+      t.recordResult(0, i, 'white_win');
+    }
+
+    // Now round 1 has started. D withdraws during round 1.
+    assert.strictEqual(t.getRounds().length, 2);
+    assert.strictEqual(t.getRounds()[1].roundIndex, 1);
+
+    t.withdraw('D');
+
+    // A. Historical flag before withdrawal:
+    // standingsAfterRound(0) must show D as NOT withdrawn (withdrawn === false)
+    const standingsR0 = t.standingsAfterRound(0);
+    const dStandingR0 = standingsR0.find((s) => s.playerId === 'D');
+    assert.ok(dStandingR0, 'D exists in round 0 standings');
+    assert.strictEqual(
+      dStandingR0.withdrawn,
+      false,
+      'D was active at end of round 0 and must not be marked withdrawn in round 0 standings',
+    );
+
+    // B. Withdrawal round itself:
+    const standingsR1 = t.standingsAfterRound(1);
+    const dStandingR1 = standingsR1.find((s) => s.playerId === 'D');
+    assert.ok(dStandingR1, 'D exists in round 1 standings');
+    assert.strictEqual(
+      dStandingR1.withdrawn,
+      true,
+      'D withdrew during round 1 and must be marked withdrawn in round 1 standings',
+    );
+
+    // C. Current standings unchanged:
+    const currentStandings = t.standings();
+    const dCurrent = currentStandings.find((s) => s.playerId === 'D');
+    assert.strictEqual(dCurrent?.withdrawn, true, 'D is currently withdrawn');
+    assert.strictEqual(currentStandings.find((s) => s.playerId === 'A')?.withdrawn, false);
+
+    // D. Earlier results remain historical:
+    assert.strictEqual(dStandingR0.gamesPlayed, 1);
+    assert.strictEqual(dStandingR0.losses, 1);
+    assert.strictEqual(dStandingR0.points, 0);
+
+    // Complete the other round-1 pairing so a genuine later round exists.
+    const r1 = t.getRounds()[1];
+    const dPairingIndex = r1.pairings.findIndex(
+      (p) => p.kind === 'game' && (p.white === 'D' || p.black === 'D'),
+    );
+    assert.notStrictEqual(dPairingIndex, -1);
+    assert.notStrictEqual(t.resultFor(1, dPairingIndex), undefined, 'withdrawal forfeits D’s round-1 game');
+    for (let i = 0; i < r1.pairings.length; i++) {
+      if (t.resultFor(1, i) === undefined) t.recordResult(1, i, 'draw');
+    }
+    assert.strictEqual(t.getRounds()[2]?.roundIndex, 2);
+    assert.strictEqual(t.standingsAfterRound(2).find((s) => s.playerId === 'D')?.withdrawn, true);
+
+    // E. Snapshot round-trip:
+    const snap = t.toSnapshot();
+    const restored = Tournament.restore(snap, new RoundRobinPairing());
+
+    const restoredR0 = restored.standingsAfterRound(0);
+    assert.strictEqual(restoredR0.find((s) => s.playerId === 'D')?.withdrawn, false);
+
+    const restoredR1 = restored.standingsAfterRound(1);
+    assert.strictEqual(restoredR1.find((s) => s.playerId === 'D')?.withdrawn, true);
+
+    const restoredCurrent = restored.standings();
+    assert.strictEqual(restoredCurrent.find((s) => s.playerId === 'D')?.withdrawn, true);
+  });
+
+  test('withdraw is idempotent and retains initial withdrawal round', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.register('C');
+    t.register('D');
+    t.start();
+
+    // D withdraws in round 0
+    t.withdraw('D');
+    t.withdraw('D');
+
+    const snap = t.toSnapshot();
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 0]]);
+
+    // Finish remaining game in round 0
+    const r0 = t.getRounds()[0];
+    for (let i = 0; i < r0.pairings.length; i++) {
+      const matchId = `0-${i}`;
+      if (!snap.results.some(([m]) => m === matchId)) {
+        t.recordResult(0, i, 'draw');
+      }
+    }
+
+    assert.strictEqual(t.getState(), 'running');
+    assert.strictEqual(t.getRounds()[1]?.roundIndex, 1);
+    t.withdraw('D');
+    const snap2 = t.toSnapshot();
+    assert.deepStrictEqual(snap2.withdrawalRounds, [['D', 0]]);
+    assert.strictEqual(t.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, true);
+    assert.strictEqual(t.standingsAfterRound(1).find((s) => s.playerId === 'D')?.withdrawn, true);
+  });
+
+  test('registration withdrawal does not create historical withdrawal records', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.register('C');
+    t.withdraw('C');
+
+    assert.deepStrictEqual(t.getParticipants(), ['A', 'B']);
+    const snap = t.toSnapshot();
+    assert.strictEqual(snap.withdrawn?.includes('C') ?? false, false);
+    assert.strictEqual(snap.withdrawalRounds?.length ?? 0, 0);
+
+    t.start();
+    t.recordResult(0, 0, 'white_win');
+
+    const standings = t.standingsAfterRound(0);
+    assert.strictEqual(standings.some((s) => s.playerId === 'C'), false);
+  });
+
+  test('legacy snapshot restore without withdrawalRounds preserves legacy observable semantics', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.register('C');
+    t.register('D');
+    t.start();
+
+    // Round 0
+    t.recordResult(0, 0, 'white_win');
+    t.recordResult(0, 1, 'draw');
+
+    // Round 1
+    t.withdraw('D');
+
+    // Simulate a legacy snapshot that has `withdrawn: ['D']` but lacks `withdrawalRounds`
+    const snap = t.toSnapshot();
+    const { withdrawalRounds, ...legacySnap } = snap;
+    assert.deepStrictEqual(withdrawalRounds, [['D', 1]]);
+    assert.strictEqual('withdrawalRounds' in legacySnap, false);
+
+    const restored = Tournament.restore(legacySnap, new RoundRobinPairing());
+    const r0Standings = restored.standingsAfterRound(0);
+    assert.strictEqual(
+      r0Standings.find((s) => s.playerId === 'D')?.withdrawn,
+      true,
+      'Legacy snapshots without withdrawalRounds preserve legacy behavior where withdrawn was true across all rounds',
+    );
+    assert.strictEqual(restored.standings().find((s) => s.playerId === 'D')?.withdrawn, true);
+
+    // A later withdrawal must not fabricate a date for the legacy player.
+    assert.strictEqual(restored.getState(), 'running');
+    restored.withdraw('C');
+    assert.deepStrictEqual(restored.toSnapshot().withdrawalRounds, [['C', 1]]);
+    assert.strictEqual(restored.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, true);
+    assert.strictEqual(restored.standingsAfterRound(0).find((s) => s.playerId === 'C')?.withdrawn, false);
+    assert.strictEqual(restored.standingsAfterRound(1).find((s) => s.playerId === 'C')?.withdrawn, true);
+    const mixedRestored = Tournament.restore(restored.toSnapshot(), new RoundRobinPairing());
+    assert.deepStrictEqual(mixedRestored.standingsAfterRound(0), restored.standingsAfterRound(0));
+  });
+
+  test('withdrawal round is captured before forfeit causes synchronous round advancement', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.register('C');
+    t.register('D');
+    t.start();
+
+    // In round 0, resolve the match not involving D first
+    const r0 = t.getRounds()[0];
+    const dPairingIdx = r0.pairings.findIndex(
+      (p) => p.kind === 'game' && (p.white === 'D' || p.black === 'D'),
+    );
+    const otherPairingIdx = dPairingIdx === 0 ? 1 : 0;
+    t.recordResult(0, otherPairingIdx, 'white_win');
+
+    // Withdrawing D will forfeit the only remaining game in round 0,
+    // immediately completing round 0 and causing tryAdvance() to generate round 1
+    assert.strictEqual(t.getRounds().length, 1);
+    t.withdraw('D');
+
+    assert.strictEqual(t.getRounds().length, 2);
+    assert.strictEqual(t.getRounds()[1].roundIndex, 1);
+
+    const snap = t.toSnapshot();
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 0]]);
+    assert.strictEqual(t.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, true);
+  });
+
+  test('withdrawal in the final round stays in that round after the tournament finishes', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    ['A', 'B', 'C', 'D'].forEach((player) => t.register(player));
+    t.start();
+    for (const roundIndex of [0, 1]) {
+      const round = t.getRounds()[roundIndex];
+      assert.strictEqual(round?.roundIndex, roundIndex);
+      for (let i = 0; i < round.pairings.length; i++) t.recordResult(roundIndex, i, 'draw');
+    }
+
+    const finalRound = t.getRounds()[2];
+    assert.strictEqual(finalRound?.roundIndex, 2);
+    const dPairingIndex = finalRound.pairings.findIndex(
+      (p) => p.kind === 'game' && (p.white === 'D' || p.black === 'D'),
+    );
+    assert.notStrictEqual(dPairingIndex, -1);
+    for (let i = 0; i < finalRound.pairings.length; i++) {
+      if (i !== dPairingIndex) t.recordResult(2, i, 'draw');
+    }
+    t.withdraw('D');
+
+    assert.strictEqual(t.getState(), 'finished');
+    assert.deepStrictEqual(t.toSnapshot().withdrawalRounds, [['D', 2]]);
+    assert.strictEqual(t.standingsAfterRound(1).find((s) => s.playerId === 'D')?.withdrawn, false);
+    assert.strictEqual(t.standingsAfterRound(2).find((s) => s.playerId === 'D')?.withdrawn, true);
+    assert.throws(() => t.withdraw('D'), /Cannot withdraw after tournament has finished/);
+  });
+
+  test('Swiss historical withdrawal remains truthful after pairing excludes the player', () => {
+    const swissConfig: SwissConfig = { ...config, format: 'swiss', rounds: 3 };
+    const t = new Tournament(swissConfig, new SwissPairing(3));
+    ['A', 'B', 'C', 'D', 'E', 'F'].forEach((player) => t.register(player));
+    t.start();
+    const firstRound = t.getRounds()[0];
+    assert.strictEqual(firstRound.roundIndex, 0);
+    for (let i = 0; i < firstRound.pairings.length; i++) t.recordResult(0, i, 'draw');
+    assert.strictEqual(t.getRounds()[1]?.roundIndex, 1);
+
+    t.withdraw('D');
+    assert.strictEqual(t.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, false);
+    assert.strictEqual(t.standingsAfterRound(1).find((s) => s.playerId === 'D')?.withdrawn, true);
+    const secondRound = t.getRounds()[1];
+    for (let i = 0; i < secondRound.pairings.length; i++) {
+      if (t.resultFor(1, i) === undefined) t.recordResult(1, i, 'draw');
+    }
+    assert.strictEqual(t.getRounds()[2]?.roundIndex, 2);
+    assert.strictEqual(t.standingsAfterRound(2).find((s) => s.playerId === 'D')?.withdrawn, true);
+    assert.strictEqual(
+      t.getRounds()[2].pairings.some((p) => p.kind === 'game' && (p.white === 'D' || p.black === 'D')),
+      false,
+    );
+  });
+
+  test('withdrawing the current bye voids its point without rewriting earlier results', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    ['A', 'B', 'C'].forEach((player) => t.register(player));
+    t.start();
+    const round = t.getRounds()[0];
+    const byeIndex = round.pairings.findIndex((pairing) => pairing.kind === 'bye');
+    assert.notStrictEqual(byeIndex, -1);
+    const bye = round.pairings[byeIndex];
+    assert.strictEqual(bye.kind, 'bye');
+    if (bye.kind !== 'bye') throw new Error('Expected a bye pairing');
+    assert.strictEqual(t.resultFor(0, byeIndex), 'bye');
+
+    t.withdraw(bye.player);
+    assert.strictEqual(t.resultFor(0, byeIndex), 'void');
+    assert.deepStrictEqual(t.toSnapshot().withdrawalRounds, [[bye.player, 0]]);
+    const standing = t.standingsAfterRound(0).find((s) => s.playerId === bye.player);
+    assert.strictEqual(standing?.withdrawn, true);
+    assert.strictEqual(standing?.byes, 0);
+    assert.strictEqual(standing?.points, 0);
+  });
+
+  test('an earlier recorded forfeit remains historical before a later withdrawal', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    ['A', 'B', 'C', 'D'].forEach((player) => t.register(player));
+    t.start();
+    const firstRound = t.getRounds()[0];
+    const dPairingIndex = firstRound.pairings.findIndex(
+      (p) => p.kind === 'game' && (p.white === 'D' || p.black === 'D'),
+    );
+    assert.notStrictEqual(dPairingIndex, -1);
+    t.recordResult(0, dPairingIndex, 'double_forfeit');
+    for (let i = 0; i < firstRound.pairings.length; i++) {
+      if (i !== dPairingIndex) t.recordResult(0, i, 'draw');
+    }
+    assert.strictEqual(t.getRounds()[1]?.roundIndex, 1);
+    t.withdraw('D');
+
+    assert.strictEqual(t.resultFor(0, dPairingIndex), 'double_forfeit');
+    assert.strictEqual(t.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, false);
+    assert.strictEqual(t.standingsAfterRound(0).find((s) => s.playerId === 'D')?.points, 0);
+    assert.strictEqual(t.standingsAfterRound(1).find((s) => s.playerId === 'D')?.withdrawn, true);
+  });
+
+  test('snapshot omits withdrawalRounds key when no withdrawals occurred', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.start();
+
+    const snap = t.toSnapshot();
+    assert.strictEqual('withdrawalRounds' in snap, false);
+    assert.strictEqual(snap.withdrawalRounds, undefined);
+
+    const restored = Tournament.restore(snap, new RoundRobinPairing());
+    const restoredSnap = restored.toSnapshot();
+    assert.strictEqual('withdrawalRounds' in restoredSnap, false);
+  });
+
+  test('snapshot withdrawalRounds is isolated from live aggregate mutations', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.register('C');
+    t.register('D');
+    t.start();
+    t.withdraw('D');
+
+    const snap = t.toSnapshot();
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 0]]);
+
+    t.withdraw('C');
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 0]], 'previous snapshot unaffected by later withdrawal');
+    assert.deepStrictEqual(t.toSnapshot().withdrawalRounds, [['D', 0], ['C', 0]]);
+  });
 });
+

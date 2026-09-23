@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-23 — M15 Increment 62: Legal-move UCI round-trip invariant across chess variants._
+_Last updated: 2026-09-23 — M15 Increment 63: Historical tournament withdrawal state preservation._
+
+Prior: _Last updated: 2026-09-23 — M15 Increment 62: Legal-move UCI round-trip invariant across chess variants._
 
 Prior: _Last updated: 2026-09-22 — M15 Increment 61: exact-accounting zero-skip correction and PR #56 integration._
 
@@ -4357,3 +4359,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Asserted a unique UCI encoding for every distinct legal move in each tested position, including all 960 Chess960 starting arrays and targeted castling, promotion, en-passant, drop, explosion, check-counter, and variant-terminal fixtures.
 - Strengthened the Racing Kings anti-check regression with a same-board Standard positive control: `e2c3` and `e2c1` are legal checks under Standard rules but illegal under Racing Kings. Also covered the near-goal case where White's rank-eight arrival leaves Black an equalizing reply.
 - The PR changes tests and this append-only project-state entry only; no production source is changed.
+
+## M15 Increment 63 — Historical tournament withdrawal state preservation (2026-09-23)
+
+- `Tournament.standingsAfterRound(roundIndex)` now reports a participant as withdrawn starting with the 0-based round in which they withdrew, leaving earlier round standings active and current `standings()` behavior unchanged. The withdrawal round is captured before game/bye forfeits and before synchronous `tryAdvance()` can generate the next round or finish the event; repeated withdrawal retains the first recorded round.
+- Added optional `withdrawalRounds` snapshot tuples, omitted when empty. Restore preserves legacy snapshots without those tuples and their prior retroactive withdrawal display rather than inventing dates; modern entries are copied and validated against withdrawn participants and existing rounds, rejecting duplicate or contradictory values. Mixed legacy and newly recorded withdrawals keep their respective semantics without a database migration.
+- ADR-0143 records the contract. Round-robin and Swiss lifecycle tests cover before/at/after boundaries, synchronous advancement, final-round and repeated withdrawal, current standings, forfeits and voided byes, in-progress restore, snapshot round-trip, legacy behavior, and malformed metadata.
