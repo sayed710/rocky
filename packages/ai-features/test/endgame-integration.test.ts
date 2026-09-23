@@ -1,7 +1,7 @@
 /**
  * Env-gated integration test for `EndgameTrainer`.
  *
- * Skips without an API key, same pattern as the other four features.
+ * The live-provider runner registers this file only for the selected, provisioned provider.
  */
 
 import { test, describe } from 'node:test';
@@ -30,8 +30,8 @@ const fakeEngine: AnalysisProvider = {
 
 const openaiKey = process.env['OPENAI_API_KEY'];
 
-describe('EndgameTrainer integration (OpenAI)', () => {
-  test('real narrative with engine-verified solution', { skip: !openaiKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'openai') describe('EndgameTrainer integration (OpenAI)', () => {
+  test('real narrative with engine-verified solution', async () => {
     const db = new BundledEndgameDatabase();
     const ai = new OpenAiCompatibleAdapter({ id: 'openai', apiKey: openaiKey, defaultModel: 'gpt-4o-mini' });
     const trainer = new EndgameTrainer({ database: db, engine: fakeEngine, ai });
@@ -46,10 +46,10 @@ describe('EndgameTrainer integration (OpenAI)', () => {
 
 const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 
-describe('EndgameTrainer integration (Anthropic)', () => {
-  test('real coaching with engine-verified evaluation', { skip: !anthropicKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('EndgameTrainer integration (Anthropic)', () => {
+  test('real coaching with engine-verified evaluation', async () => {
     const db = new BundledEndgameDatabase();
-    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-3-5-sonnet-20241022' });
+    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-sonnet-4-6' });
     const trainer = new EndgameTrainer({ database: db, engine: fakeEngine, ai });
 
     const result = await trainer.evaluateAttempt({

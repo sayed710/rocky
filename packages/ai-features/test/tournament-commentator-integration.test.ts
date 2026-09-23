@@ -1,7 +1,7 @@
 /**
  * Live integration test for `TournamentCommentator`.
  *
- * Gated by `GAMBIT_TEST_INTEGRATION=1`.
+ * Selected by `GAMBIT_LIVE_PROVIDER=openai` through the live-provider runner.
  * Uses a real `OpenAiCompatibleAdapter` (requires `OPENAI_API_KEY`) and a 
  * mock `AnalysisProvider` to verify wiring to a real LLM.
  */
@@ -50,7 +50,7 @@ const fakeEngine: AnalysisProvider = {
   },
 };
 
-describe('TournamentCommentator (integration)', { skip: !process.env.GAMBIT_TEST_INTEGRATION }, () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'openai') describe('TournamentCommentator (integration)', () => {
   let commentator: TournamentCommentator;
 
   before(async () => {
