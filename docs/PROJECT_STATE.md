@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-22 — M15 Increment 61: exact-accounting zero-skip correction and PR #56 integration._
+_Last updated: 2026-09-23 — M15 Increment 62: Legal-move UCI round-trip invariant across chess variants._
+
+Prior: _Last updated: 2026-09-22 — M15 Increment 61: exact-accounting zero-skip correction and PR #56 integration._
 
 Prior: _Last updated: 2026-09-22 — M15 Increment 60: hash-aware immutable asset delivery contract._
 
@@ -4348,3 +4350,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Split live OpenAI and Anthropic contracts into independently selectable scripts and workflow steps. One provisioned credential now runs its full provider surface without registering the absent provider as skipped; both credentials run both surfaces, and no credentials fail closed.
 - Hardened TAP/spec processing with ANSI removal, complete six-field summary accounting, complete plan-only TAP validation, pass/total reconciliation, malformed and contradictory transcript rejection, UTF-8-safe independent stdout/stderr streaming, and child signal forwarding with listener cleanup. `test-counts.mjs` consumes the same exact accounting and no longer synthesizes pass totals.
 - Scoped deployment exclusions to the exact `deploy/helm` and `deploy/observability` trees, added portable negative-extglob fallback coverage, and added falsification regressions for package directories with colliding names, partial summaries, contradictory summaries, truncated plans, ANSI output, provider credential matrices, and Playwright skipped outcomes.
+
+## M15 Increment 62 — Legal-move UCI round-trip invariant across chess variants (2026-09-23)
+
+- Added a test-only `@chess-platform/core` invariant suite that enumerates every legal move in representative positions for Standard, Chess960, Crazyhouse, Three-check, Atomic, Horde, Racing Kings, and King of the Hill. For each move, UCI-string and Move-object execution must agree on FEN, public status, and snapshot, while leaving the parent position unchanged.
+- Asserted a unique UCI encoding for every distinct legal move in each tested position, including all 960 Chess960 starting arrays and targeted castling, promotion, en-passant, drop, explosion, check-counter, and variant-terminal fixtures.
+- Strengthened the Racing Kings anti-check regression with a same-board Standard positive control: `e2c3` and `e2c1` are legal checks under Standard rules but illegal under Racing Kings. Also covered the near-goal case where White's rank-eight arrival leaves Black an equalizing reply.
+- The PR changes tests and this append-only project-state entry only; no production source is changed.
