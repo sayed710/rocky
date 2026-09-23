@@ -38,6 +38,7 @@ const CORE = [
   ['CI parity', 'npm run check:ci-parity'],
   ['variant parity', 'npm run check:variant-parity'],
   ['engine pin parity', 'npm run check:engine-pin-parity'],
+  ['test topology', 'npm run check:test-topology'],
   ['guard script tests', 'npm run test:scripts'],
 ];
 
@@ -79,8 +80,9 @@ const SERVICE_JOBS = [
       ? 'DATABASE_URL does not name a database with "test" in it — these suites need a disposable, empty one'
       : null,
     steps: [
-      ['persistence against Postgres', 'npm test --workspace @chess-platform/persistence'],
-      ['api concurrency against Postgres', 'npm test --workspace @chess-platform/api'],
+      ['persistence against Postgres', 'npm run test:integration:postgres --workspace @chess-platform/persistence'],
+      ['api concurrency against Postgres', 'npm run test:integration:postgres --workspace @chess-platform/api'],
+      ['scripts integration against Postgres', 'npm run test:scripts:integration'],
     ],
   },
   {
@@ -104,6 +106,16 @@ const SERVICE_JOBS = [
     env: { REQUIRE_DOCKER: '1' },
     steps: [
       ['trusted edge through real Nginx', 'npm run test:trusted-edge'],
+      ['web delivery caching and compression through real Nginx', 'npm run test:web-delivery'],
+    ],
+  },
+  {
+    name: 'posix contract tests (Linux/macOS only)',
+    needs: 'POSIX platform',
+    available: process.platform !== 'win32',
+    steps: [
+      ['POSIX API tests', 'npm run test:posix -w @chess-platform/api'],
+      ['POSIX load harness tests', 'npm run test:load-harness:posix'],
     ],
   },
 ];

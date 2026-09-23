@@ -1,7 +1,7 @@
 /**
  * Env-gated integration test for `StudyPartner`.
  *
- * Skips without an API key, same pattern as the other six features.
+ * The live-provider runner registers this file only for the selected, provisioned provider.
  */
 
 import { test, describe } from 'node:test';
@@ -25,8 +25,8 @@ const fakeEngine: AnalysisProvider = {
 
 const openaiKey = process.env['OPENAI_API_KEY'];
 
-describe('StudyPartner integration (OpenAI)', () => {
-  test('real session with narrative', { skip: !openaiKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'openai') describe('StudyPartner integration (OpenAI)', () => {
+  test('real session with narrative', async () => {
     const ai = new OpenAiCompatibleAdapter({ id: 'openai', apiKey: openaiKey, defaultModel: 'gpt-4o-mini' });
     const coach = new Coach({ engine: fakeEngine, ai });
     const store = new InMemoryStudySessionStore();
@@ -46,9 +46,9 @@ describe('StudyPartner integration (OpenAI)', () => {
 
 const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 
-describe('StudyPartner integration (Anthropic)', () => {
-  test('real session with narrative', { skip: !anthropicKey }, async () => {
-    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-3-5-sonnet-20241022' });
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('StudyPartner integration (Anthropic)', () => {
+  test('real session with narrative', async () => {
+    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-sonnet-4-6' });
     const coach = new Coach({ engine: fakeEngine, ai });
     const store = new InMemoryStudySessionStore();
     const partner = new StudyPartner({ store, coach, ai, idGenerator: () => 'int-anthropic' });

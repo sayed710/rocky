@@ -1,13 +1,10 @@
 /**
  * Env-gated integration test for `MistakePredictor`.
  *
- * Skips without an API key, exactly like the MoveExplainer and
- * PuzzleGenerator integration tests.  When the key is present, runs
- * the real path against a real provider — proving the wiring works
- * beyond fakes.
+ * The live-provider runner registers only the selected, provisioned provider and runs the
+ * real path against it, proving the wiring beyond fakes without creating skipped tests.
  *
- * Run with: OPENAI_API_KEY=sk-... npm test
- *           ANTHROPIC_API_KEY=sk-ant-... npm test
+ * Run with the package's `test:live-provider:openai` or `test:live-provider:anthropic` script.
  */
 
 import { test, describe } from 'node:test';
@@ -86,8 +83,8 @@ const fakeEngine: AnalysisProvider = {
 
 const openaiKey = process.env['OPENAI_API_KEY'];
 
-describe('MistakePredictor integration (OpenAI)', () => {
-  test('real completion with engine-verified verdict', { skip: !openaiKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'openai') describe('MistakePredictor integration (OpenAI)', () => {
+  test('real completion with engine-verified verdict', async () => {
     const ai = new OpenAiCompatibleAdapter({
       id: 'openai',
       apiKey: openaiKey,
@@ -126,11 +123,11 @@ describe('MistakePredictor integration (OpenAI)', () => {
 
 const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 
-describe('MistakePredictor integration (Anthropic)', () => {
-  test('real completion with engine-verified verdict', { skip: !anthropicKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('MistakePredictor integration (Anthropic)', () => {
+  test('real completion with engine-verified verdict', async () => {
     const ai = new AnthropicAdapter({
       apiKey: anthropicKey,
-      defaultModel: 'claude-3-5-sonnet-20241022',
+      defaultModel: 'claude-sonnet-4-6',
     });
 
     const predictor = new MistakePredictor({ engine: fakeEngine, ai });
