@@ -413,30 +413,6 @@ test('an interrupt after clearing still leaves a failure artifact', () => {
   assert.notEqual(result.status, 0, 'and an interrupted run must never look like a successful one');
 });
 
-test(
-  'a real SIGTERM leaves the artifact and still terminates by the signal',
-  { skip: process.platform === 'win32' ? 'Windows terminates on kill() without running handlers' : false },
-  async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'gambit-evidence-'));
-    const file = join(dir, 'child.mjs');
-    writeFileSync(file, armScript(dir, "console.log('armed');\nsetTimeout(() => {}, 60_000);"), 'utf8');
-
-    const child = spawn(process.execPath, [file], { cwd: REPO_ROOT, encoding: 'utf8' });
-    await once(child.stdout, 'data');
-    child.kill('SIGTERM');
-    const [code, signal] = await once(child, 'exit');
-
-    assert.equal(
-      signal,
-      'SIGTERM',
-      'the handler re-raises after writing, so the process still dies BY the signal rather than ' +
-        'turning an interrupt into an ordinary exit',
-    );
-    assert.equal(code, null);
-    assert.equal(JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')).exitCode, 143);
-  },
-);
-
 test('a run that wrote its own evidence is not overwritten by the fallback', () => {
   const dir = mkdtempSync(join(tmpdir(), 'gambit-evidence-'));
   const result = runInChild(

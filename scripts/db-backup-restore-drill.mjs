@@ -801,7 +801,10 @@ export async function runBackupRestoreDrill(options = {}) {
   });
 
   const sourcePool = new Pool({ connectionString: options.sourceUrl, max: 2 });
+  sourcePool.on('connect', (client) => { client.on('error', () => {}); });
+  sourcePool.on('error', () => {});
   let targetPool = null;
+  const targetClients = new Set();
   let adminClient = null;
   let targetCreatedByThisRun = false;
   let backupCreatedByThisRun = false;
@@ -919,11 +922,13 @@ export async function runBackupRestoreDrill(options = {}) {
     log(`Provisioning isolated target database "${parsedTarget.database}"...`);
     const adminUrl = urlWithDatabase(targetUrl, 'postgres');
     adminClient = new Client({ connectionString: adminUrl, statement_timeout: 10000 });
+    adminClient.on('error', () => {});
     try {
       await adminClient.connect();
     } catch {
       // Try template1 if postgres db is not accessible
       adminClient = new Client({ connectionString: urlWithDatabase(targetUrl, 'template1'), statement_timeout: 10000 });
+      adminClient.on('error', () => {});
       await adminClient.connect();
     }
 
@@ -1009,6 +1014,14 @@ export async function runBackupRestoreDrill(options = {}) {
     log('Running comprehensive structural and functional verification...');
     const verifyStart = Date.now();
     targetPool = new Pool({ connectionString: targetUrl, max: 2 });
+    targetPool.on('connect', (client) => {
+      targetClients.add(client);
+      client.on('error', () => {});
+    });
+    targetPool.on('remove', (client) => {
+      targetClients.delete(client);
+    });
+    targetPool.on('error', () => {});
     const verifyResult = await verifyRestoredDatabase(sourceBaseline, targetPool, options);
     report.timings.verifyMs = Date.now() - verifyStart;
     report.checks = verifyResult.checks;
@@ -1021,6 +1034,10 @@ export async function runBackupRestoreDrill(options = {}) {
     // Teardown connections
     await sourcePool.end().catch(err => cleanupErrors.push(err));
     if (targetPool) {
+      targetPool.on('error', () => {});
+      for (const client of targetClients) {
+        client.on('error', () => {});
+      }
       await targetPool.end().catch(err => cleanupErrors.push(err));
     }
 
@@ -1029,6 +1046,9 @@ export async function runBackupRestoreDrill(options = {}) {
       if (!options.keepTarget && parsedTarget.database && targetCreatedByThisRun) {
         try {
           log(`Cleaning up isolated target database "${parsedTarget.database}"...`);
+          for (const client of targetClients) {
+            client.on('error', () => {});
+          }
           await adminClient.query(`DROP DATABASE IF EXISTS "` + parsedTarget.database.replace(/"/g, '""') + `" WITH (FORCE)`);
           log('Target database dropped.');
         } catch (err) {

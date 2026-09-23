@@ -1,12 +1,8 @@
 /**
- * Integration tests for the OpenAI-compatible and Anthropic adapters.
+ * Hermetic tests for the OpenAI-compatible and Anthropic adapters.
  *
- * These tests are env-gated: they skip unless the relevant API key
- * is present in the environment, exactly like the Postgres-gated
- * persistence tests (gated on `DATABASE_URL`).
- *
- * Run with: OPENAI_API_KEY=sk-... npm test
- *           ANTHROPIC_API_KEY=sk-ant-... npm test
+ * Live provider contracts are isolated in `adapters-live.integration.test.ts` and run through the
+ * provider-specific zero-skip package commands.
  */
 
 import { test, describe } from 'node:test';
@@ -173,25 +169,8 @@ describe('OpenAiCompatibleAdapter', () => {
   });
 });
 
-// Env-gated integration test (skips without OPENAI_API_KEY)
-const openaiKey = process.env['OPENAI_API_KEY'];
-test('OpenAI adapter: real completion', { skip: !openaiKey }, async () => {
-  const adapter = new OpenAiCompatibleAdapter({
-    id: 'openai',
-    apiKey: openaiKey,
-    defaultModel: 'gpt-4o-mini',
-  });
-  const response = await adapter.complete({
-    task: 'general',
-    messages: [{ role: 'user', content: 'What is 2+2? Reply with just the number.' }],
-    maxTokens: 10,
-  });
-  assert.ok(response.content);
-  assert.equal(response.providerId, 'openai');
-});
-
 // ---------------------------------------------------------------------------
-// Anthropic adapter (env-gated)
+// Anthropic adapter
 // ---------------------------------------------------------------------------
 
 describe('AnthropicAdapter', () => {
@@ -207,20 +186,4 @@ describe('AnthropicAdapter', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'fake' });
     await assert.rejects(adapter.embed({ input: 'test' }), /does not support embeddings/);
   });
-});
-
-// Env-gated integration test (skips without ANTHROPIC_API_KEY)
-const anthropicKey = process.env['ANTHROPIC_API_KEY'];
-test('Anthropic adapter: real completion', { skip: !anthropicKey }, async () => {
-  const adapter = new AnthropicAdapter({
-    apiKey: anthropicKey,
-    defaultModel: 'claude-3-5-sonnet-20241022',
-  });
-  const response = await adapter.complete({
-    task: 'general',
-    messages: [{ role: 'user', content: 'What is 2+2? Reply with just the number.' }],
-    maxTokens: 10,
-  });
-  assert.ok(response.content);
-  assert.equal(response.providerId, 'anthropic');
 });

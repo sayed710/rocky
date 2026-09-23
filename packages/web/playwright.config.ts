@@ -5,9 +5,8 @@
  *   npm run e2e                        # static/offline specs (vite preview only)
  *   GAMBIT_E2E_BACKEND=1 npm run e2e   # all specs (starts e2e harness + vite preview)
  *
- * Backend-dependent specs (game-vs-bot, game-vs-human) are gated with
- * `test.skip(!process.env.GAMBIT_E2E_BACKEND, ...)` so `npm run e2e`
- * without backends only runs the static/offline specs.
+ * Backend-dependent specs are excluded during offline discovery. Their own
+ * `test.skip` guards remain a safety net for direct file invocations.
  *
  * When GAMBIT_E2E_BACKEND=1, Playwright starts and health-checks both the
  * e2e harness and Vite preview. Keeping them as separate managed processes is
@@ -19,13 +18,40 @@
  */
 import type { PlaywrightTestConfig } from '@playwright/test';
 import { cpus } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const isBackend = !!process.env['GAMBIT_E2E_BACKEND'];
+const zeroSkipReporter = fileURLToPath(
+  new URL('../../scripts/playwright-zero-skip-reporter.mjs', import.meta.url)
+);
+const backendSpecs = [
+  'account-security-sessions.spec.ts',
+  'achievements.spec.ts',
+  'analysis.spec.ts',
+  'forum.spec.ts',
+  'game-actions.spec.ts',
+  'game-keyboard.spec.ts',
+  'game-lifecycle.spec.ts',
+  'game-presence.spec.ts',
+  'game-responsive.spec.ts',
+  'game-vs-bot.spec.ts',
+  'game-vs-human.spec.ts',
+  'learning.spec.ts',
+  'messages.spec.ts',
+  'play-vs-computer.spec.ts',
+  'search.spec.ts',
+  'seek-acceptance.spec.ts',
+  'studies.spec.ts',
+  'teams.spec.ts',
+  'tournaments.spec.ts',
+];
 
 const config: PlaywrightTestConfig = {
   testDir: './e2e',
+  testIgnore: isBackend ? [] : backendSpecs.map((name) => `**/${name}`),
   timeout: 300_000,
   retries: 1,
+  reporter: [['list'], [zeroSkipReporter]],
   // Ceiling, not a fixed count: pinning `workers: 4` would RAISE parallelism on a 2-core CI
   // runner, which is the opposite of the fix. The backend-gated suite drives one shared single-process
   // `e2e-harness` and one vite preview server, and unbounded local parallelism starves them.
