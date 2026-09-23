@@ -49,7 +49,7 @@ const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('EndgameTrainer integration (Anthropic)', () => {
   test('real coaching with engine-verified evaluation', async () => {
     const db = new BundledEndgameDatabase();
-    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-3-5-sonnet-20241022' });
+    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-sonnet-4-6' });
     const trainer = new EndgameTrainer({ database: db, engine: fakeEngine, ai });
 
     const result = await trainer.evaluateAttempt({

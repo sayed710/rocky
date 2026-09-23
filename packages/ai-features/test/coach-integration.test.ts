@@ -43,7 +43,7 @@ const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 
 if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('Coach integration (Anthropic)', () => {
   test('real narrative with composed feature results', async () => {
-    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-3-5-sonnet-20241022' });
+    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-sonnet-4-6' });
     const coach = new Coach({ engine: fakeEngine, ai });
 
     const result = await coach.coach({ fen: STARTPOS, move: 'a2a3' });

@@ -116,7 +116,7 @@ if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('MoveExplainer
   test('real completion with grounded citation', async () => {
     const ai = new AnthropicAdapter({
       apiKey: anthropicKey,
-      defaultModel: 'claude-3-5-sonnet-20241022',
+      defaultModel: 'claude-sonnet-4-6',
     });
 
     const explainer = new MoveExplainer({ engine: fakeEngine, ai });

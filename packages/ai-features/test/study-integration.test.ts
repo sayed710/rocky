@@ -48,7 +48,7 @@ const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 
 if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('StudyPartner integration (Anthropic)', () => {
   test('real session with narrative', async () => {
-    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-3-5-sonnet-20241022' });
+    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-sonnet-4-6' });
     const coach = new Coach({ engine: fakeEngine, ai });
     const store = new InMemoryStudySessionStore();
     const partner = new StudyPartner({ store, coach, ai, idGenerator: () => 'int-anthropic' });

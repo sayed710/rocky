@@ -52,7 +52,7 @@ if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('OpeningExplor
     const db = new BundledOpeningDatabase();
     const ai = new AnthropicAdapter({
       apiKey: anthropicKey,
-      defaultModel: 'claude-3-5-sonnet-20241022',
+      defaultModel: 'claude-sonnet-4-6',
     });
 
     const explorer = new OpeningExplorer({ database: db, ai });

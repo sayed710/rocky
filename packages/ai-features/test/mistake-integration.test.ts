@@ -127,7 +127,7 @@ if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('MistakePredic
   test('real completion with engine-verified verdict', async () => {
     const ai = new AnthropicAdapter({
       apiKey: anthropicKey,
-      defaultModel: 'claude-3-5-sonnet-20241022',
+      defaultModel: 'claude-sonnet-4-6',
     });
 
     const predictor = new MistakePredictor({ engine: fakeEngine, ai });

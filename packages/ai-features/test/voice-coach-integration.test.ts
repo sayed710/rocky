@@ -45,7 +45,7 @@ const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 
 if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('VoiceCoach integration (Anthropic)', () => {
   test('real narrative smoothing with spoken segments', async () => {
-    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-3-5-sonnet-20241022' });
+    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-sonnet-4-6' });
     const coach = new Coach({ engine: fakeEngine });
     const voiceCoach = new VoiceCoach({ coach, ai });
 

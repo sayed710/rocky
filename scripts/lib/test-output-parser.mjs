@@ -24,7 +24,7 @@ export function stripAnsi(value) {
  * Ensures escaped hashes (`\#`) in descriptions are not misinterpreted as directives.
  */
 export const TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX =
-  /^[ \t]*(?:(?:ok|not ok)(?:[ \t]+\d+)?(?=[ \t]+(?:-|#)(?:[ \t]|$)|$)[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\b[^)]*\))/im;
+  /^[ \t]*(?:(?:ok|not ok)(?=[ \t]|$)[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*SKIP(?:PED)?\b|[\ufe63\-]\s+[^\r\n]*\((?:skipped|skip)\b[^)]*\))/im;
 
 /**
  * Line-anchored regex matching individual TAP or spec TODO directives.
@@ -33,14 +33,14 @@ export const TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX =
  * Ensures escaped hashes (`\#`) in descriptions are not misinterpreted as directives.
  */
 export const TAP_OR_SPEC_TODO_DIRECTIVE_REGEX =
-  /^[ \t]*(?:(?:ok|not ok)(?:[ \t]+\d+)?(?=[ \t]+(?:-|#)(?:[ \t]|$)|$)[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*\((?:to-?do)\b[^)]*\))/im;
+  /^[ \t]*(?:(?:ok|not ok)(?=[ \t]|$)[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*?(?<!\\)#\s*TO-?DO\b|[\ufe63\-]\s+[^\r\n]*\((?:to-?do)\b[^)]*\))/im;
 
 /**
  * Line-anchored regex matching raw TAP failure test points ("not ok") that do NOT
  * represent TODO or SKIP directives.
  */
 export const RAW_TAP_FAILURE_REGEX =
-  /^[ \t]*not ok(?:[ \t]+\d+)?(?=[ \t]+(?:-|#)(?:[ \t]|$)|$)(?:(?!(?<!\\)#\s*(?:TO-?DO|SKIP(?:PED)?)\b).)*$/im;
+  /^[ \t]*not ok(?=[ \t]|$)(?:(?!(?<!\\)#\s*(?:TO-?DO|SKIP(?:PED)?)\b).)*$/im;
 
 /**
  * Resolves the total tests count from reporter summary lines or TAP plan headers.
@@ -185,6 +185,8 @@ export function parseCancelledCount(output) {
 export function createStreamingTestParser() {
   let summaryTests = 0;
   let summaryTestsCount = 0;
+  let hasSpecTestSummary = false;
+  let hasTapTestSummary = false;
   let planTestsCount = 0;
   let hasZeroTestSummary = false;
 
@@ -209,6 +211,7 @@ export function createStreamingTestParser() {
   let topLevelPlanCount = 0;
   let topLevelPlanValue = null;
   let topLevelTapPoints = 0;
+  let topLevelNumberedTapPoints = 0;
   let topLevelPassPoints = 0;
   let malformedSummary = null;
 
@@ -266,7 +269,7 @@ export function createStreamingTestParser() {
 
   return {
     pushLine(line) {
-      line = stripAnsi(line);
+      line = stripAnsi(line).replace(/\r$/, '');
 
       const summaryLike = line.match(metricPrefixRegex);
       if (summaryLike && !/^\s*(?:#|ℹ)\s+(?:tests|pass(?:ed)?|fail(?:ed)?|skipped|todo|cancelled):?\s+\d+\s*$/i.test(line)) {
@@ -278,6 +281,8 @@ export function createStreamingTestParser() {
       if (testMatch) {
         const val = Number.parseInt(testMatch[1], 10);
         if (val === 0) hasZeroTestSummary = true;
+        if (/^\s*ℹ/.test(line)) hasSpecTestSummary = true;
+        else hasTapTestSummary = true;
         summaryTests += val;
         summaryTestsCount++;
         recordSummaryMetric('tests', val);
@@ -295,9 +300,10 @@ export function createStreamingTestParser() {
         }
       }
 
-      const tapPoint = line.match(/^(ok|not ok)(?:[ \t]+\d+)?(?=[ \t]+(?:-|#)(?:[ \t]|$)|$)/i);
+      const tapPoint = line.match(/^(ok|not ok)(?=[ \t]|$)/i);
       if (tapPoint) {
         topLevelTapPoints++;
+        if (/^(?:ok|not ok)[ \t]+\d+(?=[ \t]|$)/i.test(line)) topLevelNumberedTapPoints++;
         if (tapPoint[1].toLowerCase() === 'ok'
           && !TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX.test(line)
           && !TAP_OR_SPEC_TODO_DIRECTIVE_REGEX.test(line)) {
@@ -384,7 +390,12 @@ export function createStreamingTestParser() {
 
       // A reporter summary does not excuse missing or contradictory top-level TAP evidence.
       // Indented subtest plans describe a different scope and cannot be added to this plan.
-      if (!accountingError && (planTestsCount > 0 || topLevelTapPoints > 0)) {
+      // Spec reporters use the ℹ summary and can include application logs beginning
+      // with TAP-like words. TAP summaries and plan-only streams remain fail-closed.
+      const specOnlySummary = hasSpecTestSummary && !hasTapTestSummary;
+      const requiresTapReconciliation = planTestsCount > 0
+        || (topLevelTapPoints > 0 && (!specOnlySummary || topLevelNumberedTapPoints > 0));
+      if (!accountingError && requiresTapReconciliation) {
         if (topLevelPlanCount !== 1 || topLevelPlanValue === null) {
           accountingError = `Incomplete TAP evidence: expected exactly one top-level plan, found ${topLevelPlanCount}`;
         } else if (topLevelTapPoints !== topLevelPlanValue) {
