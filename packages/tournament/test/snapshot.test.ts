@@ -139,5 +139,68 @@ describe('Tournament Snapshot & Restore', () => {
     assert.strictEqual(restored.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, false);
     assert.strictEqual(restored.standingsAfterRound(1).find((s) => s.playerId === 'D')?.withdrawn, true);
     assert.strictEqual(restored.standings().find((s) => s.playerId === 'D')?.withdrawn, true);
+    assert.deepStrictEqual(restored.toSnapshot(), snap);
+  });
+
+  test('restoring an in-progress tournament then withdrawing records the current round', () => {
+    const t = new Tournament(rrConfig, new RoundRobinPairing());
+    ['A', 'B', 'C', 'D'].forEach((player) => t.register(player));
+    t.start();
+    t.recordResult(0, 0, 'draw');
+    t.recordResult(0, 1, 'draw');
+    const restored = Tournament.restore(t.toSnapshot(), new RoundRobinPairing());
+    assert.strictEqual(restored.getRounds()[1]?.roundIndex, 1);
+
+    restored.withdraw('D');
+    assert.deepStrictEqual(restored.toSnapshot().withdrawalRounds, [['D', 1]]);
+    assert.strictEqual(restored.standingsAfterRound(0).find((s) => s.playerId === 'D')?.withdrawn, false);
+    assert.strictEqual(restored.standingsAfterRound(1).find((s) => s.playerId === 'D')?.withdrawn, true);
+  });
+
+  test('withdrawal metadata order does not affect restored historical standings', () => {
+    const t = new Tournament(rrConfig, new RoundRobinPairing());
+    ['A', 'B', 'C', 'D'].forEach((player) => t.register(player));
+    t.start();
+    t.withdraw('D');
+    t.withdraw('C');
+    const snap = t.toSnapshot();
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 0], ['C', 0]]);
+
+    const reordered = Tournament.restore(
+      { ...snap, withdrawalRounds: [...snap.withdrawalRounds].reverse() },
+      new RoundRobinPairing(),
+    );
+    assert.deepStrictEqual(reordered.standingsAfterRound(0), t.standingsAfterRound(0));
+    assert.deepStrictEqual(reordered.standings(), t.standings());
+  });
+
+  test('restore rejects contradictory or malformed withdrawal metadata', () => {
+    const t = new Tournament(rrConfig, new RoundRobinPairing());
+    ['A', 'B', 'C', 'D'].forEach((player) => t.register(player));
+    t.start();
+    t.recordResult(0, 0, 'draw');
+    t.recordResult(0, 1, 'draw');
+    t.withdraw('D');
+    const snap = t.toSnapshot();
+    assert.deepStrictEqual(snap.withdrawalRounds, [['D', 1]]);
+
+    const invalidCases: readonly {
+      label: string;
+      rounds: readonly (readonly [string, number])[];
+      withdrawn?: readonly string[];
+      error: RegExp;
+    }[] = [
+      { label: 'negative round', rounds: [['D', -1]], error: /round must exist/ },
+      { label: 'fractional round', rounds: [['D', 0.5]], error: /round must exist/ },
+      { label: 'future round', rounds: [['D', 2]], error: /round must exist/ },
+      { label: 'unknown player', rounds: [['missing', 1]], error: /withdrawn participant/ },
+      { label: 'active player', rounds: [['A', 1]], error: /withdrawn participant/ },
+      { label: 'duplicate player', rounds: [['D', 0], ['D', 1]], error: /duplicate player/ },
+      { label: 'missing withdrawn marker', rounds: [['D', 1]], withdrawn: [], error: /withdrawn participant/ },
+    ];
+    for (const { label, rounds, withdrawn, error } of invalidCases) {
+      const candidate = { ...snap, withdrawalRounds: rounds, ...(withdrawn ? { withdrawn } : {}) };
+      assert.throws(() => Tournament.restore(candidate, new RoundRobinPairing()), error, label);
+    }
   });
 });

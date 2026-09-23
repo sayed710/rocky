@@ -76,7 +76,7 @@ export class Tournament {
 
     if (this.state === 'registration') {
       const idx = this.participants.indexOf(playerId);
-      if (idx !== -1) {
+      if (idx >= 0) {
         this.participants.splice(idx, 1);
       }
       return;
@@ -489,8 +489,27 @@ export class Tournament {
         t.withdrawn.add(w);
       }
     }
-    if (snapshot.withdrawalRounds) {
-      for (const [playerId, roundIndex] of snapshot.withdrawalRounds) {
+    if (snapshot.withdrawalRounds !== undefined) {
+      if (!Array.isArray(snapshot.withdrawalRounds)) {
+        throw new Error('Invalid withdrawalRounds: expected an array');
+      }
+      const participantIds = new Set(snapshot.participants);
+      const withdrawnIds = new Set(snapshot.withdrawn ?? []);
+      const roundIndices = new Set(snapshot.rounds.map((round) => round.roundIndex));
+      for (const entry of snapshot.withdrawalRounds) {
+        if (!Array.isArray(entry) || entry.length !== 2) {
+          throw new Error('Invalid withdrawalRounds: expected player/round tuples');
+        }
+        const [playerId, roundIndex] = entry;
+        if (typeof playerId !== 'string' || !participantIds.has(playerId) || !withdrawnIds.has(playerId)) {
+          throw new Error('Invalid withdrawalRounds: player must be a withdrawn participant');
+        }
+        if (!Number.isInteger(roundIndex) || roundIndex < 0 || !roundIndices.has(roundIndex)) {
+          throw new Error('Invalid withdrawalRounds: round must exist in the snapshot');
+        }
+        if (t.withdrawalRounds.has(playerId)) {
+          throw new Error('Invalid withdrawalRounds: duplicate player');
+        }
         t.withdrawalRounds.set(playerId, roundIndex);
       }
     }

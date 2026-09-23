@@ -40,12 +40,13 @@ If a player withdraws during `registration`, they are removed from `participants
 ```typescript
 readonly withdrawalRounds?: readonly (readonly [string, number])[];
 ```
-`toSnapshot()` serializes a defensive copy via `Array.from(this.withdrawalRounds.entries())`. `Tournament.restore()` populates internal state defensively via `Map` constructor. Callers cannot mutate aggregate state by modifying snapshot objects.
+`toSnapshot()` serializes a defensive copy via `Array.from(this.withdrawalRounds.entries())` and omits the property when no round has been recorded. `Tournament.restore()` validates and copies each tuple into its internal map; callers cannot mutate aggregate state by modifying snapshot objects. A recorded entry must identify an existing withdrawn participant and an existing non-negative integer round. Duplicate entries and contradictory metadata are rejected instead of silently choosing a historical value.
 
 ### 6. Legacy Snapshot Backward Compatibility
 Existing persisted tournament snapshots lack `withdrawalRounds`. They continue to restore without error:
 - When a restored snapshot contains players in `withdrawn` but omits `withdrawalRounds`, `standingsAfterRound(roundIndex)` preserves legacy observable semantics (reporting `withdrawn = true` across all historical rounds) rather than fabricating an arbitrary withdrawal round.
 - Modern snapshots with `withdrawalRounds` provide truthful per-round historical status (`withdrawn = roundIndex >= withdrawalRound`).
+- A restored legacy snapshot can later gain a new withdrawal. In that mixed case, older withdrawn players without recorded rounds retain legacy retroactive behavior, while newly withdrawn players use their recorded round. No missing historical date is invented.
 - Current standings via `Tournament.standings()` continue to report current withdrawal status unchanged.
 
 ### 7. No Database Migration or Persistence Changes
@@ -54,8 +55,8 @@ Existing persisted tournament snapshots lack `withdrawalRounds`. They continue t
 ### 8. Scoring and Pairing Invariance
 Scoring rules, tiebreaks (Buchholz, Sonneborn-Berger, Median Buchholz), Swiss pairing, Round Robin pairing, game linking, game launch attempts, and Arena tournaments remain strictly unchanged.
 
-### 9. Strict Open-PR Isolation
-This change has zero file overlap with open PRs #55, #56, and #57, and touches only `packages/tournament/**` and this ADR.
+### 9. PR Isolation and Current Main
+This change has zero file overlap with open PR #55. Merged PRs #56, #57, and #59 are preserved from current main. The final diff is limited to `packages/tournament/**`, this ADR, and the required append-only `docs/PROJECT_STATE.md` increment.
 
 ## Consequences
 
