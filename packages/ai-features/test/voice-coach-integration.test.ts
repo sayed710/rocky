@@ -1,7 +1,7 @@
 /**
  * Env-gated integration test for `VoiceCoach`.
  *
- * Skips without an API key, same pattern as the other seven features.
+ * The live-provider runner registers this file only for the selected, provisioned provider.
  */
 
 import { test, describe } from 'node:test';
@@ -25,8 +25,8 @@ const fakeEngine: AnalysisProvider = {
 
 const openaiKey = process.env['OPENAI_API_KEY'];
 
-describe('VoiceCoach integration (OpenAI)', () => {
-  test('real narrative smoothing with spoken segments', { skip: !openaiKey }, async () => {
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'openai') describe('VoiceCoach integration (OpenAI)', () => {
+  test('real narrative smoothing with spoken segments', async () => {
     const ai = new OpenAiCompatibleAdapter({ id: 'openai', apiKey: openaiKey, defaultModel: 'gpt-4o-mini' });
     const coach = new Coach({ engine: fakeEngine });
     const voiceCoach = new VoiceCoach({ coach, ai });
@@ -43,9 +43,9 @@ describe('VoiceCoach integration (OpenAI)', () => {
 
 const anthropicKey = process.env['ANTHROPIC_API_KEY'];
 
-describe('VoiceCoach integration (Anthropic)', () => {
-  test('real narrative smoothing with spoken segments', { skip: !anthropicKey }, async () => {
-    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-3-5-sonnet-20241022' });
+if (process.env['GAMBIT_LIVE_PROVIDER'] === 'anthropic') describe('VoiceCoach integration (Anthropic)', () => {
+  test('real narrative smoothing with spoken segments', async () => {
+    const ai = new AnthropicAdapter({ apiKey: anthropicKey, defaultModel: 'claude-sonnet-4-6' });
     const coach = new Coach({ engine: fakeEngine });
     const voiceCoach = new VoiceCoach({ coach, ai });
 

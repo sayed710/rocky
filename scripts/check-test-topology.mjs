@@ -1,0 +1,1030 @@
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, posix, relative, resolve, sep } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { randomBytes } from 'node:crypto';
+
+const REPO_ROOT = resolve(process.cwd());
+
+/**
+ * Strips single-line and multi-line comments from JS/TS code while preserving string literals.
+ *
+ * @param {string} code
+ * @returns {string}
+ */
+export function stripComments(code) {
+  return code.replace(
+    /("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`)|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
+    (match, str) => (str ? str : '')
+  );
+}
+
+/**
+ * Extracts a static string literal starting at index 0 of str.
+ * Supports single quotes, double quotes, and template literals without interpolation (${...).
+ *
+ * @param {string} str
+ * @returns {{ value: string, endIndex: number } | null}
+ */
+export function extractStringLiteralAtStart(str) {
+  const quote = str[0];
+  if (quote !== "'" && quote !== '"' && quote !== '`') return null;
+  let i = 1;
+  let escaped = false;
+  while (i < str.length) {
+    const ch = str[i];
+    if (escaped) {
+      escaped = false;
+    } else if (ch === '\\') {
+      escaped = true;
+    } else if (ch === quote) {
+      const content = str.slice(1, i);
+      if (quote === '`' && content.includes('${')) {
+        return null;
+      }
+      return {
+        value: content,
+        endIndex: i + 1,
+      };
+    }
+    i++;
+  }
+  return null;
+}
+
+/**
+ * Parses an array literal of static string literals (e.g. ['**\/*.spec.ts', '**\/*.test.ts']).
+ * Fails closed (returns null) if any element is non-literal or unparseable.
+ *
+ * @param {string} str
+ * @returns {string[] | null}
+ */
+export function parseStringLiteralArray(str) {
+  if (!str.startsWith('[')) return null;
+  let i = 1;
+  const elements = [];
+  while (i < str.length) {
+    while (i < str.length && /\s/.test(str[i])) i++;
+    if (i >= str.length) return null;
+    if (str[i] === ']') {
+      return elements;
+    }
+    const literal = extractStringLiteralAtStart(str.slice(i));
+    if (!literal) {
+      return null;
+    }
+    elements.push(literal.value);
+    i += literal.endIndex;
+    while (i < str.length && /\s/.test(str[i])) i++;
+    if (i < str.length && str[i] === ',') {
+      i++;
+    } else if (i < str.length && str[i] === ']') {
+      return elements;
+    } else {
+      return null;
+    }
+  }
+  return null;
+}
+
+export function parseStaticStringLiteral(raw) {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/^(['"`])([\s\S]*)\1$/);
+  if (!match) return null;
+  const quote = match[1];
+  const content = match[2];
+  if (quote === '`' && content.includes('${')) {
+    return null;
+  }
+  return content;
+}
+
+/**
+ * Locates the opening and closing curly braces of an object literal in str starting from fromIndex.
+ *
+ * @param {string} str - Source string.
+ * @param {number} fromIndex - Index to search from.
+ * @returns {string | null} The object literal body (between { and }), or null if not found.
+ */
+export function extractObjectBody(str, fromIndex = 0) {
+  let openBrace = -1;
+  let i = fromIndex;
+  while (i < str.length) {
+    const lit = extractStringLiteralAtStart(str.slice(i));
+    if (lit) {
+      i += lit.endIndex;
+      continue;
+    }
+    if (str[i] === '{') {
+      openBrace = i;
+      break;
+    }
+    i++;
+  }
+  if (openBrace === -1) return null;
+
+  let braceDepth = 0;
+  i = openBrace;
+  while (i < str.length) {
+    const lit = extractStringLiteralAtStart(str.slice(i));
+    if (lit) {
+      i += lit.endIndex;
+      continue;
+    }
+    if (str[i] === '{') {
+      braceDepth++;
+    } else if (str[i] === '}') {
+      braceDepth--;
+      if (braceDepth === 0) {
+        return str.slice(openBrace + 1, i);
+      }
+    }
+    i++;
+  }
+  return null;
+}
+
+/**
+ * Finds the body of the exported Playwright configuration object.
+ *
+ * @param {string} stripped - Source code with comments removed.
+ * @param {string} configRel - Relative path for diagnostics.
+ * @returns {string} The inner body of the exported configuration object.
+ */
+export function findExportedPlaywrightConfigBody(stripped, configRel) {
+  const exportMatch = stripped.match(/(?:export\s+default|module\.exports\s*=)\s*([\s\S]*)/);
+  if (exportMatch) {
+    const afterExport = exportMatch[1].trimStart();
+    const idMatch = afterExport.match(/^([A-Za-z0-9_$]+)\s*;?/);
+    if (idMatch && idMatch[1] !== 'defineConfig') {
+      const varName = idMatch[1];
+      const declRegex = new RegExp(`(?:const|let|var)\\s+${varName}\\s*(?::\\s*[^=]+)?=\\s*([\\s\\S]*)`);
+      const declMatch = stripped.match(declRegex);
+      if (!declMatch) {
+        throw new Error(
+          `Cannot mechanically resolve Playwright configuration object in ${configRel}: exported identifier '${varName}' declaration cannot be statically resolved. Topology validation must fail closed.`
+        );
+      }
+      const body = extractObjectBody(declMatch[1], 0);
+      if (body === null) {
+        throw new Error(
+          `Cannot mechanically resolve Playwright configuration object in ${configRel}: exported object structure cannot be statically resolved. Topology validation must fail closed.`
+        );
+      }
+      return body;
+    }
+
+    const body = extractObjectBody(afterExport, 0);
+    if (body === null) {
+      throw new Error(
+        `Cannot mechanically resolve Playwright configuration object in ${configRel}: exported object structure cannot be statically resolved. Topology validation must fail closed.`
+      );
+    }
+    return body;
+  }
+
+  const body = extractObjectBody(stripped, 0);
+  if (body !== null) {
+    return body;
+  }
+  return stripped;
+}
+
+/**
+ * Scans an object literal body for direct properties at depth 0.
+ * Ignores properties in nested objects (like projects: [{ ... }]) or string literals.
+ *
+ * @param {string} objectBody
+ * @returns {Map<string, string>} Map of direct property keys to their raw value expressions.
+ */
+export function extractDirectProperties(objectBody) {
+  const properties = new Map();
+  let depth = { brace: 0, bracket: 0, paren: 0 };
+  let idx = 0;
+
+  while (idx < objectBody.length) {
+    const literal = extractStringLiteralAtStart(objectBody.slice(idx));
+    if (literal) {
+      idx += literal.endIndex;
+      continue;
+    }
+
+    const ch = objectBody[idx];
+    if (ch === '{') { depth.brace++; idx++; continue; }
+    if (ch === '}') { depth.brace--; idx++; continue; }
+    if (ch === '[') { depth.bracket++; idx++; continue; }
+    if (ch === ']') { depth.bracket--; idx++; continue; }
+    if (ch === '(') { depth.paren++; idx++; continue; }
+    if (ch === ')') { depth.paren--; idx++; continue; }
+
+    if (depth.brace === 0 && depth.bracket === 0 && depth.paren === 0) {
+      const propMatch = objectBody.slice(idx).match(/^(?:([A-Za-z0-9_$]+)|['"]([A-Za-z0-9_$]+)['"])\s*:\s*/);
+      if (propMatch) {
+        const key = propMatch[1] || propMatch[2];
+        idx += propMatch[0].length;
+        const valStart = idx;
+        let valDepth = { brace: 0, bracket: 0, paren: 0 };
+        while (idx < objectBody.length) {
+          const valLit = extractStringLiteralAtStart(objectBody.slice(idx));
+          if (valLit) {
+            idx += valLit.endIndex;
+            continue;
+          }
+          const vch = objectBody[idx];
+          if (vch === '{') { valDepth.brace++; idx++; continue; }
+          if (vch === '}') { valDepth.brace--; idx++; continue; }
+          if (vch === '[') { valDepth.bracket++; idx++; continue; }
+          if (vch === ']') { valDepth.bracket--; idx++; continue; }
+          if (vch === '(') { valDepth.paren++; idx++; continue; }
+          if (vch === ')') { valDepth.paren--; idx++; continue; }
+
+          if (vch === ',' && valDepth.brace === 0 && valDepth.bracket === 0 && valDepth.paren === 0) {
+            break;
+          }
+          idx++;
+        }
+        const rawVal = objectBody.slice(valStart, idx).trim();
+        properties.set(key, rawVal);
+        if (idx < objectBody.length && objectBody[idx] === ',') {
+          idx++;
+        }
+        continue;
+      }
+    }
+
+    idx++;
+  }
+
+  return properties;
+}
+
+/**
+ * Recursively collects discovered test files from Playwright JSON report suites.
+ *
+ * @param {object} suite - Suite or project object from Playwright JSON report.
+ * @param {string} rootDir - Root directory reported by Playwright.
+ * @param {Set<string>} discovered - Set of repository-relative POSIX paths.
+ * @param {string} repoRoot - Repository root directory.
+ */
+function collectPlaywrightFiles(suite, rootDir, discovered, repoRoot) {
+  if (!suite) return;
+  if (typeof suite.file === 'string' && suite.file.length > 0) {
+    const absPath = resolve(rootDir, suite.file);
+    const relPath = relative(repoRoot, absPath).split(sep).join('/');
+    discovered.add(relPath);
+  }
+  if (Array.isArray(suite.suites)) {
+    for (const child of suite.suites) {
+      collectPlaywrightFiles(child, rootDir, discovered, repoRoot);
+    }
+  }
+}
+
+/**
+ * Derives the exact set of reachable test files directly from Playwright's discovery engine
+ * (`playwright test --list --reporter=json`).
+ *
+ * Evaluates real Playwright configuration including:
+ * - Top-level and project-specific `testDir`
+ * - Top-level and project-specific `testMatch`
+ * - Top-level and project-specific `testIgnore`
+ * - Object spreads, variables, and dynamic configuration
+ *
+ * Fails closed: if Playwright configuration cannot be resolved, compiled, or executed,
+ * throws an explicit Error instead of substituting false-green assumptions.
+ *
+ * @param {string} [manifestDir='packages/web'] - Directory containing Playwright config and package.json.
+ * @param {object} [options={}] - Options (root, backend, playwrightConfigOverrides, playwrightDiscoveredCache, scriptCmd).
+ * @returns {Set<string>} Set of repository-relative POSIX file paths discovered by Playwright.
+ */
+export function getPlaywrightDiscoveredFiles(manifestDir = 'packages/web', options = {}) {
+  const root = options.root || REPO_ROOT;
+  const manifestDirFull = resolve(root, manifestDir);
+
+  const cache = options.playwrightDiscoveredCache;
+  const cacheKey = `${manifestDirFull}::${options.backend === false ? 'offline' : 'backend'}::${options.playwrightConfigOverrides ? JSON.stringify(options.playwrightConfigOverrides) : ''}::${options.scriptCmd || ''}`;
+  if (cache && cache.has(cacheKey)) {
+    return cache.get(cacheKey);
+  }
+
+  const req = createRequire(import.meta.url);
+  let cliPath;
+  try {
+    cliPath = req.resolve('@playwright/test/cli', {
+      paths: [manifestDirFull, root, REPO_ROOT],
+    });
+  } catch {
+    throw new Error(
+      `Cannot mechanically resolve Playwright test runner in ${manifestDir}: @playwright/test/cli could not be resolved. Topology validation must fail closed.`
+    );
+  }
+
+  let tempConfigPath = null;
+  let customConfigArg = null;
+  let overrideContent = null;
+  if (options.playwrightConfigOverrides) {
+    for (const [key, val] of Object.entries(options.playwrightConfigOverrides)) {
+      const normKey = key.replace(/^\.\//, '').split(sep).join('/');
+      if (
+        normKey === `${manifestDir}/playwright.config.ts` ||
+        normKey === `${manifestDir}/playwright.config.js` ||
+        normKey === `${manifestDir}/playwright.config.mjs` ||
+        normKey === `${manifestDir}/playwright.config.cjs`
+      ) {
+        overrideContent = val;
+        break;
+      }
+    }
+  }
+
+  if (overrideContent) {
+    const rand = randomBytes(6).toString('hex');
+    const tempFileName = `.playwright.topology-temp-${rand}.ts`;
+    tempConfigPath = join(manifestDirFull, tempFileName);
+    writeFileSync(tempConfigPath, overrideContent, 'utf8');
+    customConfigArg = `--config=${tempFileName}`;
+  } else if (options.scriptCmd) {
+    const configMatch = options.scriptCmd.match(/(?:--config|-c)[=\s]+(\S+)/);
+    if (configMatch) {
+      customConfigArg = `--config=${configMatch[1]}`;
+    }
+  }
+
+  try {
+    const args = ['test', '--list', '--reporter=json'];
+    if (customConfigArg) {
+      args.push(customConfigArg);
+    }
+
+    const res = spawnSync(process.execPath, [cliPath, ...args], {
+      cwd: manifestDirFull,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
+        // Validate reachability in the complete CI acceptance suite. The local
+        // backend-free mode intentionally discovers only offline specs.
+        GAMBIT_E2E_BACKEND: options.backend === false ? '' : '1',
+      },
+      maxBuffer: 16 * 1024 * 1024,
+    });
+
+    if (res.error) {
+      throw new Error(
+        `Failed to execute Playwright discovery in ${manifestDir}: ${res.error.message}. Topology validation must fail closed.`
+      );
+    }
+
+    let parsed = null;
+    if (res.stdout && res.stdout.trim().startsWith('{')) {
+      try {
+        parsed = JSON.parse(res.stdout);
+      } catch {
+        parsed = null;
+      }
+    }
+
+    const isZeroTestsFound =
+      parsed &&
+      Array.isArray(parsed.suites) &&
+      parsed.suites.length === 0 &&
+      Array.isArray(parsed.errors) &&
+      parsed.errors.every((e) => typeof e?.message === 'string' && e.message.includes('No tests found'));
+
+    if (res.status !== 0 && !isZeroTestsFound) {
+      const errorMsg = (res.stderr || res.stdout || `process exited with status ${res.status}`).trim();
+      throw new Error(
+        `Cannot mechanically resolve Playwright configuration in ${manifestDir}: ${errorMsg}. Topology validation must fail closed.`
+      );
+    }
+
+    if (!parsed || !Array.isArray(parsed.suites)) {
+      throw new Error(
+        `Cannot mechanically resolve Playwright configuration in ${manifestDir}: invalid or empty discovery payload. Topology validation must fail closed.`
+      );
+    }
+
+    const discovered = new Set();
+    const configRootDir = parsed.config?.rootDir || manifestDirFull;
+    for (const suite of parsed.suites) {
+      collectPlaywrightFiles(suite, configRootDir, discovered, root);
+    }
+
+    if (cache) {
+      cache.set(cacheKey, discovered);
+    }
+
+    return discovered;
+  } finally {
+    if (tempConfigPath && existsSync(tempConfigPath)) {
+      try {
+        unlinkSync(tempConfigPath);
+      } catch {
+        // Ignore cleanup failure
+      }
+    }
+  }
+}
+
+/**
+ * Mechanically resolves test patterns from a Playwright configuration file.
+ * Reads the actual Playwright config file from the workspace to extract `testDir` and `testMatch`,
+ * eliminating hard-coded duplicate reachability definitions.
+ *
+ * Fails closed: if `testDir` or `testMatch` is present but non-literal or unparseable,
+ * it explicitly throws an Error instead of substituting false-green defaults.
+ *
+ * @param {string} [manifestDir='packages/web'] - Directory containing playwright.config.* or package manifest.
+ * @param {object} [options={}] - Options containing root or config overrides.
+ * @returns {string[]} Resolved patterns relative to manifestDir.
+ */
+export function extractPlaywrightPatterns(manifestDir = 'packages/web', options = {}) {
+  const root = options.root || REPO_ROOT;
+  const configRel = join(manifestDir, 'playwright.config.ts').split(sep).join('/');
+  let content = options.playwrightConfigOverrides?.[configRel];
+  if (!content) {
+    const fullPath = join(root, configRel);
+    if (existsSync(fullPath)) {
+      content = readFileSync(fullPath, 'utf8');
+    }
+  }
+  if (!content) {
+    for (const ext of ['.js', '.mjs', '.cjs']) {
+      const altRel = join(manifestDir, `playwright.config${ext}`).split(sep).join('/');
+      if (options.playwrightConfigOverrides?.[altRel]) {
+        content = options.playwrightConfigOverrides[altRel];
+        break;
+      }
+      const altFull = join(root, altRel);
+      if (existsSync(altFull)) {
+        content = readFileSync(altFull, 'utf8');
+        break;
+      }
+    }
+  }
+  if (!content) {
+    return ['**/*.@(spec|test).ts'];
+  }
+
+  const stripped = stripComments(content);
+  const objectBody = findExportedPlaywrightConfigBody(stripped, configRel);
+  const directProps = extractDirectProperties(objectBody);
+
+  let testDir = null;
+  if (!directProps.has('testDir')) {
+    // Property absent -> Playwright default ('.' relative to manifestDir) is allowed
+    testDir = '.';
+  } else {
+    const rawVal = directProps.get('testDir');
+    const parsedLiteral = parseStaticStringLiteral(rawVal);
+    if (parsedLiteral === null) {
+      throw new Error(
+        `Cannot mechanically resolve Playwright 'testDir' in ${configRel}: property is present but non-literal or unparseable ("${rawVal}"). Topology validation must fail closed.`
+      );
+    }
+    testDir = parsedLiteral.replace(/^\.\//, '').replace(/\/+$/, '') || '.';
+  }
+
+  let testMatchPatterns = null;
+  if (!directProps.has('testMatch')) {
+    // Property absent -> Playwright default ('**/*.spec.ts') is allowed
+    testMatchPatterns = ['**/*.spec.ts'];
+  } else {
+    const rawVal = directProps.get('testMatch');
+    if (rawVal.startsWith('[')) {
+      const parsedArray = parseStringLiteralArray(rawVal);
+      if (parsedArray === null) {
+        throw new Error(
+          `Cannot mechanically resolve Playwright 'testMatch' in ${configRel}: property is present but contains non-literal or unparseable array elements. Topology validation must fail closed.`
+        );
+      }
+      testMatchPatterns = parsedArray;
+    } else {
+      const parsedLiteral = parseStaticStringLiteral(rawVal);
+      if (parsedLiteral === null) {
+        throw new Error(
+          `Cannot mechanically resolve Playwright 'testMatch' in ${configRel}: property is present but non-literal or unsupported ("${rawVal}"). Topology validation must fail closed.`
+        );
+      }
+      testMatchPatterns = [parsedLiteral];
+    }
+  }
+
+  return testMatchPatterns.map((matchPattern) => {
+    return testDir === '.' ? matchPattern : `${testDir}/${matchPattern}`;
+  });
+}
+
+/**
+ * Mechanically extracts test runner target file globs/paths from a package.json script command.
+ * Parses flags and options out of `node --test` or `playwright test` command invocations.
+ *
+ * @param {string} scriptCmd - Script command from package.json manifest.
+ * @param {object} [options={}] - Context options (e.g. manifestDir, root, playwrightConfigOverrides).
+ * @returns {string[]} Array of extracted target globs or file paths.
+ */
+export function extractRunnerPatterns(scriptCmd, options = {}) {
+  if (!scriptCmd) return [];
+  const parts = scriptCmd.split('&&').map((s) => s.trim());
+  const testSubCmd = parts.find((s) => s.includes('node --test') || s.includes('playwright test'));
+  if (!testSubCmd) return [];
+  if (testSubCmd.includes('playwright test')) {
+    return extractPlaywrightPatterns(options.manifestDir || 'packages/web', options);
+  }
+
+  const afterTest = testSubCmd.slice(testSubCmd.indexOf('node --test') + 'node --test'.length).trim();
+  const tokenRegex = /(?:\"([^\"]+)\"|'([^']+)'|(\S+))/g;
+  const patterns = [];
+  let m;
+  while ((m = tokenRegex.exec(afterTest)) !== null) {
+    const token = m[1] || m[2] || m[3];
+    if (token.startsWith('-')) continue;
+    patterns.push(token);
+  }
+  return patterns;
+}
+
+/**
+ * Evaluates whether a candidate path matches a runner glob pattern.
+ * Uses native node:path posix.matchesGlob with a regex fallback.
+ *
+ * @param {string} pattern - Glob or file path pattern.
+ * @param {string} candidate - Relative candidate file path to match.
+ * @returns {boolean}
+ */
+export function matchRunnerPattern(pattern, candidate) {
+  const normPattern = pattern.replace(/\\/g, '/');
+  const normCandidate = candidate.replace(/\\/g, '/');
+  try {
+    if (typeof posix.matchesGlob === 'function') {
+      return posix.matchesGlob(normCandidate, normPattern);
+    }
+  } catch {
+    // Fall through to regex matcher
+  }
+  return matchRunnerPatternFallback(normPattern, normCandidate);
+}
+
+function globSegmentToRegex(segment) {
+  const escapeLiteral = (value) => value.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  const simple = (value) => escapeLiteral(value)
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]');
+
+  const negative = segment.match(/^!\(([^)]+)\)(.*)$/);
+  if (negative) {
+    const suffix = simple(negative[2]);
+    const alternatives = negative[1].split('|').map(simple).join('|');
+    return `(?!(?:${alternatives})${suffix}$)[^/]*${suffix}`;
+  }
+  return simple(segment);
+}
+
+/**
+ * Portable fallback for the runner globs used by this repository. Supports `*`, `?`,
+ * globstar directory segments, and the negative extglob used by hermetic unit scripts.
+ */
+export function matchRunnerPatternFallback(pattern, candidate) {
+  const segments = pattern.replace(/\\/g, '/').split('/');
+  let reStr = '';
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index];
+    if (index > 0 && segments[index - 1] !== '**') reStr += '/';
+    if (segment === '**') {
+      reStr += index < segments.length - 1 ? '(?:[^/]+/)*' : '.*';
+      continue;
+    }
+    reStr += globSegmentToRegex(segment);
+  }
+  return new RegExp(`^${reStr}$`).test(candidate.replace(/\\/g, '/'));
+}
+
+/**
+ * Resolves the authoritative manifest for a suite and test file, and mechanically checks
+ * whether the actual runner glob in package.json reaches the test file.
+ *
+ * @param {object} suite - Suite definition.
+ * @param {string} relPath - Repository-relative POSIX file path.
+ * @param {object} [options={}] - Verification options (root, manifestCache, manifestOverrides).
+ * @returns {boolean} True if the test file is reached by the actual runner glob in package.json.
+ */
+export function isTestFileReachableByRunner(suite, relPath, options = {}) {
+  const root = options.root || REPO_ROOT;
+  const manifestCache = options.manifestCache || new Map();
+  const manifestOverrides = options.manifestOverrides || {};
+
+  let manifestPath = suite.manifest;
+  if (!manifestPath) {
+    const match = relPath.match(/^packages\/([^/]+)\//);
+    if (!match) return false;
+    manifestPath = `packages/${match[1]}/package.json`;
+  }
+
+  let baseManifest = manifestCache.get(manifestPath);
+  if (!baseManifest) {
+    const fullPath = join(root, manifestPath);
+    if (existsSync(fullPath)) {
+      baseManifest = JSON.parse(readFileSync(fullPath, 'utf8'));
+      manifestCache.set(manifestPath, baseManifest);
+    }
+  }
+
+  let manifest = baseManifest;
+  if (manifestOverrides[manifestPath]) {
+    manifest = {
+      ...baseManifest,
+      ...manifestOverrides[manifestPath],
+      scripts: {
+        ...(baseManifest?.scripts || {}),
+        ...(manifestOverrides[manifestPath].scripts || {}),
+      },
+    };
+  }
+  if (!manifest) return false;
+
+  const scriptCmd = manifest.scripts?.[suite.script];
+  if (!scriptCmd) return false;
+
+  const manifestDir = dirname(manifestPath);
+
+  if (scriptCmd.includes('playwright test')) {
+    const discovered = getPlaywrightDiscoveredFiles(manifestDir, {
+      ...options,
+      scriptCmd,
+    });
+    return discovered.has(relPath);
+  }
+
+  const patterns = extractRunnerPatterns(scriptCmd, {
+    manifestDir,
+    root,
+    playwrightConfigOverrides: options.playwrightConfigOverrides,
+  });
+  if (!patterns || patterns.length === 0) return false;
+
+  const relToManifest = manifestDir === '.' ? relPath : relative(manifestDir, relPath).split(sep).join('/');
+  const compiledPath = relToManifest.startsWith('test/')
+    ? 'dist-test/test/' + relToManifest.slice(5).replace(/\.ts$/, '.js')
+    : null;
+
+  for (const pat of patterns) {
+    let normPat = pat;
+    let checkRelPath = relPath;
+    if (pat.startsWith('../') || pat.startsWith('./')) {
+      normPat = join(manifestDir, pat).split(sep).join('/');
+    }
+
+    if (
+      matchRunnerPattern(normPat, relToManifest) ||
+      (compiledPath && matchRunnerPattern(normPat, compiledPath)) ||
+      matchRunnerPattern(normPat, checkRelPath) ||
+      matchRunnerPattern(normPat, relPath)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+const RAW_SUITE_DEFINITIONS = [
+  {
+    name: 'acceptance-playwright',
+    pattern: /^packages\/web\/e2e\/.*\.spec\.ts$/,
+    target: 'npm run e2e (m6-acceptance)',
+    manifest: 'packages/web/package.json',
+    script: 'e2e',
+  },
+  {
+    name: 'gateway-redis-integration',
+    pattern: /^services\/gateway\/test\/.*\.integration\.test\.ts$/,
+    target: 'npm test in services/gateway (gateway-service)',
+    manifest: 'services/gateway/package.json',
+    script: 'test',
+  },
+  {
+    name: 'gateway-unit',
+    pattern: /^services\/gateway\/test\/.*\.test\.ts$/,
+    target: 'npm test in services/gateway (gateway-service)',
+    manifest: 'services/gateway/package.json',
+    script: 'test',
+  },
+  {
+    name: 'gateway-trusted-edge',
+    pattern: /^scripts\/nginx-trusted-edge-acceptance\.mjs$/,
+    target: 'npm run test:trusted-edge in services/gateway (gateway-service)',
+    manifest: 'services/gateway/package.json',
+    script: 'test:trusted-edge',
+  },
+  {
+    name: 'gateway-web-delivery',
+    pattern: /^scripts\/nginx-web-delivery-acceptance\.mjs$/,
+    target: 'npm run test:web-delivery in services/gateway (gateway-service)',
+    manifest: 'services/gateway/package.json',
+    script: 'test:web-delivery',
+  },
+  {
+    name: 'persistence-postgres-integration',
+    pattern: /^packages\/persistence\/test\/.*\.integration\.test\.ts$/,
+    target: 'npm run test:integration:postgres -w @chess-platform/persistence',
+    manifest: 'packages/persistence/package.json',
+    script: 'test:integration:postgres',
+  },
+  {
+    name: 'persistence-unit',
+    pattern: /^packages\/persistence\/test\/.*\.test\.ts$/,
+    target: 'npm test -w @chess-platform/persistence (build-test)',
+    manifest: 'packages/persistence/package.json',
+    script: 'test:unit',
+  },
+  {
+    name: 'api-postgres-integration',
+    pattern: /^packages\/api\/test\/.*\.integration\.test\.ts$/,
+    target: 'npm run test:integration:postgres -w @chess-platform/api',
+    manifest: 'packages/api/package.json',
+    script: 'test:integration:postgres',
+  },
+  {
+    name: 'api-engine-smoke',
+    pattern: /^packages\/api\/test\/(analysis-.*smoke|analysis-real-stack)\.test\.ts$/,
+    target: 'npm run test:analysis-smoke -w @chess-platform/api (analysis-smoke)',
+    manifest: 'packages/api/package.json',
+    script: 'test:analysis-smoke',
+  },
+  {
+    name: 'api-diagnostics',
+    pattern: /^packages\/api\/test\/diagnostics\/.*\.diag\.ts$/,
+    target: 'npm run test:diagnostics:abort -w @chess-platform/api',
+    manifest: 'packages/api/package.json',
+    script: 'test:diagnostics:abort',
+  },
+  {
+    name: 'api-posix-unit',
+    pattern: /^packages\/api\/test\/.*\.posix\.test\.ts$/,
+    target: 'npm run test:posix -w @chess-platform/api',
+    manifest: 'packages/api/package.json',
+    script: 'test:posix',
+  },
+  {
+    name: 'api-unit',
+    pattern: /^packages\/api\/test\/.*\.test\.ts$/,
+    target: 'npm test -w @chess-platform/api (build-test)',
+    manifest: 'packages/api/package.json',
+    script: 'test:unit',
+  },
+  {
+    name: 'ai-orchestrator-live-provider',
+    pattern: /^packages\/ai-orchestrator\/test\/.*\.integration\.test\.ts$/,
+    target: 'npm run test:live-provider -w @chess-platform/ai-orchestrator',
+    manifest: 'packages/ai-orchestrator/package.json',
+    script: 'test:live-provider',
+  },
+  {
+    name: 'ai-orchestrator-unit',
+    pattern: /^packages\/ai-orchestrator\/test\/.*\.test\.ts$/,
+    target: 'npm test -w @chess-platform/ai-orchestrator (build-test)',
+    manifest: 'packages/ai-orchestrator/package.json',
+    script: 'test:unit',
+  },
+  {
+    name: 'ai-features-live-provider',
+    pattern: /^packages\/ai-features\/test\/.*integration\.test\.ts$/,
+    target: 'npm run test:live-provider -w @chess-platform/ai-features',
+    manifest: 'packages/ai-features/package.json',
+    script: 'test:live-provider',
+  },
+  {
+    name: 'ai-features-unit',
+    pattern: /^packages\/ai-features\/test\/.*\.test\.ts$/,
+    target: 'npm test -w @chess-platform/ai-features (build-test)',
+    manifest: 'packages/ai-features/package.json',
+    script: 'test:unit',
+  },
+  {
+    name: 'scripts-postgres-integration',
+    pattern: /^scripts\/test\/.*\.integration\.test\.mjs$/,
+    target: 'npm run test:scripts:integration (postgres-integration)',
+    manifest: 'package.json',
+    script: 'test:scripts:integration',
+  },
+  {
+    name: 'scripts-unit',
+    pattern: /^scripts\/test\/.*\.test\.mjs$/,
+    target: 'npm run test:scripts (build-test)',
+    manifest: 'package.json',
+    script: 'test:scripts',
+  },
+  {
+    name: 'load-harness-posix',
+    pattern: /^deploy\/load\/test\/.*\.posix\.test\.mjs$/,
+    target: 'npm run test:load-harness:posix',
+    manifest: 'package.json',
+    script: 'test:load-harness:posix',
+  },
+  {
+    name: 'load-harness-unit',
+    pattern: /^deploy\/load\/test\/.*\.test\.mjs$/,
+    target: 'npm run test:load-harness (build-test)',
+    manifest: 'package.json',
+    script: 'test:load-harness',
+  },
+  {
+    name: 'domain-hermetic-unit',
+    pattern: /^packages\/[^/]+\/test\/.*\.test\.ts$/,
+    target: 'npm test (build-test)',
+    manifest: null,
+    script: 'test',
+  },
+];
+
+export const SUITE_DEFINITIONS = RAW_SUITE_DEFINITIONS.map((suite) => ({
+  ...suite,
+  isReachable(relPath, options) {
+    return isTestFileReachableByRunner(this, relPath, options);
+  },
+}));
+
+/**
+ * Validates whether a file path is located within an authorized test directory structure.
+ *
+ * @param {string} relPath - Repository-relative POSIX file path.
+ * @returns {boolean} True if the path resides in an approved test location.
+ */
+export function isAllowedPlacement(relPath) {
+  if (
+    relPath === 'scripts/nginx-trusted-edge-acceptance.mjs' ||
+    relPath === 'scripts/nginx-web-delivery-acceptance.mjs'
+  ) return true;
+  if (/^packages\/[^/]+\/test\/.+/.test(relPath)) return true;
+  if (/^packages\/web\/e2e\/.+/.test(relPath)) return true;
+  if (/^services\/[^/]+\/test\/.+/.test(relPath)) return true;
+  if (/^scripts\/test\/.+/.test(relPath)) return true;
+  if (/^deploy\/[^/]+\/test\/.+/.test(relPath)) return true;
+  return false;
+}
+
+/**
+ * Recursively scans the repository from the given root directory to discover all test files,
+ * regardless of whether they reside in a /test/ directory or are misplaced in src/.
+ * Excludes build artifacts, dependencies, and generated reports.
+ *
+ * @param {string} [root=REPO_ROOT] - Repository root directory to scan.
+ * @returns {string[]} Sorted array of repository-relative POSIX file paths for all discovered tests.
+ */
+export function findTestFiles(root = REPO_ROOT) {
+  const testFiles = [];
+
+  function walk(dir) {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      const relPath = relative(root, fullPath).split(sep).join('/');
+
+      if (entry.isDirectory()) {
+        if (
+          entry.name === 'node_modules' ||
+          entry.name === 'dist' ||
+          entry.name === 'dist-test' ||
+          entry.name === '.git' ||
+          entry.name === 'coverage' ||
+          entry.name === 'playwright-report' ||
+          entry.name === 'test-results' ||
+          relPath === 'deploy/helm' ||
+          relPath === 'deploy/observability'
+        ) {
+          continue;
+        }
+        walk(fullPath);
+      } else if (entry.isFile()) {
+        if (
+          relPath === 'scripts/nginx-trusted-edge-acceptance.mjs' ||
+          relPath === 'scripts/nginx-web-delivery-acceptance.mjs' ||
+          /\.(test|spec|diag)\.(ts|js|mjs|cjs)$/.test(relPath)
+        ) {
+          testFiles.push(relPath);
+        }
+      }
+    }
+  }
+
+  walk(root);
+  return testFiles.sort();
+}
+
+/**
+ * Matches a repository-relative test file path against known zero-skip suite definitions.
+ *
+ * @param {string} relPath - Repository-relative file path in POSIX format.
+ * @returns {object|null} The matching suite definition object, or null if unclassified.
+ */
+export function classifyTestFile(relPath) {
+  for (const suite of SUITE_DEFINITIONS) {
+    if (suite.pattern.test(relPath)) {
+      return suite;
+    }
+  }
+  return null;
+}
+
+/**
+ * Scans the repository and validates that:
+ * 1. 100% of test files are placed in authorized test directories (no src/ co-location).
+ * 2. 100% of test files map to an explicit zero-skip suite.
+ * 3. 100% of test files are reachable by their owning suite's runner execution globs.
+ *
+ * @param {string} [root=REPO_ROOT] - Repository root directory to verify.
+ * @returns {{
+ *   totalFiles: number,
+ *   misplaced: string[],
+ *   unclassified: string[],
+ *   unreachable: Array<{ file: string, suite: string }>,
+ *   categorized: Map<string, string[]>
+ * }}
+ */
+export function verifyTestTopology(root = REPO_ROOT, options = {}) {
+  const files = findTestFiles(root);
+  const misplaced = [];
+  const unclassified = [];
+  const unreachable = [];
+  const categorized = new Map();
+  const manifestCache = new Map();
+  const playwrightDiscoveredCache = options.playwrightDiscoveredCache || new Map();
+
+  for (const file of files) {
+    if (!isAllowedPlacement(file)) {
+      misplaced.push(file);
+      continue;
+    }
+
+    const suite = classifyTestFile(file);
+    if (!suite) {
+      unclassified.push(file);
+      continue;
+    }
+
+    if (suite.isReachable && !suite.isReachable(file, { root, manifestCache, playwrightDiscoveredCache, ...options })) {
+      unreachable.push({ file, suite: suite.name });
+      continue;
+    }
+
+    const list = categorized.get(suite.name) || [];
+    list.push(file);
+    categorized.set(suite.name, list);
+  }
+
+  return {
+    totalFiles: files.length,
+    misplaced,
+    unclassified,
+    unreachable,
+    categorized,
+  };
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
+  let result;
+  try {
+    result = verifyTestTopology();
+  } catch (err) {
+    console.error(`[TEST TOPOLOGY] FAILED: ${err.message}`);
+    process.exit(1);
+  }
+  console.log(`[TEST TOPOLOGY] Verified ${result.totalFiles} test files across ${result.categorized.size} suites.`);
+
+  for (const [suiteName, files] of result.categorized.entries()) {
+    console.log(`  - ${suiteName}: ${files.length} file(s)`);
+  }
+
+  let failed = false;
+
+  if (result.misplaced.length > 0) {
+    console.error(`[TEST TOPOLOGY] FAILED: ${result.misplaced.length} misplaced test file(s) found (outside authorized test directories):`);
+    for (const f of result.misplaced) {
+      console.error(`  - ${f}`);
+    }
+    failed = true;
+  }
+
+  if (result.unclassified.length > 0) {
+    console.error(`[TEST TOPOLOGY] FAILED: ${result.unclassified.length} unclassified test file(s) found:`);
+    for (const f of result.unclassified) {
+      console.error(`  - ${f}`);
+    }
+    failed = true;
+  }
+
+  if (result.unreachable.length > 0) {
+    console.error(`[TEST TOPOLOGY] FAILED: ${result.unreachable.length} test file(s) unreachable by suite runner:`);
+    for (const item of result.unreachable) {
+      console.error(`  - ${item.file} (suite: ${item.suite})`);
+    }
+    failed = true;
+  }
+
+  if (failed) {
+    process.exit(1);
+  }
+
+  console.log('[TEST TOPOLOGY] All test files successfully placed, classified, and reachable by explicit zero-skip suites.');
+}
+

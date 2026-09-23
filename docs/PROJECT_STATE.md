@@ -6,7 +6,27 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
+_Last updated: 2026-09-23 — M15 Increment 63: Historical tournament withdrawal state preservation._
+
+Prior: _Last updated: 2026-09-23 — M15 Increment 62: Legal-move UCI round-trip invariant across chess variants._
+
+Prior: _Last updated: 2026-09-22 — M15 Increment 61: exact-accounting zero-skip correction and PR #56 integration._
+
+Prior: _Last updated: 2026-09-22 — M15 Increment 60: hash-aware immutable asset delivery contract._
+
+Prior: _Last updated: 2026-09-21 — M15 Increment 59h: Authoritative Playwright CLI test reachability discovery and fail-closed validation._
+
+Prior: _Last updated: 2026-09-17 — M15 Increment 59g: Negative lookbehind directive isolation, unnumbered TAP directive support, and zero-plan fail closed._
+
+Prior: _Last updated: 2026-09-17 — M15 Increment 59f: Shared test-output parser module and strict TAP directive/not-ok reconciliation._
+
+Prior: _Last updated: 2026-09-17 — M15 Increment 59d: Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment._
+
+Prior: _Last updated: 2026-09-17 — M15 Increment 59c: Zero test-skip CI architecture — anchored reporter summary parsing and decoy output hardening._
+
+Prior: _Last updated: 2026-09-16 — M15 Increment 59: production web delivery caching and compression contract._
+
+Prior: _Last updated: 2026-09-15 — M15 Increment 58: kubelet probe NetworkPolicy contract._
 
 Prior: _Last updated: 2026-09-15 — M15 Increment 57: search-indexer API NetworkPolicy reachability._
 
@@ -4236,11 +4256,112 @@ Per package: `cd packages/<pkg> && npm install && npm run build && npm test`.
 - Reserve backup files exclusively and clean up only resources created by the drill. Preserve restore and cleanup errors together while continuing other cleanup. Redact connection secrets from diagnostics, including CLI argument errors.
 - Verify append-only protection and valid, ready HNSW indexes on their specific public-schema relations. Added database-boundary and disposable-file regressions for native/Docker custom/plain orchestration and failure paths; live integration remains opt-in and was not run against an existing database.
 
+## M15 Increment 59 — Zero test-skip CI architecture and suite partitioning — 2026-09-17
 
+- **Problem solved**: The repository previously allowed test self-skipping across packages when services (PostgreSQL, Stockfish, live AI keys) were not provisioned. In PR CI, dozens of tests were skipped in `build-test` (`packages/persistence`, `packages/api`, `packages/ai-orchestrator`, `packages/ai-features`, `scripts/test`). This violated the owner's strict zero-test-skip gate (`failed = 0`, `skipped = 0`).
+- **Partitioned suite architecture**:
+  - Hermetic Unit Suites (`build-test`): `npm test` across all workspaces runs purely hermetic tests with zero services, zero network, zero skips.
+  - PostgreSQL Integration Suites (`postgres-integration`): `npm run test:integration:postgres` for `persistence` and `api`, and `npm run test:scripts:integration` run against real PostgreSQL 16 + pgvector (`DATABASE_URL`) with zero skips.
+  - Engine Smoke Suite (`analysis-smoke`): `npm run test:analysis-smoke -w @chess-platform/api` runs against pinned Stockfish 16, Fairy-Stockfish 14, and real PostgreSQL with zero skips.
+  - Gateway Service Suite (`gateway-service`): runs against real Redis 7 and Nginx with zero skips.
+  - Acceptance Suite (`m6-acceptance`): runs Playwright Chromium e2e tests with zero skips.
+  - Dedicated Live Provider Workflow (`.github/workflows/live-provider.yml`): third-party AI provider contract tests (OpenAI / Anthropic) extracted into dedicated files and run strictly via `workflow_dispatch` with verified secrets. They never run in PR CI and never produce misleading skipped counts.
+- **Enforcement & Invariant Guards**:
+  - `scripts/run-zero-skip.mjs`: Programmatic test runner wrapper that monitors TAP/spec output and fails if `skipped > 0`.
+  - `scripts/check-test-topology.mjs`: Invariant guard verifying that every test file in the monorepo is classified into an explicit suite and none are orphaned.
+  - `scripts/test-counts.mjs`: Detailed test suite count and skip auditor reporting per-suite pass/fail/skip totals.
+- Detailed in `docs/adr/0142-zero-test-skip-ci-architecture.md`.
 
+## M15 Increment 59a — Zero test-skip CI architecture: ChatGPT blocker fixes and PR overlap disclosure — 2026-09-17
 
+Addresses four blocking review findings identified by ChatGPT independent review on PR #57 (`gemini/ci-zero-skip-architecture`, HEAD `27c3c66`):
 
+- **Blocker 1 — Live provider self-contained build**: `test:live-provider` in `packages/ai-orchestrator` and `packages/ai-features` now unconditionally prepends `npm run build:test &&`. Previously the script ran `dist-test` files without guaranteeing compilation, causing spurious failures when invoked in isolation.
+- **Blocker 2 — False-green on missing test output**: `scripts/run-zero-skip.mjs` now requires `totalTests !== null && totalTests > 0`. A process that exits 0 with arbitrary text and no test-count line fails with "No executed tests detected". Regex updated to recognise TAP plan (`1..N`) and `tests: N` formats. Two regression tests added to `scripts/test/zero-skip-enforcement.test.mjs`.
+- **Blocker 3 — POSIX suite partition and Windows laundering removal**: Three POSIX-only tests extracted into dedicated `*.posix.test.ts` / `*.posix.test.mjs` files. Dedicated `api-posix-unit` and `load-harness-posix` CI steps added (Linux only). The entire `if (process.platform === 'win32')` skip-laundering block removed from `scripts/run-zero-skip.mjs`. Topology passes: 396 files, 20 suites, 0 unclassified.
+- **Blocker 4 — PR #56 overlap disclosure**: PR #57 shares 4 files with open PR #56 (`gemini/web-delivery-cache-compression`): `.github/workflows/ci.yml`, `docs/PROJECT_STATE.md`, `scripts/ci-local.mjs`, `services/gateway/package.json`. PR #57 is foundational; PR #56 must be rebased after PR #57 lands. PR #55 has zero file overlap with PR #57. Overlap table documented in `docs/adr/0142-zero-test-skip-ci-architecture.md` §"Open PR Overlap".
 
+## M15 Increment 59b — PostgreSQL backup drill teardown resilience and skip removal — 2026-09-17
 
+- **Backup-restore drill connection resilience**: Attached error handlers and tracked client sockets on `sourcePool`, `targetPool`, and `adminClient` in `scripts/db-backup-restore-drill.mjs`. When `DROP DATABASE ... WITH (FORCE)` terminates idle target pool connections, the resulting `FATAL: terminating connection due to administrator command` (57P01) or socket termination is absorbed rather than bubbling up as an `uncaughtException` in `node:test`.
+- **Zero-skip compliance**: Removed the lingering `skip: process.env.DATABASE_URL ? false : ...` condition from `scripts/test/backup-restore-drill.integration.test.mjs`, enforcing `DATABASE_URL` presence via assertion so the test never skips under any environment.
 
+## M15 Increment 59c — Zero test-skip parser anchoring and decoy output hardening — 2026-09-17
 
+- **Anchored skip count parsing**: In `scripts/run-zero-skip.mjs`, anchored the skip summary regex to genuine line-anchored reporter summary lines (`/^\s*(?:#|ℹ)\s+skipped:?\s+(\d+)\b/gim`). Prose outputs containing words like "skipped 1" (e.g. application logs) no longer trigger false-positive suite failures when the reporter summary reports 0 skips.
+- **Anchored test count parsing**: Anchored the test count regex strictly to reporter summary lines (`/^\s*(?:#|ℹ)\s+tests:?\s+(\d+)\b/gim`) and line-anchored TAP plan headers (`/^\s*1\.\.(\d+)\b/gm`). Arbitrary prose like "unrelated tests 0" or "we ran tests 5" can no longer cause false failures or false greens.
+- **Regression coverage**: Added 8 comprehensive regression tests in `scripts/test/zero-skip-enforcement.test.mjs` verifying that decoy prose ("skipped N", "tests N", unanchored "1..N") does not corrupt detection, and that genuine skips and missing test summaries are strictly enforced.
+- **Documentation coverage**: Added JSDoc docstrings across `scripts/run-zero-skip.mjs`, `scripts/check-test-topology.mjs`, and `scripts/test-counts.mjs` to satisfy CodeRabbit maintainability standards.
+- **Multi-summary aggregation**: Handled multi-suite test outputs in `scripts/run-zero-skip.mjs` by accumulating skips across all summary lines (preventing earlier skips from being laundered by later zero-skip suites) and requiring that every reported suite executed > 0 tests.
+
+## M15 Increment 59d — Centralized repository-wide hermetic zero-skip orchestration and live-provider contract alignment — 2026-09-17
+
+- **Centralized hermetic zero-skip orchestrator (`scripts/run-hermetic-tests.mjs`)**: Established a centralized test runner executing all 19 hermetic workspace packages in sequence under programmatic `runWithZeroSkip` enforcement. Root `npm test` now routes directly to `node scripts/run-hermetic-tests.mjs`. Individual package test commands remain intact and untouched (preserving PR #55 boundaries). If any child workspace reports `skipped > 0`, zero executed tests, non-zero exit code, or signal termination, the orchestrator halts immediately and fails the run.
+- **Cross-platform programmatic invocation**: The orchestrator resolves `process.env.npm_execpath` and invokes `process.execPath` directly with `shell: false`, bypassing shell-specific `$npm_execpath`/`%npm_execpath%` expansion issues and Node CVE-2024-27980 Windows `.cmd` spawn restrictions.
+- **Live-provider contract alignment in `scripts/test-counts.mjs`**: Replaced permissive `OPENAI_API_KEY || ANTHROPIC_API_KEY` with strict conjunctions matching the actual runner contract: `OPENAI_API_KEY && ANTHROPIC_API_KEY` for `ai-orchestrator`, and `OPENAI_API_KEY && ANTHROPIC_API_KEY && GAMBIT_TEST_INTEGRATION=1` for `ai-features`. Incompletely provisioned suites are reported as `NOT EXECUTED` rather than invoked to self-skip.
+- **Regression coverage**: Added 5 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (24 tests total, all passing) demonstrating that child workspaces exiting 0 but reporting `# tests 1 \n # skipped 1` fail the repository-level runner, multi-workspace runs with multiple reporter summaries succeed when all report tests > 0 and skipped = 0, zero-test workspaces fail, and natural non-zero exit codes propagate.
+
+## M15 Increment 59e — Zero-skip enforcer and audit rejection of TODO and cancelled test metrics — 2026-09-17
+
+- **TODO test rejection in `scripts/run-zero-skip.mjs`**: Enforced that `todo === 0` across all genuine line-anchored reporter summaries (`# todo N`, `ℹ todo N`) and individual test directives (`# TODO`). A Node test marked TODO is non-failing by default in Node.js, which previously allowed a suite with `pass = 0, todo = 1` to pass the quality gate without genuine passing assertions. The enforcer now strictly rejects `todo > 0` with exit code 1.
+- **Cancelled test rejection**: Added explicit rejection for `cancelled > 0` across reporter summaries (`# cancelled N`, `ℹ cancelled N`) to prevent cancelled test runs from passing CI.
+- **Audited test counts alignment in `scripts/test-counts.mjs`**: Updated `test-counts.mjs` to parse `pass`, `fail`, `skipped`, `todo`, and `cancelled` metrics across both TAP and spec reporter formats. Executed suites fail the audit if `failed > 0`, `skipped > 0`, `todo > 0`, `cancelled > 0`, or `tests === 0`. Output clearly separates `tests` from `passed` per suite (`tests X, passed Y, failed 0, skipped 0, todo 0, cancelled 0`) and grand total (`Grand Total Executed: 3636 tests (3636 passed, 0 failed, 0 skipped, 0 todo, 0 cancelled)`).
+- **Regression coverage**: Added 10 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (34 tests total, all passing) covering TODO-only output rejection, mixed pass + TODO rejection, clean summary acceptance, decoy prose ignoring, cancelled count rejection, spec format TODO/cancelled rejection, individual `# TODO` directive rejection, and multi-summary TODO/cancelled rejection.
+
+## M15 Increment 59f — Shared test-output parser module and strict TAP directive/not-ok reconciliation — 2026-09-17
+
+- **Shared pure parser module (`scripts/lib/test-output-parser.mjs`)**: Centralized test metric, plan, and directive parsing across `scripts/run-zero-skip.mjs`, `scripts/test-counts.mjs`, and regression test suites. Fully annotated with complete JSDoc docstrings for CodeRabbit maintainability standards.
+- **Summary and directive independent evaluation**: Fixed the flaw where `# skipped 0` or `# todo 0` prevented evaluation of record-level `# SKIP` or `# TODO` directives. `parseSkippedCount` and `parseTodoCount` independently evaluate summaries and individual directives, guaranteeing that any genuine record-level skip or TODO results in at least count 1 and triggers gate failure.
+- **Line-anchored raw TAP failure detection (`RAW_TAP_FAILURE_REGEX`)**: Added detection for raw TAP `not ok` records lacking reporter summary lines when child processes exit 0. Preserves TAP semantics by properly isolating `# TODO` and `# SKIP` directives so they are not misclassified as ordinary failures while still failing their respective quality gates.
+- **Per-summary zero-test preservation**: `parseTestCount` fails closed (returns 0) if ANY recognized summary or plan header reports 0 executed tests, preventing multi-summary runs (such as `# tests 0 \n # tests 5`) from laundering unexecuted test suites.
+- **Auditor alignment in `scripts/test-counts.mjs`**: Replaced disparate ad-hoc regexes with shared parser helpers across both hermetic and service suite audit loops, enforcing identical zero-skip, zero-todo, and failure contracts across both execution and reporting paths.
+- **Regression coverage**: Added 14 new tests in `scripts/test/zero-skip-enforcement.test.mjs` (48 tests total, all passing) verifying summary + directive reconciliation, raw TAP not-ok detection, multi-summary zero-test preservation, decoy prose immunity, and parser helper unit contracts.
+
+## M15 Increment 59g — Negative lookbehind directive isolation, unnumbered TAP directive support, and zero-plan fail closed — 2026-09-17
+
+- **Negative lookbehind directive isolation (`(?<!\\)#`)**: Replaced loose regex matching in `TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX`, `TAP_OR_SPEC_TODO_DIRECTIVE_REGEX`, and `RAW_TAP_FAILURE_REGEX` with modern ES2018 negative lookbehind `(?<!\\)#`. Prevents escaped hash symbols (`\#`) emitted by Node 22 TAP reporter in test titles from being misidentified as skip or todo directives.
+- **Unnumbered TAP test point support**: Extended regexes to match unnumbered TAP results (`ok - ... # SKIP`, `not ok - ... # TODO`, `not ok - ...`) matching standard TAP 13 specifications.
+- **Immediate fail-closed on zero-test TAP plans (`1..0`)**: `parseTestCount` now inspects both reporter summaries and TAP plan headers for `0` tests before computing sums, ensuring that `1..0` immediately triggers gate failure even if preceded or followed by positive summary lines.
+- **Test suite hygiene**: Renamed regression test descriptions in `scripts/test/zero-skip-enforcement.test.mjs` to eliminate literal `# SKIP` / `# TODO` strings from test titles, preventing runner-level escaping ambiguity.
+- **Regression coverage**: Added 4 new regression tests in `scripts/test/zero-skip-enforcement.test.mjs` (52 tests total, all passing) verifying unnumbered TAP SKIP/TODO detection, unnumbered raw failures, escaped hash immunity in test titles, and zero-test plan fail-closed behavior.
+
+## M15 Increment 59h — Authoritative Playwright CLI test reachability discovery and fail-closed validation — 2026-09-21
+
+- **Authoritative Playwright discovery engine (`getPlaywrightDiscoveredFiles`)**: In `scripts/check-test-topology.mjs`, replaced custom regex and AST extraction for Playwright reachability with Playwright's actual discovery CLI (`playwright test --list --reporter=json`). Evaluates real configuration including top-level and project-specific `testDir`, `testMatch`, and `testIgnore`, as well as object spreads and dynamic configuration.
+- **Fail-closed validation on unresolvable configurations**: If Playwright configuration cannot be resolved or throws an evaluation error (e.g. undeclared identifiers or runtime exceptions), topology verification fails closed immediately with an explicit error.
+- **Run-level discovery caching**: Cached discovered Playwright test file sets during `verifyTestTopology` runs, allowing all 26 web e2e tests to be validated against Playwright reachability in ~1.4 seconds total without re-executing discovery per file.
+- **Regression coverage**: In `scripts/test/check-test-topology.test.mjs`, added comprehensive falsification regressions proving that: (1) top-level and project-specific `testIgnore` exclusions are flagged unreachable, (2) project-specific `testDir` overrides are respected, (3) spread-composed configurations are dynamically evaluated, (4) default `testMatch` patterns are recognized when omitted, and (5) unresolvable or errored configurations fail closed.
+
+## M15 Increment 59 — Production web delivery caching and compression contract (2026-09-16)
+
+- Hardened production web delivery in `docker/web/nginx.conf.template` to implement optimized HTTP compression and safe caching headers.
+- **Compression**: Enabled `gzip on;`, `gzip_vary on;`, `gzip_proxied any;`, `gzip_comp_level 6;`, `gzip_min_length 1024;`, and MIME types for text/plain, text/css, text/xml, application/json, application/javascript, text/javascript, application/xml, image/svg+xml, and application/manifest+json.
+- **Content-Hashed Assets**: Route `/assets/*` enforces long-lived immutable caching (`Cache-Control: public, max-age=31536000, immutable`), returns 404 for missing assets without attaching immutable headers, and preserves all 7 security headers with `always`.
+- **SPA Shell & Static Mutable Files**: Root route `/` enforces safe revalidation (`Cache-Control: no-cache`), ensuring `index.html` and SPA deep-link fallback routes (`try_files $uri $uri/ /index.html;`) cannot permanently pin clients to stale asset references after deployments.
+- **Real Nginx Acceptance Suite**: Added `scripts/nginx-web-delivery-acceptance.mjs` and `npm run test:web-delivery` in `services/gateway`, validating all 10 delivery assertions (hashed asset caching, SPA shell freshness, deep-link fallback, gzip encoding, Vary header, API proxy safety, WebSocket upgrades, security headers preservation, 404 error routes, and uncompressed representation) through real Nginx containers in CI and local runners with zero test skips.
+
+## M15 Increment 60 — Hash-aware immutable asset delivery contract (2026-09-22)
+
+- Restricted one-year immutable caching to Vite-style content-hashed filenames under `/assets/`; existing unhashed assets now use `Cache-Control: no-cache`, and both hashed and unhashed missing assets remain strict 404 responses without immutable headers.
+- Extended the real-Nginx acceptance suite with a deterministic unhashed `/assets/runtime-config.json` fixture, hashed JS and CSS cache assertions, root static-file revalidation checks, both hashed/unhashed 404 paths, and shared security-header assertions while preserving gzip, SPA, REST, and WebSocket coverage.
+
+## M15 Increment 61 — Exact-accounting zero-skip correction and PR #56 integration (2026-09-22)
+
+- Integrated merged PR #56/current `main` into PR #57 with a history-preserving merge and retained its hash-aware immutable caching, gzip, WebSocket, CI trigger, and real-Nginx acceptance behavior. Classified `scripts/nginx-web-delivery-acceptance.mjs` as the twenty-first explicit suite; topology now verifies 397 test files across 21 suites.
+- Added a Playwright reporter that fails an executed browser suite on zero tests, skipped outcomes, unexpected outcomes, or interrupted execution while leaving `--list` discovery non-executing. The `m6-acceptance` job therefore enforces zero skips on actual Playwright outcomes rather than trusting a green process status.
+- Split live OpenAI and Anthropic contracts into independently selectable scripts and workflow steps. One provisioned credential now runs its full provider surface without registering the absent provider as skipped; both credentials run both surfaces, and no credentials fail closed.
+- Hardened TAP/spec processing with ANSI removal, complete six-field summary accounting, complete plan-only TAP validation, pass/total reconciliation, malformed and contradictory transcript rejection, UTF-8-safe independent stdout/stderr streaming, and child signal forwarding with listener cleanup. `test-counts.mjs` consumes the same exact accounting and no longer synthesizes pass totals.
+- Scoped deployment exclusions to the exact `deploy/helm` and `deploy/observability` trees, added portable negative-extglob fallback coverage, and added falsification regressions for package directories with colliding names, partial summaries, contradictory summaries, truncated plans, ANSI output, provider credential matrices, and Playwright skipped outcomes.
+
+## M15 Increment 62 — Legal-move UCI round-trip invariant across chess variants (2026-09-23)
+
+- Added a test-only `@chess-platform/core` invariant suite that enumerates every legal move in representative positions for Standard, Chess960, Crazyhouse, Three-check, Atomic, Horde, Racing Kings, and King of the Hill. For each move, UCI-string and Move-object execution must agree on FEN, public status, and snapshot, while leaving the parent position unchanged.
+- Asserted a unique UCI encoding for every distinct legal move in each tested position, including all 960 Chess960 starting arrays and targeted castling, promotion, en-passant, drop, explosion, check-counter, and variant-terminal fixtures.
+- Strengthened the Racing Kings anti-check regression with a same-board Standard positive control: `e2c3` and `e2c1` are legal checks under Standard rules but illegal under Racing Kings. Also covered the near-goal case where White's rank-eight arrival leaves Black an equalizing reply.
+- The PR changes tests and this append-only project-state entry only; no production source is changed.
+
+## M15 Increment 63 — Historical tournament withdrawal state preservation (2026-09-23)
+
+- `Tournament.standingsAfterRound(roundIndex)` now reports a participant as withdrawn starting with the 0-based round in which they withdrew, leaving earlier round standings active and current `standings()` behavior unchanged. The withdrawal round is captured before game/bye forfeits and before synchronous `tryAdvance()` can generate the next round or finish the event; repeated withdrawal retains the first recorded round.
+- Added optional `withdrawalRounds` snapshot tuples, omitted when empty. Restore preserves legacy snapshots without those tuples and their prior retroactive withdrawal display rather than inventing dates; modern entries are copied and validated against withdrawn participants and existing rounds, rejecting duplicate or contradictory values. Mixed legacy and newly recorded withdrawals keep their respective semantics without a database migration.
+- ADR-0143 records the contract. Round-robin and Swiss lifecycle tests cover before/at/after boundaries, synchronous advancement, final-round and repeated withdrawal, current standings, forfeits and voided byes, in-progress restore, snapshot round-trip, legacy behavior, and malformed metadata.
