@@ -211,7 +211,6 @@ export function createStreamingTestParser() {
   let topLevelPlanCount = 0;
   let topLevelPlanValue = null;
   let topLevelTapPoints = 0;
-  let topLevelNumberedTapPoints = 0;
   let topLevelPassPoints = 0;
   let malformedSummary = null;
 
@@ -303,7 +302,6 @@ export function createStreamingTestParser() {
       const tapPoint = line.match(/^(ok|not ok)(?=[ \t]|$)/i);
       if (tapPoint) {
         topLevelTapPoints++;
-        if (/^(?:ok|not ok)[ \t]+\d+(?=[ \t]|$)/i.test(line)) topLevelNumberedTapPoints++;
         if (tapPoint[1].toLowerCase() === 'ok'
           && !TAP_OR_SPEC_SKIP_DIRECTIVE_REGEX.test(line)
           && !TAP_OR_SPEC_TODO_DIRECTIVE_REGEX.test(line)) {
@@ -394,7 +392,7 @@ export function createStreamingTestParser() {
       // with TAP-like words. TAP summaries and plan-only streams remain fail-closed.
       const specOnlySummary = hasSpecTestSummary && !hasTapTestSummary;
       const requiresTapReconciliation = planTestsCount > 0
-        || (topLevelTapPoints > 0 && (!specOnlySummary || topLevelNumberedTapPoints > 0));
+        || (topLevelTapPoints > 0 && !specOnlySummary);
       if (!accountingError && requiresTapReconciliation) {
         if (topLevelPlanCount !== 1 || topLevelPlanValue === null) {
           accountingError = `Incomplete TAP evidence: expected exactly one top-level plan, found ${topLevelPlanCount}`;

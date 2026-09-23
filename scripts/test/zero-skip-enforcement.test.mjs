@@ -148,13 +148,18 @@ test('test-output-parser: ordinary TAP comments do not corrupt nested summary ac
   assert.equal(parseCompleteTestOutput(output).accountingValid, true);
 });
 
-test('test-output-parser: spec summaries ignore ordinary logs resembling TAP prefixes', () => {
+test('test-output-parser: spec summaries ignore ordinary logs resembling TAP prefixes', async () => {
   const summary = 'ℹ tests 1\nℹ pass 1\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0';
-  for (const log of ['ok: connected', 'not ok: retrying', 'ok (status 200)', 'ok - connected to db', '1..10 batches processed', '  1..10 batches processed']) {
+  for (const log of ['ok: connected', 'not ok: retrying', 'ok (status 200)', 'ok - connected to db', 'ok 200 response sent', 'ok 1 record updated', '1..10 batches processed', '  1..10 batches processed']) {
     const parsed = parseCompleteTestOutput(`${summary}\n${log}`);
     assert.equal(parsed.accountingValid, true, log);
     assert.equal(parsed.totalTests, 1, log);
   }
+  assert.equal(parseCompleteTestOutput(`${summary}\nnot ok 1 failed`).failCount, 1, 'raw failures still fail under spec summaries');
+  assert.equal(parseCompleteTestOutput(`${summary}\nok 1 skipped # SKIP reason`).skippedCount, 1, 'raw skip directives still fail under spec summaries');
+  const output = `ok 200 response sent\n${summary}`;
+  const code = await runWithZeroSkip(process.execPath, ['-e', `console.log(${JSON.stringify(output)})`], { silent: true });
+  assert.equal(code, 0, 'the public zero-skip gate accepts a valid spec run with numbered application logs');
 });
 
 test('test-output-parser: numbered TAP descriptions need no hyphen and cannot hide skip or failure', async () => {
@@ -172,7 +177,7 @@ test('test-output-parser: numbered TAP descriptions need no hyphen and cannot hi
 test('test-output-parser: TAP summary still requires a plan after a top-level point', () => {
   const output = 'ok 1 test without plan\n# tests 1\n# pass 1\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0';
   assert.equal(parseCompleteTestOutput(output).accountingValid, false);
-  assert.equal(parseCompleteTestOutput(output.replaceAll('# ', 'ℹ ')).accountingValid, false, 'numbered TAP point stays fail-closed even with a spec summary');
+  assert.equal(parseCompleteTestOutput(output.replaceAll('# ', 'ℹ ')).accountingValid, true, 'spec reporter output may contain numbered application logs');
 });
 
 test('test-output-parser: direct streaming accepts CRLF-terminated TAP plan lines', () => {
