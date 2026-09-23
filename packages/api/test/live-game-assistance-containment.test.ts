@@ -208,9 +208,16 @@ test('Study Partner cannot reveal or extend an existing session during active hu
     headers: { 'Idempotency-Key': 'blocked-live-turn' },
     body: { move: 'e2e4', expectedVersion: 0 },
   });
+  const completed = await h.json('POST', `/v1/study-partner/sessions/${sessionId}/end`, {
+    token: player.token,
+    body: { expectedVersion: 0 },
+  });
 
   assert.equal(resumed.status, 409);
   assert.equal(turn.status, 409);
+  assert.equal(completed.status, 409);
+  assert.equal(completed.body.error.details.reason, 'active_human_game');
+  assert.equal((await h.repos.studyPartner.findOwnedSession(sessionId, player.userId))?.session.status, 'active');
 });
 
 test('Study Partner writes acquire the player barrier before durable mutation', async (t) => {
@@ -246,6 +253,91 @@ test('Study Partner writes acquire the player barrier before durable mutation', 
   const response = await pending;
   assert.equal(mutationEntered, true);
   assert.equal(response.status, 201);
+});
+
+test('Study Partner turn reaches the player barrier before claiming a durable turn', async (t) => {
+  const h = await startHarness();
+  t.after(() => h.close());
+  const player = await h.makeUser('study-turn-barrier');
+  const session = await h.json('POST', '/v1/study-partner/sessions', {
+    token: player.token,
+    body: { variant: 'standard', initialFen: START_FEN },
+  });
+  assert.equal(session.status, 201);
+  const sessionId = session.body.id as string;
+  const originalAcquire = h.repos.events.acquirePlayerLock.bind(h.repos.events);
+  const release = await originalAcquire(player.userId);
+  let markAttempt!: () => void;
+  const attempted = new Promise<void>((resolve) => { markAttempt = resolve; });
+  h.repos.events.acquirePlayerLock = async (userId) => {
+    if (userId === player.userId) markAttempt();
+    return originalAcquire(userId);
+  };
+  const originalClaim = h.repos.studyPartner.claimTurn.bind(h.repos.studyPartner);
+  let claimEntered = false;
+  h.repos.studyPartner.claimTurn = async (input) => {
+    claimEntered = true;
+    return originalClaim(input);
+  };
+  const pending = h.json('POST', `/v1/study-partner/sessions/${sessionId}/turns`, {
+    token: player.token,
+    headers: { 'Idempotency-Key': 'barrier-turn' },
+    body: { move: 'e2e4', expectedVersion: 0 },
+  });
+  try {
+    await attempted;
+    assert.equal(claimEntered, false);
+  } finally {
+    await release();
+  }
+  const response = await pending;
+  assert.equal(claimEntered, true);
+  assert.equal(response.status, 200);
+});
+
+test('a human game queued first prevents a waiting Study Partner write', async (t) => {
+  const h = await startHarness();
+  t.after(() => h.close());
+  const player = await h.makeUser('study-game-wins');
+  const opponent = await h.makeUser('study-game-wins-opponent');
+  const originalAcquire = h.repos.events.acquirePlayerLock.bind(h.repos.events);
+  const release = await originalAcquire(player.userId);
+  let markGameAttempt!: () => void;
+  const gameAttempted = new Promise<void>((resolve) => { markGameAttempt = resolve; });
+  let markStudyAttempt!: () => void;
+  const studyAttempted = new Promise<void>((resolve) => { markStudyAttempt = resolve; });
+  let attempts = 0;
+  h.repos.events.acquirePlayerLock = async (userId) => {
+    if (userId === player.userId) {
+      attempts += 1;
+      if (attempts === 1) markGameAttempt();
+      if (attempts === 2) markStudyAttempt();
+    }
+    return originalAcquire(userId);
+  };
+  const originalCreate = h.repos.studyPartner.createSession.bind(h.repos.studyPartner);
+  let mutationEntered = false;
+  h.repos.studyPartner.createSession = async (input) => {
+    mutationEntered = true;
+    return originalCreate(input);
+  };
+  const game = startGame(h, '00000000-0000-7000-8000-000000000112', player.userId, opponent.userId);
+  await gameAttempted;
+  const study = h.json('POST', '/v1/study-partner/sessions', {
+    token: player.token,
+    body: { variant: 'standard', initialFen: START_FEN },
+  });
+  try {
+    await studyAttempted;
+    assert.equal(mutationEntered, false);
+  } finally {
+    await release();
+  }
+  await game;
+  const response = await study;
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error.details.reason, 'active_human_game');
+  assert.equal(mutationEntered, false);
 });
 
 test('a separate user remains eligible while another user has an active human game', async (t) => {
@@ -309,7 +401,7 @@ test('curated endgame training remains available during an active human game', a
   assert.equal(response.body.id, 'kq-vs-k-01');
 });
 
-test('disconnect or reconnect cannot reopen assistance while the durable game is active', async (t) => {
+test('HTTP assistance remains blocked without any game WebSocket and across fresh requests', async (t) => {
   const provider = new ControllableProvider();
   const h = await startHarness({}, { analysis: new AnalysisService({ provider }) });
   t.after(() => h.close());
@@ -322,7 +414,9 @@ test('disconnect or reconnect cannot reopen assistance while the durable game is
     opponent.userId,
   );
 
-  for (const phase of ['disconnected', 'reconnected']) {
+  // The harness never opens a game WebSocket. A fresh HTTP request therefore cannot rely on
+  // realtime presence to decide whether the durable game is still active.
+  for (const phase of ['first request', 'fresh request']) {
     const response = await h.json('POST', '/v1/analysis', analysisRequest(player.token));
     assert.equal(response.status, 409, phase);
   }

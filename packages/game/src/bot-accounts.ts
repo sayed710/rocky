@@ -10,3 +10,8 @@ const ENGINE_BOT_IDS = new Set<string>(Object.values(ENGINE_BOT_USER_IDS));
 export function isEngineBotUserId(userId: string): boolean {
   return ENGINE_BOT_IDS.has(userId);
 }
+
+/** First-party engine opponents do not turn a game into human-vs-human play. */
+export function isHumanGamePlayers(players: { readonly white: string; readonly black: string }): boolean {
+  return !isEngineBotUserId(players.white) && !isEngineBotUserId(players.black);
+}

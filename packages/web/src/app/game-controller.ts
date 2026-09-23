@@ -18,7 +18,7 @@ import type { WsColor, Role, Variant, TimeControl } from '../net/ws-protocol.js'
 import { applyMove } from '../core/mover.js';
 import type { PromotionRole } from '../core/interaction.js';
 import { interpolateRemaining } from '@chess-platform/realtime-gateway/latency';
-import { isEngineBotUserId } from '@chess-platform/game';
+import { isHumanGamePlayers } from '@chess-platform/game';
 
 /**
  * The unified UI state for game actions, projected from authoritative server state.
@@ -430,9 +430,7 @@ export class GameController {
     // --- Action State ---
     const isPlayer = state.myColor !== null;
     const players = state.snapshot?.players;
-    const isHumanGame = players !== undefined
-      && !isEngineBotUserId(players.white)
-      && !isEngineBotUserId(players.black);
+    const isHumanGame = players !== undefined && isHumanGamePlayers(players);
     const connected = state.connected;
     const isOver = state.status?.over ?? false;
     const canAbort = state.ply < 2;

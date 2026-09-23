@@ -245,7 +245,16 @@ export function buildRouter(deps: RouteDeps): Router {
     const release = await repos.events.acquirePlayerLock(identity.userId);
     try {
       await assistanceGuard.assertEligible(identity.userId);
-      return { ...result, afterWrite: release };
+      return {
+        ...result,
+        afterWrite: async () => {
+          try {
+            await result.afterWrite?.();
+          } finally {
+            await release();
+          }
+        },
+      };
     } catch (error) {
       await release();
       throw error;
@@ -263,7 +272,16 @@ export function buildRouter(deps: RouteDeps): Router {
       await assistanceGuard.assertEligible(identity.userId);
       const result = await handler(ctx, identity);
       await assistanceGuard.assertEligible(identity.userId);
-      return { ...result, afterWrite: release };
+      return {
+        ...result,
+        afterWrite: async () => {
+          try {
+            await result.afterWrite?.();
+          } finally {
+            await release();
+          }
+        },
+      };
     } catch (error) {
       await release();
       throw error;
@@ -2088,14 +2106,14 @@ export function buildRouter(deps: RouteDeps): Router {
         200: ['StudyPartnerSession', 'Session completed, or its existing completion returned'],
         401: ['Error', 'Authentication required'],
         404: ['Error', 'Session missing or not owned by the caller'],
-        409: ['Error', 'Version conflict or a turn is in progress'],
+        409: ['Error', 'Active human game, version conflict, or a turn is in progress'],
         422: ['Error', 'Malformed session ID or body'],
         503: ['Error', 'Study Partner is not configured'],
       },
     }),
     AUTHED,
-    async (ctx) => {
-      const actorId = requireAuth(ctx).userId;
+    withAssistanceWriteGuard(async (ctx, identity) => {
+      const actorId = identity.userId;
       const service = deps.studyPartner;
       if (!service) throw HttpError.unavailable('study partner is not configured');
       const sessionId = parseUuid(ctx.params['id']!, 'id');
@@ -2107,7 +2125,7 @@ export function buildRouter(deps: RouteDeps): Router {
         });
       }
       return json(200, studyPartnerSessionView(await service.end(actorId, sessionId, expectedVersion)));
-    },
+    }),
   );
 
   router.delete(

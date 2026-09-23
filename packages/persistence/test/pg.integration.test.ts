@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { Game, type GameEvent } from '@chess-platform/game';
+import { ENGINE_BOT_USER_IDS, Game, type GameEvent } from '@chess-platform/game';
 import { createPool } from '../src/pg/pool';
 import { migrate, migrationChecksum, readMigrationSql } from '../src/pg/migrate';
 import { PostgresEventStore } from '../src/pg/event-store';
@@ -75,6 +75,7 @@ test('migrations apply and are idempotent', { skip }, async () => {
     );
     assert.equal(activePlayersIndex.rows[0]?.indisvalid, true);
     assert.match(activePlayersIndex.rows[0]?.definition ?? '', /USING gin/);
+    assert.match(activePlayersIndex.rows[0]?.definition ?? '', /payload\s*->\s*'players'/);
     assert.match(activePlayersIndex.rows[0]?.predicate ?? '', /seq = 0/);
     assert.match(activePlayersIndex.rows[0]?.predicate ?? '', /GameCreated/);
 
@@ -179,7 +180,11 @@ test('postgres event store finds only unended games for either player seat', { s
     const target = uuidv7();
     const opponent = uuidv7();
     const activeGameId = uuidv7();
+    const activeBlackGameId = uuidv7();
     const finishedGameId = uuidv7();
+    const olderFinishedGameId = uuidv7();
+    const unrelatedGameId = uuidv7();
+    const botGameId = uuidv7();
     const event = (gameId: string, players: { white: string; black: string }): GameEvent => ({
       type: 'GameCreated',
       gameId,
@@ -191,6 +196,7 @@ test('postgres event store finds only unended games for either player seat', { s
       at: 1,
     });
     await store.append(activeGameId, -1, [event(activeGameId, { white: target, black: opponent })]);
+    await store.append(activeBlackGameId, -1, [event(activeBlackGameId, { white: opponent, black: target })]);
     await store.append(finishedGameId, -1, [event(finishedGameId, { white: opponent, black: target })]);
     await store.append(finishedGameId, 0, [{
       type: 'GameEnded',
@@ -199,16 +205,31 @@ test('postgres event store finds only unended games for either player seat', { s
       winner: 'w',
       at: 2,
     }]);
-
-    assert.deepEqual(await store.findActiveGamesByPlayer(target), [{
-      gameId: activeGameId,
-      players: { white: target, black: opponent },
+    await store.append(olderFinishedGameId, -1, [event(olderFinishedGameId, { white: target, black: opponent })]);
+    await store.append(olderFinishedGameId, 0, [{
+      type: 'GameEnded',
+      result: '1-0',
+      termination: 'resignation',
+      winner: 'w',
+      at: 3,
     }]);
+    await store.append(unrelatedGameId, -1, [event(unrelatedGameId, { white: opponent, black: uuidv7() })]);
+    await store.append(botGameId, -1, [event(botGameId, { white: target, black: ENGINE_BOT_USER_IDS.novice })]);
+
+    const found = await store.findActiveGamesByPlayer(target);
+    assert.deepEqual(found.map(({ gameId }) => gameId).sort(),
+      [activeGameId, activeBlackGameId, botGameId].sort());
+    assert.deepEqual(found.find(({ gameId }) => gameId === activeGameId)?.players,
+      { white: target, black: opponent });
+    assert.deepEqual(found.find(({ gameId }) => gameId === activeBlackGameId)?.players,
+      { white: opponent, black: target });
+    assert.deepEqual(await store.findActiveGamesByPlayer(uuidv7()), []);
 
     const lockedPlayer = uuidv7();
     const blockedGameId = uuidv7();
     const release = await store.acquirePlayerLock(lockedPlayer);
     let appendSettled = false;
+    let appendError: unknown;
     let blockedAppend: Promise<void> | undefined;
     try {
       blockedAppend = store.append(blockedGameId, -1, [event(blockedGameId, {
@@ -216,14 +237,38 @@ test('postgres event store finds only unended games for either player seat', { s
         black: uuidv7(),
       })]).then(() => {
         appendSettled = true;
+      }, (error: unknown) => {
+        appendError = error;
+        appendSettled = true;
       });
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      assert.equal(appendSettled, false, 'human-game creation must wait for the delivery lock');
+      // Observe the actual PostgreSQL backend waiting on the transaction advisory lock.
+      // A fixed sleep could pass before append had even acquired a pooled connection.
+      const deadline = Date.now() + 10_000;
+      let waiting = false;
+      while (!waiting && !appendSettled && Date.now() < deadline) {
+        const observed = await pool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM pg_locks AS lock
+               JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+              WHERE activity.datname = current_database()
+                AND lock.locktype = 'advisory'
+                AND NOT lock.granted
+                AND activity.query LIKE '%pg_advisory_xact_lock%'
+           ) AS waiting`,
+        );
+        waiting = observed.rows[0]?.waiting ?? false;
+        if (!waiting) await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.equal(waiting, true, 'human-game append must reach and wait at the PostgreSQL advisory lock');
+      assert.equal(appendSettled, false, 'human-game creation must not cross the held delivery lock');
     } finally {
       await release();
     }
+    await release(); // the response cleanup path must be idempotent
     assert.ok(blockedAppend);
     await blockedAppend;
+    if (appendError) throw appendError;
     assert.equal(appendSettled, true);
   }, isolated);
 });

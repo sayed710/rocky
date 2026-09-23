@@ -9,7 +9,7 @@
  * upcaster registry. The Postgres implementation lives in `./pg/event-store`.
  */
 
-import { isEngineBotUserId, type GameEvent } from '@chess-platform/game';
+import { isHumanGamePlayers, type GameEvent } from '@chess-platform/game';
 import { ConcurrencyError, PersistenceError } from './errors';
 
 /** Current event payload schema version written for new events. */
@@ -68,8 +68,7 @@ export function humanGamePlayerIds(events: readonly GameEvent[]): readonly strin
   const created = events[0];
   if (
     created?.type !== 'GameCreated'
-    || isEngineBotUserId(created.players.white)
-    || isEngineBotUserId(created.players.black)
+    || !isHumanGamePlayers(created.players)
   ) {
     return [];
   }

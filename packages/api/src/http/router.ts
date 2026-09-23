@@ -301,7 +301,20 @@ export class Router {
         } catch (cleanupError) {
           // The response is already committed. Report cleanup failure without entering the outer
           // response-error path, which would attempt to write a second response.
-          onInternal(cleanupError, requestId);
+          try {
+            onInternal(cleanupError, requestId);
+          } catch (reportError) {
+            // A faulty injected reporter must not turn a post-commit cleanup failure into another
+            // response write. The request logger is a best-effort fallback at this boundary.
+            try {
+              logger.error('post-write cleanup reporting failed', {
+                cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+                reportError: reportError instanceof Error ? reportError.message : String(reportError),
+              });
+            } catch {
+              // No safe transport action remains once the response has been committed.
+            }
+          }
         }
       }
 
