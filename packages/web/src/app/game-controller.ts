@@ -324,6 +324,7 @@ export class GameController {
     }
   }
 
+  /** Project authoritative game state into board, clock, and fair-play control visibility. */
   private handleState(state: GameSyncState): void {
     this.lastState = state;
     // --- Position projection ---

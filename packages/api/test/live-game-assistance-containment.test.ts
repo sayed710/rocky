@@ -17,16 +17,19 @@ import { startHarness, type Harness } from './helpers.js';
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const OTHER_FEN = '8/8/8/8/8/8/5k2/7K w - - 0 1';
 
+/** Deterministic engine stub whose search can pause at the delivery-race boundary. */
 class ControllableProvider implements AnalysisProvider {
   calls = 0;
   readonly entered: Promise<void>;
   private enter!: () => void;
   private releaseSearch: (() => void) | null = null;
 
+  /** Start with immediate searches unless a test needs to hold an in-flight result. */
   constructor(private readonly paused = false) {
     this.entered = new Promise<void>((resolve) => { this.enter = resolve; });
   }
 
+  /** Signal search entry and optionally wait until the test releases the result. */
   async analyze(_request: AnalysisRequest): Promise<readonly EngineResult[]> {
     this.calls += 1;
     this.enter();
@@ -44,20 +47,24 @@ class ControllableProvider implements AnalysisProvider {
     }];
   }
 
+  /** Resume the paused search only after it has reached the provider. */
   release(): void {
     assert.ok(this.releaseSearch, 'analysis must be in flight before release');
     this.releaseSearch();
   }
 
+  /** Bot move generation is outside this provider fixture's contract. */
   async play(_request: PlayRequest): Promise<PlayResult> {
     throw new Error('not used');
   }
 
+  /** Leave optional variant capabilities unadvertised for these route tests. */
   capabilitiesFor(_variant: string): EngineCapabilities | undefined {
     return undefined;
   }
 }
 
+/** Build a durable human-game creation event with a stable clock and participant IDs. */
 function created(gameId: string, white: string, black: string, rated = true): GameEvent {
   return {
     type: 'GameCreated',
@@ -71,6 +78,7 @@ function created(gameId: string, white: string, black: string, rated = true): Ga
   };
 }
 
+/** Append the creation event through the same event-store boundary as production. */
 async function startGame(
   h: Harness,
   gameId: string,
@@ -81,6 +89,7 @@ async function startGame(
   await h.repos.events.append(gameId, -1, [created(gameId, white, black, rated)]);
 }
 
+/** End an existing fixture game so post-game assistance can be asserted. */
 async function endGame(h: Harness, gameId: string): Promise<void> {
   await h.repos.events.append(gameId, 0, [{
     type: 'GameEnded',
@@ -91,6 +100,7 @@ async function endGame(h: Harness, gameId: string): Promise<void> {
   }]);
 }
 
+/** Construct an authenticated analysis request without caller-controlled engine policy. */
 function analysisRequest(token: string, fen = START_FEN) {
   return {
     token,

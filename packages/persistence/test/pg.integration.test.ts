@@ -363,6 +363,27 @@ test('exhausted advisory-lock pool raises a typed temporary refusal', { skip }, 
   }, isolated);
 });
 
+test('server connection-capacity refusal also raises a typed temporary error', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const store = new PostgresEventStore(pool);
+    const release = await store.acquirePlayerLock(uuidv7());
+    const lockPool = (store as unknown as { playerLockPool: Pool }).playerLockPool;
+    assert.ok(lockPool);
+    const connection = lockPool as unknown as { connect: () => Promise<import('pg').PoolClient> };
+    const originalConnect = connection.connect;
+    connection.connect = async () => {
+      throw Object.assign(new Error('remaining connection slots are reserved'), { code: '53300' });
+    };
+    try {
+      await assert.rejects(store.acquirePlayerLock(uuidv7()), PlayerLockUnavailableError);
+    } finally {
+      connection.connect = originalConnect;
+      await release();
+      await store.closePlayerLocks();
+    }
+  }, isolated);
+});
+
 test('blocked game creation yields a one-client query pool to assistance', { skip }, async () => {
   await withTestDatabase(async ({ pool, connectionString }) => {
     await migrate(pool, join(process.cwd(), 'migrations'));

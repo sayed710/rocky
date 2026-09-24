@@ -189,6 +189,7 @@ export class Router {
     };
   }
 
+  /** Authenticate, run one route, commit its response, and run post-write cleanup exactly once. */
   private async dispatch(
     req: IncomingMessage,
     res: ServerResponse,

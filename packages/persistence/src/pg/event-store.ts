@@ -34,6 +34,7 @@ interface ActiveGameRow {
 
 const UNIQUE_VIOLATION = '23505';
 const LOCK_NOT_AVAILABLE = '55P03';
+const TOO_MANY_CONNECTIONS = '53300';
 
 /** A short advisory-lock wait expired; the caller must retry after rolling back its transaction. */
 export class PlayerLockBusyError extends PersistenceError {}
@@ -216,7 +217,10 @@ export class PostgresEventStore implements EventStore {
       try {
         client = await this.lockPool().connect();
       } catch (error) {
-        if (error instanceof Error && error.message.includes('timeout exceeded when trying to connect')) {
+        if (
+          (error instanceof Error && error.message.includes('timeout exceeded when trying to connect'))
+          || (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === TOO_MANY_CONNECTIONS)
+        ) {
           throw new PlayerLockUnavailableError();
         }
         throw error;
