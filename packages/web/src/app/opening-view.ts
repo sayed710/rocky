@@ -19,6 +19,7 @@ export const OPENING_MESSAGES = {
   beyondOpening: 'This game is past the opening phase the book covers.',
   rateLimited: 'Too many opening look-ups. Try again shortly.',
   unavailable: 'Opening identification is unavailable right now.',
+  activeGame: 'Opening identification is unavailable while you are playing a live human game.',
   rejected: 'This move sequence cannot be identified.',
   failed: 'Could not identify the opening.',
 } as const;

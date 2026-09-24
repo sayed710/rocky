@@ -359,6 +359,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   };
   resetPuzzleBlock();
 
+  /** Keep puzzle visibility and button state aligned with capabilities and the live-game rule. */
   const refreshPuzzleControls = (): void => {
     if (analysisDisposed || !puzzleAvailable) return;
     if (
@@ -369,7 +370,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
     const servable = !puzzleUnsupported && !liveHumanGameBlocksAssistance();
     if (puzzleBlockEl) puzzleBlockEl.hidden = !servable;
-    if (!servable) return;
+    if (!servable) {
+      if (puzzleRunBtn) puzzleRunBtn.disabled = true;
+      return;
+    }
     const authed = isUserAuthenticated();
     if (puzzleRunBtn) {
       puzzleRunBtn.disabled = !authed || !hasPosition() || puzzleController.isPending;
@@ -651,7 +655,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       !liveHumanGameBlocksAssistance()
       && (currentVariant === null || moveExplanationSupportsVariant(explainCapabilities, currentVariant));
     if (explainBlockEl) explainBlockEl.hidden = !servable;
-    if (!servable) return;
+    if (!servable) {
+      if (explainRunBtn) explainRunBtn.disabled = true;
+      return;
+    }
 
     const authed = isUserAuthenticated();
     const target = lastMoveTarget();
@@ -714,7 +721,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       !liveHumanGameBlocksAssistance()
       && (currentVariant === null || mistakePredictionSupportsVariant(assessCapabilities, currentVariant));
     if (assessBlockEl) assessBlockEl.hidden = !servable;
-    if (!servable) return;
+    if (!servable) {
+      if (assessRunBtn) assessRunBtn.disabled = true;
+      return;
+    }
 
     const authed = isUserAuthenticated();
     const target = lastMoveTarget();
@@ -776,6 +786,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         const noteFor: Partial<Record<typeof failure, string>> = {
           'rate-limited': PUZZLE_MESSAGES.rateLimited,
           unavailable: PUZZLE_MESSAGES.unavailable,
+          'active-game': PUZZLE_MESSAGES.activeGame,
           unauthenticated: PUZZLE_MESSAGES.signedOut,
         };
         const note = noteFor[failure];
@@ -822,6 +833,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         const noteFor: Partial<Record<typeof failure, string>> = {
           'rate-limited': OPENING_MESSAGES.rateLimited,
           unavailable: OPENING_MESSAGES.unavailable,
+          'active-game': OPENING_MESSAGES.activeGame,
           unauthenticated: OPENING_MESSAGES.signedOut,
           'unsupported-variant': OPENING_MESSAGES.unsupportedVariant,
         };
@@ -869,6 +881,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         const noteFor: Partial<Record<typeof failure, string>> = {
           'rate-limited': COACH_MESSAGES.rateLimited,
           unavailable: COACH_MESSAGES.unavailable,
+          'active-game': COACH_MESSAGES.activeGame,
           unauthenticated: COACH_MESSAGES.signedOut,
           'unsupported-variant': COACH_MESSAGES.unsupportedVariant,
         };
@@ -915,6 +928,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         const noteFor: Partial<Record<typeof failure, string>> = {
           'rate-limited': ASSESS_MESSAGES.rateLimited,
           unavailable: ASSESS_MESSAGES.unavailable,
+          'active-game': ASSESS_MESSAGES.activeGame,
           unauthenticated: ASSESS_MESSAGES.signedOut,
         };
         const note = noteFor[failure];
@@ -963,6 +977,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         const noteFor: Partial<Record<typeof failure, string>> = {
           'rate-limited': EXPLAIN_MESSAGES.rateLimited,
           unavailable: EXPLAIN_MESSAGES.unavailable,
+          'active-game': EXPLAIN_MESSAGES.activeGame,
           unauthenticated: EXPLAIN_MESSAGES.signedOut,
         };
         const note = noteFor[failure];
@@ -1037,6 +1052,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           if (analysisErrorEl) renderError(analysisErrorEl, null);
         } else if (failure === 'unauthenticated') {
           if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unauthenticated);
+          if (analysisErrorEl) renderError(analysisErrorEl, null);
+        } else if (failure === 'active-game') {
+          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.activeGame);
           if (analysisErrorEl) renderError(analysisErrorEl, null);
         } else if (failure === 'rejected') {
           if (analysisNoteEl) renderNote(analysisNoteEl, null);

@@ -22,6 +22,7 @@ export const EXPLAIN_MESSAGES = {
   running: 'Explaining…',
   rateLimited: 'Too many explanations. Try again shortly.',
   unavailable: 'Move explanation is unavailable right now.',
+  activeGame: 'Move explanation is unavailable while you are playing a live human game.',
   rejected: 'This position cannot be explained.',
   failed: 'Could not explain the move.',
 } as const;

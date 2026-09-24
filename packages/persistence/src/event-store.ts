@@ -111,6 +111,7 @@ export class InMemoryEventStore implements EventStore {
   /** `now` is injectable so tests can assert deterministic timestamps. */
   constructor(private readonly now: () => number = () => Date.now()) {}
 
+  /** Serialize human game creation with assistance delivery in the process-local implementation. */
   async append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
     const releases: Array<() => Promise<void>> = [];
     try {
@@ -157,6 +158,7 @@ export class InMemoryEventStore implements EventStore {
     return Promise.resolve((this.logs.get(gameId)?.length ?? 0) > 0);
   }
 
+  /** Return games with a creation event but no durable ending event for this player. */
   findActiveGamesByPlayer(userId: string): Promise<ActiveGameRecord[]> {
     const active: ActiveGameRecord[] = [];
     for (const [gameId, log] of this.logs) {
@@ -169,6 +171,7 @@ export class InMemoryEventStore implements EventStore {
     return Promise.resolve(active);
   }
 
+  /** Acquire an idempotently releasable player mutex shared with human-game creation. */
   acquirePlayerLock(userId: string): Promise<() => Promise<void>> {
     let lock = this.playerLocks.get(userId);
     if (!lock) {

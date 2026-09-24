@@ -29,6 +29,8 @@ export type RequestFailure =
   | 'unavailable'
   /** 401 — the feature requires a signed-in caller. */
   | 'unauthenticated'
+  /** 409 — account-wide fair-play guard rejected a request after another tab started a game. */
+  | 'active-game'
   /** 422 — the position or move was rejected. A bug on our side if a player sees it. */
   | 'rejected'
   /** Anything else: transport, timeout, decode. */
@@ -59,7 +61,7 @@ export interface MoveRequestControllerOptions<T> {
 }
 
 /**
- * Classify a rejection from its status alone.
+ * Classify a rejection from its structured status and reason.
  *
  * Never reads a message: the API deliberately returns fixed strings for subsystem failures precisely
  * so that nothing a vendor or an engine said reaches a user, and re-deriving meaning from that text
@@ -68,6 +70,8 @@ export interface MoveRequestControllerOptions<T> {
  */
 export function classifyRequestFailure(err: unknown): RequestFailure {
   const status = (err as { status?: unknown } | null)?.status;
+  const reason = (err as { details?: { reason?: unknown } } | null)?.details?.reason;
+  if (status === 409 && reason === 'active_human_game') return 'active-game';
   if (status === 429) return 'rate-limited';
   if (status === 503) return 'unavailable';
   if (status === 401) return 'unauthenticated';

@@ -15,6 +15,7 @@ export const ANALYSIS_MESSAGES = {
   rateLimited: 'Too many analysis requests. Wait a moment and try again.',
   unavailable: 'Analysis is unavailable right now.',
   unauthenticated: 'Sign in to analyse positions.',
+  activeGame: 'Analysis is unavailable while you are playing a live human game.',
   unsupportedVariant: 'This deployment has no engine for this variant.',
   rejected: 'This position could not be analysed.',
   failed: 'Analysis failed. Try again.',

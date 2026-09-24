@@ -40,6 +40,7 @@ export const COACH_MESSAGES = {
   signedOut: 'Sign in for coaching.',
   rateLimited: 'Too many coaching requests. Try again shortly.',
   unavailable: 'Coaching is unavailable right now.',
+  activeGame: 'Coaching is unavailable while you are playing a live human game.',
   unsupportedVariant: 'Coaching is not available for this variant.',
   rejected: 'This position cannot be coached.',
   failed: 'Could not coach the position.',

@@ -8,6 +8,7 @@ export type PuzzleFailure =
   | 'rate-limited'
   | 'unavailable'
   | 'unauthenticated'
+  | 'active-game'
   | 'unsupported-variant'
   | 'rejected'
   | 'failed';

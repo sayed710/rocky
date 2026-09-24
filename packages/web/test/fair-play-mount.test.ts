@@ -22,6 +22,7 @@ test('active human play hides every game-page assistance control', async (t) => 
           openingExplorer: true,
           coach: true,
         },
+        puzzleVariants: ['standard'],
       });
     }
     return json(200, {});
@@ -67,6 +68,9 @@ test('active human play hides every game-page assistance control', async (t) => 
   const botGameVisibility = new Map(
     assistanceIds.map((id) => [id, elements.get(id)!.hidden]),
   );
+  for (const id of assistanceIds) {
+    assert.equal(botGameVisibility.get(id), false, `${id} visible during a bot game`);
+  }
 
   sockets.last.emit({
     t: 'state',
@@ -105,5 +109,87 @@ test('active human play hides every game-page assistance control', async (t) => 
       botGameVisibility.get(id),
       `${id} after terminal state`,
     );
+  }
+});
+
+test('an account-wide fair-play conflict explains each already-visible assistance refusal', async (t) => {
+  const sockets = new FakeSocketFactory();
+  const transport = new FakeTransport().onEach((req: HttpRequest) => {
+    if (req.url.includes('/v1/capabilities')) {
+      return json(200, {
+        capabilities: {
+          analysis: true,
+          puzzleGeneration: true,
+          moveExplanation: true,
+          mistakePrediction: true,
+          openingExplorer: true,
+          coach: true,
+        },
+        puzzleVariants: ['standard'],
+      });
+    }
+    return json(409, {
+      error: { code: 'conflict', message: 'assistance unavailable',
+        details: { reason: 'active_human_game' }, requestId: 'req-other-tab' },
+    });
+  });
+  const app = createApp({
+    config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+    wsFactory: sockets.factory,
+    httpTransport: transport,
+  });
+  t.after(() => app.dispose());
+  app.api.session.adopt({
+    user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: 'token', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  });
+  const { doc, elements } = createGameDocument();
+  const mounted = mountGame({
+    doc,
+    boardEl: elements.get('board')! as unknown as HTMLElement,
+    gameId: 'g-test-1',
+    createGameSync: app.createGameSync,
+    createGameOracle: app.createGameOracle,
+    getAccessToken: () => app.api.session.current?.tokens.accessToken,
+    client: app.api,
+    token: 'token',
+    restorePromise: Promise.resolve(null),
+  });
+  t.after(() => {
+    mounted.analysis.dispose();
+    mounted.connectivity.dispose();
+    mounted.controller.dispose();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  sockets.last.open();
+  sockets.last.emit({
+    t: 'joined',
+    gameId: 'g-test-1',
+    role: 'white',
+    state: makeState(FEN, 0, 'w'),
+  });
+  sockets.last.emit({
+    t: 'move', gameId: 'g-test-1', ply: 1, uci: 'e2e4', san: 'e4', by: 'w',
+    fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 1, legalMoves: {},
+  });
+
+  const panels = [
+    ['puzzle', 'Tactic search'],
+    ['opening', 'Opening identification'],
+    ['coach', 'Coaching'],
+    ['assess', 'Move assessment'],
+    ['explain', 'Move explanation'],
+  ] as const;
+  for (const [panel, label] of panels) {
+    const button = elements.get(`${panel}-run`)!;
+    assert.equal(elements.get(panel)!.hidden, false, `${panel} must be offered before the other tab is known`);
+    assert.equal(button.disabled, false, `${panel} must be actionable to exercise its request`);
+    const before = transport.calls.length;
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(transport.calls.length, before + 1, `${panel} must reach the server`);
+    assert.equal(elements.get(`${panel}-note`)!.textContent,
+      `${label} is unavailable while you are playing a live human game.`);
+    assert.equal(elements.get(`${panel}-error`)!.hidden, true, `${panel} conflict is informational`);
   }
 });

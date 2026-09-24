@@ -109,7 +109,7 @@ test('player locks serialize human-game creation but do not delay bot games', as
   } finally {
     await release();
   }
-  await release();
+  await release(); // release is idempotent after the response cleanup path runs
   await human;
   assert.equal(humanSettled, true);
 });

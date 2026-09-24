@@ -12,6 +12,7 @@ export const PUZZLE_MESSAGES = {
   terminal: 'This position is already decided.',
   rateLimited: 'Too many tactic searches. Try again shortly.',
   unavailable: 'Tactic search is unavailable right now.',
+  activeGame: 'Tactic search is unavailable while you are playing a live human game.',
   unsupportedVariant: 'Tactic search is not available for this variant.',
   rejected: 'This position cannot be searched for tactics.',
   failed: 'Could not search for a tactic.',

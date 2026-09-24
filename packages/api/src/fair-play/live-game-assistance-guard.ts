@@ -6,6 +6,7 @@ import { HttpError } from '../http/errors.js';
 export class LiveGameAssistanceGuard {
   constructor(private readonly events: EventStore) {}
 
+  /** Reject assistance whenever the account has an unended human-vs-human game. */
   async assertEligible(userId: string): Promise<void> {
     const activeGames = await this.events.findActiveGamesByPlayer(userId);
     const humanGame = activeGames.find(({ players }) =>

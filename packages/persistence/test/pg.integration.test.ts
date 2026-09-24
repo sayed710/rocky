@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { Pool } from 'pg';
 import { ENGINE_BOT_USER_IDS, Game, type GameEvent } from '@chess-platform/game';
 import { createPool } from '../src/pg/pool';
 import { migrate, migrationChecksum, readMigrationSql } from '../src/pg/migrate';
@@ -225,51 +226,144 @@ test('postgres event store finds only unended games for either player seat', { s
       { white: opponent, black: target });
     assert.deepEqual(await store.findActiveGamesByPlayer(uuidv7()), []);
 
-    const lockedPlayer = uuidv7();
-    const blockedGameId = uuidv7();
-    const release = await store.acquirePlayerLock(lockedPlayer);
-    let appendSettled = false;
-    let appendError: unknown;
-    let blockedAppend: Promise<void> | undefined;
     try {
-      blockedAppend = store.append(blockedGameId, -1, [event(blockedGameId, {
-        white: lockedPlayer,
-        black: uuidv7(),
-      })]).then(() => {
-        appendSettled = true;
-      }, (error: unknown) => {
-        appendError = error;
-        appendSettled = true;
-      });
-      // Observe the actual PostgreSQL backend waiting on the transaction advisory lock.
-      // A fixed sleep could pass before append had even acquired a pooled connection.
+      const lockedPlayer = uuidv7();
+      const blockedGameId = uuidv7();
+      const release = await store.acquirePlayerLock(lockedPlayer);
+      let appendSettled = false;
+      let appendError: unknown;
+      let blockedAppend: Promise<void> | undefined;
+      try {
+        blockedAppend = store.append(blockedGameId, -1, [event(blockedGameId, {
+          white: lockedPlayer,
+          black: uuidv7(),
+        })]).then(() => {
+          appendSettled = true;
+        }, (error: unknown) => {
+          appendError = error;
+          appendSettled = true;
+        });
+        // Observe the actual PostgreSQL backend waiting on the transaction advisory lock.
+        // A fixed sleep could pass before append had even acquired a pooled connection.
+        const deadline = Date.now() + 10_000;
+        let waiting = false;
+        while (!waiting && !appendSettled && Date.now() < deadline) {
+          const observed = await pool.query<{ waiting: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1
+                 FROM pg_locks AS lock
+                 JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+                WHERE activity.datname = current_database()
+                  AND lock.locktype = 'advisory'
+                  AND NOT lock.granted
+                  AND activity.query LIKE '%pg_advisory_xact_lock%'
+             ) AS waiting`,
+          );
+          waiting = observed.rows[0]?.waiting ?? false;
+          if (!waiting) await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        assert.equal(waiting, true, 'human-game append must reach and wait at the PostgreSQL advisory lock');
+        assert.equal(appendSettled, false, 'human-game creation must not cross the held delivery lock');
+      } finally {
+        await release();
+      }
+      await release(); // the response cleanup path must be idempotent
+      assert.ok(blockedAppend);
+      await blockedAppend;
+      if (appendError) throw appendError;
+      assert.equal(appendSettled, true);
+    } finally {
+      await store.closePlayerLocks();
+    }
+  }, isolated);
+});
+
+test('advisory locks leave even a one-client query pool available', { skip }, async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const databaseUrl = new URL(connectionString);
+    const queryPool = new Pool({
+      host: databaseUrl.hostname,
+      port: Number(databaseUrl.port || 5432),
+      user: decodeURIComponent(databaseUrl.username),
+      password: decodeURIComponent(databaseUrl.password),
+      database: decodeURIComponent(databaseUrl.pathname.slice(1)),
+      max: 1,
+    });
+    const store = new PostgresEventStore(queryPool);
+    let releaseFirst: (() => Promise<void>) | undefined;
+    let releaseSecond: (() => Promise<void>) | undefined;
+    try {
+      releaseFirst = await store.acquirePlayerLock(uuidv7());
+      assert.equal(queryPool.idleCount, queryPool.totalCount,
+        'player locks must not check out query-pool clients');
+      releaseSecond = await store.acquirePlayerLock(uuidv7());
+      assert.deepEqual(await store.findActiveGamesByPlayer(uuidv7()), []);
+    } finally {
+      await releaseSecond?.();
+      await releaseFirst?.();
+      await store.closePlayerLocks();
+      await queryPool.end();
+    }
+    await assert.rejects(store.acquirePlayerLock(uuidv7()), /player lock pool is closed/);
+  }, isolated);
+});
+
+test('blocked game creation yields a one-client query pool to assistance', { skip }, async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const databaseUrl = new URL(connectionString);
+    const queryPool = new Pool({
+      host: databaseUrl.hostname,
+      port: Number(databaseUrl.port || 5432),
+      user: decodeURIComponent(databaseUrl.username),
+      password: decodeURIComponent(databaseUrl.password),
+      database: decodeURIComponent(databaseUrl.pathname.slice(1)),
+      max: 1,
+      connectionTimeoutMillis: 2_000,
+    });
+    const store = new PostgresEventStore(queryPool);
+    const playerId = uuidv7();
+    const gameId = uuidv7();
+    const release = await store.acquirePlayerLock(playerId);
+    let append: Promise<number> | undefined;
+    try {
+      append = store.append(gameId, -1, [{
+        type: 'GameCreated',
+        gameId,
+        variant: 'standard',
+        initialFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+        players: { white: playerId, black: uuidv7() },
+        rated: true,
+        at: 1,
+      }]);
       const deadline = Date.now() + 10_000;
-      let waiting = false;
-      while (!waiting && !appendSettled && Date.now() < deadline) {
-        const observed = await pool.query<{ waiting: boolean }>(
+      let observed = false;
+      while (!observed && Date.now() < deadline) {
+        const result = await pool.query<{ waiting: boolean }>(
           `SELECT EXISTS (
-             SELECT 1
-               FROM pg_locks AS lock
-               JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
-              WHERE activity.datname = current_database()
-                AND lock.locktype = 'advisory'
-                AND NOT lock.granted
-                AND activity.query LIKE '%pg_advisory_xact_lock%'
+             SELECT 1 FROM pg_locks AS lock
+             JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+             WHERE activity.datname = current_database()
+               AND lock.locktype = 'advisory' AND NOT lock.granted
+               AND activity.query LIKE '%pg_advisory_xact_lock%'
            ) AS waiting`,
         );
-        waiting = observed.rows[0]?.waiting ?? false;
-        if (!waiting) await new Promise<void>((resolve) => setImmediate(resolve));
+        observed = result.rows[0]?.waiting ?? false;
+        if (!observed) await new Promise<void>((resolve) => setImmediate(resolve));
       }
-      assert.equal(waiting, true, 'human-game append must reach and wait at the PostgreSQL advisory lock');
-      assert.equal(appendSettled, false, 'human-game creation must not cross the held delivery lock');
+      assert.equal(observed, true, 'the creator must first reach the held PostgreSQL lock');
+      assert.deepEqual(await store.findActiveGamesByPlayer(uuidv7()), [],
+        'eligibility reads must progress while a creator waits for the same player');
+      assert.deepEqual(await store.load(gameId), [], 'game creation must remain blocked');
     } finally {
       await release();
+      await append?.catch(() => undefined);
+      await store.closePlayerLocks();
+      await queryPool.end();
     }
-    await release(); // the response cleanup path must be idempotent
-    assert.ok(blockedAppend);
-    await blockedAppend;
-    if (appendError) throw appendError;
-    assert.equal(appendSettled, true);
+    assert.equal((await pool.query('SELECT 1 FROM game_events WHERE game_id = $1', [gameId])).rowCount, 1);
   }, isolated);
 });
 

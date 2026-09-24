@@ -233,6 +233,7 @@ export function buildRouter(deps: RouteDeps): Router {
   const router = new Router();
   const { auth, repos, clock, ids, chess960Starts, info, rateLimiter, config } = deps;
   const assistanceGuard = new LiveGameAssistanceGuard(repos.events);
+  /** Check before computation and under the player lock before response commitment. */
   const withAssistanceGuard = (
     handler: (
       ctx: RequestContext,
@@ -260,6 +261,7 @@ export function buildRouter(deps: RouteDeps): Router {
       throw error;
     }
   };
+  /** Coordinate assistance-producing writes with human game creation before mutation. */
   const withAssistanceWriteGuard = (
     handler: (
       ctx: RequestContext,

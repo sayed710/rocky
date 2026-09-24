@@ -215,8 +215,8 @@ function resolveLogLevel(): LogLevel {
  * Build the {@link ApiDependencies} bundle backed by Postgres.
  *
  * Returns `shutdownAnalysis` alongside the pool because the analysis subsystem owns engine
- * subprocesses (ADR-0113). A caller that closes the pool and exits without calling it leaves those
- * processes to be killed rather than drained.
+ * subprocesses (ADR-0113), and the event store owns a separate advisory-lock pool. Call it after
+ * draining HTTP requests and before closing the main pool.
  */
 export function createPgDependencies(options: PgBootstrapOptions = {}): {
   deps: ApiDependencies;
@@ -543,7 +543,11 @@ export function createPgDependencies(options: PgBootstrapOptions = {}): {
     deps,
     pool,
     shutdownAnalysis: async () => {
-      await analysisComposition?.shutdown();
+      try {
+        await analysisComposition?.shutdown();
+      } finally {
+        await eventStore.closePlayerLocks();
+      }
     },
   };
 }
