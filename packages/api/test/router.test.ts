@@ -8,6 +8,7 @@ import { NullMetrics } from '../src/ports/metrics';
 import { NullTracer } from '../src/ports/tracer';
 import { startHarness } from './helpers';
 import { closeServer, listenOnFetchablePort } from './listen';
+import { PlayerLockUnavailableError } from '@chess-platform/persistence';
 
 test('router matches path params and reports 404 vs 405', () => {
   const r = new Router();
@@ -28,6 +29,40 @@ test('router matches path params and reports 404 vs 405', () => {
   const missing = r.match('GET', '/nope');
   assert.ok('allow' in missing);
   if ('allow' in missing) assert.equal(missing.allow.length, 0);
+});
+
+test('player-lock exhaustion maps to a temporary HTTP refusal', async () => {
+  const router = new Router();
+  router.get('/lock-unavailable', {
+    summary: 'lock refusal', tags: ['test'], security: 'none', responses: {},
+  }, { required: false }, async () => {
+    throw new PlayerLockUnavailableError();
+  });
+  const reported: unknown[] = [];
+  const { server, port } = await listenOnFetchablePort(
+    (candidate, host) => new Promise<Server>((resolve, reject) => {
+      const listener = createServer(router.toListener({
+        authenticate: () => null,
+        newRequestId: () => 'lock-refusal-test',
+        logger: new NullLogger(),
+        metrics: new NullMetrics(),
+        tracer: new NullTracer(),
+        onInternalError: (error) => { reported.push(error); },
+      }));
+      listener.once('error', reject);
+      listener.listen(candidate, host, () => resolve(listener));
+    }),
+    '127.0.0.1',
+  );
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/lock-unavailable`);
+    assert.equal(response.status, 503);
+    const body = await response.json() as { error: { code: string } };
+    assert.equal(body.error.code, 'service_unavailable');
+    assert.deepEqual(reported, []);
+  } finally {
+    await closeServer(server);
+  }
 });
 
 test('post-write cleanup runs once and never changes an already committed response', async () => {

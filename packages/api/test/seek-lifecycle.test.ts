@@ -1,9 +1,41 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { SEEK_TTL_MS } from '@chess-platform/persistence';
+import { PlayerLockUnavailableError, SEEK_TTL_MS } from '@chess-platform/persistence';
 import { startHarness } from './helpers';
 
 const MATCH_RECEIPT_TTL_MS = 5 * 60 * 1000;
+
+test('seek acceptance returns 503 when game-creation coordination is exhausted', async () => {
+  const h = await startHarness();
+  try {
+    const creator = await h.makeUser('creator-lock-refusal');
+    const acceptor = await h.makeUser('acceptor-lock-refusal');
+    const seek = await h.json('POST', '/v1/seeks', {
+      token: creator.token,
+      body: {
+        variant: 'standard',
+        timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+        rated: false,
+      },
+    });
+    assert.equal(seek.status, 201);
+    const originalAccept = h.repos.seekAcceptor.accept.bind(h.repos.seekAcceptor);
+    h.repos.seekAcceptor.accept = async () => { throw new PlayerLockUnavailableError(); };
+    try {
+      const response = await h.json('POST', `/v1/seeks/${seek.body.id}/accept`, { token: acceptor.token });
+      assert.equal(response.status, 503);
+      assert.equal(response.body.error.code, 'service_unavailable');
+      const stored = await h.repos.seeks.findById(seek.body.id);
+      assert.ok(stored);
+      assert.equal(stored.gameId, null);
+      assert.equal(stored.acceptedAt, null);
+    } finally {
+      h.repos.seekAcceptor.accept = originalAccept;
+    }
+  } finally {
+    await h.close();
+  }
+});
 
 test('abandoned seek expires deterministically and is omitted from listOpen', async () => {
   const h = await startHarness();

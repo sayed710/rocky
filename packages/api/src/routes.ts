@@ -239,7 +239,7 @@ export function buildRouter(deps: RouteDeps): Router {
       return await repos.events.acquirePlayerLock(userId);
     } catch (error) {
       if (error instanceof PlayerLockUnavailableError) {
-        throw HttpError.unavailable('assistance coordination is temporarily unavailable');
+        throw HttpError.unavailable('player coordination is temporarily unavailable');
       }
       throw error;
     }
@@ -1359,6 +1359,7 @@ export function buildRouter(deps: RouteDeps): Router {
         403: ['Error', 'Rating requirements not met'],
         404: ['Error', 'Seek not found or already accepted'],
         409: ['Error', 'Seek is for a variant this server cannot start a game with'],
+        503: ['Error', 'Game creation coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -1615,7 +1616,7 @@ export function buildRouter(deps: RouteDeps): Router {
         409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid position, variant or limits'],
         429: ['Error', 'Rate limit exceeded'],
-        503: ['Error', 'Analysis is not configured, or the engine is saturated or unavailable'],
+        503: ['Error', 'Analysis is not configured, the engine is unavailable, or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -1668,7 +1669,7 @@ export function buildRouter(deps: RouteDeps): Router {
         409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid position or unsupported variant'],
         429: ['Error', 'Rate limit exceeded'],
-        503: ['Error', 'Puzzle generation is not configured, or the engine is unavailable'],
+        503: ['Error', 'Puzzle generation or its engine is unavailable, or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -1714,7 +1715,7 @@ export function buildRouter(deps: RouteDeps): Router {
         409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Unsupported variant or starting position, or a malformed, illegal or over-long move sequence'],
         429: ['Error', 'Rate limit exceeded'],
-        503: ['Error', 'Opening exploration is not configured'],
+        503: ['Error', 'Opening exploration or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -1772,7 +1773,7 @@ export function buildRouter(deps: RouteDeps): Router {
         409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid position, variant, move, illegal move, or a decided position'],
         429: ['Error', 'Rate limit exceeded'],
-        503: ['Error', 'Analysis is not configured, or the engine is saturated or unavailable'],
+        503: ['Error', 'Analysis is not configured, the engine is unavailable, or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -1923,7 +1924,7 @@ export function buildRouter(deps: RouteDeps): Router {
         409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid FEN, variant, move, or an over-long move sequence'],
         429: ['Error', 'Rate limit exceeded'],
-        503: ['Error', 'Coaching is not configured, or no feature could answer'],
+        503: ['Error', 'Coaching is unavailable, no feature could answer, or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -2003,7 +2004,7 @@ export function buildRouter(deps: RouteDeps): Router {
         401: ['Error', 'Authentication required'],
         409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid variant, FEN, or body'],
-        503: ['Error', 'Study Partner is not configured'],
+        503: ['Error', 'Study Partner or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -2032,7 +2033,7 @@ export function buildRouter(deps: RouteDeps): Router {
         409: ['Error', 'Caller is participating in an active human game'],
         404: ['Error', 'Session missing or not owned by the caller'],
         422: ['Error', 'Malformed session ID'],
-        503: ['Error', 'Study Partner is not configured'],
+        503: ['Error', 'Study Partner or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -2073,7 +2074,7 @@ export function buildRouter(deps: RouteDeps): Router {
         409: ['Error', 'Active human game, version conflict, completed session, failed key, or turn in progress'],
         422: ['Error', 'Invalid move, key, body, or turn limit reached'],
         429: ['Error', 'Coach rate limit exceeded'],
-        503: ['Error', 'Study Partner or coaching dependency unavailable'],
+        503: ['Error', 'Study Partner, coaching dependency, or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -2121,7 +2122,7 @@ export function buildRouter(deps: RouteDeps): Router {
         404: ['Error', 'Session missing or not owned by the caller'],
         409: ['Error', 'Active human game, version conflict, or a turn is in progress'],
         422: ['Error', 'Malformed session ID or body'],
-        503: ['Error', 'Study Partner is not configured'],
+        503: ['Error', 'Study Partner or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -2183,7 +2184,7 @@ export function buildRouter(deps: RouteDeps): Router {
         409: ['Error', 'Caller is participating in an active human game'],
         422: ['Error', 'Invalid position, variant, move, or illegal move'],
         429: ['Error', 'Rate limit exceeded'],
-        503: ['Error', 'Move explanation is not configured, or the provider is unavailable'],
+        503: ['Error', 'Move explanation, its provider, or player coordination is temporarily unavailable'],
       },
     }),
     AUTHED,
@@ -2327,7 +2328,7 @@ export function buildRouter(deps: RouteDeps): Router {
       security: 'bearer',
       params: [pathParam('id', 'Tournament id')],
       requestSchema: 'RegisterParticipantRequest',
-      responses: { 200: ['TournamentAnyView', 'Registered'], 403: ['Error', 'Forbidden'], 404: ['Error', 'Not found'], 409: ['Error', 'Conflict'] },
+      responses: { 200: ['TournamentAnyView', 'Registered'], 403: ['Error', 'Forbidden'], 404: ['Error', 'Not found'], 409: ['Error', 'Conflict'], 503: ['Error', 'Game creation coordination is temporarily unavailable'] },
     }),
     AUTHED,
     async (ctx) => {
@@ -2393,7 +2394,7 @@ export function buildRouter(deps: RouteDeps): Router {
       tags: ['tournaments'],
       security: 'bearer',
       params: [pathParam('id', 'Tournament id')],
-      responses: { 200: ['TournamentAnyView', 'Started'], 403: ['Error', 'Forbidden'], 404: ['Error', 'Not found'], 409: ['Error', 'Conflict'] },
+      responses: { 200: ['TournamentAnyView', 'Started'], 403: ['Error', 'Forbidden'], 404: ['Error', 'Not found'], 409: ['Error', 'Conflict'], 503: ['Error', 'Game creation coordination is temporarily unavailable'] },
     }),
     AUTHED,
     async (ctx) => {
@@ -2436,7 +2437,7 @@ export function buildRouter(deps: RouteDeps): Router {
       security: 'bearer',
       params: [pathParam('id', 'Tournament id'), pathParam('roundIndex', 'Round index')],
       requestSchema: 'RecordResultRequest',
-      responses: { 200: ['TournamentAnyView', 'Result recorded'], 403: ['Error', 'Forbidden'], 404: ['Error', 'Not found'], 409: ['Error', 'Conflict'], 422: ['Error', 'Validation error'] },
+      responses: { 200: ['TournamentAnyView', 'Result recorded'], 403: ['Error', 'Forbidden'], 404: ['Error', 'Not found'], 409: ['Error', 'Conflict'], 422: ['Error', 'Validation error'], 503: ['Error', 'Game creation coordination is temporarily unavailable'] },
     }),
     AUTHED,
     async (ctx) => {
@@ -2469,7 +2470,7 @@ export function buildRouter(deps: RouteDeps): Router {
       security: 'bearer',
       params: [pathParam('id', 'Tournament id'), pathParam('gameId', 'Game id')],
       requestSchema: 'RecordResultByGameRequest',
-      responses: { 200: ['TournamentAnyView', 'Result recorded'], 403: ['Error', 'Forbidden'], 404: ['Error', 'Not found'], 409: ['Error', 'Conflict'], 422: ['Error', 'Validation error'] },
+      responses: { 200: ['TournamentAnyView', 'Result recorded'], 403: ['Error', 'Forbidden'], 404: ['Error', 'Not found'], 409: ['Error', 'Conflict'], 422: ['Error', 'Validation error'], 503: ['Error', 'Game creation coordination is temporarily unavailable'] },
     }),
     AUTHED,
     async (ctx) => {

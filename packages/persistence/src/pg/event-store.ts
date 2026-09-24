@@ -39,15 +39,17 @@ const TOO_MANY_CONNECTIONS = '53300';
 /** A short advisory-lock wait expired; the caller must retry after rolling back its transaction. */
 export class PlayerLockBusyError extends PersistenceError {}
 
-/** Never let game-creation waiters monopolize the query pool while assistance holds a player lock. */
-export async function retryPlayerLockContention<T>(operation: () => Promise<T>): Promise<T> {
-  const deadline = Date.now() + 60_000;
+/** Never let game-creation waiters monopolize the query pool; report exhausted retries as temporary unavailability. */
+export async function retryPlayerLockContention<T>(operation: () => Promise<T>, maxWaitMs = 60_000): Promise<T> {
+  const deadline = Date.now() + maxWaitMs;
   for (;;) {
     try {
       return await operation();
     } catch (error) {
-      if (!(error instanceof PlayerLockBusyError) || Date.now() >= deadline) throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      if (!(error instanceof PlayerLockBusyError)) throw error;
+      if (Date.now() >= deadline) throw new PlayerLockUnavailableError();
+      // Desynchronize overlapping game-creation retries after the short PostgreSQL lock timeout.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 20)));
     }
   }
 }

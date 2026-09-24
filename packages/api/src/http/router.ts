@@ -1,6 +1,6 @@
 /**
  * @packageDocumentation
- * A tiny, typed, dependency-free HTTP router built on Node's `http` module. It
+ * A tiny, typed HTTP router built on Node's `http` module. It
  * compiles `/v1/users/:handle`-style patterns into segment matchers, resolves
  * path parameters, applies authentication + RBAC declaratively per route, and
  * normalizes every outcome into the JSON error envelope. Handlers never touch
@@ -9,7 +9,7 @@
  */
 
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
-import type { Role } from '@chess-platform/persistence';
+import { PlayerLockUnavailableError, type Role } from '@chess-platform/persistence';
 import { HttpError } from './errors';
 import { readJsonBody, DEFAULT_MAX_BODY_BYTES } from './body';
 import type { Handler, HandlerResult, Identity, RequestContext } from './context';
@@ -331,23 +331,26 @@ export class Router {
       const reqPath = req.url ? req.url.split('?')[0] ?? '/' : '/';
       const logger = runtime.logger.child({ requestId, traceId, method, path: reqPath });
 
-      if (err instanceof HttpError) {
-        logger[err.status >= 500 ? 'error' : 'warn']('request failed', { status: err.status, durationMs, code: err.code, err: err.message });
-        runtime.metrics.counter('http_requests_total', { method, route: resolvedRoutePath, status: String(err.status) }).inc();
+      const failure = err instanceof PlayerLockUnavailableError
+        ? HttpError.unavailable('player coordination is temporarily unavailable')
+        : err;
+      if (failure instanceof HttpError) {
+        logger[failure.status >= 500 ? 'error' : 'warn']('request failed', { status: failure.status, durationMs, code: failure.code, err: failure.message });
+        runtime.metrics.counter('http_requests_total', { method, route: resolvedRoutePath, status: String(failure.status) }).inc();
         runtime.metrics.histogram('http_request_duration_seconds', LATENCY_BUCKETS, { route: resolvedRoutePath }).observe(durationMs / 1000);
         span.setAttribute('http.route', resolvedRoutePath);
-        span.setAttribute('http.status_code', err.status);
-        span.setStatus(err.status >= 500 ? 'error' : 'ok');
+        span.setAttribute('http.status_code', failure.status);
+        span.setStatus(failure.status >= 500 ? 'error' : 'ok');
         span.end();
 
         writeResult(res, {
-          status: err.status,
-          headers: err.headers,
+          status: failure.status,
+          headers: failure.headers,
           body: {
             error: {
-              code: err.code,
-              message: err.message,
-              ...(err.details ? { details: err.details } : {}),
+              code: failure.code,
+              message: failure.message,
+              ...(failure.details ? { details: failure.details } : {}),
               requestId,
             },
           },

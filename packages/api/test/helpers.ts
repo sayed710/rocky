@@ -20,6 +20,7 @@ import { InMemoryRateLimiter } from '../src/ports/in-memory-rate-limiter';
 import { createApiServer } from '../src/server';
 import type { ApiServer } from '../src/server';
 import { InMemoryGameLauncher } from '../src/tournament/launcher';
+import type { GameLauncher } from '../src/tournament/launcher';
 import { InMemoryEmailSender } from '../src/ports/email';
 import type { EmailSender } from '../src/ports/email';
 import { InMemoryEventStore } from '@chess-platform/persistence';
@@ -87,6 +88,8 @@ export interface Harness {
 
 /** Extra server dependencies a test may override (beyond the config). */
 export interface HarnessOptions {
+  /** Replace tournament launches to test transport handling of durable game-creation failures. */
+  readonly gameLauncher?: GameLauncher;
   /** Override outbound email delivery while retaining the in-memory sender for token inspection. */
   readonly emailSender?: EmailSender;
   /**
@@ -199,7 +202,7 @@ export async function startHarness(
   const tournamentRepo = new InMemoryTournamentsRepository();
   const hasher = new ScryptPasswordHasher({ N: 1024 }); // low cost for test speed
   const rateLimiter = new InMemoryRateLimiter(clock);
-  const gameLauncher = new InMemoryGameLauncher(ids);
+  const gameLauncher = harnessOptions.gameLauncher ?? new InMemoryGameLauncher(ids);
   const liveView = { activeGames: () => [] };
   const emailSender = new InMemoryEmailSender();
   const fakeEvaluator: PositionEvaluator = {

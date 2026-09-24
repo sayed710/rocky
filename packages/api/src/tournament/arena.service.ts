@@ -1,6 +1,6 @@
 import { ArenaTournament, type ArenaConfig } from '@chess-platform/tournament';
 import type { TournamentsRepository } from '@chess-platform/persistence';
-import { isArenaSnapshot, VersionConflictError } from '@chess-platform/persistence';
+import { isArenaSnapshot, PlayerLockUnavailableError, VersionConflictError } from '@chess-platform/persistence';
 import { HttpError } from '../http/errors';
 
 import type { GameResult } from '@chess-platform/tournament';
@@ -94,6 +94,7 @@ export class ArenaService {
           continue;
         }
         if (e instanceof HttpError) throw e;
+        if (e instanceof PlayerLockUnavailableError) throw e;
         // The arena domain throws 'Unknown gameId: <id>' for an unlinked game.
         if (e.message.includes('Unknown gameId')) {
           throw HttpError.notFound('Game ID not found in this tournament');

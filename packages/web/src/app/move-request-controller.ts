@@ -68,6 +68,7 @@ export interface MoveRequestControllerOptions<T> {
  * would defeat it. There is no `unsupported-variant` case — these controls are gated on the
  * capability's variant list before they are ever offered.
  */
+/** Recognize the account-wide fair-play conflict even when it arrives from another session. */
 export function classifyRequestFailure(err: unknown): RequestFailure {
   const status = (err as { status?: unknown } | null)?.status;
   const reason = (err as { details?: { reason?: unknown } } | null)?.details?.reason;

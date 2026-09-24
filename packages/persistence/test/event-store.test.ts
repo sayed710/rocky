@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { ENGINE_BOT_USER_IDS, type GameEvent } from '@chess-platform/game';
 import { InMemoryEventStore } from '../src/event-store';
 import { ConcurrencyError, PersistenceError } from '../src/errors';
+import { PlayerLockUnavailableError } from '../src/errors';
+import { PlayerLockBusyError, retryPlayerLockContention } from '../src/pg/event-store';
 
 const created: GameEvent = {
   type: 'GameCreated',
@@ -22,6 +24,24 @@ const move2: GameEvent = {
   type: 'MovePlayed', ply: 2, uci: 'e7e5', san: 'e5', by: 'b',
   moveTimeMs: 500, remaining: { w: 59_500, b: 59_500 }, at: 3,
 };
+
+test('game-creation retry exhaustion is typed and unrelated failures propagate', async () => {
+  let attempts = 0;
+  await assert.rejects(
+    retryPlayerLockContention(async () => {
+      attempts += 1;
+      throw new PlayerLockBusyError('busy');
+    }, 0),
+    PlayerLockUnavailableError,
+  );
+  assert.equal(attempts, 1);
+
+  const unexpected = new Error('unrelated failure');
+  await assert.rejects(
+    retryPlayerLockContention(async () => { throw unexpected; }, 0),
+    (error: unknown) => error === unexpected,
+  );
+});
 
 test('a new game must start with GameCreated', async () => {
   const s = new InMemoryEventStore(() => 1);

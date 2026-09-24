@@ -2185,6 +2185,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2500,7 +2510,7 @@
             }
           },
           "503": {
-            "description": "Analysis is not configured, or the engine is saturated or unavailable",
+            "description": "Analysis is not configured, the engine is unavailable, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2596,7 +2606,7 @@
             }
           },
           "503": {
-            "description": "Puzzle generation is not configured, or the engine is unavailable",
+            "description": "Puzzle generation or its engine is unavailable, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2692,7 +2702,7 @@
             }
           },
           "503": {
-            "description": "Opening exploration is not configured",
+            "description": "Opening exploration or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2788,7 +2798,7 @@
             }
           },
           "503": {
-            "description": "Analysis is not configured, or the engine is saturated or unavailable",
+            "description": "Analysis is not configured, the engine is unavailable, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3056,7 +3066,7 @@
             }
           },
           "503": {
-            "description": "Coaching is not configured, or no feature could answer",
+            "description": "Coaching is unavailable, no feature could answer, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3142,7 +3152,7 @@
             }
           },
           "503": {
-            "description": "Study Partner is not configured",
+            "description": "Study Partner or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3238,7 +3248,7 @@
             }
           },
           "503": {
-            "description": "Study Partner is not configured",
+            "description": "Study Partner or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3433,7 +3443,7 @@
             }
           },
           "503": {
-            "description": "Study Partner or coaching dependency unavailable",
+            "description": "Study Partner, coaching dependency, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3552,7 +3562,7 @@
             }
           },
           "503": {
-            "description": "Study Partner is not configured",
+            "description": "Study Partner or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3659,7 +3669,7 @@
             }
           },
           "503": {
-            "description": "Move explanation is not configured, or the provider is unavailable",
+            "description": "Move explanation, its provider, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3922,6 +3932,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4115,6 +4135,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4264,6 +4294,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4373,6 +4413,16 @@
           },
           "422": {
             "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {

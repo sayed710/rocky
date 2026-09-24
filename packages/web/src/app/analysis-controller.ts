@@ -75,6 +75,7 @@ export interface AnalysisControllerOptions {
  * error class still classifies correctly, and no engine-internal message is ever read or shown —
  * the panel says what it means from the status alone.
  */
+/** Preserve the active-human-game refusal as a distinct, actionable client state. */
 export function classifyFailure(err: unknown): AnalysisFailure {
   const failure = err as { status?: unknown; details?: Record<string, unknown> } | null;
   const status = failure?.status;
