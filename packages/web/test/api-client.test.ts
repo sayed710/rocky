@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GambitClient } from '../src/api/client.js';
 import type { RetryPolicy } from '../src/net/retry.js';
-import { RequestAbortedError, UnauthorizedError } from '../src/net/errors.js';
+import { NetworkError, RequestAbortedError, ServiceUnavailableError, UnauthorizedError } from '../src/net/errors.js';
 import { NoSessionError } from '../src/net/session.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { abortableHang, FakeTransport, empty, json } from './support/fake-transport.js';
@@ -113,6 +113,61 @@ test('a failed refresh surfaces the original 401 and clears the session', async 
   await c.auth.login({ handle: 'alice', password: 'pw' });
   await assert.rejects(c.users.me(), UnauthorizedError);
   assert.equal(c.session.isAuthenticated, false);
+});
+
+test('a transient refresh failure after a 401 surfaces the outage and keeps the session', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('tok-A')),
+    () => json(401, { error: { code: 'unauthenticated', message: 'expired', requestId: 'r' } }),
+    () => json(503, { error: { code: 'unavailable', message: 'down', requestId: 'r2' } }),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), ServiceUnavailableError);
+  assert.equal(c.session.current?.tokens.accessToken, 'tok-A');
+});
+
+test('a proactive refresh that hits a network failure keeps the session and retries after backoff', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+    () => json(200, auth('tok-B', 'r2')),
+    () => json(200, selfUser),
+  );
+  let clock = 1000;
+  const c = new GambitClient({
+    baseUrl: 'https://api.test',
+    transport: t,
+    retry: NO_RETRY,
+    sleep: async () => {},
+    now: () => clock,
+  });
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), NetworkError);
+  assert.equal(c.session.isAuthenticated, true);
+  // During the backoff the next call fails fast without another refresh request.
+  await assert.rejects(c.users.me(), NetworkError);
+  assert.equal(t.calls.length, 2);
+  clock += 1_000;
+  const me = await c.users.me();
+  assert.equal(me.handle, 'alice');
+  assert.equal(t.calls[3]!.headers['authorization'], 'Bearer tok-B');
+});
+
+test('logout during a refresh backoff still signs out without another refresh request', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), NetworkError);
+  assert.equal(c.session.isAuthenticated, true);
+
+  // The explicit sign-out wins over the preserved session, and the cooldown sends nothing.
+  await assert.rejects(c.auth.logout(), NetworkError);
+  assert.equal(c.session.isAuthenticated, false);
+  assert.equal(t.calls.length, 2);
 });
 
 test('read endpoints encode query params and path segments', async () => {

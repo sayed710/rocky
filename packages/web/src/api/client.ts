@@ -25,7 +25,7 @@ import type { HttpTransport } from '../ports/http.js';
 import { HttpClient } from '../net/http-client.js';
 import type { RequestSpec } from '../net/http-client.js';
 import { UnauthorizedError } from '../net/errors.js';
-import { NoSessionError, SessionManager } from '../net/session.js';
+import { isTransientRefreshFailure, NoSessionError, SessionManager } from '../net/session.js';
 import type { TokenStore } from '../net/session.js';
 import { DEFAULT_RETRY_POLICY } from '../net/retry.js';
 import { SocialApi } from './social.js';
@@ -299,8 +299,9 @@ export class GambitClient {
       if (auth && !retried && error instanceof UnauthorizedError && headers['authorization']) {
         try {
           await this.session.refreshNow();
-        } catch {
-          throw error;
+        } catch (refreshError) {
+          // A transient refresh failure kept the session; report the outage, not a sign-out 401.
+          throw isTransientRefreshFailure(refreshError) ? refreshError : error;
         }
         return this.execute<T>(spec, true);
       }
