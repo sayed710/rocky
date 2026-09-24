@@ -764,6 +764,7 @@ export class PgSeekAcceptor implements SeekAcceptor {
     return retryPlayerLockContention(() => this.acceptOnce(seekId, gameId, events, gameStart));
   }
 
+  /** Claim and create in one transaction so a player-lock retry cannot leave a partial game. */
   private async acceptOnce(seekId: string, gameId: string, events: readonly GameEvent[], gameStart: GameStart): Promise<SeekRow | null> {
     const client = await this.pool.connect();
     try {
@@ -813,12 +814,15 @@ export class PgSeekAcceptor implements SeekAcceptor {
 }
 
 export class PgGameStarter implements GameStarter {
+  /** Bind game creation and its player locks to the supplied query pool. */
   constructor(private readonly pool: Pool) {}
 
+  /** Retry a whole game-start transaction when a response-delivery lock is held. */
   async start(gameId: string, events: readonly GameEvent[], gameStart: GameStart): Promise<boolean> {
     return retryPlayerLockContention(() => this.startOnce(gameId, events, gameStart));
   }
 
+  /** Persist initial events and the game projection atomically. */
   private async startOnce(gameId: string, events: readonly GameEvent[], gameStart: GameStart): Promise<boolean> {
     const client = await this.pool.connect();
     try {

@@ -9,7 +9,7 @@ import { migrate, migrationChecksum, readMigrationSql } from '../src/pg/migrate'
 import { PostgresEventStore } from '../src/pg/event-store';
 import { PgGamesRepository, PgSeeksRepository, PgSeekAcceptor, PgGameStarter, PgUsersRepository } from '../src/pg/repositories';
 import { uuidv7 } from '../src/ids';
-import { ConcurrencyError } from '../src/errors';
+import { ConcurrencyError, PlayerLockUnavailableError } from '../src/errors';
 import { withTestDatabase } from '../src/test-support/database';
 
 // Integration tests need a real Postgres. They SKIP (not fail) when DATABASE_URL
@@ -306,6 +306,60 @@ test('advisory locks leave even a one-client query pool available', { skip }, as
       await queryPool.end();
     }
     await assert.rejects(store.acquirePlayerLock(uuidv7()), /player lock pool is closed/);
+  }, isolated);
+});
+
+test('same-player lock waiters cannot exhaust capacity for an unrelated player', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const store = new PostgresEventStore(pool);
+    const playerId = uuidv7();
+    const releaseHolder = await store.acquirePlayerLock(playerId);
+    const lockPool = (store as unknown as { playerLockPool: Pool }).playerLockPool;
+    assert.ok(lockPool, 'holder must initialize the real advisory-lock pool');
+    const capacity = lockPool.options.max ?? 10;
+    const connection = lockPool as unknown as { connect: () => Promise<import('pg').PoolClient> };
+    const originalConnect = connection.connect.bind(lockPool);
+    let attempts = 0;
+    let reachedCapacity!: () => void;
+    const allAttempted = new Promise<void>((resolve) => { reachedCapacity = resolve; });
+    connection.connect = () => {
+      attempts += 1;
+      if (attempts === capacity - 1) reachedCapacity();
+      return originalConnect();
+    };
+    const waiters = Array.from({ length: capacity * 2 }, () => store.acquirePlayerLock(playerId));
+    try {
+      await allAttempted;
+      const releaseUnrelated = await store.acquirePlayerLock(uuidv7());
+      await releaseUnrelated();
+    } finally {
+      connection.connect = originalConnect;
+      await releaseHolder();
+      const settled = await Promise.allSettled(waiters.map(async (waiter) => (await waiter)()));
+      await store.closePlayerLocks();
+      assert.ok(settled.every((result) => result.status === 'fulfilled'), 'every same-player waiter eventually acquires');
+    }
+  }, isolated);
+});
+
+test('exhausted advisory-lock pool raises a typed temporary refusal', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const store = new PostgresEventStore(pool);
+    const releases: Array<() => Promise<void>> = [];
+    try {
+      // Distinct users legitimately hold every connection; the next checkout must time out.
+      releases.push(await store.acquirePlayerLock(uuidv7()));
+      const lockPool = (store as unknown as { playerLockPool: Pool }).playerLockPool;
+      assert.ok(lockPool);
+      const capacity = lockPool.options.max ?? 10;
+      for (let i = 1; i < capacity; i += 1) {
+        releases.push(await store.acquirePlayerLock(uuidv7()));
+      }
+      await assert.rejects(store.acquirePlayerLock(uuidv7()), PlayerLockUnavailableError);
+    } finally {
+      await Promise.all(releases.map((release) => release()));
+      await store.closePlayerLocks();
+    }
   }, isolated);
 });
 

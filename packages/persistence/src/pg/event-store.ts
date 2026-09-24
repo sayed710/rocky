@@ -15,7 +15,7 @@ import {
   type StoredEvent,
   humanGamePlayerIds,
 } from '../event-store';
-import { ConcurrencyError, PersistenceError } from '../errors';
+import { ConcurrencyError, PersistenceError, PlayerLockUnavailableError } from '../errors';
 
 interface EventRow {
   game_id: string;
@@ -69,6 +69,7 @@ export class PostgresEventStore implements EventStore {
   private playerLockPool: Pool | null = null;
   private playerLockPoolClosing: Promise<void> | null = null;
 
+  /** Use the normal query pool for events and create a separate pool for delivery locks. */
   constructor(private readonly pool: Pool) {}
 
   /** Close the independent advisory-lock pool after all request handlers have drained. */
@@ -87,7 +88,8 @@ export class PostgresEventStore implements EventStore {
         ...this.pool.options,
         // pg deliberately makes this option non-enumerable, so object spread alone drops it.
         password: this.pool.options.password,
-        max: 5,
+        // Follow configured query capacity, while retaining enough slots for ordinary concurrency.
+        max: Math.max(10, this.pool.options.max ?? 10),
         connectionTimeoutMillis: 10_000,
         statement_timeout: 30_000,
       });
@@ -95,6 +97,7 @@ export class PostgresEventStore implements EventStore {
     return this.playerLockPool;
   }
 
+  /** Read the current sequence inside the append transaction. */
   private async headSeq(client: PoolClient, gameId: string): Promise<number> {
     const res = await client.query<{ head: string }>(
       'SELECT COALESCE(MAX(seq), -1)::text AS head FROM game_events WHERE game_id = $1',
@@ -108,6 +111,7 @@ export class PostgresEventStore implements EventStore {
     return retryPlayerLockContention(() => this.appendOnce(gameId, expectedSeq, events));
   }
 
+  /** Retryable single transaction; a lock-contention retry must restart the whole append. */
   private async appendOnce(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
     if (events.length === 0) return expectedSeq;
     const client = await this.pool.connect();
@@ -202,32 +206,55 @@ export class PostgresEventStore implements EventStore {
     });
   }
 
-  /** Hold a session advisory lock through response commitment without occupying the query pool. */
+  /** Hold a session advisory lock through response commitment without occupying the query pool or pinning waiting clients. */
   async acquirePlayerLock(userId: string): Promise<() => Promise<void>> {
-    const client = await this.lockPool().connect();
-    try {
-      await client.query(
-        `SELECT pg_advisory_lock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
-        [userId],
-      );
-    } catch (error) {
-      client.release(error instanceof Error ? error : new Error('failed to acquire player lock'));
-      throw error;
-    }
-    let released = false;
-    return async () => {
-      if (released) return;
-      released = true;
+    const deadline = Date.now() + 60_000;
+    let backoffMs = 10;
+    for (;;) {
+      let client: PoolClient;
+      let releasedClient = false;
       try {
-        await client.query(
-          `SELECT pg_advisory_unlock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+        client = await this.lockPool().connect();
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('timeout exceeded when trying to connect')) {
+          throw new PlayerLockUnavailableError();
+        }
+        throw error;
+      }
+      try {
+        const result = await client.query<{ locked: boolean }>(
+          `SELECT pg_try_advisory_lock(hashtextextended('rocky:active-human-game:' || $1, 0)) AS locked`,
           [userId],
         );
+        if (result.rows[0]?.locked) {
+          let released = false;
+          return async () => {
+            if (released) return;
+            released = true;
+            try {
+              await client.query(
+                `SELECT pg_advisory_unlock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+                [userId],
+              );
+              client.release();
+            } catch (error) {
+              client.release(error instanceof Error ? error : new Error('failed to release player lock'));
+            }
+          };
+        }
+        releasedClient = true;
         client.release();
       } catch (error) {
-        client.release(error instanceof Error ? error : new Error('failed to release player lock'));
+        if (!releasedClient) client.release(error instanceof Error ? error : new Error('failed to acquire player lock'));
+        throw error;
       }
-    };
+      // A waiter must not pin a lock-pool client while another request performs slow work.
+      if (Date.now() >= deadline) throw new PlayerLockUnavailableError();
+      // Desynchronize a burst of same-player requests so they do not all poll together.
+      const jitterMs = Math.floor(backoffMs * (0.75 + Math.random() * 0.5));
+      await new Promise<void>((resolve) => setTimeout(resolve, jitterMs));
+      backoffMs = Math.min(250, backoffMs * 2);
+    }
   }
 }
 

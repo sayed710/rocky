@@ -199,6 +199,7 @@ class PlayerMutex {
     return !this.locked && this.waiters.length === 0;
   }
 
+  /** Queue contenders in arrival order and transfer ownership only on release. */
   acquire(): Promise<() => Promise<void>> {
     return new Promise((resolve) => {
       const grant = (): void => {

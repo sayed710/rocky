@@ -278,6 +278,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   resetAnalysisPanel();
 
+  /** Keep mount-time control visibility aligned with the active client session. */
   const isUserAuthenticated = (): boolean => {
     return Boolean(getAccessToken() ?? deps.client.session.current?.tokens.accessToken);
   };

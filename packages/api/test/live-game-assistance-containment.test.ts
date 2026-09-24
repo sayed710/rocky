@@ -9,6 +9,7 @@ import type {
   PlayResult,
 } from '@chess-platform/engine';
 import type { GameEvent } from '@chess-platform/game';
+import { PlayerLockUnavailableError } from '@chess-platform/persistence';
 import { AnalysisService } from '../src/analysis/service.js';
 import { BOT_ACCOUNTS } from '../src/bot/catalogue.js';
 import { startHarness, type Harness } from './helpers.js';
@@ -218,6 +219,20 @@ test('Study Partner cannot reveal or extend an existing session during active hu
   assert.equal(completed.status, 409);
   assert.equal(completed.body.error.details.reason, 'active_human_game');
   assert.equal((await h.repos.studyPartner.findOwnedSession(sessionId, player.userId))?.session.status, 'active');
+});
+
+test('exhausted player-lock capacity returns 503 instead of an internal error', async (t) => {
+  const provider = new ControllableProvider();
+  const h = await startHarness({}, { analysis: new AnalysisService({ provider }) });
+  t.after(() => h.close());
+  const user = await h.makeUser('lock-capacity-player');
+  h.repos.events.acquirePlayerLock = async () => { throw new PlayerLockUnavailableError(); };
+
+  const response = await h.json('POST', '/v1/analysis', analysisRequest(user.token));
+
+  assert.equal(response.status, 503);
+  assert.equal(response.body.error.code, 'service_unavailable');
+  assert.equal(provider.calls, 1, 'pre-computation behavior is unchanged');
 });
 
 test('Study Partner writes acquire the player barrier before durable mutation', async (t) => {

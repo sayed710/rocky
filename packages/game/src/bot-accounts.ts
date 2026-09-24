@@ -7,6 +7,7 @@ export const ENGINE_BOT_USER_IDS = {
 
 const ENGINE_BOT_IDS = new Set<string>(Object.values(ENGINE_BOT_USER_IDS));
 
+/** Recognize only the reserved first-party opponent IDs, never arbitrary bot-like handles. */
 export function isEngineBotUserId(userId: string): boolean {
   return ENGINE_BOT_IDS.has(userId);
 }

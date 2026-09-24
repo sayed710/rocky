@@ -10,7 +10,7 @@ import type { Variant } from '@chess-platform/core';
 import { FenError } from '@chess-platform/core';
 import { coreFenValidator } from './analysis/fen-validator.js';
 import type { TiebreakKey } from '@chess-platform/tournament';
-import { type RatingRow, type TournamentsRepository } from '@chess-platform/persistence';
+import { PlayerLockUnavailableError, type RatingRow, type TournamentsRepository } from '@chess-platform/persistence';
 import { AuthService } from './auth/service';
 import type { RequestMeta } from './auth/service';
 import { EMAIL_ADDRESS_PATTERN } from './email/address.js';
@@ -233,6 +233,17 @@ export function buildRouter(deps: RouteDeps): Router {
   const router = new Router();
   const { auth, repos, clock, ids, chess960Starts, info, rateLimiter, config } = deps;
   const assistanceGuard = new LiveGameAssistanceGuard(repos.events);
+  /** Capacity exhaustion is a temporary service refusal, not an internal HTTP 500. */
+  const acquireAssistanceLock = async (userId: string): Promise<() => Promise<void>> => {
+    try {
+      return await repos.events.acquirePlayerLock(userId);
+    } catch (error) {
+      if (error instanceof PlayerLockUnavailableError) {
+        throw HttpError.unavailable('assistance coordination is temporarily unavailable');
+      }
+      throw error;
+    }
+  };
   /** Check before computation and under the player lock before response commitment. */
   const withAssistanceGuard = (
     handler: (
@@ -243,7 +254,7 @@ export function buildRouter(deps: RouteDeps): Router {
     const identity = requireAuth(ctx);
     await assistanceGuard.assertEligible(identity.userId);
     const result = await handler(ctx, identity);
-    const release = await repos.events.acquirePlayerLock(identity.userId);
+    const release = await acquireAssistanceLock(identity.userId);
     try {
       await assistanceGuard.assertEligible(identity.userId);
       return {
@@ -269,7 +280,7 @@ export function buildRouter(deps: RouteDeps): Router {
     ) => Promise<HandlerResult>,
   ): Handler => async (ctx) => {
     const identity = requireAuth(ctx);
-    const release = await repos.events.acquirePlayerLock(identity.userId);
+    const release = await acquireAssistanceLock(identity.userId);
     try {
       await assistanceGuard.assertEligible(identity.userId);
       const result = await handler(ctx, identity);
