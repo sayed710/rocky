@@ -30,6 +30,7 @@ export const ASSESS_MESSAGES = {
   running: 'Assessing…',
   rateLimited: 'Too many assessments. Try again shortly.',
   unavailable: 'Move assessment is unavailable right now.',
+  activeGame: 'Move assessment is unavailable while you are playing a live human game.',
   rejected: 'This position cannot be assessed.',
   failed: 'Could not assess the move.',
 } as const;

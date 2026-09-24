@@ -12,6 +12,14 @@ export class PersistenceError extends Error {
   }
 }
 
+/** Bounded fair-play lock acquisition could not obtain capacity or a released player lock. */
+export class PlayerLockUnavailableError extends PersistenceError {
+  constructor() {
+    super('player lock coordination is temporarily unavailable');
+    this.name = 'PlayerLockUnavailableError';
+  }
+}
+
 /** A uniqueness conflict while creating an identity record. */
 export class DuplicateUserError extends PersistenceError {
   constructor() {

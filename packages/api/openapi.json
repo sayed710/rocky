@@ -2185,6 +2185,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -2469,6 +2479,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid position, variant or limits",
             "content": {
@@ -2490,7 +2510,7 @@
             }
           },
           "503": {
-            "description": "Analysis is not configured, or the engine is saturated or unavailable",
+            "description": "Analysis is not configured, the engine is unavailable, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2555,6 +2575,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid position or unsupported variant",
             "content": {
@@ -2576,7 +2606,7 @@
             }
           },
           "503": {
-            "description": "Puzzle generation is not configured, or the engine is unavailable",
+            "description": "Puzzle generation or its engine is unavailable, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2641,6 +2671,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Unsupported variant or starting position, or a malformed, illegal or over-long move sequence",
             "content": {
@@ -2662,7 +2702,7 @@
             }
           },
           "503": {
-            "description": "Opening exploration is not configured",
+            "description": "Opening exploration or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2727,6 +2767,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid position, variant, move, illegal move, or a decided position",
             "content": {
@@ -2748,7 +2798,7 @@
             }
           },
           "503": {
-            "description": "Analysis is not configured, or the engine is saturated or unavailable",
+            "description": "Analysis is not configured, the engine is unavailable, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2985,6 +3035,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid FEN, variant, move, or an over-long move sequence",
             "content": {
@@ -3006,7 +3066,7 @@
             }
           },
           "503": {
-            "description": "Coaching is not configured, or no feature could answer",
+            "description": "Coaching is unavailable, no feature could answer, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3071,6 +3131,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid variant, FEN, or body",
             "content": {
@@ -3082,7 +3152,7 @@
             }
           },
           "503": {
-            "description": "Study Partner is not configured",
+            "description": "Study Partner or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3157,6 +3227,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Malformed session ID",
             "content": {
@@ -3168,7 +3248,7 @@
             }
           },
           "503": {
-            "description": "Study Partner is not configured",
+            "description": "Study Partner or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3333,7 +3413,7 @@
             }
           },
           "409": {
-            "description": "Version conflict, completed session, failed key, or turn in progress",
+            "description": "Active human game, version conflict, completed session, failed key, or turn in progress",
             "content": {
               "application/json": {
                 "schema": {
@@ -3363,7 +3443,7 @@
             }
           },
           "503": {
-            "description": "Study Partner or coaching dependency unavailable",
+            "description": "Study Partner, coaching dependency, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3462,7 +3542,7 @@
             }
           },
           "409": {
-            "description": "Version conflict or a turn is in progress",
+            "description": "Active human game, version conflict, or a turn is in progress",
             "content": {
               "application/json": {
                 "schema": {
@@ -3482,7 +3562,7 @@
             }
           },
           "503": {
-            "description": "Study Partner is not configured",
+            "description": "Study Partner or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3558,6 +3638,16 @@
               }
             }
           },
+          "409": {
+            "description": "Caller is participating in an active human game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid position, variant, move, or illegal move",
             "content": {
@@ -3579,7 +3669,7 @@
             }
           },
           "503": {
-            "description": "Move explanation is not configured, or the provider is unavailable",
+            "description": "Move explanation, its provider, or player coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3842,6 +3932,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4035,6 +4135,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4184,6 +4294,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -4293,6 +4413,16 @@
           },
           "422": {
             "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Game creation coordination is temporarily unavailable",
             "content": {
               "application/json": {
                 "schema": {

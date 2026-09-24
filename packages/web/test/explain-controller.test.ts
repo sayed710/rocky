@@ -13,10 +13,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ExplainController } from '../src/app/explain-controller.js';
+import { classifyRequestFailure } from '../src/app/move-request-controller.js';
 import type { GambitClient } from '../src/api/client.js';
 import type { MoveExplanationResponse } from '../src/api/models.js';
 
 const FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+test('move requests distinguish the fair-play conflict from other conflicts', () => {
+  assert.equal(classifyRequestFailure({ status: 409, details: { reason: 'active_human_game' } }), 'active-game');
+  assert.equal(classifyRequestFailure({ status: 409, details: { reason: 'different_conflict' } }), 'failed');
+});
 
 function response(move: string): MoveExplanationResponse {
   return {

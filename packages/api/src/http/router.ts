@@ -1,6 +1,6 @@
 /**
  * @packageDocumentation
- * A tiny, typed, dependency-free HTTP router built on Node's `http` module. It
+ * A tiny, typed HTTP router built on Node's `http` module. It
  * compiles `/v1/users/:handle`-style patterns into segment matchers, resolves
  * path parameters, applies authentication + RBAC declaratively per route, and
  * normalizes every outcome into the JSON error envelope. Handlers never touch
@@ -9,7 +9,7 @@
  */
 
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
-import type { Role } from '@chess-platform/persistence';
+import { PlayerLockUnavailableError, type Role } from '@chess-platform/persistence';
 import { HttpError } from './errors';
 import { readJsonBody, DEFAULT_MAX_BODY_BYTES } from './body';
 import type { Handler, HandlerResult, Identity, RequestContext } from './context';
@@ -189,6 +189,7 @@ export class Router {
     };
   }
 
+  /** Authenticate, run one route, commit its response, and run post-write cleanup exactly once. */
   private async dispatch(
     req: IncomingMessage,
     res: ServerResponse,
@@ -287,16 +288,36 @@ export class Router {
         signal: disconnect.signal,
       };
 
-      let result;
+      let result: HandlerResult | undefined;
       try {
         result = await route.handler(ctx);
+        writeResult(res, result);
       } finally {
         // The listener holds the controller, and the controller is reachable from any signal the
         // handler passed downstream. Removing it here keeps a long-lived socket from accumulating
         // one per request on a keep-alive connection.
         res.removeListener('close', onClose);
+        try {
+          await result?.afterWrite?.();
+        } catch (cleanupError) {
+          // The response is already committed. Report cleanup failure without entering the outer
+          // response-error path, which would attempt to write a second response.
+          try {
+            onInternal(cleanupError, requestId);
+          } catch (reportError) {
+            // A faulty injected reporter must not turn a post-commit cleanup failure into another
+            // response write. The request logger is a best-effort fallback at this boundary.
+            try {
+              logger.error('post-write cleanup reporting failed', {
+                cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+                reportError: reportError instanceof Error ? reportError.message : String(reportError),
+              });
+            } catch {
+              // No safe transport action remains once the response has been committed.
+            }
+          }
+        }
       }
-      writeResult(res, result);
 
       const durationMs = Date.now() - startMs;
       logger.info('request completed', { status: result.status, durationMs });
@@ -310,23 +331,26 @@ export class Router {
       const reqPath = req.url ? req.url.split('?')[0] ?? '/' : '/';
       const logger = runtime.logger.child({ requestId, traceId, method, path: reqPath });
 
-      if (err instanceof HttpError) {
-        logger[err.status >= 500 ? 'error' : 'warn']('request failed', { status: err.status, durationMs, code: err.code, err: err.message });
-        runtime.metrics.counter('http_requests_total', { method, route: resolvedRoutePath, status: String(err.status) }).inc();
+      const failure = err instanceof PlayerLockUnavailableError
+        ? HttpError.unavailable('player coordination is temporarily unavailable')
+        : err;
+      if (failure instanceof HttpError) {
+        logger[failure.status >= 500 ? 'error' : 'warn']('request failed', { status: failure.status, durationMs, code: failure.code, err: failure.message });
+        runtime.metrics.counter('http_requests_total', { method, route: resolvedRoutePath, status: String(failure.status) }).inc();
         runtime.metrics.histogram('http_request_duration_seconds', LATENCY_BUCKETS, { route: resolvedRoutePath }).observe(durationMs / 1000);
         span.setAttribute('http.route', resolvedRoutePath);
-        span.setAttribute('http.status_code', err.status);
-        span.setStatus(err.status >= 500 ? 'error' : 'ok');
+        span.setAttribute('http.status_code', failure.status);
+        span.setStatus(failure.status >= 500 ? 'error' : 'ok');
         span.end();
 
         writeResult(res, {
-          status: err.status,
-          headers: err.headers,
+          status: failure.status,
+          headers: failure.headers,
           body: {
             error: {
-              code: err.code,
-              message: err.message,
-              ...(err.details ? { details: err.details } : {}),
+              code: failure.code,
+              message: failure.message,
+              ...(failure.details ? { details: failure.details } : {}),
               requestId,
             },
           },

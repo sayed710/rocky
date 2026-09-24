@@ -9,7 +9,7 @@
 
 import type { Pool } from 'pg';
 import { uuidv7 } from '@chess-platform/persistence';
-import type { TournamentsRepository } from '@chess-platform/persistence';
+import type { EventStore, TournamentsRepository } from '@chess-platform/persistence';
 import {
   createPool,
   PgGamesRepository,
@@ -135,8 +135,13 @@ export class PgAuditRepository implements AuditRepository {
 }
 
 /** Construct the full Postgres-backed repository bundle from a pool. */
-export function createPgRepositories(pool: Pool, ids: IdGenerator = uuidv7Generator): Repositories {
+export function createPgRepositories(
+  pool: Pool,
+  ids: IdGenerator = uuidv7Generator,
+  events: EventStore = new PostgresEventStore(pool),
+): Repositories {
   return {
+    events,
     users: new PgUsersRepository(pool),
     sessions: new PgSessionsRepository(pool),
     ratings: new PgRatingsRepository(pool),
@@ -210,8 +215,8 @@ function resolveLogLevel(): LogLevel {
  * Build the {@link ApiDependencies} bundle backed by Postgres.
  *
  * Returns `shutdownAnalysis` alongside the pool because the analysis subsystem owns engine
- * subprocesses (ADR-0113). A caller that closes the pool and exits without calling it leaves those
- * processes to be killed rather than drained.
+ * subprocesses (ADR-0113), and the event store owns a separate advisory-lock pool. Call it after
+ * draining HTTP requests and before closing the main pool.
  */
 export function createPgDependencies(options: PgBootstrapOptions = {}): {
   deps: ApiDependencies;
@@ -241,7 +246,7 @@ export function createPgDependencies(options: PgBootstrapOptions = {}): {
 
   const eventStore = new PostgresEventStore(pool);
   const gameLauncher = options.gameLauncher ?? new DurableGameLauncher(eventStore, clock);
-  const repos = createPgRepositories(pool, ids);
+  const repos = createPgRepositories(pool, ids, eventStore);
   const antiCheatAnalysis = options.analysisProvider
     ? new AntiCheatAnalysisService(
         new EventStoreGameSource(eventStore, logger),
@@ -538,7 +543,11 @@ export function createPgDependencies(options: PgBootstrapOptions = {}): {
     deps,
     pool,
     shutdownAnalysis: async () => {
-      await analysisComposition?.shutdown();
+      try {
+        await analysisComposition?.shutdown();
+      } finally {
+        await eventStore.closePlayerLocks();
+      }
     },
   };
 }

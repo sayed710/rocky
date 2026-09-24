@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { GameEvent } from '@chess-platform/game';
+import { ENGINE_BOT_USER_IDS, type GameEvent } from '@chess-platform/game';
 import { InMemoryEventStore } from '../src/event-store';
 import { ConcurrencyError, PersistenceError } from '../src/errors';
+import { PlayerLockUnavailableError } from '../src/errors';
+import { PlayerLockBusyError, retryPlayerLockContention } from '../src/pg/event-store';
 
 const created: GameEvent = {
   type: 'GameCreated',
@@ -22,6 +24,24 @@ const move2: GameEvent = {
   type: 'MovePlayed', ply: 2, uci: 'e7e5', san: 'e5', by: 'b',
   moveTimeMs: 500, remaining: { w: 59_500, b: 59_500 }, at: 3,
 };
+
+test('game-creation retry exhaustion is typed and unrelated failures propagate', async () => {
+  let attempts = 0;
+  await assert.rejects(
+    retryPlayerLockContention(async () => {
+      attempts += 1;
+      throw new PlayerLockBusyError('busy');
+    }, 0),
+    PlayerLockUnavailableError,
+  );
+  assert.equal(attempts, 1);
+
+  const unexpected = new Error('unrelated failure');
+  await assert.rejects(
+    retryPlayerLockContention(async () => { throw unexpected; }, 0),
+    (error: unknown) => error === unexpected,
+  );
+});
 
 test('a new game must start with GameCreated', async () => {
   const s = new InMemoryEventStore(() => 1);
@@ -57,6 +77,61 @@ test('exists reflects whether a game has any events', async () => {
   assert.equal(await s.exists('g1'), false);
   await s.append('g1', -1, [created]);
   assert.equal(await s.exists('g1'), true);
+});
+
+test('findActiveGamesByPlayer derives participation from GameCreated through GameEnded', async () => {
+  const s = new InMemoryEventStore();
+  const active = { ...created, gameId: 'active', players: { white: 'target', black: 'other' } };
+  const finished = { ...created, gameId: 'finished', players: { white: 'other', black: 'target' } };
+  const unrelated = { ...created, gameId: 'unrelated', players: { white: 'third', black: 'fourth' } };
+  await s.append('active', -1, [active]);
+  await s.append('finished', -1, [finished]);
+  await s.append('finished', 0, [{
+    type: 'GameEnded',
+    result: '1-0',
+    termination: 'resignation',
+    winner: 'w',
+    at: 2,
+  }]);
+  await s.append('unrelated', -1, [unrelated]);
+
+  assert.deepEqual(await s.findActiveGamesByPlayer('target'), [{
+    gameId: 'active',
+    players: { white: 'target', black: 'other' },
+  }]);
+  assert.deepEqual(await s.findActiveGamesByPlayer('missing'), []);
+});
+
+test('player locks serialize human-game creation but do not delay bot games', async () => {
+  const s = new InMemoryEventStore();
+  const originalAcquire = s.acquirePlayerLock.bind(s);
+  const release = await originalAcquire('a');
+  let markAttempt!: () => void;
+  const attempted = new Promise<void>((resolve) => { markAttempt = resolve; });
+  s.acquirePlayerLock = async (userId) => {
+    if (userId === 'a') markAttempt();
+    return originalAcquire(userId);
+  };
+  let humanSettled = false;
+  const human = s.append('human', -1, [{ ...created, gameId: 'human' }]).then(() => {
+    humanSettled = true;
+  });
+  try {
+    await attempted;
+    assert.equal(humanSettled, false);
+    const bot = {
+      ...created,
+      gameId: 'bot',
+      players: { white: 'a', black: ENGINE_BOT_USER_IDS.novice },
+    };
+    assert.equal(await s.append('bot', -1, [bot]), 0);
+    assert.equal(humanSettled, false, 'human append remains blocked after an independent bot append completes');
+  } finally {
+    await release();
+  }
+  await release(); // release is idempotent after the response cleanup path runs
+  await human;
+  assert.equal(humanSettled, true);
 });
 
 test('stored events are isolated from later caller mutation', async () => {

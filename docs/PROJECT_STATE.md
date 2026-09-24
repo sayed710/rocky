@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-23 — M15 Increment 63: Historical tournament withdrawal state preservation._
+_Last updated: 2026-09-24 — M15 Increment 64: Account-wide live-human-game assistance containment._
+
+Prior: _Last updated: 2026-09-23 — M15 Increment 63: Historical tournament withdrawal state preservation._
 
 Prior: _Last updated: 2026-09-23 — M15 Increment 62: Legal-move UCI round-trip invariant across chess variants._
 
@@ -4365,3 +4367,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - `Tournament.standingsAfterRound(roundIndex)` now reports a participant as withdrawn starting with the 0-based round in which they withdrew, leaving earlier round standings active and current `standings()` behavior unchanged. The withdrawal round is captured before game/bye forfeits and before synchronous `tryAdvance()` can generate the next round or finish the event; repeated withdrawal retains the first recorded round.
 - Added optional `withdrawalRounds` snapshot tuples, omitted when empty. Restore preserves legacy snapshots without those tuples and their prior retroactive withdrawal display rather than inventing dates; modern entries are copied and validated against withdrawn participants and existing rounds, rejecting duplicate or contradictory values. Mixed legacy and newly recorded withdrawals keep their respective semantics without a database migration.
 - ADR-0143 records the contract. Round-robin and Swiss lifecycle tests cover before/at/after boundaries, synchronous advancement, final-round and repeated withdrawal, current standings, forfeits and voided byes, in-progress restore, snapshot round-trip, legacy behavior, and malformed metadata.
+
+## M15 Increment 64 — Account-wide live-human-game assistance containment (2026-09-24)
+
+- The server refuses actionable analysis, puzzle generation, opening exploration, mistake prediction, coaching, move explanation, and Study Partner create/read/turn/complete responses for an authenticated account participating in any active human-vs-human game, rated or casual. Eligibility comes from durable `GameCreated` events without a corresponding `GameEnded`, not WebSocket presence, tab state, or a lagging game projection. First-party engine-bot games, unrelated accounts, completed games, curated endgame training, and operator/post-game review remain eligible.
+- Read/computation routes check before expensive work and again after work while holding a per-player lock through HTTP response commitment. Assistance-producing Study Partner mutations acquire that lock before repository writes; administrative delete returns no coaching data and remains allowed. Every human `GameCreated` path uses the same sorted, deduplicated player-lock namespace at the event-store creation boundary, with transaction-scoped PostgreSQL locks for game creation and a session-scoped lock for assistance delivery. Session lock clients use a separate bounded pool; blocked game creators release query-pool clients after a short advisory-lock timeout and retry their entire transaction, so eligibility and handler reads can progress under contention.
+- The web game view hides in-game assistance controls for an active human participant and restores them after game end; server enforcement remains authoritative across sessions, tabs, arbitrary FENs, and disconnects. Route metadata and generated OpenAPI document describe the `active_human_game` conflict response, including Study Partner completion. Deterministic in-memory and real-PostgreSQL lock-boundary tests, API race tests, package gates, and repository validation cover the contract.
+- Waiting assistance requests use bounded, jittered `pg_try_advisory_lock` retries and return the dedicated lock client after each failed attempt, so many requests for one busy account cannot pin every lock-pool connection and starve unrelated players. The lock pool scales with configured query capacity (minimum ten); connection-capacity exhaustion and the retry deadline surface as HTTP 503 rather than an internal error. Real-PostgreSQL tests oversubscribe one player's waiters, prove an unrelated player can still acquire a lock, and verify a typed refusal when distinct lock holders exhaust capacity.

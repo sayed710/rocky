@@ -46,6 +46,7 @@ import type {
 } from '../repositories';
 import { SEEK_TTL_MS } from '../repositories';
 import { CURRENT_EVENT_VERSION } from '../event-store.js';
+import { lockGameCreationPlayers, retryPlayerLockContention } from './event-store.js';
 import { DuplicateUserError, VersionConflictError } from '../errors';
 
 const SEEK_TTL_INTERVAL = `${Math.floor(SEEK_TTL_MS / 1000)} seconds`;
@@ -760,6 +761,11 @@ export class PgSeekAcceptor implements SeekAcceptor {
    * @returns The updated SeekRow with creator handle, or null if seek not available
    */
   async accept(seekId: string, gameId: string, events: readonly GameEvent[], gameStart: GameStart): Promise<SeekRow | null> {
+    return retryPlayerLockContention(() => this.acceptOnce(seekId, gameId, events, gameStart));
+  }
+
+  /** Claim and create in one transaction so a player-lock retry cannot leave a partial game. */
+  private async acceptOnce(seekId: string, gameId: string, events: readonly GameEvent[], gameStart: GameStart): Promise<SeekRow | null> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -778,6 +784,8 @@ export class PgSeekAcceptor implements SeekAcceptor {
         await client.query('ROLLBACK');
         return null;
       }
+
+      await lockGameCreationPlayers(client, events);
       
       let seq = -1;
       for (const event of events) {
@@ -806,12 +814,21 @@ export class PgSeekAcceptor implements SeekAcceptor {
 }
 
 export class PgGameStarter implements GameStarter {
+  /** Bind game creation and its player locks to the supplied query pool. */
   constructor(private readonly pool: Pool) {}
 
+  /** Retry a whole game-start transaction when a response-delivery lock is held. */
   async start(gameId: string, events: readonly GameEvent[], gameStart: GameStart): Promise<boolean> {
+    return retryPlayerLockContention(() => this.startOnce(gameId, events, gameStart));
+  }
+
+  /** Persist initial events and the game projection atomically. */
+  private async startOnce(gameId: string, events: readonly GameEvent[], gameStart: GameStart): Promise<boolean> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+
+      await lockGameCreationPlayers(client, events);
 
       let seq = -1;
       for (const event of events) {

@@ -4,21 +4,77 @@
  * concurrent result recordings BOTH survive (the lost-update scenario that a
  * blind upsert silently corrupts).
  */
-import { describe, it } from 'node:test';
+import { describe, it, test } from 'node:test';
 import * as assert from 'node:assert/strict';
-import { VersionConflictError } from '@chess-platform/persistence';
+import { PlayerLockUnavailableError, VersionConflictError } from '@chess-platform/persistence';
 import { InMemoryTournamentsRepository } from '../src/fakes';
 import { ArenaService } from '../src/tournament/arena.service';
+import { TournamentService } from '../src/tournament/service';
 import { InMemoryGameLauncher } from '../src/tournament/launcher';
 import { uuidv7Generator } from '../src/ports/ids';
+import { startHarness } from './helpers';
 
 const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } as const;
+
+test('tournament start routes return 503 when player-lock coordination is exhausted', async () => {
+  const h = await startHarness({}, {
+    gameLauncher: { launch: async () => { throw new PlayerLockUnavailableError(); } },
+  });
+  try {
+    const director = await h.makeUser('lock-director', ['user', 'tournament_director']);
+    const first = await h.makeUser('lock-player-one');
+    const second = await h.makeUser('lock-player-two');
+    for (const format of ['round_robin', 'arena'] as const) {
+      const created = await h.json('POST', '/v1/tournaments', {
+        token: director.token,
+        body: {
+          name: `Lock refusal ${format}`,
+          format,
+          variant: 'standard',
+          timeControl: TC,
+          ...(format === 'arena' ? { durationMs: 3_600_000 } : {}),
+        },
+      });
+      assert.equal(created.status, 201);
+      for (const player of [first, second]) {
+        const registered = await h.json('POST', `/v1/tournaments/${created.body.id}/participants`, {
+          token: director.token,
+          body: { playerId: player.userId },
+        });
+        assert.equal(registered.status, 200);
+      }
+      const response = await h.json('POST', `/v1/tournaments/${created.body.id}/start`, {
+        token: director.token,
+      });
+      assert.equal(response.status, 503);
+      assert.equal(response.body.error.code, 'service_unavailable');
+    }
+  } finally {
+    await h.close();
+  }
+});
 
 function makeArenaService(repo: InMemoryTournamentsRepository): ArenaService {
   return new ArenaService(repo, new InMemoryGameLauncher(uuidv7Generator), () => 1_000);
 }
 
 describe('tournament optimistic concurrency', () => {
+  it('preserves typed player-lock exhaustion through both launch retry loops', async () => {
+    const refusal = new PlayerLockUnavailableError();
+    const launcher = { launch: async () => { throw refusal; } };
+    const rounds = new TournamentService(new InMemoryTournamentsRepository(), launcher);
+    await rounds.create({ id: 'lock-rounds', name: 'Lock rounds', format: 'round_robin', variant: 'standard', timeControl: TC });
+    await rounds.register('lock-rounds', 'p1');
+    await rounds.register('lock-rounds', 'p2');
+    await assert.rejects(rounds.start('lock-rounds'), (error: unknown) => error === refusal);
+
+    const arena = new ArenaService(new InMemoryTournamentsRepository(), launcher, () => 1_000);
+    await arena.create({ id: 'lock-arena', name: 'Lock arena', variant: 'standard', timeControl: TC, durationMs: 3_600_000 });
+    await arena.register('lock-arena', 'p1');
+    await arena.register('lock-arena', 'p2');
+    await assert.rejects(arena.start('lock-arena', 1_000), (error: unknown) => error === refusal);
+  });
+
   it('in-memory repository rejects stale-version saves', async () => {
     const repo = new InMemoryTournamentsRepository();
     const service = makeArenaService(repo);

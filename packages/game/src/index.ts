@@ -7,5 +7,6 @@
 
 export * from './clock';
 export * from './events';
+export { ENGINE_BOT_USER_IDS, isEngineBotUserId, isHumanGamePlayers } from './bot-accounts';
 export { Game, GameError, canMate } from './game';
 export type { GameState, GameStatus, CreateGameParams } from './game';

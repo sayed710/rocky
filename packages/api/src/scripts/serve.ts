@@ -30,13 +30,13 @@ async function main(): Promise<void> {
     // eslint-disable-next-line no-console
     console.log(`${signal} received — shutting down`);
     http.close(() => {
-      // The analysis pool owns engine subprocesses (ADR-0113), so drain it before the process
-      // exits — otherwise they are killed rather than asked to quit. A failure here must not
-      // block closing the pool, or a stuck engine would keep the container alive until SIGKILL.
+      // The legacy-named shutdown handle drains engine subprocesses (ADR-0113) and the
+      // independent player-lock pool before the primary query pool closes. A failure must not
+      // prevent primary-pool closure, or the container could remain alive until SIGKILL.
       void shutdownAnalysis()
         .catch((err: unknown) => {
           // eslint-disable-next-line no-console
-          console.error('analysis engine shutdown failed', err);
+          console.error('API resource shutdown failed', err);
         })
         .then(() => pool.end())
         .then(() => process.exit(0));

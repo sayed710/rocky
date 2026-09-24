@@ -209,6 +209,8 @@ test('failures classify by status, not by message', () => {
   assert.equal(classifyFailure({ status: 429 }), 'rate-limited');
   assert.equal(classifyFailure({ status: 503 }), 'unavailable');
   assert.equal(classifyFailure({ status: 401 }), 'unauthenticated');
+  assert.equal(classifyFailure({ status: 409, details: { reason: 'active_human_game' } }), 'active-game');
+  assert.equal(classifyFailure({ status: 409, details: { reason: 'version_conflict' } }), 'failed');
   assert.equal(classifyFailure({ status: 422 }), 'rejected');
   assert.equal(classifyFailure({ status: 400 }), 'rejected');
   assert.equal(classifyFailure({ status: 500 }), 'failed');

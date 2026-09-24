@@ -1,8 +1,14 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import { createServer, type Server } from 'node:http';
 import { Router } from '../src/http/router';
 import { json } from '../src/http/context';
+import { NullLogger } from '../src/ports/logger';
+import { NullMetrics } from '../src/ports/metrics';
+import { NullTracer } from '../src/ports/tracer';
 import { startHarness } from './helpers';
+import { closeServer, listenOnFetchablePort } from './listen';
+import { PlayerLockUnavailableError } from '@chess-platform/persistence';
 
 test('router matches path params and reports 404 vs 405', () => {
   const r = new Router();
@@ -23,6 +29,108 @@ test('router matches path params and reports 404 vs 405', () => {
   const missing = r.match('GET', '/nope');
   assert.ok('allow' in missing);
   if ('allow' in missing) assert.equal(missing.allow.length, 0);
+});
+
+test('player-lock exhaustion maps to a temporary HTTP refusal', async () => {
+  const router = new Router();
+  router.get('/lock-unavailable', {
+    summary: 'lock refusal', tags: ['test'], security: 'none', responses: {},
+  }, { required: false }, async () => {
+    throw new PlayerLockUnavailableError();
+  });
+  const reported: unknown[] = [];
+  const { server, port } = await listenOnFetchablePort(
+    (candidate, host) => new Promise<Server>((resolve, reject) => {
+      const listener = createServer(router.toListener({
+        authenticate: () => null,
+        newRequestId: () => 'lock-refusal-test',
+        logger: new NullLogger(),
+        metrics: new NullMetrics(),
+        tracer: new NullTracer(),
+        onInternalError: (error) => { reported.push(error); },
+      }));
+      listener.once('error', reject);
+      listener.listen(candidate, host, () => resolve(listener));
+    }),
+    '127.0.0.1',
+  );
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/lock-unavailable`);
+    assert.equal(response.status, 503);
+    const body = await response.json() as { error: { code: string } };
+    assert.equal(body.error.code, 'service_unavailable');
+    assert.deepEqual(reported, []);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test('post-write cleanup runs once and never changes an already committed response', async () => {
+  const router = new Router();
+  const policy = { required: false } as const;
+  const doc = { summary: 'cleanup', tags: ['test'], security: 'none' as const, responses: {} };
+  const reported: unknown[] = [];
+  let markReported!: () => void;
+  const firstReport = new Promise<void>((resolve) => { markReported = resolve; });
+  let cleaned = 0;
+  let markCleaned!: () => void;
+  const cleanupDone = new Promise<void>((resolve) => { markCleaned = resolve; });
+  router.get('/ok', doc, policy, () => ({
+    status: 200,
+    body: { ok: true },
+    afterWrite: async () => {
+      cleaned += 1;
+      markCleaned();
+      throw new Error('cleanup failed after response commitment');
+    },
+  }));
+  let failedWriteCleaned = 0;
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  router.get('/write-fails', doc, policy, () => ({
+    status: 200,
+    body: circular,
+    afterWrite: async () => { failedWriteCleaned += 1; },
+  }));
+  const runtime = {
+    authenticate: () => null,
+    newRequestId: () => 'cleanup-test',
+    logger: new NullLogger(),
+    metrics: new NullMetrics(),
+    tracer: new NullTracer(),
+    onInternalError: (error: unknown) => {
+      reported.push(error);
+      if (reported.length === 1) markReported();
+      if (String(error).includes('cleanup failed after response commitment')) {
+        throw new Error('injected reporter failed');
+      }
+    },
+  };
+  const { server, port } = await listenOnFetchablePort(
+    (candidate, host) => new Promise<Server>((resolve, reject) => {
+      const listener = createServer(router.toListener(runtime));
+      listener.once('error', reject);
+      listener.listen(candidate, host, () => resolve(listener));
+    }),
+    '127.0.0.1',
+  );
+  try {
+    const ok = await fetch(`http://127.0.0.1:${port}/ok`);
+    assert.equal(ok.status, 200);
+    assert.deepEqual(await ok.json(), { ok: true });
+    await cleanupDone;
+    await firstReport;
+    assert.equal(cleaned, 1);
+    assert.equal(reported.length, 1);
+    assert.match(String(reported[0]), /cleanup failed after response commitment/);
+
+    const failed = await fetch(`http://127.0.0.1:${port}/write-fails`);
+    assert.equal(failed.status, 500);
+    assert.equal(failedWriteCleaned, 1);
+    assert.equal(reported.length, 2);
+  } finally {
+    await closeServer(server);
+  }
 });
 
 test('unknown route returns a 404 error envelope with a request id', async () => {

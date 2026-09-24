@@ -247,6 +247,44 @@ test('service unavailable (503) -> the muted note, NOT the error element', async
   mounted.analysis.dispose();
 });
 
+test('live-human-game conflict from another session explains why analysis was refused', async () => {
+  const transport = new FakeTransport().onEach((req: HttpRequest) => {
+    if (req.url.includes('/v1/capabilities')) {
+      return json(200, { capabilities: { analysis: true } });
+    }
+    if (req.url.includes('/v1/analysis')) {
+      return json(409, {
+        error: {
+          code: 'conflict',
+          message: 'assistance unavailable',
+          details: { reason: 'active_human_game' },
+          requestId: 'req-live-game',
+        },
+      });
+    }
+    return json(200, {});
+  });
+
+  const { sockets, elements, mounted } = setupMountedGame({ transport });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  sockets.last.open();
+  sockets.last.emit({
+    t: 'joined',
+    gameId: 'g-test-1',
+    role: 'white',
+    state: makeState('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'),
+  });
+
+  elements.get('analysis-run')!.click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(elements.get('analysis-note')!.textContent,
+    'Analysis is unavailable while you are playing a live human game.');
+  assert.equal(elements.get('analysis-error')!.hidden, true);
+
+  mounted.controller.dispose();
+  mounted.analysis.dispose();
+});
+
 test('a new request supersedes an old one: a slow first response that resolves AFTER a position change must not render', async () => {
   let resolveSlowResponse: ((res: HttpResponse) => void) | null = null;
   const transport = new AsyncTransport((req: HttpRequest) => {

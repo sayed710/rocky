@@ -5,15 +5,17 @@
  * a unique-violation surfaced as {@link ConcurrencyError}.
  */
 
-import type { Pool, PoolClient } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import type { GameEvent } from '@chess-platform/game';
 import {
   CURRENT_EVENT_VERSION,
   upcast,
   type EventStore,
+  type ActiveGameRecord,
   type StoredEvent,
+  humanGamePlayerIds,
 } from '../event-store';
-import { ConcurrencyError, PersistenceError } from '../errors';
+import { ConcurrencyError, PersistenceError, PlayerLockUnavailableError } from '../errors';
 
 interface EventRow {
   game_id: string;
@@ -24,7 +26,33 @@ interface EventRow {
   server_ts: Date;
 }
 
+interface ActiveGameRow {
+  game_id: string;
+  event_version: number;
+  payload: unknown;
+}
+
 const UNIQUE_VIOLATION = '23505';
+const LOCK_NOT_AVAILABLE = '55P03';
+const TOO_MANY_CONNECTIONS = '53300';
+
+/** A short advisory-lock wait expired; the caller must retry after rolling back its transaction. */
+export class PlayerLockBusyError extends PersistenceError {}
+
+/** Never let game-creation waiters monopolize the query pool; report exhausted retries as temporary unavailability. */
+export async function retryPlayerLockContention<T>(operation: () => Promise<T>, maxWaitMs = 60_000): Promise<T> {
+  const deadline = Date.now() + maxWaitMs;
+  for (;;) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!(error instanceof PlayerLockBusyError)) throw error;
+      if (Date.now() >= deadline) throw new PlayerLockUnavailableError();
+      // Desynchronize overlapping game-creation retries after the short PostgreSQL lock timeout.
+      await new Promise<void>((resolve) => setTimeout(resolve, 10 + Math.floor(Math.random() * 20)));
+    }
+  }
+}
 
 function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === UNIQUE_VIOLATION;
@@ -41,8 +69,38 @@ function toStored(row: EventRow): StoredEvent {
 }
 
 export class PostgresEventStore implements EventStore {
+  private playerLockPool: Pool | null = null;
+  private playerLockPoolClosing: Promise<void> | null = null;
+
+  /** Use the normal query pool for events and create a separate pool for delivery locks. */
   constructor(private readonly pool: Pool) {}
 
+  /** Close the independent advisory-lock pool after all request handlers have drained. */
+  async closePlayerLocks(): Promise<void> {
+    if (!this.playerLockPoolClosing) {
+      this.playerLockPoolClosing = this.playerLockPool?.end() ?? Promise.resolve();
+    }
+    await this.playerLockPoolClosing;
+  }
+
+  /** Lock holders must never consume the query pool needed by eligibility and handler reads. */
+  private lockPool(): Pool {
+    if (this.playerLockPoolClosing) throw new PersistenceError('player lock pool is closed');
+    if (!this.playerLockPool) {
+      this.playerLockPool = new Pool({
+        ...this.pool.options,
+        // pg deliberately makes this option non-enumerable, so object spread alone drops it.
+        password: this.pool.options.password,
+        // Follow configured query capacity, while retaining enough slots for ordinary concurrency.
+        max: Math.max(10, this.pool.options.max ?? 10),
+        connectionTimeoutMillis: 10_000,
+        statement_timeout: 30_000,
+      });
+    }
+    return this.playerLockPool;
+  }
+
+  /** Read the current sequence inside the append transaction. */
   private async headSeq(client: PoolClient, gameId: string): Promise<number> {
     const res = await client.query<{ head: string }>(
       'SELECT COALESCE(MAX(seq), -1)::text AS head FROM game_events WHERE game_id = $1',
@@ -51,12 +109,19 @@ export class PostgresEventStore implements EventStore {
     return parseInt(res.rows[0]!.head, 10);
   }
 
+  /** Append one game stream atomically, coordinating human creation with player delivery locks. */
   async append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
+    return retryPlayerLockContention(() => this.appendOnce(gameId, expectedSeq, events));
+  }
+
+  /** Retryable single transaction; a lock-contention retry must restart the whole append. */
+  private async appendOnce(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
     if (events.length === 0) return expectedSeq;
     const client = await this.pool.connect();
     let committed = false;
     try {
       await client.query('BEGIN');
+      if (expectedSeq === -1) await lockGameCreationPlayers(client, events);
       const head = await this.headSeq(client, gameId);
       if (head !== expectedSeq) throw new ConcurrencyError(gameId, expectedSeq, head);
       if (head === -1 && events[0]!.type !== 'GameCreated') {
@@ -114,4 +179,113 @@ export class PostgresEventStore implements EventStore {
     );
     return res.rowCount !== null && res.rowCount > 0;
   }
+
+  /** Read active participation from durable creation and ending events, not projections. */
+  async findActiveGamesByPlayer(userId: string): Promise<ActiveGameRecord[]> {
+    const res = await this.pool.query<ActiveGameRow>(
+      `SELECT created.game_id, created.event_version, created.payload
+       FROM game_events AS created
+       WHERE created.seq = 0
+         AND created.type = 'GameCreated'
+         AND (
+           created.payload->'players' @> jsonb_build_object('white', $1::text)
+           OR created.payload->'players' @> jsonb_build_object('black', $1::text)
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM game_events AS ended
+           WHERE ended.game_id = created.game_id
+             AND ended.type = 'GameEnded'
+         )
+       ORDER BY created.server_ts DESC, created.game_id DESC`,
+      [userId],
+    );
+    return res.rows.map((row) => {
+      const event = upcast('GameCreated', Number(row.event_version), row.payload);
+      if (event.type !== 'GameCreated') {
+        throw new PersistenceError(`game ${row.game_id} starts with a non-GameCreated payload`);
+      }
+      return { gameId: row.game_id, players: { ...event.players } };
+    });
+  }
+
+  /** Hold a session advisory lock through response commitment without occupying the query pool or pinning waiting clients. */
+  async acquirePlayerLock(userId: string): Promise<() => Promise<void>> {
+    const deadline = Date.now() + 60_000;
+    let backoffMs = 10;
+    for (;;) {
+      let client: PoolClient;
+      let releasedClient = false;
+      try {
+        client = await this.lockPool().connect();
+      } catch (error) {
+        if (
+          (error instanceof Error && error.message.includes('timeout exceeded when trying to connect'))
+          || (typeof error === 'object' && error !== null && (error as { code?: unknown }).code === TOO_MANY_CONNECTIONS)
+        ) {
+          throw new PlayerLockUnavailableError();
+        }
+        throw error;
+      }
+      try {
+        const result = await client.query<{ locked: boolean }>(
+          `SELECT pg_try_advisory_lock(hashtextextended('rocky:active-human-game:' || $1, 0)) AS locked`,
+          [userId],
+        );
+        if (result.rows[0]?.locked) {
+          let released = false;
+          return async () => {
+            if (released) return;
+            released = true;
+            try {
+              await client.query(
+                `SELECT pg_advisory_unlock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+                [userId],
+              );
+              client.release();
+            } catch (error) {
+              client.release(error instanceof Error ? error : new Error('failed to release player lock'));
+            }
+          };
+        }
+        releasedClient = true;
+        client.release();
+      } catch (error) {
+        if (!releasedClient) client.release(error instanceof Error ? error : new Error('failed to acquire player lock'));
+        throw error;
+      }
+      // A waiter must not pin a lock-pool client while another request performs slow work.
+      if (Date.now() >= deadline) throw new PlayerLockUnavailableError();
+      // Desynchronize a burst of same-player requests so they do not all poll together.
+      const jitterMs = Math.floor(backoffMs * (0.75 + Math.random() * 0.5));
+      await new Promise<void>((resolve) => setTimeout(resolve, jitterMs));
+      backoffMs = Math.min(250, backoffMs * 2);
+    }
+  }
+}
+
+/** Serialize human-game creation against assistance response commitment for both participants. */
+export async function lockGameCreationPlayers(
+  client: PoolClient,
+  events: readonly GameEvent[],
+): Promise<void> {
+  const players = humanGamePlayerIds(events);
+  if (players.length === 0) return;
+  await client.query("SET LOCAL lock_timeout = '500ms'");
+  for (const playerId of players) {
+    try {
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+        [playerId],
+      );
+    } catch (error) {
+      // PostgreSQL aborts the transaction on timeout; each caller rolls it back before retrying.
+      if (typeof error === 'object' && error !== null && (error as { code?: string }).code === LOCK_NOT_AVAILABLE) {
+        throw new PlayerLockBusyError('player lock contention');
+      }
+      throw error;
+    }
+  }
+  // Later writes in this transaction should not inherit the short advisory-lock timeout.
+  await client.query('SET LOCAL lock_timeout = DEFAULT');
 }

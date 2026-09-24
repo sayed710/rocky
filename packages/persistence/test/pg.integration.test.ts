@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { Game } from '@chess-platform/game';
+import { Pool } from 'pg';
+import { ENGINE_BOT_USER_IDS, Game, type GameEvent } from '@chess-platform/game';
 import { createPool } from '../src/pg/pool';
 import { migrate, migrationChecksum, readMigrationSql } from '../src/pg/migrate';
 import { PostgresEventStore } from '../src/pg/event-store';
 import { PgGamesRepository, PgSeeksRepository, PgSeekAcceptor, PgGameStarter, PgUsersRepository } from '../src/pg/repositories';
 import { uuidv7 } from '../src/ids';
-import { ConcurrencyError } from '../src/errors';
+import { ConcurrencyError, PlayerLockUnavailableError } from '../src/errors';
 import { withTestDatabase } from '../src/test-support/database';
 
 // Integration tests need a real Postgres. They SKIP (not fail) when DATABASE_URL
@@ -64,6 +65,20 @@ test('migrations apply and are idempotent', { skip }, async () => {
     assert.match(index.rows[0]?.definition ?? '', /\(player_id, created_at DESC, id\)/);
     assert.match(index.rows[0]?.predicate ?? '', /status/);
     assert.match(index.rows[0]?.predicate ?? '', /'pending'/);
+
+    const activePlayersIndex = await pool.query<{ indisvalid: boolean; definition: string; predicate: string }>(
+      `SELECT i.indisvalid,
+              pg_get_indexdef(i.indexrelid) AS definition,
+              pg_get_expr(i.indpred, i.indrelid) AS predicate
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+        WHERE c.relname = 'game_events_active_players_idx'`,
+    );
+    assert.equal(activePlayersIndex.rows[0]?.indisvalid, true);
+    assert.match(activePlayersIndex.rows[0]?.definition ?? '', /USING gin/);
+    assert.match(activePlayersIndex.rows[0]?.definition ?? '', /payload\s*->\s*'players'/);
+    assert.match(activePlayersIndex.rows[0]?.predicate ?? '', /seq = 0/);
+    assert.match(activePlayersIndex.rows[0]?.predicate ?? '', /GameCreated/);
 
     assert.equal(await migrate(pool, dir), 0, 're-running applies nothing');
 
@@ -156,6 +171,274 @@ test('postgres event store: round-trip and optimistic concurrency', { skip }, as
 
     // A second append at a stale head is rejected.
     await assert.rejects(store.append(gameId, -1, events), ConcurrencyError);
+  }, isolated);
+});
+
+test('postgres event store finds only unended games for either player seat', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const store = new PostgresEventStore(pool);
+    const target = uuidv7();
+    const opponent = uuidv7();
+    const activeGameId = uuidv7();
+    const activeBlackGameId = uuidv7();
+    const finishedGameId = uuidv7();
+    const olderFinishedGameId = uuidv7();
+    const unrelatedGameId = uuidv7();
+    const botGameId = uuidv7();
+    const event = (gameId: string, players: { white: string; black: string }): GameEvent => ({
+      type: 'GameCreated',
+      gameId,
+      variant: 'standard',
+      initialFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      players,
+      rated: true,
+      at: 1,
+    });
+    await store.append(activeGameId, -1, [event(activeGameId, { white: target, black: opponent })]);
+    await store.append(activeBlackGameId, -1, [event(activeBlackGameId, { white: opponent, black: target })]);
+    await store.append(finishedGameId, -1, [event(finishedGameId, { white: opponent, black: target })]);
+    await store.append(finishedGameId, 0, [{
+      type: 'GameEnded',
+      result: '1-0',
+      termination: 'resignation',
+      winner: 'w',
+      at: 2,
+    }]);
+    await store.append(olderFinishedGameId, -1, [event(olderFinishedGameId, { white: target, black: opponent })]);
+    await store.append(olderFinishedGameId, 0, [{
+      type: 'GameEnded',
+      result: '1-0',
+      termination: 'resignation',
+      winner: 'w',
+      at: 3,
+    }]);
+    await store.append(unrelatedGameId, -1, [event(unrelatedGameId, { white: opponent, black: uuidv7() })]);
+    await store.append(botGameId, -1, [event(botGameId, { white: target, black: ENGINE_BOT_USER_IDS.novice })]);
+
+    const found = await store.findActiveGamesByPlayer(target);
+    assert.deepEqual(found.map(({ gameId }) => gameId).sort(),
+      [activeGameId, activeBlackGameId, botGameId].sort());
+    assert.deepEqual(found.find(({ gameId }) => gameId === activeGameId)?.players,
+      { white: target, black: opponent });
+    assert.deepEqual(found.find(({ gameId }) => gameId === activeBlackGameId)?.players,
+      { white: opponent, black: target });
+    assert.deepEqual(await store.findActiveGamesByPlayer(uuidv7()), []);
+
+    try {
+      const lockedPlayer = uuidv7();
+      const blockedGameId = uuidv7();
+      const release = await store.acquirePlayerLock(lockedPlayer);
+      let appendSettled = false;
+      let appendError: unknown;
+      let blockedAppend: Promise<void> | undefined;
+      try {
+        blockedAppend = store.append(blockedGameId, -1, [event(blockedGameId, {
+          white: lockedPlayer,
+          black: uuidv7(),
+        })]).then(() => {
+          appendSettled = true;
+        }, (error: unknown) => {
+          appendError = error;
+          appendSettled = true;
+        });
+        // Observe the actual PostgreSQL backend waiting on the transaction advisory lock.
+        // A fixed sleep could pass before append had even acquired a pooled connection.
+        const deadline = Date.now() + 10_000;
+        let waiting = false;
+        while (!waiting && !appendSettled && Date.now() < deadline) {
+          const observed = await pool.query<{ waiting: boolean }>(
+            `SELECT EXISTS (
+               SELECT 1
+                 FROM pg_locks AS lock
+                 JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+                WHERE activity.datname = current_database()
+                  AND lock.locktype = 'advisory'
+                  AND NOT lock.granted
+                  AND activity.query LIKE '%pg_advisory_xact_lock%'
+             ) AS waiting`,
+          );
+          waiting = observed.rows[0]?.waiting ?? false;
+          if (!waiting) await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        assert.equal(waiting, true, 'human-game append must reach and wait at the PostgreSQL advisory lock');
+        assert.equal(appendSettled, false, 'human-game creation must not cross the held delivery lock');
+      } finally {
+        await release();
+      }
+      await release(); // the response cleanup path must be idempotent
+      assert.ok(blockedAppend);
+      await blockedAppend;
+      if (appendError) throw appendError;
+      assert.equal(appendSettled, true);
+    } finally {
+      await store.closePlayerLocks();
+    }
+  }, isolated);
+});
+
+test('advisory locks leave even a one-client query pool available', { skip }, async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const databaseUrl = new URL(connectionString);
+    const queryPool = new Pool({
+      host: databaseUrl.hostname,
+      port: Number(databaseUrl.port || 5432),
+      user: decodeURIComponent(databaseUrl.username),
+      password: decodeURIComponent(databaseUrl.password),
+      database: decodeURIComponent(databaseUrl.pathname.slice(1)),
+      max: 1,
+    });
+    const store = new PostgresEventStore(queryPool);
+    let releaseFirst: (() => Promise<void>) | undefined;
+    let releaseSecond: (() => Promise<void>) | undefined;
+    try {
+      releaseFirst = await store.acquirePlayerLock(uuidv7());
+      assert.equal(queryPool.idleCount, queryPool.totalCount,
+        'player locks must not check out query-pool clients');
+      releaseSecond = await store.acquirePlayerLock(uuidv7());
+      assert.deepEqual(await store.findActiveGamesByPlayer(uuidv7()), []);
+    } finally {
+      await releaseSecond?.();
+      await releaseFirst?.();
+      await store.closePlayerLocks();
+      await queryPool.end();
+    }
+    await assert.rejects(store.acquirePlayerLock(uuidv7()), /player lock pool is closed/);
+  }, isolated);
+});
+
+test('same-player lock waiters cannot exhaust capacity for an unrelated player', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const store = new PostgresEventStore(pool);
+    const playerId = uuidv7();
+    const releaseHolder = await store.acquirePlayerLock(playerId);
+    const lockPool = (store as unknown as { playerLockPool: Pool }).playerLockPool;
+    assert.ok(lockPool, 'holder must initialize the real advisory-lock pool');
+    const capacity = lockPool.options.max ?? 10;
+    const connection = lockPool as unknown as { connect: () => Promise<import('pg').PoolClient> };
+    const originalConnect = connection.connect.bind(lockPool);
+    let attempts = 0;
+    let reachedCapacity!: () => void;
+    const allAttempted = new Promise<void>((resolve) => { reachedCapacity = resolve; });
+    connection.connect = () => {
+      attempts += 1;
+      if (attempts === capacity - 1) reachedCapacity();
+      return originalConnect();
+    };
+    const waiters = Array.from({ length: capacity * 2 }, () => store.acquirePlayerLock(playerId));
+    try {
+      await allAttempted;
+      const releaseUnrelated = await store.acquirePlayerLock(uuidv7());
+      await releaseUnrelated();
+    } finally {
+      connection.connect = originalConnect;
+      await releaseHolder();
+      const settled = await Promise.allSettled(waiters.map(async (waiter) => (await waiter)()));
+      await store.closePlayerLocks();
+      assert.ok(settled.every((result) => result.status === 'fulfilled'), 'every same-player waiter eventually acquires');
+    }
+  }, isolated);
+});
+
+test('exhausted advisory-lock pool raises a typed temporary refusal', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const store = new PostgresEventStore(pool);
+    const releases: Array<() => Promise<void>> = [];
+    try {
+      // Distinct users legitimately hold every connection; the next checkout must time out.
+      releases.push(await store.acquirePlayerLock(uuidv7()));
+      const lockPool = (store as unknown as { playerLockPool: Pool }).playerLockPool;
+      assert.ok(lockPool);
+      const capacity = lockPool.options.max ?? 10;
+      for (let i = 1; i < capacity; i += 1) {
+        releases.push(await store.acquirePlayerLock(uuidv7()));
+      }
+      await assert.rejects(store.acquirePlayerLock(uuidv7()), PlayerLockUnavailableError);
+    } finally {
+      await Promise.all(releases.map((release) => release()));
+      await store.closePlayerLocks();
+    }
+  }, isolated);
+});
+
+test('server connection-capacity refusal also raises a typed temporary error', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const store = new PostgresEventStore(pool);
+    const release = await store.acquirePlayerLock(uuidv7());
+    const lockPool = (store as unknown as { playerLockPool: Pool }).playerLockPool;
+    assert.ok(lockPool);
+    const connection = lockPool as unknown as { connect: () => Promise<import('pg').PoolClient> };
+    const originalConnect = connection.connect;
+    connection.connect = async () => {
+      throw Object.assign(new Error('remaining connection slots are reserved'), { code: '53300' });
+    };
+    try {
+      await assert.rejects(store.acquirePlayerLock(uuidv7()), PlayerLockUnavailableError);
+    } finally {
+      connection.connect = originalConnect;
+      await release();
+      await store.closePlayerLocks();
+    }
+  }, isolated);
+});
+
+test('blocked game creation yields a one-client query pool to assistance', { skip }, async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const databaseUrl = new URL(connectionString);
+    const queryPool = new Pool({
+      host: databaseUrl.hostname,
+      port: Number(databaseUrl.port || 5432),
+      user: decodeURIComponent(databaseUrl.username),
+      password: decodeURIComponent(databaseUrl.password),
+      database: decodeURIComponent(databaseUrl.pathname.slice(1)),
+      max: 1,
+      connectionTimeoutMillis: 2_000,
+    });
+    const store = new PostgresEventStore(queryPool);
+    const playerId = uuidv7();
+    const gameId = uuidv7();
+    const release = await store.acquirePlayerLock(playerId);
+    let append: Promise<number> | undefined;
+    try {
+      append = store.append(gameId, -1, [{
+        type: 'GameCreated',
+        gameId,
+        variant: 'standard',
+        initialFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+        players: { white: playerId, black: uuidv7() },
+        rated: true,
+        at: 1,
+      }]);
+      const deadline = Date.now() + 10_000;
+      let observed = false;
+      while (!observed && Date.now() < deadline) {
+        const result = await pool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_locks AS lock
+             JOIN pg_stat_activity AS activity ON activity.pid = lock.pid
+             WHERE activity.datname = current_database()
+               AND lock.locktype = 'advisory' AND NOT lock.granted
+               AND activity.query LIKE '%pg_advisory_xact_lock%'
+           ) AS waiting`,
+        );
+        observed = result.rows[0]?.waiting ?? false;
+        if (!observed) await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.equal(observed, true, 'the creator must first reach the held PostgreSQL lock');
+      assert.deepEqual(await store.findActiveGamesByPlayer(uuidv7()), [],
+        'eligibility reads must progress while a creator waits for the same player');
+      assert.deepEqual(await store.load(gameId), [], 'game creation must remain blocked');
+    } finally {
+      await release();
+      await append?.catch(() => undefined);
+      await store.closePlayerLocks();
+      await queryPool.end();
+    }
+    assert.equal((await pool.query('SELECT 1 FROM game_events WHERE game_id = $1', [gameId])).rowCount, 1);
   }, isolated);
 });
 

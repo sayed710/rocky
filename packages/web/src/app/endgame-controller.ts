@@ -12,6 +12,7 @@ export type EndgameFailure =
   | 'rate-limited'
   | 'unavailable'
   | 'unauthenticated'
+  | 'active-game'
   | 'unsupported-variant'
   | 'rejected'
   | 'failed';

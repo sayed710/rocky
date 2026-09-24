@@ -5,6 +5,7 @@ import { GameSync } from '../src/net/game-sync.js';
 import { GameController } from '../src/app/game-controller.js';
 import type { StateView, WsColor } from '../src/net/ws-protocol.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
+import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
 
 function setup() {
   const factory = new FakeSocketFactory();
@@ -572,12 +573,21 @@ test('onActionState derives correctly for players and spectators', () => {
   const spectatorState = { ...stateView(0, 'w', 'startpos'), drawOffer: 'w' as const };
   factory.last.emit({ t: 'joined', gameId: 'g1', role: 'spectator', state: spectatorState });
   assert.equal(actionStates.at(-1)!.isPlayer, false);
+  assert.equal(actionStates.at(-1)!.isHumanGame, true);
   assert.equal(actionStates.at(-1)!.drawOffer, 'none');
 
   // Player
   factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w', 'startpos') });
   assert.equal(actionStates.at(-1)!.isPlayer, true);
+  assert.equal(actionStates.at(-1)!.isHumanGame, true);
   assert.equal(actionStates.at(-1)!.canAbort, true);
+
+  const botState = {
+    ...stateView(0, 'w', 'startpos'),
+    players: { white: 'u1', black: ENGINE_BOT_USER_IDS.novice },
+  };
+  factory.last.emit({ t: 'state', gameId: 'g1', state: botState });
+  assert.equal(actionStates.at(-1)!.isHumanGame, false);
 
   // Ply >= 2 means no abort
   factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(2, 'w', 'startpos') });

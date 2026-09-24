@@ -34,6 +34,8 @@ export type AnalysisFailure =
   | 'unavailable'
   /** 401 — analysis needs a signed-in caller. */
   | 'unauthenticated'
+  /** 409 — another tab or session may be playing a live human game. */
+  | 'active-game'
   /**
    * 422 naming the variant — this deployment has no engine for the game being watched, and never
    * will within this page. Distinct from `rejected` because it is permanent: the control should stop
@@ -73,12 +75,14 @@ export interface AnalysisControllerOptions {
  * error class still classifies correctly, and no engine-internal message is ever read or shown —
  * the panel says what it means from the status alone.
  */
+/** Preserve the active-human-game refusal as a distinct, actionable client state. */
 export function classifyFailure(err: unknown): AnalysisFailure {
   const failure = err as { status?: unknown; details?: Record<string, unknown> } | null;
   const status = failure?.status;
   if (status === 429) return 'rate-limited';
   if (status === 503) return 'unavailable';
   if (status === 401) return 'unauthenticated';
+  if (status === 409 && failure?.details?.['reason'] === 'active_human_game') return 'active-game';
   if (status === 422 || status === 400) {
     // The API answers an unsupported variant with a validation error naming `variant`, and a bad
     // position with one naming `fen`. Telling them apart matters because only one of them can ever

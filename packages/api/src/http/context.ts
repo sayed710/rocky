@@ -60,6 +60,8 @@ export interface HandlerResult {
   readonly status: number;
   readonly body?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
+  /** Release transport-bound coordination only after the response has been committed. */
+  readonly afterWrite?: () => Promise<void>;
 }
 
 /** A route handler: context in, result out (sync or async). */

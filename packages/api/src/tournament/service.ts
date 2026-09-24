@@ -1,5 +1,5 @@
 import type { TournamentsRepository } from '@chess-platform/persistence';
-import { isArenaSnapshot, VersionConflictError } from '@chess-platform/persistence';
+import { isArenaSnapshot, PlayerLockUnavailableError, VersionConflictError } from '@chess-platform/persistence';
 import type { RoundBasedConfig } from '@chess-platform/tournament';
 import { Tournament, createPairingStrategy } from '@chess-platform/tournament';
 import type { GameResult } from '@chess-platform/tournament';
@@ -54,6 +54,7 @@ export class TournamentService {
           continue;
         }
         if (e instanceof HttpError) throw e;
+        if (e instanceof PlayerLockUnavailableError) throw e;
         if (e.message.includes('Unknown game ID')) {
           throw HttpError.notFound('Game ID not found in this tournament');
         }
