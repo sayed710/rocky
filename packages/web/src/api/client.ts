@@ -278,7 +278,14 @@ export class GambitClient {
     const headers: Record<string, string> = { ...spec.headers };
 
     if (auth) {
-      const token = await this.session.validAccessToken();
+      let token: string | undefined;
+      try {
+        token = await this.session.validAccessToken();
+      } catch (error) {
+        // An optional-auth request must not depend on the refresh endpoint: during a transient
+        // refresh outage it goes out anonymously, exactly as it does without a session.
+        if (auth !== 'optional' || !isTransientRefreshFailure(error)) throw error;
+      }
       if (token === undefined) {
         if (auth === true) {
           throw new UnauthorizedError({
@@ -429,7 +436,10 @@ export class AuthApi {
     // the generation that this logout is allowed to clear.
     let token: string | undefined;
     try {
-      token = await this.session.validAccessToken();
+      // An explicit sign-out makes one real refresh attempt even during a backoff, so a recovered
+      // server can still revoke the refresh session. If the server stays unreachable only the
+      // local session can be cleared.
+      token = await this.session.validAccessToken(true);
     } catch (error) {
       // A failed refresh is only an invalidation internally, but the user's explicit action is a
       // durable logout boundary and must still converge across tabs.

@@ -1463,3 +1463,47 @@ test('a 401 after a transient failure (a rotated or reused token) still invalida
   mgr1.dispose();
   mgr2.dispose();
 });
+
+test('a peer logout persisted during a refresh backoff still clears this tab', async () => {
+  const barriers = sharedBarrierStorage();
+  let calls = 0;
+  const cooling = new SessionManager({
+    refresh: async () => { calls++; throw new NetworkError(); },
+    now: () => 0, channel: null, barrierStorage: barriers, channelSource: 'cooling',
+  });
+  const peer = new SessionManager({
+    refresh: async () => authResponse(), now: () => 0, channel: null,
+    barrierStorage: barriers, channelSource: 'peer',
+  });
+  let resets = 0;
+  cooling.onReset(() => { resets++; });
+  cooling.adopt(authResponse('a', 'r', 1));
+  await assert.rejects(cooling.refreshNow(), NetworkError);
+
+  // The peer's logout message was missed; only the durable barrier records it.
+  peer.reset();
+  await assert.rejects(cooling.validAccessToken(), NoSessionError);
+  assert.equal(cooling.isAuthenticated, false);
+  assert.equal(resets, 1);
+  assert.equal(calls, 1);
+  cooling.dispose();
+  peer.dispose();
+});
+
+test('ignoreBackoff sends one refresh attempt during a backoff', async () => {
+  let calls = 0;
+  const mgr = new SessionManager({
+    refresh: async () => {
+      calls++;
+      if (calls === 1) throw new NetworkError();
+      return authResponse('b', 'r2', 3600);
+    },
+    now: () => 0,
+  });
+  mgr.adopt(authResponse('a', 'r', 1));
+  await assert.rejects(mgr.refreshNow(), NetworkError);
+  await assert.rejects(mgr.validAccessToken(), NetworkError);
+  assert.equal(calls, 1);
+  assert.equal(await mgr.validAccessToken(true), 'b');
+  assert.equal(calls, 2);
+});

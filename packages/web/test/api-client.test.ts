@@ -154,20 +154,69 @@ test('a proactive refresh that hits a network failure keeps the session and retr
   assert.equal(t.calls[3]!.headers['authorization'], 'Bearer tok-B');
 });
 
-test('logout during a refresh backoff still signs out without another refresh request', async () => {
+test('logout during a refresh backoff still refreshes once and revokes the server session', async () => {
   const t = new FakeTransport(
     () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+    () => json(200, auth('fresh', 'r2')),
+    () => empty(204),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), NetworkError);
+
+  await c.auth.logout();
+  assert.equal(c.session.isAuthenticated, false);
+  assert.equal(t.calls[2]!.url, 'https://api.test/v1/auth/refresh');
+  assert.equal(t.calls[3]!.url, 'https://api.test/v1/auth/logout');
+  assert.equal(t.calls[3]!.headers['authorization'], 'Bearer fresh');
+});
+
+test('logout while the refresh endpoint stays down clears the local session', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
     () => new TypeError('fetch failed'),
   );
   const c = make(t);
   await c.auth.login({ handle: 'alice', password: 'pw' });
   await assert.rejects(c.users.me(), NetworkError);
-  assert.equal(c.session.isAuthenticated, true);
 
-  // The explicit sign-out wins over the preserved session, and the cooldown sends nothing.
+  // The server cannot be reached to revoke anything; the explicit sign-out still wins locally.
   await assert.rejects(c.auth.logout(), NetworkError);
   assert.equal(c.session.isAuthenticated, false);
-  assert.equal(t.calls.length, 2);
+  assert.equal(t.calls.length, 3);
+});
+
+test('an optional-auth request goes out anonymously during a transient refresh outage', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+    () => json(200, []),
+    () => json(200, []),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+
+  assert.deepEqual(await c.seeks.list(), []);
+  // A second call inside the backoff sends no refresh request and still succeeds.
+  assert.deepEqual(await c.seeks.list(), []);
+  assert.deepEqual(t.calls.map((call) => call.url.replace('https://api.test', '')), [
+    '/v1/auth/login', '/v1/auth/refresh', '/v1/seeks', '/v1/seeks',
+  ]);
+  assert.equal(t.calls[2]!.headers['authorization'], undefined);
+  assert.equal(c.session.isAuthenticated, true);
+});
+
+test('an optional-auth request still fails when the session is definitively rejected', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => json(401, { error: { code: 'invalid_grant', message: 'revoked', requestId: 'r' } }),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.seeks.list(), UnauthorizedError);
+  assert.equal(c.session.isAuthenticated, false);
 });
 
 test('read endpoints encode query params and path segments', async () => {

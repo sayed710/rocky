@@ -855,12 +855,13 @@ export class SessionManager {
   /**
    * Return a non-expired access token, refreshing proactively when the current
    * one is (near) expiry. Resolves to undefined when there is no session at all.
+   * `ignoreBackoff` is passed to {@link refreshNow}.
    */
-  async validAccessToken(): Promise<string | undefined> {
+  async validAccessToken(ignoreBackoff = false): Promise<string | undefined> {
     const session = this.store.load();
     if (!session) return undefined;
     if (!this.isAccessTokenExpired(session)) return session.tokens.accessToken;
-    const refreshed = await this.refreshNow();
+    const refreshed = await this.refreshNow(ignoreBackoff);
     return refreshed.tokens.accessToken;
   }
 
@@ -894,6 +895,7 @@ export class SessionManager {
    * refresh. On a definitive failure the local session is cleared, peers are told, and the error
    * rethrown; a transient failure ({@link isTransientRefreshFailure}) keeps the session and starts
    * a backoff during which further calls reject with that failure without sending a request.
+   * `ignoreBackoff` sends one attempt anyway, for an explicit user action such as logout.
    *
    * Concurrent state transitions:
    * - If the manager adopts a newer session while the refresh is in flight, the
@@ -906,14 +908,16 @@ export class SessionManager {
    * `RefreshFn` sends `credentials: 'include'` so the cookie is attached
    * automatically). The body token is omitted for the browser flow.
    */
-  async refreshNow(): Promise<StoredSession> {
+  async refreshNow(ignoreBackoff = false): Promise<StoredSession> {
     const existing = this.refreshInFlight;
     if (existing) return existing;
 
+    // Apply a peer logout persisted while its message was missed, even during a backoff.
+    this.synchronizeBarrier();
     const session = this.store.load();
     if (!session) throw new NoSessionError('cannot refresh without a session');
     const cooldown = this.refreshCooldown;
-    if (cooldown && this.now() < cooldown.retryAt) throw cooldown.error;
+    if (!ignoreBackoff && cooldown && this.now() < cooldown.retryAt) throw cooldown.error;
 
     const opGen = this.captureGeneration();
 
