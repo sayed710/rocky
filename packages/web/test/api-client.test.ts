@@ -188,24 +188,43 @@ test('logout while the refresh endpoint stays down clears the local session', as
   assert.equal(t.calls.length, 3);
 });
 
-test('an optional-auth request goes out anonymously during a transient refresh outage', async () => {
+test('an optional-auth request surfaces a transient refresh outage instead of dropping identity', async () => {
   const t = new FakeTransport(
     () => json(200, auth('expired', 'r', 0)),
     () => new TypeError('fetch failed'),
-    () => json(200, []),
-    () => json(200, []),
   );
   const c = make(t);
   await c.auth.login({ handle: 'alice', password: 'pw' });
 
-  assert.deepEqual(await c.seeks.list(), []);
-  // A second call inside the backoff sends no refresh request and still succeeds.
-  assert.deepEqual(await c.seeks.list(), []);
-  assert.deepEqual(t.calls.map((call) => call.url.replace('https://api.test', '')), [
-    '/v1/auth/login', '/v1/auth/refresh', '/v1/seeks', '/v1/seeks',
-  ]);
-  assert.equal(t.calls[2]!.headers['authorization'], undefined);
+  await assert.rejects(c.seeks.list(), NetworkError);
+  // Inside the backoff the outage is reported again without any request, anonymous or not.
+  await assert.rejects(c.seeks.list(), NetworkError);
+  assert.equal(t.calls.length, 2);
   assert.equal(c.session.isAuthenticated, true);
+});
+
+test('a login adopted while logout waits on its refresh survives that refresh failing', async () => {
+  let failRefresh!: (error: Error) => void;
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+  ).onEach(() => json(200, auth('unused')));
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), NetworkError);
+
+  // Hold logout's refresh open, adopt a newer session meanwhile, then fail the refresh.
+  const pending = new Promise<never>((_resolve, reject) => { failRefresh = reject; });
+  const send = t.send.bind(t);
+  t.send = (request) => (request.url.endsWith('/v1/auth/refresh') ? pending : send(request));
+  const logout = c.auth.logout();
+  await Promise.resolve();
+  // The newer session also needs a refresh, so the stale refresh rejects rather than adopting it.
+  c.session.adopt(auth('newer', 'r-newer', 0));
+  failRefresh(new TypeError('fetch failed'));
+
+  await assert.rejects(logout);
+  assert.equal(c.session.current?.tokens.accessToken, 'newer', 'logout must not clear the newer session');
 });
 
 test('an optional-auth request still fails when the session is definitively rejected', async () => {

@@ -278,14 +278,10 @@ export class GambitClient {
     const headers: Record<string, string> = { ...spec.headers };
 
     if (auth) {
-      let token: string | undefined;
-      try {
-        token = await this.session.validAccessToken();
-      } catch (error) {
-        // An optional-auth request must not depend on the refresh endpoint: during a transient
-        // refresh outage it goes out anonymously, exactly as it does without a session.
-        if (auth !== 'optional' || !isTransientRefreshFailure(error)) throw error;
-      }
+      // A transient refresh failure rejects here even for optional auth: sending the request
+      // anonymously would silently drop identity-dependent data (e.g. private studies) while the
+      // user still appears signed in.
+      const token = await this.session.validAccessToken();
       if (token === undefined) {
         if (auth === true) {
           throw new UnauthorizedError({
@@ -434,6 +430,7 @@ export class AuthApi {
     if (!this.session.isAuthenticated) return;
     // A required proactive refresh is itself a session transition. Complete it before capturing
     // the generation that this logout is allowed to clear.
+    const loggingOut = this.session.current?.tokens.accessToken;
     let token: string | undefined;
     try {
       // An explicit sign-out makes one real refresh attempt even during a backoff, so a recovered
@@ -442,8 +439,10 @@ export class AuthApi {
       token = await this.session.validAccessToken(true);
     } catch (error) {
       // A failed refresh is only an invalidation internally, but the user's explicit action is a
-      // durable logout boundary and must still converge across tabs.
-      this.session.reset();
+      // durable logout boundary and must still converge across tabs — unless a newer login or peer
+      // adoption replaced the session while the refresh was in flight.
+      const current = this.session.current;
+      if (!current || current.tokens.accessToken === loggingOut) this.session.reset();
       throw error;
     }
     if (token === undefined) {
