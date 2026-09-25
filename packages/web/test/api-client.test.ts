@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GambitClient } from '../src/api/client.js';
 import type { RetryPolicy } from '../src/net/retry.js';
-import { RequestAbortedError, UnauthorizedError } from '../src/net/errors.js';
+import { NetworkError, RequestAbortedError, ServiceUnavailableError, UnauthorizedError } from '../src/net/errors.js';
 import { NoSessionError } from '../src/net/session.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { abortableHang, FakeTransport, empty, json } from './support/fake-transport.js';
@@ -112,6 +112,129 @@ test('a failed refresh surfaces the original 401 and clears the session', async 
   const c = make(t);
   await c.auth.login({ handle: 'alice', password: 'pw' });
   await assert.rejects(c.users.me(), UnauthorizedError);
+  assert.equal(c.session.isAuthenticated, false);
+});
+
+test('a transient refresh failure after a 401 surfaces the outage and keeps the session', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('tok-A')),
+    () => json(401, { error: { code: 'unauthenticated', message: 'expired', requestId: 'r' } }),
+    () => json(503, { error: { code: 'unavailable', message: 'down', requestId: 'r2' } }),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), ServiceUnavailableError);
+  assert.equal(c.session.current?.tokens.accessToken, 'tok-A');
+});
+
+test('a proactive refresh that hits a network failure keeps the session and retries after backoff', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+    () => json(200, auth('tok-B', 'r2')),
+    () => json(200, selfUser),
+  );
+  let clock = 1000;
+  const c = new GambitClient({
+    baseUrl: 'https://api.test',
+    transport: t,
+    retry: NO_RETRY,
+    sleep: async () => {},
+    now: () => clock,
+  });
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), NetworkError);
+  assert.equal(c.session.isAuthenticated, true);
+  // During the backoff the next call fails fast without another refresh request.
+  await assert.rejects(c.users.me(), NetworkError);
+  assert.equal(t.calls.length, 2);
+  clock += 1_000;
+  const me = await c.users.me();
+  assert.equal(me.handle, 'alice');
+  assert.equal(t.calls[3]!.headers['authorization'], 'Bearer tok-B');
+});
+
+test('logout during a refresh backoff still refreshes once and revokes the server session', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+    () => json(200, auth('fresh', 'r2')),
+    () => empty(204),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), NetworkError);
+
+  await c.auth.logout();
+  assert.equal(c.session.isAuthenticated, false);
+  assert.equal(t.calls[2]!.url, 'https://api.test/v1/auth/refresh');
+  assert.equal(t.calls[3]!.url, 'https://api.test/v1/auth/logout');
+  assert.equal(t.calls[3]!.headers['authorization'], 'Bearer fresh');
+});
+
+test('logout while the refresh endpoint stays down clears the local session', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+    () => new TypeError('fetch failed'),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), NetworkError);
+
+  // The server cannot be reached to revoke anything; the explicit sign-out still wins locally.
+  await assert.rejects(c.auth.logout(), NetworkError);
+  assert.equal(c.session.isAuthenticated, false);
+  assert.equal(t.calls.length, 3);
+});
+
+test('an optional-auth request surfaces a transient refresh outage instead of dropping identity', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+
+  await assert.rejects(c.seeks.list(), NetworkError);
+  // Inside the backoff the outage is reported again without any request, anonymous or not.
+  await assert.rejects(c.seeks.list(), NetworkError);
+  assert.equal(t.calls.length, 2);
+  assert.equal(c.session.isAuthenticated, true);
+});
+
+test('a login adopted while logout waits on its refresh survives that refresh failing', async () => {
+  let failRefresh!: (error: Error) => void;
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => new TypeError('fetch failed'),
+  ).onEach(() => json(200, auth('unused')));
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.users.me(), NetworkError);
+
+  // Hold logout's refresh open, adopt a newer session meanwhile, then fail the refresh.
+  const pending = new Promise<never>((_resolve, reject) => { failRefresh = reject; });
+  const send = t.send.bind(t);
+  t.send = (request) => (request.url.endsWith('/v1/auth/refresh') ? pending : send(request));
+  const logout = c.auth.logout();
+  await Promise.resolve();
+  // The newer session also needs a refresh, so the stale refresh rejects rather than adopting it.
+  c.session.adopt(auth('newer', 'r-newer', 0));
+  failRefresh(new TypeError('fetch failed'));
+
+  await assert.rejects(logout);
+  assert.equal(c.session.current?.tokens.accessToken, 'newer', 'logout must not clear the newer session');
+});
+
+test('an optional-auth request still fails when the session is definitively rejected', async () => {
+  const t = new FakeTransport(
+    () => json(200, auth('expired', 'r', 0)),
+    () => json(401, { error: { code: 'invalid_grant', message: 'revoked', requestId: 'r' } }),
+  );
+  const c = make(t);
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  await assert.rejects(c.seeks.list(), UnauthorizedError);
   assert.equal(c.session.isAuthenticated, false);
 });
 

@@ -7,6 +7,7 @@ import type { AuthResponse, LoginRequest, RegisterRequest } from '../src/api/mod
 import type { StoredSession, KeyValueStorage } from '../src/net/session.js';
 import { MemoryTokenStore } from '../src/net/session.js';
 import { json } from './support/fake-transport.js';
+import { NetworkError } from '../src/net/errors.js';
 
 /** Provide isolated Web Storage semantics for each controller test. */
 function makeFakeStorage(): KeyValueStorage {
@@ -682,6 +683,22 @@ test('M12 inc 2: restore returns null when storage is empty', async () => {
     storage,
   });
   assert.equal(await ctrl.restore(), null);
+});
+
+test('restore keeps the persisted hint when the refresh fails transiently', async () => {
+  const storage = makeFakeStorage();
+  const persisted = JSON.stringify({ handle: 'stored-user', userId: 'u3' });
+  storage.setItem('gambit-session', persisted);
+  const client = makeFakeClient({
+    refresh: async () => { throw new NetworkError(); },
+  }) as any;
+  const ctrl = new AuthController({
+    client,
+    callbacks: { onSessionChange: () => {}, onPending: () => {}, onError: () => {} },
+    storage,
+  });
+  assert.equal(await ctrl.restore(), null);
+  assert.equal(storage.getItem('gambit-session'), persisted, 'the next restore must be able to retry');
 });
 
 test('M12 inc 2: restore returns null when refresh fails (cookie expired)', async () => {
