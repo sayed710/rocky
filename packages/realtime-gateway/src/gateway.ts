@@ -83,6 +83,8 @@ export class RealtimeGateway {
     commandRouter?: CommandRouter,
     /** Called once a join has materialised a game, so a host can react to who is seated. */
     private readonly onGameLoaded?: (gameId: string, state: StateView) => void,
+    /** Called when the last session in a game leaves this node — the pair of `onGameLoaded`. */
+    private readonly onGameUnloaded?: (gameId: string) => void,
   ) {
     // Fall back to local routing when no router is injected. This preserves
     // backward compatibility: existing callers that don't pass a router get
@@ -307,6 +309,7 @@ export class RealtimeGateway {
         entry.unsubscribe();
         this.rooms.delete(gameId);
         this.loadedGames.delete(gameId);
+        this.onGameUnloaded?.(gameId);
       } else {
         entry.room.broadcastPresence();
       }

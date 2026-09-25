@@ -155,11 +155,6 @@ export class OwnershipRegistry {
   }
 
   /**
-   * Try to claim ownership of `gameId`. If successful, this node is the
-   * owner. If another node already owns it (and the lease hasn't expired),
-   * returns the owner's node ID.
-   */
-  /**
    * Extend this node's lease on `gameId` in Redis, compare-and-expire so another node's key is
    * never touched. Returns whether we still hold it afterwards.
    *
@@ -178,6 +173,11 @@ export class OwnershipRegistry {
     return !(renewed === 0 || renewed === '0');
   }
 
+  /**
+   * Try to claim ownership of `gameId`. If successful, this node is the
+   * owner. If another node already owns it (and the lease hasn't expired),
+   * returns the owner's node ID.
+   */
   async claim(gameId: string): Promise<ClaimResult> {
     const key = ownerKey(gameId);
     // SET NX EX — atomic claim with a real key-level TTL.
@@ -260,6 +260,15 @@ export class OwnershipRegistry {
     const expiresAt = this.leaseExpiryMs.get(gameId);
     if (expiresAt === undefined) return false;
     return performance.now() < expiresAt - this.safetyMarginMs;
+  }
+
+  /**
+   * Whether this node lists `gameId` as one of its games, lease valid or not. A game stays listed
+   * through renewal failures (see `renewAll`) and leaves only on release or on proof that another
+   * node took it, so this errs towards "ours".
+   */
+  listsAsOwned(gameId: string): boolean {
+    return this.ownedGames.has(gameId);
   }
 
   /**

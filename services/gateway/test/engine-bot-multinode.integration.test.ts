@@ -491,6 +491,28 @@ redisTest('taking over a game that ended out of sight unregisters it after the r
   });
 });
 
+redisTest('when local sessions leave, the non-owner lets go and the owner keeps moving', async () => {
+  await withCluster([new ScriptedEngine(['e7e5', 'b8c6']), new ScriptedEngine([])], async ({ a, b, store }) => {
+    const gameId = await createBotGame(a, 'black');
+    await a.router.route(gameId, HUMAN, { kind: 'move', uci: 'e2e4' }); // A owns
+    await b.authority.ensureLoaded(gameId);
+    a.mover.registerGame(gameId);
+    b.mover.registerGame(gameId);
+    await waitFor('the owner to reply', async () => (await loggedMoves(store, gameId)).length === 2);
+
+    // Both replicas' last sessions leave (the player is reconnecting, say).
+    b.mover.localSessionsGone(gameId);
+    a.mover.localSessionsGone(gameId);
+    assert.equal(b.pubsub.active(gameChannel(gameId)), 0, 'the non-owner let go');
+    assert.equal(a.pubsub.active(gameChannel(gameId)), 1, 'the owner kept the game');
+
+    // The player moves through B, with no session on A: A still answers for the bot.
+    await b.router.route(gameId, HUMAN, { kind: 'move', uci: 'g1f3' });
+    await waitFor('the owner to reply again', async () => (await loggedMoves(store, gameId)).length === 4);
+    assert.equal(b.engine.fens.length, 0);
+  });
+});
+
 redisTest('a finished game stops bot work on every replica, including the non-owner', async () => {
   await withCluster([new ScriptedEngine(['e7e5']), new ScriptedEngine(['c7c5'])], async ({ a, b, store }) => {
     const gameId = await createBotGame(a, 'black');

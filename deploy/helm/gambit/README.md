@@ -68,8 +68,9 @@ Each gateway pod then runs the engine pool's defaults: no Stockfish process unti
 move, then one, growing to four under load, each single-threaded with a 16 MB hash. A bot move is a
 300 ms time-limited search, so CPU decides how deep it gets, not how long it takes: under the
 default 500m limit even one worker gets half a core for its 300 ms, and concurrent bot moves share
-that. A throttled pod plays weaker bots rather than slower ones. The memory (four workers at 16 MB
-of hash each) fits the 512Mi limit. Raise `gateway.resources.limits.cpu` if bot strength matters or
+that. A throttled pod plays weaker bots rather than slower ones. Each worker also loads Stockfish's
+evaluation network on top of its 16 MB hash; check a pod's peak usage against the 512Mi limit if
+you raise the worker count or enable other engine consumers. Raise `gateway.resources.limits.cpu` if bot strength matters or
 bot games are a large share of traffic.
 
 To turn Play vs Computer's opponent off:

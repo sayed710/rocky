@@ -536,6 +536,7 @@ async function main(): Promise<void> {
         }
       }
     },
+    (gameId) => engineBotMover?.localSessionsGone(gameId),
   );
 
   // --- HTTP health server ---

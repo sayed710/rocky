@@ -296,6 +296,11 @@ export class RedisCommandRouter implements CommandRouter {
     return this.holdsOwnership(gameId);
   }
 
+  /** Whether this node still counts the game as its own, even with its lease lapsing. */
+  claimedHere(gameId: string): boolean {
+    return this.registry.listsAsOwned(gameId);
+  }
+
   /**
    * Synchronous re-check that this node still holds a valid lease on a copy with no reload debt.
    * A lease lost and re-claimed while a caller was awaiting leaves reload debt, so it reads false.
