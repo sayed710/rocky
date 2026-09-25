@@ -5,6 +5,12 @@
  * Listens for game state updates via pub/sub and triggers engine move generation
  * when it is a bot account's turn. Submits moves through the CommandRouter so multi-node
  * ownership and forwarding (ADR-0010) are honored.
+ *
+ * Under multi-node routing, only the replica that owns a game computes its bot moves. A
+ * non-owner's cached aggregate never sees the owner's moves (they arrive as room broadcasts), so a
+ * move computed from it is a move for a position the game has left — and the owner would apply it
+ * whenever it happens to be legal. Ownership is therefore settled BEFORE the engine runs, and
+ * re-checked together with the position AFTER it, because either can change while it thinks.
  */
 
 import type { AnalysisProvider } from '@chess-platform/engine';
@@ -27,11 +33,23 @@ import type { Counter, Histogram, Logger } from '@chess-platform/api';
  */
 const BOT_THINK_TIME_MS = 300;
 
+/**
+ * Ownership gate for multi-node routing (ADR-0010), implemented by `RedisCommandRouter`.
+ * Absent on a single node, which owns every game.
+ */
+export interface BotMoveOwnership {
+  /** Claim or confirm ownership and settle takeover rehydration; `false` if another node owns it. */
+  prepareOwnership(gameId: string): Promise<boolean>;
+  /** Whether this node still owns the game on a fresh copy — checked after the engine returns. */
+  holdsOwnership(gameId: string): boolean;
+}
+
 export interface EngineBotMoverOptions {
   readonly authority: GameAuthority;
   readonly router: CommandRouter;
   readonly pubsub: PubSub;
   readonly provider: AnalysisProvider;
+  readonly ownership?: BotMoveOwnership;
   readonly logger?: Logger;
   readonly movesCounter?: Counter;
   readonly failuresCounter?: Counter;
@@ -43,6 +61,7 @@ export class EngineBotMover {
   private readonly router: CommandRouter;
   private readonly pubsub: PubSub;
   private readonly provider: AnalysisProvider;
+  private readonly ownership?: BotMoveOwnership;
   private readonly logger?: Logger;
   private readonly movesCounter?: Counter;
   private readonly failuresCounter?: Counter;
@@ -65,6 +84,7 @@ export class EngineBotMover {
     this.router = opts.router;
     this.pubsub = opts.pubsub;
     this.provider = opts.provider;
+    this.ownership = opts.ownership;
     this.logger = opts.logger;
     this.movesCounter = opts.movesCounter;
     this.failuresCounter = opts.failuresCounter;
@@ -77,7 +97,13 @@ export class EngineBotMover {
    */
   registerGame(gameId: string): void {
     if (!this.subscriptions.has(gameId)) {
-      const unsub = this.pubsub.subscribe(gameChannel(gameId), () => {
+      const unsub = this.pubsub.subscribe(gameChannel(gameId), (msg) => {
+        // A non-owner's cached copy never reaches `over`, so the terminal broadcast is the only
+        // signal that stops bot work for this game on every replica.
+        if (msg.t === 'ended') {
+          this.unregisterGame(gameId);
+          return;
+        }
         void this.attemptMove(gameId);
       });
       this.subscriptions.set(gameId, unsub);
@@ -134,6 +160,7 @@ export class EngineBotMover {
   private async doMove(gameId: string): Promise<void> {
     let state: StateView;
     try {
+      if (this.ownership && !(await this.ownership.prepareOwnership(gameId))) return;
       state = this.authority.getState(gameId);
     } catch (err: unknown) {
       if (err instanceof AuthorityError && err.code === 'unknown_game') {
@@ -180,6 +207,11 @@ export class EngineBotMover {
       const durationSec = (performance.now() - startTime) / 1000;
       this.moveSecondsHistogram?.observe(durationSec);
 
+      // Ownership and the game can both move on while the engine thinks. Submit only if this
+      // node still owns the game and it is still the exact position the move was computed for;
+      // otherwise drop it — the broadcast that changed the game has already queued a re-run.
+      if (!this.stillCurrent(gameId, state, botAcc.userId)) return;
+
       await this.router.route(gameId, botAcc.userId, {
         kind: 'move',
         uci: result.move,
@@ -193,6 +225,26 @@ export class EngineBotMover {
         err: err instanceof Error ? (err.stack ?? err.message) : String(err),
       });
     }
+  }
+
+  /**
+   * Whether `computedFor` is still the live position on an owned, fresh copy with the bot to move.
+   *
+   * Synchronous and immediately followed by `route()`, whose owner fast path applies without I/O
+   * in between: while the lease is valid no other node can own the game, and in `computedFor` only
+   * the bot has a legal move, so no other command can change the position before the apply. (A
+   * resignation can still end the game first; the authority then rejects the move as game over.)
+   */
+  private stillCurrent(gameId: string, computedFor: StateView, botUserId: string): boolean {
+    if (this.ownership && !this.ownership.holdsOwnership(gameId)) return false;
+    let now: StateView;
+    try {
+      now = this.authority.getState(gameId);
+    } catch {
+      return false;
+    }
+    const botToMove = (now.turn === 'w' ? now.players.white : now.players.black) === botUserId;
+    return !now.status.over && botToMove && now.ply === computedFor.ply && now.fen === computedFor.fen;
   }
 
   /** Stop all subscriptions and clear state for graceful shutdown. */

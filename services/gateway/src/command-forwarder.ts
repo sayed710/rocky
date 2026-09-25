@@ -262,6 +262,30 @@ export class RedisCommandRouter implements CommandRouter {
     await inFlight;
   }
 
+  /**
+   * Become (or confirm being) the owner of `gameId` and settle any takeover reload, without
+   * applying a command. Resolves `false` when another node owns the game.
+   *
+   * This is `route()`'s ownership step on its own, for callers that must decide what to submit
+   * from the authoritative state — the engine bot (ADR-0080) — and so need that state fresh
+   * BEFORE they compute. A non-owner's cached copy never sees the owner's moves.
+   */
+  async prepareOwnership(gameId: string): Promise<boolean> {
+    if (!this.registry.holdsValidLease(gameId) && !(await this.registry.claim(gameId)).owned) {
+      return false;
+    }
+    await this.rehydrateIfStale(gameId);
+    return true;
+  }
+
+  /**
+   * Synchronous re-check that this node still holds a valid lease on a copy with no reload debt.
+   * A lease lost and re-claimed while a caller was awaiting leaves reload debt, so it reads false.
+   */
+  holdsOwnership(gameId: string): boolean {
+    return this.registry.holdsValidLease(gameId) && !this.staleAfterClaim.has(gameId);
+  }
+
   async route(gameId: string, userId: string, cmd: Command): Promise<ApplyResult> {
     // Fast path: if this node holds a valid, non-expired local lease for gameId outside
     // the safety margin, apply locally immediately without touching Redis.

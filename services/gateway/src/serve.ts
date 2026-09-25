@@ -437,6 +437,7 @@ async function main(): Promise<void> {
 
   // --- Command router: local (single-node) or Redis (multi-node) (M14 inc 5) ---
   let commandRouter: CommandRouter;
+  let botMoveOwnership: import('./engine-bot.js').BotMoveOwnership | undefined;
   let ownershipRegistry: { releaseAll: () => Promise<void>; startRenewal: () => void; stopRenewal: () => void; ownedCount: number } | undefined;
   let commandConsumer: { stop: () => void } | undefined;
   let closeCommandRedis: (() => Promise<void>) | undefined;
@@ -463,7 +464,7 @@ async function main(): Promise<void> {
     const consumer = new OwnerCommandConsumer(authority, cmdRedis, tracer);
     // Not wrapped in TracingCommandRouter: RedisCommandRouter spans itself, because only it knows
     // whether a command was applied locally or forwarded to the owning node.
-    commandRouter = new RedisCommandRouter({
+    const redisRouter = new RedisCommandRouter({
       authority,
       registry,
       redis: cmdRedis,
@@ -476,6 +477,8 @@ async function main(): Promise<void> {
       fastPathCommandsCounter,
       forwardLatencyHistogram,
     });
+    commandRouter = redisRouter;
+    botMoveOwnership = redisRouter;
     commandConsumer = consumer;
     ownershipRegistry = registry;
     registry.startRenewal();
@@ -506,6 +509,7 @@ async function main(): Promise<void> {
         router: commandRouter,
         pubsub,
         provider: engine,
+        ownership: botMoveOwnership,
         logger,
         movesCounter,
         failuresCounter,

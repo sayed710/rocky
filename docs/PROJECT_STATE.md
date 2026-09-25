@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-25 — M15 Increment 66: Committed terminal-event recovery and idempotent downstream processing._
+_Last updated: 2026-09-26 — M15 Increment 68: Owner-only engine bot decisions and Helm ENGINE_BOT parity._
+
+Prior: _Last updated: 2026-09-25 — M15 Increment 66: Committed terminal-event recovery and idempotent downstream processing._
 
 Prior: _Last updated: 2026-09-24 — M15 Increment 65: Transient-refresh session preservation._
 
@@ -4408,3 +4410,12 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Migration 0037 adds the `login_step_up` token kind and an attempt counter; migration 0038 builds the one-live-code index concurrently (ADR-0145). The ADR records the remaining limits: an attacker who already knows the password can delay an owner without a passkey by spending codes, and the remedy is a password reset. The web sign-in form shows a code field only after a step-up answer, and registration refuses a blank email before sending. The e2e harness records outgoing email (`GET /e2e/outbox`) so specs can verify an account as its owner would.
 - Tests cover all of the above in the in-memory stack, in real PostgreSQL (repository semantics under concurrency, and two API replicas sharing the failure count and code), in web unit tests and in Playwright: a 25-source attack that leaves the owner signing in with the emailed code, uniform answers for unknown and real handles, and single-use, expiry, attempt-cap and no-replacement semantics.
 - Scope: API authentication and rate limiting, persistence identity tokens, the web sign-in and registration form, the e2e harness, and their tests. This PR does not touch terminal-outcome recovery, the realtime gateway game logic, tournaments, or messaging budgets.
+
+## M15 Increment 68 — Owner-only engine bot decisions and Helm ENGINE_BOT parity (2026-09-26)
+
+- Audit Ops row (Helm omits `ENGINE_BOT`). Compose enabled the engine bot and the gateway image ships Stockfish, but the chart never rendered `ENGINE_BOT`, so a Helm release offered Play vs Computer with an opponent that never moved.
+- Enabling it per replica was not safe on `main`. Each replica with a session in a bot game ran a mover that chose moves from its own cached `GameAuthority`, and a non-owner's copy never sees the owner's moves. A reconnect to the other pod, a second tab, or a spectator was enough. Reproduced with two nodes: the owner applied `…Nf6` at ply 4, computed by the non-owner for ply 1.
+- `EngineBotMover` now asks the engine only on the owning replica. Before computing it calls `RedisCommandRouter.prepareOwnership` (valid lease, or claim, then the existing takeover reload), so an unowned game (bot as White at ply 0, an owner gone) is claimed and rehydrated first, and a non-owner returns without an engine call. After computing it submits only if `holdsOwnership` is still true (valid lease, no reload debt) and the bot is still to move at the same ply and FEN. Otherwise the result is dropped and the re-run queued by the changing broadcast computes from the current position. An `ended` broadcast unregisters the game on every replica. No protocol, migration or single-node behaviour change. ADR-0080 carries the amendment.
+- Helm: `gateway.engineBot.enabled` (default `true`) renders `ENGINE_BOT="1"` on the gateway Deployment only. Stockfish and `STOCKFISH_PATH` still come only from the gateway image. Disabled, the render is byte-identical to `main`; rolling, blue/green and canary differ from `main` only by that variable.
+- Tests: `engine-bot.test.ts` adds the ownership gate and post-engine checks with a scripted gate; `engine-bot-multinode.integration.test.ts` proves them on real Redis with the production router and registry (owner-only computation including duplicate broadcasts, ply-0 claim, takeover rehydration, ownership lost or lost-and-regained mid-think, terminal stop). Each safety line was removed in turn, and each removal failed at least one test. `helm-snapshot-test.sh` pins the flag on, off, per strategy, absent from the search indexer, and the rest of the gateway env contract including the tournament reporter.
+- Scope: `services/gateway` (engine bot, router ownership methods, wiring), the Helm chart, snapshot test, and docs. BOT_AUTO_ANALYZE, ANTICHEAT_AUTO_ANALYZE, the tournament reporter, the search indexer, ratings, timed games and auth are untouched.

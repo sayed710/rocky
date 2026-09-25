@@ -5,6 +5,7 @@ import {
   InMemoryPubSub,
   LocalCommandRouter,
   gameChannel,
+  type Broadcast,
 } from '@chess-platform/realtime-gateway';
 import type {
   AnalysisProvider,
@@ -316,5 +317,166 @@ test('EngineBotMover: unregisters when the bot\'s own move ends the game', async
     'mover must unsubscribe after the move that ended the game',
   );
 
+  mover.stop();
+});
+
+// --- Multi-node ownership gate (ADR-0010) ---
+//
+// These drive the mover's own logic with a scripted ownership gate. The same guarantees are proven
+// against the production RedisCommandRouter + OwnershipRegistry in
+// engine-bot-multinode.integration.test.ts.
+
+/** Ownership gate whose answers the test controls. */
+class ScriptedOwnership {
+  public owns = true;
+  public prepareCalls = 0;
+  async prepareOwnership(_gameId: string): Promise<boolean> {
+    this.prepareCalls++;
+    return this.owns;
+  }
+  holdsOwnership(_gameId: string): boolean {
+    return this.owns;
+  }
+}
+
+/** Engine whose answer is held until the test releases it, so the test can act while it "thinks". */
+class HeldProvider extends FakeAnalysisProvider {
+  private releases: (() => void)[] = [];
+  override async play(request: PlayRequest): Promise<PlayResult> {
+    this.playCalls.push(request);
+    await new Promise<void>((resolve) => this.releases.push(resolve));
+    return { move: this.responseMove };
+  }
+  release(): void {
+    for (const r of this.releases.splice(0)) r();
+  }
+}
+
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+/** A regression that leaves a held engine call unreleased must fail, not hang the suite. */
+const HELD_TEST_TIMEOUT_MS = 5_000;
+
+async function botBlackAfterE4(gameId: string) {
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub);
+  const router = new LocalCommandRouter(authority);
+  const bot = BOT_ACCOUNTS[0]!;
+  const human = 'human-player-1';
+  await authority.createGame({
+    gameId,
+    variant: 'standard',
+    timeControl: { kind: 'unlimited', initialMs: 0, incrementMs: 0, delayMs: 0 },
+    players: { white: human, black: bot.userId },
+    rated: false,
+  });
+  const e4Broadcasts: Broadcast[] = [];
+  const unsub = pubsub.subscribe(gameChannel(gameId), (msg) => e4Broadcasts.push(msg));
+  await authority.apply(gameId, human, { kind: 'move', uci: 'e2e4' });
+  unsub();
+  return { pubsub, authority, router, bot, human, e4Broadcast: e4Broadcasts[0]! };
+}
+
+test('EngineBotMover: a non-owner never calls the engine, however many broadcasts arrive', async () => {
+  const gameId = '00000000-0000-7000-8000-000000000020';
+  const { pubsub, authority, router, e4Broadcast } = await botBlackAfterE4(gameId);
+  const provider = new FakeAnalysisProvider();
+  const ownership = new ScriptedOwnership();
+  ownership.owns = false;
+  const mover = new EngineBotMover({ authority, router, pubsub, provider, ownership });
+
+  mover.registerGame(gameId);
+  await flush();
+  // Duplicate delivery of the same move broadcast: each one wakes the mover, none may compute.
+  pubsub.publish(gameChannel(gameId), e4Broadcast);
+  pubsub.publish(gameChannel(gameId), e4Broadcast);
+  await flush();
+
+  assert.equal(provider.playCalls.length, 0, 'non-owner must not compute from its cached copy');
+  assert.ok(ownership.prepareCalls >= 3, 'ownership is asked before every would-be computation');
+  assert.equal(authority.getState(gameId).ply, 1, 'no command submitted');
+  mover.stop();
+});
+
+test('EngineBotMover: a result computed before ownership was lost is dropped', { timeout: HELD_TEST_TIMEOUT_MS }, async () => {
+  const gameId = '00000000-0000-7000-8000-000000000021';
+  const { pubsub, authority, router } = await botBlackAfterE4(gameId);
+  const provider = new HeldProvider();
+  const ownership = new ScriptedOwnership();
+  const mover = new EngineBotMover({ authority, router, pubsub, provider, ownership });
+
+  mover.registerGame(gameId);
+  await flush();
+  assert.equal(provider.playCalls.length, 1, 'owner started thinking');
+  ownership.owns = false; // lease lost mid-think
+  provider.release();
+  await mover.attemptMove(gameId);
+
+  assert.equal(authority.getState(gameId).ply, 1, 'stale result must not be submitted');
+  mover.stop();
+});
+
+test('EngineBotMover: a result for a position the game has left is dropped, and the new position is computed', { timeout: HELD_TEST_TIMEOUT_MS }, async () => {
+  const gameId = '00000000-0000-7000-8000-000000000022';
+  const { pubsub, authority, router, bot, human } = await botBlackAfterE4(gameId);
+  const provider = new HeldProvider();
+  provider.responseMove = 'g8f6';
+  const ownership = new ScriptedOwnership();
+  const mover = new EngineBotMover({ authority, router, pubsub, provider, ownership });
+
+  mover.registerGame(gameId);
+  await flush();
+  const computedFor = provider.playCalls[0]!.fen;
+  // While it thinks, the game advances elsewhere (worst case: ownership moved away and back, and
+  // this node's copy was rehydrated) — 1...Nc6 2.Nf3, and the bot is to move again.
+  await authority.apply(gameId, bot.userId, { kind: 'move', uci: 'b8c6' });
+  await authority.apply(gameId, human, { kind: 'move', uci: 'g1f3' });
+  provider.release(); // the ply-1 answer (…Nf6) arrives: legal now, but computed for ply 1
+  await flush();
+
+  assert.equal(authority.getState(gameId).ply, 3, 'the ply-1 answer must not be applied at ply 3');
+  assert.equal(provider.playCalls.length, 2, 'the change queued a fresh computation');
+  assert.notEqual(provider.playCalls[1]!.fen, computedFor, 'recomputed from the current position');
+  provider.release();
+  await mover.attemptMove(gameId);
+  assert.equal(authority.getState(gameId).ply, 4, 'the fresh answer is applied');
+  mover.stop();
+});
+
+test('EngineBotMover: a result that arrives after the game ended is dropped and bot work stops', { timeout: HELD_TEST_TIMEOUT_MS }, async () => {
+  const gameId = '00000000-0000-7000-8000-000000000023';
+  const { pubsub, authority, router, human } = await botBlackAfterE4(gameId);
+  const provider = new HeldProvider();
+  const ownership = new ScriptedOwnership();
+  const mover = new EngineBotMover({ authority, router, pubsub, provider, ownership });
+
+  mover.registerGame(gameId);
+  await flush();
+  await authority.apply(gameId, human, { kind: 'resign' });
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 0, 'terminal broadcast unregisters');
+  provider.release();
+  await mover.attemptMove(gameId);
+
+  assert.equal(authority.getState(gameId).ply, 1, 'no move after the game ended');
+  assert.equal(provider.playCalls.length, 1, 'no further computation');
+  mover.stop();
+});
+
+test('EngineBotMover: a non-owner stops on the terminal broadcast its stale copy cannot see', async () => {
+  const gameId = '00000000-0000-7000-8000-000000000024';
+  const { pubsub, authority, router } = await botBlackAfterE4(gameId);
+  const provider = new FakeAnalysisProvider();
+  const ownership = new ScriptedOwnership();
+  ownership.owns = false;
+  const mover = new EngineBotMover({ authority, router, pubsub, provider, ownership });
+
+  mover.registerGame(gameId);
+  await flush();
+  // The owner's game ended; this node's copy still says ply 1 and in progress.
+  pubsub.publish(gameChannel(gameId), {
+    t: 'ended', gameId, result: '1-0', termination: 'resignation', winner: 'w', serverTs: Date.now(),
+  });
+
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 0, 'unsubscribed on ended');
+  assert.equal(provider.playCalls.length, 0);
   mover.stop();
 });

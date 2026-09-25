@@ -162,6 +162,13 @@ spec:
             - name: TOURNAMENT_REPORTER_SCAN_MS
               value: {{ .Values.gateway.tournamentReporter.scanIntervalMs | quote }}
             {{- end }}
+            {{- if .Values.gateway.engineBot.enabled }}
+            # ADR-0080: Play vs Computer. Every replica runs a mover, but only the
+            # game's owner (ADR-0010) computes and submits its moves. Stockfish and
+            # STOCKFISH_PATH come from the gateway image.
+            - name: ENGINE_BOT
+              value: "1"
+            {{- end }}
             {{- if .Values.tracing.enabled }}
             {{- if and (not .Values.tracing.otlpEndpoint) (not .Values.tracing.otlpTracesEndpoint) }}
             {{- fail "tracing.enabled requires at least one of tracing.otlpEndpoint or tracing.otlpTracesEndpoint to be set" }}

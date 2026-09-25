@@ -56,6 +56,18 @@ non-secret values from the selected GitHub Environment's `EMAIL_FROM` and `PUBLI
 variables. `email.provider=console` is available only with a non-production `config.nodeEnv` and
 prints no recipient, token, or completed URL.
 
+## Engine bot (Play vs Computer)
+
+`gateway.engineBot.enabled` (default `true`) sets `ENGINE_BOT=1` on the gateway, which starts the
+mover that plays the bot's moves (ADR-0080). The gateway image already ships the pinned Stockfish
+binary and sets `STOCKFISH_PATH`, so the chart adds nothing else. It runs on every gateway replica:
+only the replica that owns a game (ADR-0010) computes its bot moves. To turn Play vs Computer's
+opponent off:
+
+```bash
+helm upgrade gambit deploy/helm/gambit --set gateway.engineBot.enabled=false
+```
+
 ## Search indexer
 
 The live search indexer (ADR-0056) dedups in-process, so it must run as exactly one
