@@ -11,6 +11,5 @@ ALTER TABLE identity_tokens ADD CONSTRAINT identity_tokens_kind_check
 -- Wrong codes presented alongside the correct password. A code stops working after a few.
 ALTER TABLE identity_tokens ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0);
 
--- At most one outstanding code per account, so repeated requests cannot mint a spread of valid codes.
-CREATE UNIQUE INDEX identity_tokens_one_login_step_up
-  ON identity_tokens (user_id) WHERE kind = 'login_step_up';
+-- The one-live-code-per-account unique index is built online by migration 0038, so this
+-- transaction holds its lock on identity_tokens only for the constraint and column changes.

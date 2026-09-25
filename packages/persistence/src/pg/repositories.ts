@@ -1027,6 +1027,7 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
   async replaceActiveEmailVerification(
     token: Omit<NewIdentityToken, 'kind'>,
     at: Date,
+    reissueCutoff?: Date,
   ): Promise<IdentityTokenRow | null> {
     const client = await this.pool.connect();
     try {
@@ -1038,6 +1039,20 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
       if (!user.rows[0] || user.rows[0].email_verified_at !== null) {
         await client.query('COMMIT');
         return null;
+      }
+      if (reissueCutoff) {
+        // Under the user row lock, so two racing triggers cannot both see no recent token.
+        const recent = await client.query(
+          `SELECT 1 FROM identity_tokens
+            WHERE user_id = $1 AND kind = 'email_verify' AND used_at IS NULL
+              AND expires_at > $2 AND created_at > $3
+            LIMIT 1`,
+          [token.userId, at, reissueCutoff],
+        );
+        if ((recent.rowCount ?? 0) > 0) {
+          await client.query('COMMIT');
+          return null;
+        }
       }
       await client.query(
         `UPDATE identity_tokens
@@ -1053,10 +1068,10 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
         expires_at: Date;
         used_at: Date | null;
       }>(
-        `INSERT INTO identity_tokens (token_hash, user_id, kind, expires_at)
-         VALUES ($1, $2, 'email_verify', $3)
+        `INSERT INTO identity_tokens (token_hash, user_id, kind, expires_at, created_at)
+         VALUES ($1, $2, 'email_verify', $3, $4)
          RETURNING token_hash, user_id, kind, created_at, expires_at, used_at`,
-        [token.tokenHash, token.userId, token.expiresAt],
+        [token.tokenHash, token.userId, token.expiresAt, at],
       );
       await client.query('COMMIT');
       const row = res.rows[0]!;
@@ -1179,17 +1194,20 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
     // One statement, atomic under the partial unique index: it inserts when the account has no code,
     // replaces one that has expired or used up its attempts, and leaves a live one alone. An
     // ineligible request selects no row to insert, but still runs the same statement.
+    // `created_at` is written from the caller's clock, never defaulted from the database's, so the
+    // re-issue cutoff compares like with like.
     const res = await this.pool.query(
-      `INSERT INTO identity_tokens (token_hash, user_id, kind, expires_at)
-       SELECT $1, $2, 'login_step_up', $3 WHERE $4::boolean
+      `INSERT INTO identity_tokens (token_hash, user_id, kind, expires_at, created_at)
+       SELECT $1, $2, 'login_step_up', $3, $5 WHERE $4::boolean
        ON CONFLICT (user_id) WHERE kind = 'login_step_up'
        DO UPDATE SET token_hash = EXCLUDED.token_hash,
                      expires_at = EXCLUDED.expires_at,
                      created_at = $5,
                      attempts = 0
-        WHERE identity_tokens.expires_at <= $5 OR identity_tokens.attempts >= $6
+        WHERE identity_tokens.expires_at <= $5
+           OR (identity_tokens.attempts >= $6 AND identity_tokens.created_at <= $7)
        RETURNING 1`,
-      [code.tokenHash, code.userId, code.expiresAt, code.eligible, at, code.maxAttempts],
+      [code.tokenHash, code.userId, code.expiresAt, code.eligible, at, code.maxAttempts, code.reissueCutoff],
     );
     return (res.rowCount ?? 0) > 0;
   }

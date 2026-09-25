@@ -17,7 +17,9 @@
 
 import {
   createHash,
+  createHmac,
   generateKeyPairSync,
+  hkdfSync,
   randomBytes,
   randomInt,
   randomUUID,
@@ -81,14 +83,13 @@ const DUMMY_WEBAUTHN_PUBLIC_KEY = generateKeyPairSync('ec', { namedCurve: 'prime
 const STEP_UP_CODE_DIGITS = 8;
 const STEP_UP_CODE_TTL_MS = 10 * 60 * 1000;
 const STEP_UP_MAX_ATTEMPTS = 5;
-
 /**
- * The stored form of a step-up code. The user id is mixed in so equal codes for two accounts never
- * share a hash, and a code only ever matches the account it was issued to.
+ * How long a code that used up its attempts blocks a new one. Only someone with the password can
+ * spend attempts, and this caps how many emails they can force: about twelve an hour.
  */
-function stepUpTokenHash(userId: string, code: string): string {
-  return createHash('sha256').update(`${userId}:${code}`).digest('hex');
-}
+const STEP_UP_REISSUE_COOLDOWN_MS = 5 * 60 * 1000;
+/** How often a sign-in attempt on an unverified account may re-send the verification email. */
+const VERIFICATION_RESEND_COOLDOWN_MS = 10 * 60 * 1000;
 
 /**
  * The single answer to any sign-in attempt that needs a second proof. It is the same for a wrong
@@ -194,6 +195,7 @@ export class AuthService {
   private readonly refreshTtlSec: number;
   private readonly emailSender: EmailSender;
   private readonly webauthn: { rpId: string; origins: readonly string[] };
+  private readonly stepUpKey: Buffer;
   private readonly refreshGracePeriodMs: number;
 
   /** Compose authentication dependencies and enforce the bounded refresh-collision policy. */
@@ -206,6 +208,11 @@ export class AuthService {
     refreshTtlSec: number;
     emailSender: EmailSender;
     webauthn: { rpId: string; origins: readonly string[] };
+    /**
+     * Server secret that keys the stored form of login step-up codes. An 8-digit code has too
+     * little entropy for a plain hash: anyone who read the table could recover live codes offline.
+     */
+    codeSecret: string;
     refreshGracePeriodMs?: number;
   }) {
     this.repos = deps.repos;
@@ -216,6 +223,9 @@ export class AuthService {
     this.refreshTtlSec = deps.refreshTtlSec;
     this.emailSender = deps.emailSender;
     this.webauthn = deps.webauthn;
+    this.stepUpKey = Buffer.from(
+      hkdfSync('sha256', deps.codeSecret, Buffer.alloc(0), 'shatarang/login-step-up-code', 32),
+    );
     const refreshGracePeriodMs = deps.refreshGracePeriodMs ?? DEFAULT_REFRESH_GRACE_PERIOD_MS;
     if (
       !Number.isFinite(refreshGracePeriodMs) ||
@@ -305,7 +315,10 @@ export class AuthService {
     if (!user) throw new Error('Unreachable: a verified password implies an account');
 
     if (!emailVerified) {
-      if (user.email) await this.issueEmailVerification(user.id, user.email);
+      if (user.email) {
+        const cutoff = new Date(this.clock.now() - VERIFICATION_RESEND_COOLDOWN_MS);
+        await this.issueEmailVerification(user.id, user.email, cutoff);
+      }
       await this.audit(meta, user.id, 'auth.login.fail', user.id);
       throw new HttpError(403, 'forbidden', 'verify your email address before signing in', {
         reason: 'email_unverified',
@@ -523,14 +536,18 @@ export class AuthService {
     await this.issueEmailVerification(user.id, user.email);
   }
 
-  private async issueEmailVerification(userId: string, email: string): Promise<void> {
+  private async issueEmailVerification(
+    userId: string,
+    email: string,
+    reissueCutoff?: Date,
+  ): Promise<void> {
     const token = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(token).digest('hex');
     const issued = await this.repos.identityTokens.replaceActiveEmailVerification({
       tokenHash,
       userId,
       expiresAt: new Date(this.clock.now() + 24 * 60 * 60 * 1000), // 24 hours
-    }, new Date(this.clock.now()));
+    }, new Date(this.clock.now()), reissueCutoff);
     if (!issued) return;
     this.dispatchEmail(() => this.emailSender.sendEmailVerification(email, token));
   }
@@ -901,7 +918,7 @@ export class AuthService {
       return this.repos.identityTokens.checkLoginStepUp(
         {
           userId,
-          tokenHash: stepUpTokenHash(userId, code),
+          tokenHash: this.stepUpTokenHash(userId, code),
           checked: eligible,
           maxAttempts: STEP_UP_MAX_ATTEMPTS,
         },
@@ -912,16 +929,25 @@ export class AuthService {
     const issued = await this.repos.identityTokens.issueLoginStepUp(
       {
         userId,
-        tokenHash: stepUpTokenHash(userId, fresh),
+        tokenHash: this.stepUpTokenHash(userId, fresh),
         expiresAt: new Date(now.getTime() + STEP_UP_CODE_TTL_MS),
         eligible,
         maxAttempts: STEP_UP_MAX_ATTEMPTS,
+        reissueCutoff: new Date(now.getTime() - STEP_UP_REISSUE_COOLDOWN_MS),
       },
       now,
     );
     const email = user?.email;
     if (issued && email) this.dispatchEmail(() => this.emailSender.sendLoginCode(email, fresh));
     return false;
+  }
+
+  /**
+   * The stored form of a step-up code: an HMAC under a server key, over the user id and the code.
+   * The id makes equal codes for two accounts differ, so a code only matches its own account.
+   */
+  private stepUpTokenHash(userId: string, code: string): string {
+    return createHmac('sha256', this.stepUpKey).update(`${userId}:${code}`).digest('hex');
   }
 
   private async startSession(

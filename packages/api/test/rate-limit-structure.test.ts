@@ -191,10 +191,12 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
 /**
  * `/v1/analysis`, `/v1/analysis/mistake-prediction` and `/v1/ai/move-explanation` each buy real
  * engine time, so a request rejected by validation must reach no bucket at all. The cheap way to
- * lose that is to move the charge back above the parsing, where it started.
+ * lose that is to move the charge back above the parsing, where it started. `/v1/auth/login` is
+ * here for a different reason (audit P1-1): a malformed body, such as a code that is not eight
+ * digits, must not spend a failure budget or count toward step-up.
  */
 test('the expensive routes parse the body before they charge for it', () => {
-  for (const path of ['/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation']) {
+  for (const path of ['/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation', '/v1/auth/login']) {
     const route = routeNamed(path);
 
     let parse: ts.CallExpression | undefined;

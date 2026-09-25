@@ -15,6 +15,7 @@ import { uuidv7 } from '@chess-platform/persistence';
 import { withTestDatabase } from '@chess-platform/persistence/test-support';
 import type { Pool } from 'pg';
 import { createPgApiServer } from '../src/bootstrap';
+import { PgRateLimiter } from '../src/ports/pg-rate-limiter';
 import { DEFAULT_RATE_LIMIT } from '../src/config';
 import { InMemoryEmailSender } from '../src/ports/email';
 import { JsonLogger } from '../src/ports/logger';
@@ -35,9 +36,23 @@ async function account(pool: Pool): Promise<string> {
   return id;
 }
 
-function issue(repo: PgIdentityTokensRepository, userId: string, tokenHash: string, eligible = true, at = new Date()) {
+function issue(
+  repo: PgIdentityTokensRepository,
+  userId: string,
+  tokenHash: string,
+  eligible = true,
+  at = new Date(),
+  reissueCutoff = at,
+) {
   return repo.issueLoginStepUp(
-    { userId, tokenHash, expiresAt: new Date(at.getTime() + HOUR), eligible, maxAttempts: MAX_ATTEMPTS },
+    {
+      userId,
+      tokenHash,
+      expiresAt: new Date(at.getTime() + HOUR),
+      eligible,
+      maxAttempts: MAX_ATTEMPTS,
+      reissueCutoff,
+    },
     at,
   );
 }
@@ -77,17 +92,47 @@ test('Postgres step-up codes: one outstanding, single use, bounded misses, inert
     assert.deepEqual(await stored(pool, userId), [], 'a used code is deleted');
     assert.equal(await check(repo, userId, 'a'), false, 'and cannot be used again');
 
-    // Exhausted by misses: the right code no longer works, and a new code may replace it.
-    assert.equal(await issue(repo, userId, 'c'), true);
+    // Exhausted by misses: the right code no longer works. A new code replaces it only once the
+    // exhausted one was issued at or before the cutoff — the cooldown on burn-and-re-mint.
+    const issuedAt = new Date();
+    assert.equal(await issue(repo, userId, 'c', true, issuedAt), true);
     for (let i = 0; i < MAX_ATTEMPTS; i++) await check(repo, userId, `miss-${i}`);
     assert.equal(await check(repo, userId, 'c'), false);
-    assert.equal(await issue(repo, userId, 'd'), true);
+    const soon = new Date(issuedAt.getTime() + 60_000);
+    assert.equal(
+      await issue(repo, userId, 'd', true, soon, new Date(soon.getTime() - 5 * 60_000)),
+      false,
+      'not within the cooldown',
+    );
+    assert.equal(await issue(repo, userId, 'd', true, soon, issuedAt), true, 'once the cutoff reaches it');
     assert.deepEqual(await stored(pool, userId), [{ token_hash: 'd', attempts: 0 }]);
 
     // Expired: refused, and replaceable.
     const later = new Date(Date.now() + 2 * HOUR);
     assert.equal(await check(repo, userId, 'd', true, later), false);
     assert.equal(await issue(repo, userId, 'e', true, later), true);
+  });
+});
+
+test('Postgres verification re-send honours its cutoff', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const repo = new PgIdentityTokensRepository(pool);
+    const userId = await account(pool);
+    const at = new Date();
+    const token = (hash: string) => ({ tokenHash: hash, userId, expiresAt: new Date(at.getTime() + 24 * HOUR) });
+
+    assert.ok(await repo.replaceActiveEmailVerification(token('v1'), at));
+    const later = new Date(at.getTime() + 60_000);
+    assert.equal(
+      await repo.replaceActiveEmailVerification(token('v2'), later, new Date(later.getTime() - 10 * 60_000)),
+      null,
+      'a token issued within the cutoff blocks a re-send',
+    );
+    assert.ok(
+      await repo.replaceActiveEmailVerification(token('v3'), later, at),
+      'a token issued at or before the cutoff does not',
+    );
   });
 });
 
@@ -114,6 +159,19 @@ test('Postgres step-up codes stay single under concurrency', { skip }, async () 
     await Promise.all(Array.from({ length: 20 }, (_, i) => check(i % 2 === 0 ? a : b, userId, `miss-${i}`)));
     assert.equal((await stored(pool, userId))[0]?.attempts, MAX_ATTEMPTS, 'misses stop counting at the cap');
     assert.equal(await check(a, userId, 'fresh'), false, 'and the code is dead');
+  });
+});
+
+test('Postgres step-up count admits exactly its threshold across replicas under concurrency', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const a = new PgRateLimiter(pool);
+    const b = new PgRateLimiter(pool);
+    const bucket = { key: `login:handle:stepup_${uuidv7().slice(-12)}`, limit: { maxRequests: 3, windowMs: HOUR } };
+    const counted = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => (i % 2 === 0 ? a : b).tally(bucket)),
+    );
+    assert.equal(counted.filter((reservation) => reservation !== null).length, 3);
   });
 });
 

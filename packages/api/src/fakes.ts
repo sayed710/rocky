@@ -775,9 +775,24 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
   async replaceActiveEmailVerification(
     token: Omit<NewIdentityToken, 'kind'>,
     at: Date,
+    reissueCutoff?: Date,
   ): Promise<IdentityTokenRow | null> {
     if (!this.users.emailIsUnverified(token.userId)) return null;
-    return this.replaceActive({ ...token, kind: 'email_verify' }, at);
+    if (reissueCutoff) {
+      for (const row of this.byHash.values()) {
+        if (
+          row.userId === token.userId && row.kind === 'email_verify' && row.usedAt === null &&
+          row.expiresAt.getTime() > at.getTime() && row.createdAt.getTime() > reissueCutoff.getTime()
+        ) {
+          return null;
+        }
+      }
+    }
+    const row = await this.replaceActive({ ...token, kind: 'email_verify' }, at);
+    // Stamped with the caller's clock, as the Postgres adapter does, so the cutoff compares alike.
+    const stamped = { ...row, createdAt: at };
+    this.byHash.set(row.tokenHash, stamped);
+    return stamped;
   }
 
   async consume(
@@ -811,13 +826,24 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
   }
 
   /** Login step-up codes, one per user. Kept apart from `byHash` because a used code is deleted. */
-  private readonly stepUps = new Map<string, { tokenHash: string; expiresAt: Date; attempts: number }>();
+  private readonly stepUps = new Map<
+    string,
+    { tokenHash: string; expiresAt: Date; attempts: number; createdAt: Date }
+  >();
 
   async issueLoginStepUp(code: LoginStepUpIssue, at: Date): Promise<boolean> {
     if (!code.eligible) return false;
-    const live = this.stepUps.get(code.userId);
-    if (live && live.expiresAt.getTime() > at.getTime() && live.attempts < code.maxAttempts) return false;
-    this.stepUps.set(code.userId, { tokenHash: code.tokenHash, expiresAt: code.expiresAt, attempts: 0 });
+    const current = this.stepUps.get(code.userId);
+    if (current && current.expiresAt.getTime() > at.getTime()) {
+      const exhausted = current.attempts >= code.maxAttempts;
+      if (!exhausted || current.createdAt.getTime() > code.reissueCutoff.getTime()) return false;
+    }
+    this.stepUps.set(code.userId, {
+      tokenHash: code.tokenHash,
+      expiresAt: code.expiresAt,
+      attempts: 0,
+      createdAt: at,
+    });
     return true;
   }
 

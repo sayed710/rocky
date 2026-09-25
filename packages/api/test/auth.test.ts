@@ -21,6 +21,7 @@ function authServiceWithGrace(refreshGracePeriodMs: number): AuthService {
     refreshTtlSec: 3_600,
     emailSender: new InMemoryEmailSender(),
     webauthn: { rpId: 'localhost', origins: ['http://localhost'] },
+    codeSecret: TEST_SECRET,
     refreshGracePeriodMs,
   });
 }

@@ -167,7 +167,7 @@ describe('login step-up past the account-wide failure threshold', () => {
     }
   });
 
-  test('a code stops working after five wrong codes, and a fresh one can then be sent', async () => {
+  test('a code stops working after five wrong codes, and a fresh one follows after a cooldown', async () => {
     const h = await harness();
     try {
       await register(h, 'alice');
@@ -180,9 +180,37 @@ describe('login step-up past the account-wide failure threshold', () => {
       assert.equal((await login(h, 'alice', PASSWORD, first)).status, 401, 'the exhausted code is dead');
 
       await login(h, 'alice', PASSWORD);
+      assert.equal(codesSentTo(h, 'alice').length, 1, 'no replacement straight away');
+
+      h.clock.advance(5 * MINUTE);
+      await login(h, 'alice', PASSWORD);
       const codes = codesSentTo(h, 'alice');
-      assert.equal(codes.length, 2, 'a new code replaces the exhausted one');
+      assert.equal(codes.length, 2, 'a new code replaces the exhausted one after the cooldown');
       assert.equal((await login(h, 'alice', PASSWORD, codes[1])).status, 200);
+    } finally {
+      await h.close();
+    }
+  });
+
+  /**
+   * Someone who already has the password can spend each code with wrong guesses; they still cannot
+   * sign in without the mailbox. What they must not do is flood it: a spent code blocks a new one
+   * for five minutes, so a fifteen-minute step-up window sends at most three or four emails.
+   * (The owner's way out is a password reset, which the code email suggests.)
+   */
+  test('burning codes with the password cannot flood the inbox', async () => {
+    const h = await harness();
+    try {
+      await register(h, 'alice');
+      await passThreshold(h, 'alice');
+      for (let minute = 0; minute < 14; minute++) {
+        assert.equal((await login(h, 'alice', PASSWORD)).status, 401, `still stepped up at ${minute}m`);
+        for (let i = 0; i < 5; i++) await login(h, 'alice', PASSWORD, '99999999');
+        h.clock.advance(MINUTE);
+      }
+      const sent = codesSentTo(h, 'alice').length;
+      assert.ok(sent <= 3, `fourteen minutes of burning sent ${sent} codes`);
+      assert.ok(sent >= 2, 'fresh codes still follow once the cooldown passes');
     } finally {
       await h.close();
     }
@@ -263,8 +291,31 @@ describe('login step-up past the account-wide failure threshold', () => {
   test('a malformed code is a validation error before any bucket is touched', async () => {
     const h = await harness();
     try {
-      const res = await login(h, 'alice', PASSWORD, 'abc');
-      assert.equal(res.status, 422);
+      await register(h, 'alice');
+      for (let i = 0; i < THRESHOLD + 2; i++) {
+        assert.equal((await login(h, 'alice', 'wrong-password', 'abc')).status, 422);
+      }
+      // Had any of them counted as a failure, the handle would now be past its threshold.
+      assert.equal((await login(h, 'alice', PASSWORD)).status, 200);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('concurrent failures cannot overshoot the step-up threshold', async () => {
+    const h = await harness();
+    try {
+      await register(h, 'alice');
+      // Every request is in flight before any password check finishes. The count is taken at
+      // admission, so exactly THRESHOLD of them are ordinary failures and the rest need step-up.
+      const results = await Promise.all(
+        Array.from({ length: 20 }, (_, i) => login(h, 'alice', 'wrong-password', undefined, `203.0.113.${i}`)),
+      );
+      const reasons = results.map((r) => r.body.error.details?.reason ?? 'invalid_credentials').sort();
+      assert.deepEqual(reasons, [
+        ...Array(THRESHOLD).fill('invalid_credentials'),
+        ...Array(20 - THRESHOLD).fill('step_up_required'),
+      ]);
     } finally {
       await h.close();
     }
@@ -286,6 +337,7 @@ describe('password accounts require a verified email', () => {
     const h = await harness();
     try {
       await register(h, 'alice', false);
+      h.clock.advance(10 * MINUTE);
       const before = h.emailSender.sent.filter((m) => m.type === 'email_verify').length;
 
       const res = await login(h, 'alice', PASSWORD);
@@ -294,13 +346,31 @@ describe('password accounts require a verified email', () => {
       assert.equal(
         h.emailSender.sent.filter((m) => m.type === 'email_verify').length,
         before + 1,
-        'the attempt re-sends the verification email',
+        'the attempt re-sends the verification email once the last one is ten minutes old',
       );
 
       assert.equal((await login(h, 'alice', 'wrong-password')).status, 401, 'a wrong password learns nothing');
 
       await verifyEmail(h, 'alice@example.test');
       assert.equal((await login(h, 'alice', PASSWORD)).status, 200);
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('repeated sign-ins on an unverified account re-send verification at most every ten minutes', async () => {
+    const h = await harness();
+    try {
+      await register(h, 'alice', false);
+      const count = () => h.emailSender.sent.filter((m) => m.type === 'email_verify').length;
+      const before = count();
+      // Each 403 counts as a failure, so stay under the harness threshold of three.
+      for (let i = 0; i < 2; i++) assert.equal((await login(h, 'alice', PASSWORD)).status, 403);
+      assert.equal(count(), before, 'registration just sent one, so nothing more yet');
+
+      h.clock.advance(10 * MINUTE);
+      assert.equal((await login(h, 'alice', PASSWORD)).status, 403);
+      assert.equal(count(), before + 1, 'one re-send once the cooldown has passed');
     } finally {
       await h.close();
     }

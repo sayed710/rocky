@@ -85,18 +85,24 @@ export interface IdentityTokensRepository {
   create(token: NewIdentityToken): Promise<IdentityTokenRow>;
   /** Atomically supersede every unused token of the same kind for this user. */
   replaceActive(token: NewIdentityToken, at: Date): Promise<IdentityTokenRow>;
-  /** Atomically issue a replacement only while the owning user's email remains unverified. */
+  /**
+   * Atomically issue a replacement only while the owning user's email remains unverified. With
+   * `reissueCutoff`, also only when no unused verification token was issued after it, so repeated
+   * triggers cannot flood the inbox.
+   */
   replaceActiveEmailVerification(
     token: Omit<NewIdentityToken, 'kind'>,
     at: Date,
+    reissueCutoff?: Date,
   ): Promise<IdentityTokenRow | null>;
   /** Atomically consume a token. Returns null if missing, expired, or already used. */
   consume(tokenHash: string, kind: IdentityTokenKind, at: Date): Promise<IdentityTokenRow | null>;
   /** Atomically consume an email token and mark its owning user verified. */
   consumeEmailVerification(tokenHash: string, at: Date): Promise<IdentityTokenRow | null>;
   /**
-   * Issue a login step-up code, unless the account already has a live one. A code that has
-   * expired or used up its attempts is replaced.
+   * Issue a login step-up code, unless the account already has a live one. An expired code is
+   * replaced; one that has used up its attempts is replaced only if it was issued at or before
+   * `reissueCutoff`, so someone who knows the password cannot burn and re-mint codes back to back.
    *
    * `eligible` is decided by the caller, which passes `false` whenever no code should be sent. The
    * statement is issued either way, so the request costs about the same whichever it is. Resolves
@@ -118,6 +124,7 @@ export interface LoginStepUpIssue {
   readonly expiresAt: Date;
   readonly eligible: boolean;
   readonly maxAttempts: number;
+  readonly reissueCutoff: Date;
 }
 
 export interface LoginStepUpCheck {
