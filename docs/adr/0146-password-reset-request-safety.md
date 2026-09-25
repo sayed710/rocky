@@ -17,9 +17,12 @@ generate unbounded mail.
   unauthenticated caller.
 - Issue a fresh, random, SHA-256-hashed reset token only when that account has no unconsumed,
   unexpired reset token. Lock the stable user row before checking and inserting, so independent API
-  replicas cannot issue or email two tokens concurrently. A live token suppresses both replacement
+  replicas cannot issue or email two tokens concurrently. An indexed precheck suppresses ordinary
+  repeat requests without queuing on that lock; the locked transaction rechecks before insertion.
+  A live token suppresses both replacement
   and further email. Existing 30-minute expiry, atomic single-use consumption, password update, and
-  session revocation remain unchanged. No schema migration is needed.
+  session revocation remain unchanged. Migration 0039 adds a partial index for the live-token
+  lookup; no token schema or storage-contract change is needed.
 - If the mail provider definitively rejects or throttles delivery, delete only that exact unused
   token so another request can retry. A timeout, thrown sender, or unreadable provider response is
   ambiguous; the token may have reached the mailbox and remains usable.

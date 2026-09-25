@@ -1025,6 +1025,13 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
   }
 
   async issuePasswordReset(token: Omit<NewIdentityToken, 'kind'>, at: Date): Promise<boolean> {
+    const liveSql = `SELECT 1 FROM identity_tokens
+      WHERE user_id = $1 AND kind = 'password_reset' AND used_at IS NULL AND expires_at > $2
+      LIMIT 1`;
+    // An existing link is the common path. Avoid queuing a user-row lock for each repeat request.
+    // A miss is only provisional: recheck after locking before inserting.
+    const beforeLock = await this.pool.query(liveSql, [token.userId, at]);
+    if ((beforeLock.rowCount ?? 0) > 0) return false;
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -1034,12 +1041,7 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
         await client.query('COMMIT');
         return false;
       }
-      const live = await client.query(
-        `SELECT 1 FROM identity_tokens
-         WHERE user_id = $1 AND kind = 'password_reset' AND used_at IS NULL AND expires_at > $2
-         LIMIT 1`,
-        [token.userId, at],
-      );
+      const live = await client.query(liveSql, [token.userId, at]);
       if ((live.rowCount ?? 0) > 0) {
         await client.query('COMMIT');
         return false;
