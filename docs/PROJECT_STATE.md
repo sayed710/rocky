@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-25 — M15 Increment 66: Committed terminal-event recovery and idempotent downstream processing._
+_Last updated: 2026-09-26 — M15 Increment 68: Password-reset request safety without target lockout._
+
+Prior: _Last updated: 2026-09-25 — M15 Increment 67: Login step-up instead of account lockout._
+
+Prior: _Last updated: 2026-09-25 — M15 Increment 66: Committed terminal-event recovery and idempotent downstream processing._
 
 Prior: _Last updated: 2026-09-24 — M15 Increment 65: Transient-refresh session preservation._
 
@@ -4408,3 +4412,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Migration 0037 adds the `login_step_up` token kind and an attempt counter; migration 0038 builds the one-live-code index concurrently (ADR-0145). The ADR records the remaining limits: an attacker who already knows the password can delay an owner without a passkey by spending codes, and the remedy is a password reset. The web sign-in form shows a code field only after a step-up answer, and registration refuses a blank email before sending. The e2e harness records outgoing email (`GET /e2e/outbox`) so specs can verify an account as its owner would.
 - Tests cover all of the above in the in-memory stack, in real PostgreSQL (repository semantics under concurrency, and two API replicas sharing the failure count and code), in web unit tests and in Playwright: a 25-source attack that leaves the owner signing in with the emailed code, uniform answers for unknown and real handles, and single-use, expiry, attempt-cap and no-replacement semantics.
 - Scope: API authentication and rate limiting, persistence identity tokens, the web sign-in and registration form, the e2e harness, and their tests. This PR does not touch terminal-outcome recovery, the realtime gateway game logic, tournaments, or messaging budgets.
+
+## M15 Increment 68 — Password-reset request safety without target lockout (2026-09-26)
+
+- Removed the unauthenticated hard per-target reset-request bucket; the per-IP limit remains. The public route answers `202` before account lookup, token issuance, and email delivery, using PR #63's tracked background work and bounded graceful drain for uniform known/unknown timing.
+- An existing usable password-reset token is never replaced by another unauthenticated request. An indexed precheck suppresses repeat requests without queuing on the user-row lock; a recheck under that stable PostgreSQL lock ensures at most one live token is issued per account. Repeated requests send no additional email. Only a definitive provider rejection or throttle discards the exact unsent token; timeout or ambiguous failure leaves it usable. Expiry or single-use consumption permits a future token. Raw tokens are never stored.
+- New deterministic in-memory and real-PostgreSQL two-replica tests cover distributed requests, one live hashed token and email, rotating attacker addresses, unchanged link validity, provider outcomes, public response parity, and shutdown draining. Migration 0039 indexes the live reset-token lookup without changing the token schema; a PostgreSQL schema test verifies the index. Existing recovery tests continue to cover expiry, single use, password update, and full-session revocation. ADR-0146 records the updated security contract. This increment does not redesign login step-up, email verification, or other rate-limit surfaces.

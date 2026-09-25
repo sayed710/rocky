@@ -87,6 +87,8 @@ describe('Identity Recovery (API)', () => {
       });
       assert.equal(resetReqRes.status, 202); // Anti-enumeration
 
+      await env.auth.drainBackground();
+
       assert.equal(sentEmails.length, 2);
       assert.equal(sentEmails[1].to, 'recoverytester@example.com');
       assert.equal(sentEmails[1].type, 'password_reset');
@@ -139,6 +141,7 @@ describe('Identity Recovery (API)', () => {
       await env.json('POST', '/v1/auth/password-reset/request', {
         body: { handleOrEmail: 'resetsec' },
       });
+      await env.auth.drainBackground();
       const expiredToken = env.emailSender.sent.find((m) => m.type === 'password_reset')!.token;
       env.clock.advance(31 * 60 * 1000);
       const expiredRes = await env.json('POST', '/v1/auth/password-reset/confirm', {
@@ -150,6 +153,7 @@ describe('Identity Recovery (API)', () => {
       await env.json('POST', '/v1/auth/password-reset/request', {
         body: { handleOrEmail: 'resetsec' },
       });
+      await env.auth.drainBackground();
       const freshToken = env.emailSender.sent
         .filter((m) => m.type === 'password_reset')
         .at(-1)!.token;

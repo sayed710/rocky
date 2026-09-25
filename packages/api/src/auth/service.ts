@@ -516,9 +516,9 @@ export class AuthService {
    * Initiate a password-reset flow for the account identified by handle or email.
    *
    * Always resolves successfully regardless of whether the handle or email exists
-   * (anti-enumeration). If a matching account with a verified email is found, a
-   * single-use reset token is issued (replacing any active prior token) and a
-   * password-reset email is dispatched asynchronously in a fire-and-forget manner.
+   * (anti-enumeration). If a matching account with an email is found, a
+   * single-use reset token is issued only if no usable token is already live. An additional
+   * request neither replaces the owner's link nor sends another email.
    * The audit record is written whether or not a matching user is found.
    */
   async requestPasswordReset(handleOrEmail: string, meta: RequestMeta): Promise<void> {
@@ -535,14 +535,30 @@ export class AuthService {
     if (user && user.email) {
       const resetToken = randomBytes(32).toString('hex');
       const resetHash = createHash('sha256').update(resetToken).digest('hex');
-      await this.repos.identityTokens.replaceActive({
+      const issued = await this.repos.identityTokens.issuePasswordReset({
         tokenHash: resetHash,
         userId: user.id,
-        kind: 'password_reset',
         expiresAt: new Date(this.clock.now() + 30 * 60 * 1000), // 30 minutes
       }, new Date(this.clock.now()));
-      this.dispatchEmail('password_reset', () => this.emailSender.sendPasswordReset(user.email!, resetToken), meta);
+      if (!issued) return;
+      this.dispatchEmail(
+        'password_reset',
+        () => this.emailSender.sendPasswordReset(user.email!, resetToken),
+        meta,
+        () => this.repos.identityTokens.discardPasswordReset(resetHash),
+      );
     }
+  }
+
+  /** Public reset requests answer before any account-specific work to avoid a timing oracle. */
+  schedulePasswordReset(handleOrEmail: string, meta: RequestMeta): void {
+    this.runInBackground(async () => {
+      try {
+        await this.requestPasswordReset(handleOrEmail, meta);
+      } catch (error: unknown) {
+        this.logBackgroundFailure('password reset request failed', error, meta);
+      }
+    }, meta);
   }
 
   async requestEmailVerification(userId: string, meta: RequestMeta): Promise<void> {
@@ -629,11 +645,16 @@ export class AuthService {
    */
   async drainBackground(timeoutMs = 10_000): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     const deadline = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs);
+      timer = setTimeout(() => { timedOut = true; resolve(); }, timeoutMs);
     });
     try {
-      await Promise.race([Promise.allSettled([...this.background]).then(() => undefined), deadline]);
+      // A tracked request can enqueue its email follow-up while the first snapshot is settling.
+      // Drain that descendant too; otherwise shutdown could close the pool before its discard.
+      while (this.background.size > 0 && !timedOut) {
+        await Promise.race([Promise.allSettled([...this.background]).then(() => undefined), deadline]);
+      }
     } finally {
       if (timer) clearTimeout(timer);
     }

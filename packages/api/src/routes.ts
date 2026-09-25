@@ -651,18 +651,14 @@ export function buildRouter(deps: RouteDeps): Router {
       const body = strictObject(ctx.body, ['handleOrEmail']);
       const handleOrEmail = reqString(body, 'handleOrEmail', { trim: true });
 
-      await admit([
-        {
-          key: `password-reset:ip:${ctx.ip ?? 'unknown'}`,
-          limit: config.rateLimit.passwordResetRequest.perIp,
-        },
-        {
-          key: `password-reset:target:${handleOrEmail.toLowerCase()}`,
-          limit: config.rateLimit.passwordResetRequest.perTarget,
-        },
-      ]);
+      await admit([{
+        key: `password-reset:ip:${ctx.ip ?? 'unknown'}`,
+        limit: config.rateLimit.passwordResetRequest.perIp,
+      }]);
 
-      await auth.requestPasswordReset(handleOrEmail, meta(ctx));
+      // Answer before account lookup, token issuance, or provider I/O. The tracked task is drained
+      // on graceful shutdown, while the repository bounds issuance across all API replicas.
+      auth.schedulePasswordReset(handleOrEmail, meta(ctx));
       return { status: 202 };
     },
   );

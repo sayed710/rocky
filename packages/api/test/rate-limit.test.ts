@@ -186,32 +186,29 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
     }
   });
 
-  test('password-reset/request endpoint is rate limited per IP and per target independently', async () => {
+  test('password-reset/request keeps the per-IP limit without a target lockout bucket', async () => {
     const h = await startHarness({ trustProxy: true });
     try {
-      // DEFAULT_RATE_LIMIT.passwordResetRequest.perTarget is 3, perIp is 5.
-      
-      // Hit target limit (3)
-      for (let i = 0; i < 3; i++) {
-        await h.json('POST', '/v1/auth/password-reset/request', {
+      for (let i = 0; i < 8; i++) {
+        const accepted = await h.json('POST', '/v1/auth/password-reset/request', {
           body: { handleOrEmail: 'targetuser' },
           headers: { 'x-forwarded-for': `192.168.2.${i}` },
         });
+        assert.equal(accepted.status, 202, 'other sources cannot spend the owner’s allowance');
       }
-
-      const blockedTarget = await h.json('POST', '/v1/auth/password-reset/request', {
+      const owner = await h.json('POST', '/v1/auth/password-reset/request', {
         body: { handleOrEmail: 'targetuser' },
         headers: { 'x-forwarded-for': '192.168.2.100' },
       });
-      assert.equal(blockedTarget.status, 429, 'Blocked by target limit');
-      assert.equal(blockedTarget.headers.get('retry-after'), '3600'); // 60 mins
+      assert.equal(owner.status, 202);
 
       // Hit IP limit (5) for different targets
       for (let i = 0; i < 5; i++) {
-        await h.json('POST', '/v1/auth/password-reset/request', {
+        const accepted = await h.json('POST', '/v1/auth/password-reset/request', {
           body: { handleOrEmail: `target${i}` },
           headers: { 'x-forwarded-for': '10.20.20.1' },
         });
+        assert.equal(accepted.status, 202);
       }
 
       const blockedIp = await h.json('POST', '/v1/auth/password-reset/request', {
@@ -221,6 +218,7 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
       assert.equal(blockedIp.status, 429, 'Blocked by IP limit');
       assert.equal(blockedIp.headers.get('retry-after'), '3600'); // 60 mins
     } finally {
+      await h.auth.drainBackground();
       await h.close();
     }
   });
