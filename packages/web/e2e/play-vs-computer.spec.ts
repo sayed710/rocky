@@ -78,6 +78,7 @@ test('play vs computer dialog — open, focus trap, escape close, and game creat
 
   // Assert navigation to game page /game/...
   await expect(page).toHaveURL(/\/game\/[a-zA-Z0-9_-]+/, { timeout: 15_000 });
+  await expect(page.locator('#meta-black .presence-text')).toHaveText('Computer');
 });
 
 /**
