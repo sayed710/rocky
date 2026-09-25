@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-24 — M15 Increment 64: Account-wide live-human-game assistance containment._
+_Last updated: 2026-09-25 — M15 Increment 65: Committed terminal-event recovery and idempotent downstream processing._
+
+Prior: _Last updated: 2026-09-24 — M15 Increment 64: Account-wide live-human-game assistance containment._
 
 Prior: _Last updated: 2026-09-23 — M15 Increment 63: Historical tournament withdrawal state preservation._
 
@@ -4374,3 +4376,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Read/computation routes check before expensive work and again after work while holding a per-player lock through HTTP response commitment. Assistance-producing Study Partner mutations acquire that lock before repository writes; administrative delete returns no coaching data and remains allowed. Every human `GameCreated` path uses the same sorted, deduplicated player-lock namespace at the event-store creation boundary, with transaction-scoped PostgreSQL locks for game creation and a session-scoped lock for assistance delivery. Session lock clients use a separate bounded pool; blocked game creators release query-pool clients after a short advisory-lock timeout and retry their entire transaction, so eligibility and handler reads can progress under contention.
 - The web game view hides in-game assistance controls for an active human participant and restores them after game end; server enforcement remains authoritative across sessions, tabs, arbitrary FENs, and disconnects. Route metadata and generated OpenAPI document describe the `active_human_game` conflict response, including Study Partner completion. Deterministic in-memory and real-PostgreSQL lock-boundary tests, API race tests, package gates, and repository validation cover the contract.
 - Waiting assistance requests use bounded, jittered `pg_try_advisory_lock` retries and return the dedicated lock client after each failed attempt, so many requests for one busy account cannot pin every lock-pool connection and starve unrelated players. The lock pool scales with configured query capacity (minimum ten); connection-capacity exhaustion and the retry deadline surface as HTTP 503 rather than an internal error. Real-PostgreSQL tests oversubscribe one player's waiters, prove an unrelated player can still acquire a lock, and verify a typed refusal when distinct lock holders exhaust capacity.
+
+## M15 Increment 65 — Committed terminal-event recovery (2026-09-25)
+
+- `GameEnded` in the PostgreSQL event log is authoritative. The tournament reporter now scans every running tournament in keyset pages at startup and periodically, reads each linked game's committed terminal event, and uses broadcasts only as wake-ups. A failed startup scan retains its retry timer; a failed game remains eligible for later reconciliation. The reporter no longer loses an ending because a live message arrived before subscription or a callback failed after unsubscribing.
+- Round and arena terminal-result paths use version-CAS retries and no-op on already-applied outcomes, including aborted-game replacement. The deterministic launcher preserves one replacement identity across replicas. Authority append conflicts and uncertain persistence failures reload durable state before the cache serves it again, without publishing a losing move.
+- Bot-detection and anti-cheat automatic analysis replay committed endings through bounded, restartable scans with per-consumer PostgreSQL receipts after successful idempotent report upserts. Migration 0033 adds receipts; 0034 and 0035 add online scan indexes. ADR-0144 records the contract and its at-least-once processing semantics.
+- Search indexing and achievement awards remain pending: both depend on the unfinished durable games projection, and achievement increments additionally require atomic per-game deduplication. This increment does not implement a games projection, ratings, readiness, first-move clock start, no-show policy, or autonomous in-play flag expiry. Timed-game completion remains incomplete until later increments.

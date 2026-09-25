@@ -380,6 +380,8 @@ export interface TournamentsRepository {
   save(snapshot: TournamentAnySnapshot, expectedVersion: number): Promise<void>;
   findById(id: string): Promise<{ snapshot: TournamentAnySnapshot; version: number } | null>;
   list(limit: number): Promise<TournamentSummaryRow[]>;
+  /** Keyset page of every running tournament, including ones older than the public list window. */
+  listRunningIdsAfter(afterId: string | null, limit: number): Promise<string[]>;
 }
 
 

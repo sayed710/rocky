@@ -31,7 +31,7 @@ export class TournamentService {
 
   private async withRetry(
     id: string,
-    action: (tournament: Tournament) => Promise<void> | void
+    action: (tournament: Tournament) => Promise<void | false> | void | false
   ): Promise<Tournament> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       const stored = await this.repo.findById(id);
@@ -45,7 +45,8 @@ export class TournamentService {
       const tournament = Tournament.restore(stored.snapshot, strategy);
       
       try {
-        await action(tournament);
+        const changed = await action(tournament);
+        if (changed === false) return tournament;
         await this.repo.save(tournament.toSnapshot(), stored.version);
         return tournament;
       } catch (e: any) {
@@ -144,6 +145,24 @@ export class TournamentService {
   async recordResultByGame(id: string, gameId: string, result: GameResult): Promise<Tournament> {
     return this.withRetry(id, async (tournament) => {
       tournament.recordResultByGame(gameId, result);
+      await this.reconcileLaunch(tournament);
+    });
+  }
+
+  /** Apply a committed game ending once, even when two reporters race or retry after a crash. */
+  async recordCommittedOutcome(id: string, gameId: string, result: GameResult | '*'): Promise<Tournament> {
+    return this.withRetry(id, async (tournament) => {
+      const pairing = tournament.pairingForGame(gameId);
+      if (!pairing) return false;
+      const prior = tournament.resultFor(pairing.roundIndex, pairing.pairingIndex);
+      if (prior !== undefined) {
+        if (result === '*' || prior !== result) {
+          throw HttpError.conflict('Committed game outcome conflicts with tournament result');
+        }
+        return false;
+      }
+      if (result === '*') tournament.abandonGame(gameId);
+      else tournament.recordResultByGame(gameId, result);
       await this.reconcileLaunch(tournament);
     });
   }

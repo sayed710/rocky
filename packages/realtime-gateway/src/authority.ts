@@ -65,6 +65,8 @@ interface GameRecord {
   broadcastSeq: number;
   /** Durable-log head seq already persisted (`events.length - 1`). */
   persistedSeq: number;
+  /** Set when an uncertain append could not be reconciled with the durable log. */
+  stale: boolean;
 }
 
 /** Short, stable hash of a FEN string for cheap desync detection. */
@@ -175,6 +177,7 @@ export class GameAuthority {
       lock: Promise.resolve(),
       broadcastSeq: 0,
       persistedSeq,
+      stale: false,
     });
     return this.viewOf(game);
   }
@@ -185,7 +188,8 @@ export class GameAuthority {
    * game exists anywhere. Safe to call repeatedly; a cache hit is a no-op.
    */
   async ensureLoaded(gameId: string): Promise<boolean> {
-    if (this.games.has(gameId)) return true;
+    const resident = this.games.get(gameId);
+    if (resident) return resident.stale ? this.reloadFromLog(gameId) : true;
     const logged = await this.store.load(gameId);
     if (logged.length === 0) return false;
     this.games.set(gameId, this.rebuildRecord(gameId, logged));
@@ -204,9 +208,30 @@ export class GameAuthority {
    * concurrent command or join landing inside it would be answered `unknown_game`.
    */
   async reloadFromLog(gameId: string): Promise<boolean> {
+    const resident = this.games.get(gameId);
+    if (!resident) {
+      const logged = await this.store.load(gameId);
+      if (logged.length === 0) return false;
+      this.games.set(gameId, this.rebuildRecord(gameId, logged));
+      return true;
+    }
+    resident.stale = true;
+    const run = resident.lock.then(() => this.refreshRecord(gameId, resident));
+    resident.lock = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /** Preserve the command queue while replacing its state with PostgreSQL truth. */
+  private async refreshRecord(gameId: string, record: GameRecord): Promise<boolean> {
     const logged = await this.store.load(gameId);
     if (logged.length === 0) return false;
-    this.games.set(gameId, this.rebuildRecord(gameId, logged));
+    const fresh = this.rebuildRecord(gameId, logged);
+    record.game = fresh.game;
+    record.events.splice(0, record.events.length, ...fresh.events);
+    record.broadcasts.splice(0, record.broadcasts.length, ...fresh.broadcasts);
+    record.broadcastSeq = fresh.broadcastSeq;
+    record.persistedSeq = fresh.persistedSeq;
+    record.stale = false;
     return true;
   }
 
@@ -252,12 +277,15 @@ export class GameAuthority {
       lock: Promise.resolve(),
       broadcastSeq,
       persistedSeq: events.length - 1,
+      stale: false,
     };
   }
 
   /** Current authoritative state view. Throws if the game is unknown. */
   getState(gameId: string): StateView {
-    return this.viewOf(this.require(gameId).game);
+    const record = this.require(gameId);
+    if (record.stale) throw new AuthorityError('invalid_command', 'durable game reload is required');
+    return this.viewOf(record.game);
   }
 
   /**
@@ -266,6 +294,7 @@ export class GameAuthority {
    */
   getMissedSince(gameId: string, lastPly: number): (MoveBroadcast | EndedBroadcast)[] {
     const rec = this.require(gameId);
+    if (rec.stale) throw new AuthorityError('invalid_command', 'durable game reload is required');
     if (lastPly <= 0) return rec.broadcasts.map((e) => e.msg);
     let cutSeq = -1;
     for (const e of rec.broadcasts) {
@@ -276,7 +305,9 @@ export class GameAuthority {
 
   /** Resolve a user's seat in a game, or `null` if they are a spectator. */
   colorOf(gameId: string, userId: string): Color | null {
-    const { players } = this.require(gameId).game.snapshot();
+    const record = this.require(gameId);
+    if (record.stale) throw new AuthorityError('invalid_command', 'durable game reload is required');
+    const { players } = record.game.snapshot();
     if (players.white === userId) return 'w';
     if (players.black === userId) return 'b';
     return null;
@@ -299,7 +330,11 @@ export class GameAuthority {
   }
 
   private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command): Promise<ApplyResult> {
-    const color = this.colorOf(gameId, userId);
+    if (rec.stale && !(await this.refreshRecord(gameId, rec))) {
+      throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
+    }
+    const players = rec.game.snapshot().players;
+    const color = players.white === userId ? 'w' : players.black === userId ? 'b' : null;
     if (color === null) {
       throw new AuthorityError('not_a_player', 'only players may issue commands');
     }
@@ -365,6 +400,12 @@ export class GameAuthority {
     try {
       rec.persistedSeq = await this.store.append(gameId, rec.persistedSeq, result.events);
     } catch (err) {
+      rec.stale = true;
+      try {
+        await this.refreshRecord(gameId, rec);
+      } catch {
+        // A later command must retry the durable reload before using this cache entry.
+      }
       throw new AuthorityError('invalid_command', `failed to persist events for ${gameId}: ${(err as Error).message}`);
     }
 

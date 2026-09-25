@@ -7,6 +7,8 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { InMemoryPubSub, gameChannel } from '@chess-platform/realtime-gateway';
+import { InMemoryEventStore } from '@chess-platform/persistence';
+import { Game } from '@chess-platform/game';
 import { InMemoryTournamentsRepository } from '../src/fakes';
 import { ArenaService } from '../src/tournament/arena.service';
 import { TournamentService } from '../src/tournament/service';
@@ -19,20 +21,30 @@ const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } 
 interface Rig {
   pubsub: InMemoryPubSub;
   repo: InMemoryTournamentsRepository;
+  events: InMemoryEventStore;
   arenaService: ArenaService;
   reporter: TournamentResultReporter;
 }
 
-function makeRig(): Rig {
+function makeRig(scanIntervalMs = 0): Rig {
   const pubsub = new InMemoryPubSub();
   const repo = new InMemoryTournamentsRepository();
+  const events = new InMemoryEventStore();
   const launcher = new InMemoryGameLauncher(uuidv7Generator);
   const arenaService = new ArenaService(repo, launcher, () => 1_000);
   const tournamentService = new TournamentService(repo, launcher);
-  const reporter = new TournamentResultReporter(pubsub, repo, tournamentService, arenaService, {
-    scanIntervalMs: 0, // tests drive scan() directly instead of a timer
+  const reporter = new TournamentResultReporter(pubsub, repo, tournamentService, arenaService, events, {
+    scanIntervalMs,
   });
-  return { pubsub, repo, arenaService, reporter };
+  return { pubsub, repo, events, arenaService, reporter };
+}
+
+async function seedGame(rig: Rig, gameId: string): Promise<void> {
+  const { events } = Game.create({
+    gameId, variant: 'standard', timeControl: TC,
+    players: { white: 'p1', black: 'p2' }, rated: true, at: 1_000,
+  });
+  await rig.events.append(gameId, -1, events);
 }
 
 async function makeRunningArena(rig: Rig, id: string): Promise<string> {
@@ -43,11 +55,20 @@ async function makeRunningArena(rig: Rig, id: string): Promise<string> {
   const stored = await rig.repo.findById(id);
   const links = (stored!.snapshot.gameLinks ?? []) as [string, string][];
   assert.equal(links.length, 1);
+  await seedGame(rig, links[0]![1]);
   return links[0]![1];
 }
 
-function endGame(pubsub: InMemoryPubSub, gameId: string, result: '1-0' | '0-1' | '1/2-1/2' | '*'): void {
-  pubsub.publish(gameChannel(gameId), {
+async function endGame(rig: Rig, gameId: string, result: '1-0' | '0-1' | '1/2-1/2' | '*'): Promise<void> {
+  const ending = {
+    type: 'GameEnded' as const,
+    result,
+    termination: result === '*' ? 'aborted' as const : 'resignation' as const,
+    winner: result === '1-0' ? 'w' as const : result === '0-1' ? 'b' as const : null,
+    at: 1_000,
+  };
+  await rig.events.append(gameId, 0, [ending]);
+  rig.pubsub.publish(gameChannel(gameId), {
     t: 'ended',
     gameId,
     result,
@@ -63,6 +84,30 @@ function settleAsync(): Promise<void> {
 }
 
 describe('TournamentResultReporter (production)', () => {
+  it('keeps the retry timer when the startup database scan fails', async () => {
+    const rig = makeRig(1);
+    const original = rig.repo.listRunningIdsAfter.bind(rig.repo);
+    let attempts = 0;
+    let retried!: () => void;
+    const retriedPromise = new Promise<void>((resolve) => { retried = resolve; });
+    rig.repo.listRunningIdsAfter = async (afterId, limit) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('injected transient database failure');
+      retried();
+      return original(afterId, limit);
+    };
+    try {
+      await assert.rejects(rig.reporter.start(), /injected transient database failure/);
+      await Promise.race([
+        retriedPromise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('periodic retry did not run')), 1_000)),
+      ]);
+      assert.ok(attempts >= 2);
+    } finally {
+      rig.reporter.stop();
+    }
+  });
+
   it('rehydrates in-flight games at startup and records their results', async () => {
     const rig = makeRig();
     // The tournament was started by "another process" BEFORE this reporter
@@ -70,7 +115,7 @@ describe('TournamentResultReporter (production)', () => {
     const gameId = await makeRunningArena(rig, 'boot-arena');
 
     await rig.reporter.start();
-    endGame(rig.pubsub, gameId, '1-0');
+    await endGame(rig, gameId, '1-0');
     await settleAsync();
 
     const standings = await rig.arenaService.getStandings('boot-arena');
@@ -88,7 +133,7 @@ describe('TournamentResultReporter (production)', () => {
     const gameId = await makeRunningArena(rig, 'late-arena');
     await rig.reporter.scan(); // what the periodic timer does
 
-    endGame(rig.pubsub, gameId, '0-1');
+    await endGame(rig, gameId, '0-1');
     await settleAsync();
 
     const standings = await rig.arenaService.getStandings('late-arena');
@@ -101,7 +146,7 @@ describe('TournamentResultReporter (production)', () => {
     const gameId = await makeRunningArena(rig, 'abort-arena');
     await rig.reporter.start();
 
-    endGame(rig.pubsub, gameId, '*');
+    await endGame(rig, gameId, '*');
     await settleAsync();
 
     // Abandon put both players back in the pool; reconcile launched a fresh
@@ -111,10 +156,11 @@ describe('TournamentResultReporter (production)', () => {
     assert.equal(links.length, 1);
     const replacement = links[0]![1];
     assert.notEqual(replacement, gameId);
+    await seedGame(rig, replacement);
 
     // After a scan, the replacement is watched too: its result records.
     await rig.reporter.scan();
-    endGame(rig.pubsub, replacement, '1/2-1/2');
+    await endGame(rig, replacement, '1/2-1/2');
     await settleAsync();
     const standings = await rig.arenaService.getStandings('abort-arena');
     assert.equal(standings.filter((s) => s.draws === 1).length, 2);
@@ -127,7 +173,7 @@ describe('TournamentResultReporter (production)', () => {
     await rig.reporter.start();
     rig.reporter.stop();
 
-    endGame(rig.pubsub, gameId, '1-0');
+    await endGame(rig, gameId, '1-0');
     await settleAsync();
 
     const standings = await rig.arenaService.getStandings('stop-arena');
