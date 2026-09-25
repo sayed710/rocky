@@ -177,6 +177,7 @@ export class RealtimeGateway {
 
   /** Finish a join once the game is known to be resident in the authority. */
   private completeJoin(session: Session, gameId: string, token: string | undefined): void {
+    if (this.sessions.get(session.conn.id) !== session) return;
     // Derive identity from the token. No token → anonymous spectator.
     let userId: string;
     if (token !== undefined) {

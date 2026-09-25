@@ -1,5 +1,5 @@
 import type { GameEndedEvent } from '@chess-platform/game';
-import type { TerminalEventInbox } from '@chess-platform/persistence';
+import type { TerminalEventInbox, TerminalEventWork } from '@chess-platform/persistence';
 import { gamesEndedChannel, type PubSub } from '@chess-platform/realtime-gateway';
 
 interface ReconcilerOptions {
@@ -14,6 +14,8 @@ export class TerminalEventReconciler {
   private scanInFlight: Promise<void> | undefined;
   /** Retained across bounded scans so a persistent failure prefix cannot starve later rows. */
   private cursor: { gameId: string; seq: number } | null = null;
+  /** Independent descending sweep of the finite range below a busy forward cursor. */
+  private reverseCursor: { gameId: string; seq: number } | undefined;
 
   constructor(
     private readonly pubsub: PubSub,
@@ -50,26 +52,50 @@ export class TerminalEventReconciler {
   }
 
   private async scanNow(): Promise<void> {
+    await this.scanOlderWork();
     for (let pages = 0; pages < 10; pages += 1) {
       const page = await this.inbox.pendingAfter(this.consumer, this.cursor, 100);
       if (page.length === 0) {
         this.cursor = null;
+        this.reverseCursor = undefined;
         return;
       }
       for (const work of page) {
         const gameId = 'stored' in work ? work.stored.gameId : work.gameId;
         const seq = 'stored' in work ? work.stored.seq : work.seq;
         this.cursor = { gameId, seq };
-        try {
-          if ('decodeError' in work) throw new Error(`cannot decode committed ending: ${work.decodeError}`);
-          const stored = work.stored;
-          if (stored.event.type !== 'GameEnded') throw new Error('terminal inbox returned a non-terminal event');
-          await this.consume(stored.gameId, stored.event);
-          await this.inbox.acknowledge(this.consumer, stored.gameId, stored.seq);
-        } catch (error) {
-          this.report(gameId, error);
-        }
+        await this.processWork(work);
       }
+    }
+  }
+
+  private async scanOlderWork(): Promise<void> {
+    if (!this.cursor) return;
+    this.reverseCursor ??= this.cursor;
+    const page = await this.inbox.pendingBefore(this.consumer, this.reverseCursor, 100);
+    if (page.length === 0) {
+      this.reverseCursor = undefined;
+      return;
+    }
+    for (const work of page) {
+      this.reverseCursor = {
+        gameId: 'stored' in work ? work.stored.gameId : work.gameId,
+        seq: 'stored' in work ? work.stored.seq : work.seq,
+      };
+      await this.processWork(work);
+    }
+  }
+
+  private async processWork(work: TerminalEventWork): Promise<void> {
+    const gameId = 'stored' in work ? work.stored.gameId : work.gameId;
+    try {
+      if ('decodeError' in work) throw new Error(`cannot decode committed ending: ${work.decodeError}`);
+      const stored = work.stored;
+      if (stored.event.type !== 'GameEnded') throw new Error('terminal inbox returned a non-terminal event');
+      await this.consume(stored.gameId, stored.event);
+      await this.inbox.acknowledge(this.consumer, stored.gameId, stored.seq);
+    } catch (error) {
+      this.report(gameId, error);
     }
   }
 

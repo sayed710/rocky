@@ -76,6 +76,10 @@ test('valid joins and resumes wait for a stale takeover reload without disconnec
   const second = new InMemoryConnection('second');
   gateway.handleConnection(second);
   second.deliver({ t: 'join', gameId: 'reload-join' });
+  const vanished = new InMemoryConnection('vanished');
+  gateway.handleConnection(vanished);
+  vanished.deliver({ t: 'join', gameId: 'reload-join' });
+  vanished.close();
   first.deliver({ t: 'resume', gameId: 'reload-join', lastPly: 0 });
   departing.deliver({ t: 'resume', gameId: 'reload-join', lastPly: 0 });
   departing.close();
@@ -86,6 +90,7 @@ test('valid joins and resumes wait for a stale takeover reload without disconnec
   await flush();
   await flush();
   assert.ok(second.last('joined'));
+  assert.equal(first.last('presence')?.spectators, 1, 'a closed pending join must not re-enter the room');
   assert.ok(first.last('resumed'));
   assert.equal(departing.last('resumed'), undefined, 'closed sessions must not receive a delayed resume');
   assert.equal(first.isClosed, false);

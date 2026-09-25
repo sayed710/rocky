@@ -189,7 +189,7 @@ export class TournamentService {
     for (const round of rounds) {
       for (let pIndex = 0; pIndex < round.pairings.length; pIndex++) {
         const pairing = round.pairings[pIndex];
-        if (pairing.kind === 'game') {
+        if (pairing.kind === 'game' && tournament.resultFor(round.roundIndex, pIndex) === undefined) {
           if (!tournament.gameIdFor(round.roundIndex, pIndex)) {
             const result = await this.launcher.launch({
               tournamentId: tournament.config.id,

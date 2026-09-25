@@ -104,7 +104,7 @@ Every increment: **build to explicit acceptance criteria with tests → self-cri
 Only actionable, genuinely open architectural debt is tracked here:
 
 - **Tournament reporter refinements (ADR-0025)**:
-  - Event-log catch-up for committed terminal outcomes is addressed by M15 Increment 65 (ADR-0144); search and achievements remain projection-dependent follow-ups.
+  - Event-log catch-up for committed terminal outcomes is addressed by M15 Increment 66 (ADR-0144); search and achievements remain projection-dependent follow-ups.
   - Dedicated single-replica reporter Deployment (currently hosted across gateway replicas with optimistic-concurrency CAS on tournament saves).
   - Arena withdrawal is permanent by design (pause/rejoin requires an explicit domain decision and ADR).
 - **Scale & Infrastructure (M14 deferred)**:

@@ -36,6 +36,12 @@ export interface TerminalEventInbox {
     after: { readonly gameId: string; readonly seq: number } | null,
     limit: number,
   ): Promise<TerminalEventWork[]>;
+  /** Reverse keyset sweep catches endings committed below a busy forward cursor. */
+  pendingBefore(
+    consumer: string,
+    before: { readonly gameId: string; readonly seq: number },
+    limit: number,
+  ): Promise<TerminalEventWork[]>;
   acknowledge(consumer: string, gameId: string, seq: number): Promise<void>;
 }
 

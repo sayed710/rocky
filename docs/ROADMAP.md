@@ -7,7 +7,7 @@ full platform is a multi-year effort, and correctness compounds.
 
 Legend: ✅ done · 🚧 in progress · ⬜ planned
 
-Timed-game lifecycle remediation is split: M15 Increment 65 (ADR-0144) recovers
+Timed-game lifecycle remediation is split: M15 Increment 66 (ADR-0144) recovers
 committed terminal events for tournaments and event-store-backed analyzers.
 Readiness/no-show, first-move clock start, autonomous in-play expiry, the durable
 games projection, ratings, and projection-dependent search/achievements remain

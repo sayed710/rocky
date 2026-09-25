@@ -352,6 +352,9 @@ test('an unreadable committed ending stays pending without blocking a later endi
       const pending = await inbox.pendingAfter('decode-test', null, 100);
       assert.equal(pending.length, 1);
       assert.ok('decodeError' in pending[0]!);
+      const reverse = await inbox.pendingBefore('decode-test', { gameId: secondId, seq: 1 }, 100);
+      assert.equal(reverse.length, 1);
+      assert.ok('decodeError' in reverse[0]!, 'reverse catch-up preserves an unreadable older row');
       worker.stop();
     } finally {
       await store.closePlayerLocks();
