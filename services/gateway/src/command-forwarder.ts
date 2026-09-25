@@ -252,8 +252,10 @@ export class RedisCommandRouter implements CommandRouter {
    * Concurrent commands for the same claim share one log read rather than each issuing their own.
    * The stale mark is cleared only on success, and only by a reload started for the current claim:
    * if ownership was lost and re-claimed while an older reload was still reading, that reload's
-   * snapshot predates the other owner's moves, so this waits for it and then reads again. A failed
-   * reload is retried by the next command instead of being silently forgotten.
+   * snapshot predates the other owner's moves, so this starts a new reload at once; for a game in
+   * this node's cache it queues behind the older one on the game's command lock, so it reads the
+   * log after it. A failed reload is retried by the next command instead of being silently
+   * forgotten.
    */
   private async rehydrateIfStale(gameId: string): Promise<void> {
     while (this.staleAfterClaim.has(gameId)) {

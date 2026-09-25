@@ -472,6 +472,25 @@ redisTest("a claim after a lease lapsed unnoticed still reloads, though the game
   });
 });
 
+redisTest('taking over a game that ended out of sight unregisters it after the reload, without the engine', async () => {
+  // B's copy still shows the game in progress: the ending happened on A before B subscribed, and
+  // A then died. B's claim reloads the log, and only the reloaded state says the game is over.
+  await withCluster([new ScriptedEngine([]), new ScriptedEngine(['e7e5'])], async ({ a, b, redis }) => {
+    const gameId = await createBotGame(a, 'black');
+    await a.router.route(gameId, HUMAN, { kind: 'move', uci: 'e2e4' }); // A owns; bot to move
+    await b.authority.ensureLoaded(gameId); // B's copy: ply 1, in progress
+    await a.router.route(gameId, HUMAN, { kind: 'resign' });
+    a.consumer.stop();
+    await redis.del(ownerKey(gameId)); // A dies
+    assert.equal(b.authority.getState(gameId).status.over, false, "B's copy has not seen the ending");
+
+    b.mover.registerGame(gameId);
+    await waitFor('B to let go', () => b.pubsub.active(gameChannel(gameId)) === 0);
+    assert.equal(b.engine.fens.length, 0, 'no engine call for a finished game');
+    assert.equal(b.authority.getState(gameId).status.over, true, 'B learned the ending from the log');
+  });
+});
+
 redisTest('a finished game stops bot work on every replica, including the non-owner', async () => {
   await withCluster([new ScriptedEngine(['e7e5']), new ScriptedEngine(['c7c5'])], async ({ a, b, store }) => {
     const gameId = await createBotGame(a, 'black');

@@ -64,10 +64,13 @@ binary and sets `STOCKFISH_PATH`, so the chart adds nothing else. It runs on eve
 only the replica that owns a game (ADR-0010) computes its bot moves. The value must be a boolean;
 a quoted `"false"` fails the render rather than silently leaving the bot on.
 
-Each gateway pod then runs the engine pool's defaults: one Stockfish process when idle, up to four
-under load, each single-threaded with a 16 MB hash, and a 300 ms think per bot move. The chart's
-default gateway limits (500m CPU, 512Mi) leave room for that, but raise `gateway.resources` if bot
-games are a large share of traffic, since a throttled pod thinks more slowly.
+Each gateway pod then runs the engine pool's defaults: no Stockfish process until the first bot
+move, then one, growing to four under load, each single-threaded with a 16 MB hash. A bot move is a
+300 ms time-limited search, so CPU decides how deep it gets, not how long it takes: under the
+default 500m limit even one worker gets half a core for its 300 ms, and concurrent bot moves share
+that. A throttled pod plays weaker bots rather than slower ones. The memory (four workers at 16 MB
+of hash each) fits the 512Mi limit. Raise `gateway.resources.limits.cpu` if bot strength matters or
+bot games are a large share of traffic.
 
 To turn Play vs Computer's opponent off:
 

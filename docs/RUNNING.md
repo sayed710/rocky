@@ -86,7 +86,7 @@ The gateway health endpoint listens on container port 4176 (the WebSocket port
 plus one) and is used by the Compose healthcheck. That port is not published to
 the host by the primary Compose file.
 
-**Play vs Computer** needs two things and fails quietly without either: `ENGINE_BOT=1`, and an
+**Play vs Computer** needs two things, and without either the opponent never moves (the gateway only logs a warning): `ENGINE_BOT=1`, and an
 engine binary at `STOCKFISH_PATH`. The gateway image ships a pinned Stockfish 16 at
 `/usr/local/bin/stockfish`, and both Compose and the Helm chart (`gateway.engineBot.enabled`,
 default `true`) set `ENGINE_BOT`, so either gives you a working opponent. Without the binary the
