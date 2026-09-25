@@ -764,15 +764,21 @@ test('Postgres concurrent refunds never mint capacity', { skip }, async () => {
     const b = new PgRateLimiter(pool);
     const bucket = { key: `integration:refund-race:${uuidv7()}`, limit: { maxRequests: 5, windowMs: 600_000 } };
     keys.push(bucket.key);
+    // Each reservation is issued by the instance that will refund it: a limiter ignores
+    // reservations it did not issue, which would leave those refunds out of the race.
+    const limiterFor = (i: number) => (i % 2 === 0 ? a : b);
     const reservations: RateLimitReservation[][] = [];
-    for (let i = 0; i < 5; i += 1) reservations.push(await reserveOn(a, bucket));
+    for (let i = 0; i < 5; i += 1) reservations.push(await reserveOn(limiterFor(i), bucket));
 
-    await Promise.all([
-      ...reservations.map((reservation, i) => (i % 2 === 0 ? a : b).refund(reservation)),
-      ...Array.from({ length: 5 }, (_, i) => (i % 2 === 0 ? b : a).admit([bucket])),
+    const [, raced] = await Promise.all([
+      Promise.all(reservations.map((reservation, i) => limiterFor(i).refund(reservation))),
+      Promise.all(Array.from({ length: 5 }, (_, i) => limiterFor(i + 1).admit([bucket]))),
     ]);
 
+    // All five refunds ran against live charges, so what remains is exactly what the racing
+    // admissions put back — a skipped refund would leave more, a double one less.
     const stored = await storedCount(pool, bucket.key);
+    assert.equal(stored, raced.filter((r) => r.allowed).length);
     assert.ok(stored >= 0 && stored <= 5, `stored count ${stored} is within capacity`);
     let admitted = 0;
     for (let i = 0; i < 6; i += 1) if ((await a.admit([bucket])).allowed) admitted += 1;
