@@ -124,6 +124,11 @@ export interface IdentityTokensRepository {
    * delivered, so the owner's next attempt issues a fresh code instead of waiting out this one.
    */
   discardLoginStepUp(userId: string, tokenHash: string): Promise<void>;
+  /**
+   * Drop one unused verification token whose email could not be delivered, so it neither counts
+   * toward the re-send cooldown nor lingers as a link nobody received. Other links are untouched.
+   */
+  discardEmailVerification(tokenHash: string): Promise<void>;
 }
 
 export interface LoginStepUpIssue {

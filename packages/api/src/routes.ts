@@ -689,7 +689,9 @@ export function buildRouter(deps: RouteDeps): Router {
         },
       ]);
 
-      await auth.resendEmailVerification(handleOrEmail, meta(ctx));
+      // Not awaited: the answer must not wait on whether the account exists or is verified, or its
+      // timing would tell. The service logs a background failure.
+      auth.scheduleEmailVerificationResend(handleOrEmail, meta(ctx));
       return { status: 202 };
     },
   );

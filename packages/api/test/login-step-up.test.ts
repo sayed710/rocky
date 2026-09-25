@@ -10,6 +10,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, test } from 'node:test';
 import { DEFAULT_RATE_LIMIT } from '../src/config';
+import { JsonLogger } from '../src/ports/logger';
 import type { EmailDeliveryResult, EmailSender } from '../src/ports/email';
 import { startHarness, verifyEmail, type Harness } from './helpers';
 
@@ -52,6 +53,15 @@ async function passThreshold(h: Harness, handle: string): Promise<void> {
   for (let i = 0; i < THRESHOLD; i++) {
     assert.equal((await login(h, handle, 'wrong-password', undefined, `203.0.113.${i}`)).status, 401);
   }
+}
+
+/**
+ * Let background work finish. The public verification re-send answers before it looks anything up
+ * (so its timing cannot tell accounts apart); against in-memory storage that work completes within
+ * one turn of the event loop, so this waits for no timer.
+ */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function codesSentTo(h: Harness, handle: string): string[] {
@@ -358,6 +368,46 @@ describe('step-up email delivery', () => {
   });
 });
 
+test('a failed clean-up of an undelivered code is logged, without identifying data', async () => {
+  const records: Array<Record<string, unknown>> = [];
+  const logger = new JsonLogger({}, { level: 'warn', sink: (line) => records.push(JSON.parse(line)) });
+  const failingCodes: EmailSender = {
+    sendPasswordReset: async () => ({ outcome: 'success' }),
+    sendEmailVerification: async () => ({ outcome: 'success' }),
+    sendLoginCode: async () => ({ outcome: 'provider_error' }),
+  };
+  const h = await startHarness({
+    trustProxy: true,
+    rateLimit: {
+      ...DEFAULT_RATE_LIMIT,
+      login: {
+        perIp: { maxRequests: 1_000, windowMs: MINUTE },
+        perHandleIp: { maxRequests: 1_000, windowMs: MINUTE },
+        perHandleBeforeStepUp: { maxRequests: THRESHOLD, windowMs: 15 * MINUTE },
+      },
+    },
+  }, { emailSender: failingCodes, logger });
+  try {
+    await h.json('POST', '/v1/auth/register', {
+      body: { handle: 'alice', password: PASSWORD, email: 'alice@example.test' },
+    });
+    const user = await h.repos.users.findByHandle('alice');
+    h.repos.users.markEmailVerifiedNow(user!.id, new Date(h.clock.now()));
+    h.repos.identityTokens.discardLoginStepUp = async () => { throw new Error('storage unavailable'); };
+    await passThreshold(h, 'alice');
+
+    await login(h, 'alice', PASSWORD);
+    await settle();
+    const warning = records.find((r) => r['msg'] === 'discarding an undelivered email token failed');
+    assert.ok(warning, 'the failure is logged');
+    assert.equal(warning['purpose'], 'login_step_up');
+    const text = JSON.stringify(warning);
+    for (const secret of ['alice', user!.id]) assert.ok(!text.includes(secret), `no ${secret} in the log`);
+  } finally {
+    await h.close();
+  }
+});
+
 describe('password accounts require a verified email', () => {
   test('registration without an email is refused', async () => {
     const h = await harness();
@@ -425,11 +475,50 @@ describe('password accounts require a verified email', () => {
       const answers = [];
       for (const handleOrEmail of ['verified', 'pending', 'nobody-here', 'pending@example.test']) {
         const res = await h.json('POST', '/v1/auth/email/verification/resend', { body: { handleOrEmail } });
+        await settle();
         answers.push([res.status, res.body]);
       }
       assert.deepEqual(answers, Array(4).fill([202, undefined]), 'the same answer every time');
       assert.equal(links('verified'), before.verified, 'a verified address gets nothing');
       assert.equal(links('pending'), before.pending + 1, 'one new link, then the cooldown holds');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('the re-send answers without waiting on the account lookup', async () => {
+    const h = await harness();
+    try {
+      // A lookup that never finishes: if the route waited on it, this request would hang.
+      const findByHandle = h.repos.users.findByHandle.bind(h.repos.users);
+      h.repos.users.findByHandle = () => new Promise(() => undefined);
+      const res = await h.json('POST', '/v1/auth/email/verification/resend', {
+        body: { handleOrEmail: 'alice' },
+      });
+      assert.equal(res.status, 202);
+      h.repos.users.findByHandle = findByHandle;
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('a verification email that fails to send does not hold up the next one', async () => {
+    const tokens: string[] = [];
+    const failing: EmailSender = {
+      sendPasswordReset: async () => ({ outcome: 'success' }),
+      sendEmailVerification: async (_to, token) => {
+        tokens.push(token);
+        return { outcome: 'provider_error' };
+      },
+      sendLoginCode: async () => ({ outcome: 'success' }),
+    };
+    const h = await harness(failing);
+    try {
+      await register(h, 'alice', false);
+      await settle();
+      await h.json('POST', '/v1/auth/email/verification/resend', { body: { handleOrEmail: 'alice' } });
+      await settle();
+      assert.equal(tokens.length, 2, 'the undelivered link did not count toward the cooldown');
     } finally {
       await h.close();
     }
@@ -445,6 +534,7 @@ describe('password accounts require a verified email', () => {
         body: { handleOrEmail: 'alice' },
       });
       assert.equal(resend.status, 202);
+      await settle();
       assert.equal(h.emailSender.sent.filter((m) => m.type === 'email_verify').length, 2);
 
       const verified = await h.json('POST', '/v1/auth/email/verify', { body: { token: original!.token } });
@@ -471,6 +561,7 @@ describe('password accounts require a verified email', () => {
         body: { handleOrEmail: 'alice' },
       });
       assert.equal(resend.status, 202);
+      await settle();
       await verifyEmail(h, 'alice@example.test');
 
       await login(h, 'alice', PASSWORD);

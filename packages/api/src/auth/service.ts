@@ -40,6 +40,8 @@ import { generateRefreshToken, hashRefreshToken } from './refresh';
 import type { AccessTokenService } from './tokens';
 import type { PasswordHasher } from './password';
 import type { EmailDeliveryResult, EmailSender } from '../ports/email';
+import type { Logger } from '../ports/logger';
+import { NullLogger } from '../ports/logger';
 
 /** Per-request metadata attached to sessions and audit records. */
 export interface RequestMeta {
@@ -196,6 +198,7 @@ export class AuthService {
   private readonly emailSender: EmailSender;
   private readonly webauthn: { rpId: string; origins: readonly string[] };
   private readonly stepUpKey: Buffer;
+  private readonly logger: Logger;
   private readonly refreshGracePeriodMs: number;
 
   /** Compose authentication dependencies and enforce the bounded refresh-collision policy. */
@@ -213,6 +216,8 @@ export class AuthService {
      * little entropy for a plain hash: anyone who read the table could recover live codes offline.
      */
     codeSecret: string;
+    /** For background work the request never waits on. Defaults to silent. */
+    logger?: Logger;
     refreshGracePeriodMs?: number;
   }) {
     this.repos = deps.repos;
@@ -223,6 +228,7 @@ export class AuthService {
     this.refreshTtlSec = deps.refreshTtlSec;
     this.emailSender = deps.emailSender;
     this.webauthn = deps.webauthn;
+    this.logger = deps.logger ?? new NullLogger();
     this.stepUpKey = Buffer.from(
       hkdfSync('sha256', deps.codeSecret, Buffer.alloc(0), 'shatarang/login-step-up-code', 32),
     );
@@ -525,7 +531,7 @@ export class AuthService {
         kind: 'password_reset',
         expiresAt: new Date(this.clock.now() + 30 * 60 * 1000), // 30 minutes
       }, new Date(this.clock.now()));
-      this.dispatchEmail(() => this.emailSender.sendPasswordReset(user.email!, resetToken));
+      this.dispatchEmail('password_reset', () => this.emailSender.sendPasswordReset(user.email!, resetToken));
     }
   }
 
@@ -549,7 +555,12 @@ export class AuthService {
       expiresAt: new Date(this.clock.now() + 24 * 60 * 60 * 1000), // 24 hours
     }, new Date(this.clock.now()), reissueCutoff);
     if (!issued) return;
-    this.dispatchEmail(() => this.emailSender.sendEmailVerification(email, token));
+    this.dispatchEmail(
+      'email_verify',
+      () => this.emailSender.sendEmailVerification(email, token),
+      // An undelivered link would otherwise count toward the re-send cooldown.
+      () => this.repos.identityTokens.discardEmailVerification(tokenHash),
+    );
   }
 
   /**
@@ -560,11 +571,20 @@ export class AuthService {
    * must take the same time whether or not a message went out.
    */
   private dispatchEmail(
+    purpose: 'password_reset' | 'email_verify' | 'login_step_up',
     send: () => Promise<EmailDeliveryResult>,
     onUndelivered?: () => Promise<void>,
   ): void {
     const undelivered = (): void => {
-      if (onUndelivered) void onUndelivered().catch(() => undefined);
+      if (!onUndelivered) return;
+      void onUndelivered().catch((error: unknown) => {
+        // The undelivered token is still live, so it blocks a replacement until it expires. Say
+        // so — without the address, user, token or code.
+        this.logger.warn('discarding an undelivered email token failed', {
+          purpose,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     };
     try {
       void send().then(
@@ -577,6 +597,19 @@ export class AuthService {
       // Contain a sender that violates its async contract without exposing its error or payload.
       undelivered();
     }
+  }
+
+  /**
+   * {@link resendEmailVerification} in the background, for the public route. The route answers
+   * before any lookup, so its timing cannot tell an unverified account from an unknown or verified
+   * one. A failure is logged, since nobody is waiting to hear about it.
+   */
+  scheduleEmailVerificationResend(handleOrEmail: string, meta: RequestMeta): void {
+    void this.resendEmailVerification(handleOrEmail, meta).catch((error: unknown) => {
+      this.logger.warn('verification re-send failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   /**
@@ -976,6 +1009,7 @@ export class AuthService {
     if (issued && email) {
       const tokenHash = this.stepUpTokenHash(userId, fresh);
       this.dispatchEmail(
+        'login_step_up',
         () => this.emailSender.sendLoginCode(email, fresh),
         // An undelivered code would otherwise block a new one until it expires.
         () => this.repos.identityTokens.discardLoginStepUp(userId, tokenHash),

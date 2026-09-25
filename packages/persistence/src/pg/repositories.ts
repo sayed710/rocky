@@ -1238,6 +1238,13 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
     return res.rows[0]?.consumed === true;
   }
 
+  async discardEmailVerification(tokenHash: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM identity_tokens WHERE token_hash = $1 AND kind = 'email_verify' AND used_at IS NULL`,
+      [tokenHash],
+    );
+  }
+
   async discardLoginStepUp(userId: string, tokenHash: string): Promise<void> {
     await this.pool.query(
       `DELETE FROM identity_tokens WHERE user_id = $1 AND kind = 'login_step_up' AND token_hash = $2`,

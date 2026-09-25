@@ -862,6 +862,11 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
     return false;
   }
 
+  async discardEmailVerification(tokenHash: string): Promise<void> {
+    const row = this.byHash.get(tokenHash);
+    if (row && row.kind === 'email_verify' && row.usedAt === null) this.byHash.delete(tokenHash);
+  }
+
   async discardLoginStepUp(userId: string, tokenHash: string): Promise<void> {
     if (this.stepUps.get(userId)?.tokenHash === tokenHash) this.stepUps.delete(userId);
   }
