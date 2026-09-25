@@ -468,6 +468,19 @@ describe('InMemoryRateLimiter refund', () => {
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false, 'the new window keeps both');
   });
 
+  /** Raised by Qodo on PR #63: a replay must not take a later request's charge. */
+  test('a replayed or forged reservation refunds nothing', () => {
+    const limiter = new InMemoryRateLimiter(new ManualClock(1000));
+    const first = reserve(limiter);
+    reserve(limiter);
+    limiter.refund(first);
+    reserve(limiter);
+
+    limiter.refund(first);
+    limiter.refund(first.map((r) => ({ ...r })));
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false, 'both live charges survive');
+  });
+
   test('a refund touches only the buckets it names', () => {
     const limiter = new InMemoryRateLimiter(new ManualClock(1000));
     const one: RateLimit = { maxRequests: 1, windowMs: MINUTE };

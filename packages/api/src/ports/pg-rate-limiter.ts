@@ -109,6 +109,8 @@ const STATEMENT_TIMEOUT_MS = 5_000;
 /** Fixed-window limiter shared by every API replica through PostgreSQL. */
 export class PgRateLimiter implements RateLimiter {
   private admissions = 0;
+  /** Reservations issued and not yet refunded. See `RateLimiter.refund`. */
+  private readonly outstanding = new WeakSet<RateLimitReservation>();
 
   constructor(private readonly pool: Pool) {}
 
@@ -126,7 +128,7 @@ export class PgRateLimiter implements RateLimiter {
     if (requests.length === 1) {
       const request = requests[0]!;
       const window = await this.admitOne(this.pool, request);
-      if (window !== null) return admitted(reservationsOf([{ request, window }]));
+      if (window !== null) return this.admitted(reservationsOf([{ request, window }]));
       return { allowed: false, retryAfterSeconds: await this.retryAfter(this.pool, request) };
     }
 
@@ -161,7 +163,7 @@ export class PgRateLimiter implements RateLimiter {
       // of the refusals rather than whichever key happened to sort first.
       return worstRetry > 0
         ? { commit: false, value: { allowed: false, retryAfterSeconds: worstRetry } }
-        : { commit: true, value: admitted(reservationsOf(charged)) };
+        : { commit: true, value: this.admitted(reservationsOf(charged)) };
     });
   }
 
@@ -172,9 +174,12 @@ export class PgRateLimiter implements RateLimiter {
    * pooled client indefinitely.
    */
   async refund(reservations: readonly RateLimitReservation[]): Promise<void> {
-    if (reservations.length === 0) return;
     assertDistinctKeys(reservations);
-    const ordered = sortedByKey(reservations);
+    // `delete` both checks and consumes, so a replayed or foreign reservation is skipped. It is
+    // consumed before the transaction: a refund that then faults stays charged, which fails closed.
+    const live = reservations.filter((r) => this.outstanding.delete(r));
+    if (live.length === 0) return;
+    const ordered = sortedByKey(live);
     await this.inBoundedTransaction(async (client) => {
       for (const { key, window } of ordered) {
         const live = await client.query<{ request_count: number }>(REFUND_LOCK, [key, window]);
@@ -225,6 +230,12 @@ export class PgRateLimiter implements RateLimiter {
 
   async reset(key: string): Promise<void> {
     await this.pool.query('DELETE FROM rate_limit_buckets WHERE bucket_key = $1', [key]);
+  }
+
+  /** Record the reservations as outstanding, so each can be refunded once. */
+  private admitted(reservations: readonly RateLimitReservation[]): RateLimitResult {
+    for (const reservation of reservations) this.outstanding.add(reservation);
+    return reservations.length > 0 ? { ...ADMITTED, reservations } : ADMITTED;
   }
 
   /**
@@ -284,10 +295,6 @@ function reservationsOf(
   return charged
     .filter(({ request }) => request.refundable === true)
     .map(({ request, window }) => ({ key: request.key, window }));
-}
-
-function admitted(reservations: readonly RateLimitReservation[]): RateLimitResult {
-  return reservations.length > 0 ? { ...ADMITTED, reservations } : ADMITTED;
 }
 
 function fullWindowSeconds(limit: RateLimit): number {

@@ -31,6 +31,8 @@ const ADMITTED: RateLimitResult = { allowed: true, retryAfterSeconds: 0 };
  */
 export class InMemoryRateLimiter implements RateLimiter {
   private readonly buckets = new Map<string, Bucket>();
+  /** Reservations issued and not yet refunded. See `RateLimiter.refund`. */
+  private readonly outstanding = new WeakSet<RateLimitReservation>();
   private callsSinceSweep = 0;
 
   constructor(private readonly clock: Clock) {}
@@ -76,7 +78,10 @@ export class InMemoryRateLimiter implements RateLimiter {
     for (const { key, limit, refundable } of requests) {
       const bucket = this.openBucket(key, now, limit);
       bucket.count += 1;
-      if (refundable) reservations.push({ key, window: String(bucket.windowStart) });
+      if (!refundable) continue;
+      const reservation: RateLimitReservation = { key, window: String(bucket.windowStart) };
+      this.outstanding.add(reservation);
+      reservations.push(reservation);
     }
 
     return reservations.length > 0 ? { ...ADMITTED, reservations } : ADMITTED;
@@ -85,7 +90,8 @@ export class InMemoryRateLimiter implements RateLimiter {
   refund(reservations: readonly RateLimitReservation[]): void {
     assertDistinctKeys(reservations);
     const now = this.clock.now();
-    for (const { key, window } of reservations) {
+    // `delete` both checks and consumes, so a replayed or foreign reservation is skipped.
+    for (const { key, window } of reservations.filter((r) => this.outstanding.delete(r))) {
       const bucket = this.buckets.get(key);
       if (!bucket || now >= bucket.expiresAt || String(bucket.windowStart) !== window) continue;
       if (bucket.count > 0) bucket.count -= 1;

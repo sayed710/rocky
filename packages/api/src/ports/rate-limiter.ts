@@ -98,7 +98,12 @@ export interface RateLimiter {
    *
    * A refund applies only while the reservation's window is still current and live; after the
    * window has lapsed or been replaced there is nothing of this request's left to hand back, and
-   * the refund does nothing. It never takes a bucket below zero. A refund that faults leaves its
+   * the refund does nothing. It never takes a bucket below zero.
+   *
+   * A reservation is single-use and valid only on the limiter instance that issued it. Refunding it
+   * a second time, or refunding an object the limiter did not issue, does nothing: otherwise a
+   * replay would take back a charge some later request made in the same window. Reservations never
+   * leave the request that made them, so tracking them in-process is enough. A refund that faults leaves its
    * slots charged, which fails closed: the budget recovers when the window ends instead of at once.
    */
   refund(reservations: readonly RateLimitReservation[]): void | Promise<void>;

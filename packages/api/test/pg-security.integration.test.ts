@@ -675,6 +675,30 @@ test('Postgres refund from a replaced window leaves the new window alone', { ski
 });
 
 /**
+ * A reservation is single-use. Replaying one after another request has charged the same window
+ * must not take that request's charge; nor may a structurally equal object the limiter never
+ * issued. Raised by Qodo on PR #63.
+ */
+test('Postgres refund of a replayed or forged reservation does nothing', { skip }, async () => {
+  const keys: string[] = [];
+  await withSharedDatabase({ cleanup: deleteBuckets(keys) }, async (pool) => {
+    await migrate(pool, MIGRATIONS);
+    const limiter = new PgRateLimiter(pool);
+    const bucket = { key: `integration:refund-replay:${uuidv7()}`, limit: { maxRequests: 2, windowMs: 600_000 } };
+    keys.push(bucket.key);
+    const first = await reserveOn(limiter, bucket);
+    await reserveOn(limiter, bucket);
+    await limiter.refund(first);
+    await reserveOn(limiter, bucket);
+
+    await limiter.refund(first);
+    await limiter.refund(first.map((r) => ({ ...r })));
+    assert.equal(await storedCount(pool, bucket.key), 2, 'both live charges survive');
+    assert.equal((await limiter.admit([bucket])).allowed, false);
+  });
+});
+
+/**
  * Login's reservation across replicas: two limiter instances share one database, and twenty
  * concurrent failed-login admissions from twenty addresses race for an account-wide budget of
  * three. A check-then-charge design would let every one of them through; the reservation admits
@@ -718,10 +742,13 @@ test('Postgres login reservations hold across replicas under concurrency', { ski
       );
     });
 
-    const winner = results.find((r) => r.allowed)!;
-    await b.refund((winner.reservations ?? []).filter((r) => r.key === handle.key));
-    assert.equal((await a.admit(attempt(100).buckets)).allowed, true, 'the refunded slot is shared');
-    assert.equal((await a.admit(attempt(101).buckets)).allowed, false);
+    // A reservation is refunded by the replica that issued it; the freed slot is shared.
+    const winner = results.findIndex((r) => r.allowed);
+    const issuer = winner % 2 === 0 ? a : b;
+    const other = issuer === a ? b : a;
+    await issuer.refund((results[winner]!.reservations ?? []).filter((r) => r.key === handle.key));
+    assert.equal((await other.admit(attempt(100).buckets)).allowed, true, 'the refunded slot is shared');
+    assert.equal((await other.admit(attempt(101).buckets)).allowed, false);
   });
 });
 
