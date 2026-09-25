@@ -150,7 +150,6 @@ test('no handler makes more than one admission decision', () => {
 test('every multi-bucket route hands both buckets to a single admission', () => {
   const expected: Record<string, readonly string[]> = {
     '/v1/auth/login': ['login:ip:', 'login:handle-ip:'],
-    '/v1/auth/password-reset/request': ['password-reset:ip:', 'password-reset:target:'],
     '/v1/auth/email/verification/request': ['email-verification:user:', 'email-verification:ip:'],
     '/v1/analysis': ['analysis:user:', 'analysis:ip:'],
     '/v1/analysis/mistake-prediction': ['mistake-prediction:user:', 'mistake-prediction:ip:'],
@@ -163,7 +162,7 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
 
     // The bucket list has to be readable here, so it must be a literal at the call rather than a
     // variable assembled earlier. That is a real constraint and not merely this test's convenience:
-    // the point of naming these six routes is that dropping a bucket from one of them fails, and a
+    // the point of naming these routes is that dropping a bucket from one of them fails, and a
     // list built somewhere else is a list this assertion cannot check.
     const argument = calls[0]!.arguments[0];
     assert.ok(
@@ -186,6 +185,15 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
       assert.ok(charged.includes(key), `${path} must charge ${key} in the same admission`);
     }
   }
+});
+
+test('public password reset has only a per-IP admission bucket', () => {
+  const path = '/v1/auth/password-reset/request';
+  const calls = admissions(routeNamed(path).node);
+  assert.equal(calls.length, 1);
+  const argument = calls[0]!.arguments[0];
+  assert.ok(argument && ts.isArrayLiteralExpression(argument));
+  assert.deepEqual(argument.elements.map((element) => bucketKey(element, path)), ['password-reset:ip:']);
 });
 
 /**

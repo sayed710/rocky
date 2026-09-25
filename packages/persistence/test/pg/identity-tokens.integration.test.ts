@@ -20,6 +20,21 @@ const TOKEN_USER_ID = '01918300-0000-0000-0000-000000000000';
 const RACE_USER_ID = '01918300-0000-0000-0000-000000000001';
 
 describe('PgIdentityTokensRepository', { skip }, () => {
+  it('indexes live password-reset lookups by user and expiry', async () => {
+    await withSharedDatabase({ cleanup: async () => {} }, async (pool) => {
+      await migrate(pool, join(process.cwd(), 'migrations'));
+      const index = await pool.query<{ indexdef: string }>(
+        `SELECT indexdef FROM pg_indexes
+         WHERE schemaname = current_schema() AND tablename = 'identity_tokens'
+           AND indexname = 'identity_tokens_live_password_reset_lookup'`,
+      );
+      assert.equal(index.rows.length, 1);
+      assert.match(index.rows[0]!.indexdef, /\(user_id, expires_at\)/);
+      assert.match(index.rows[0]!.indexdef, /kind = 'password_reset'/);
+      assert.match(index.rows[0]!.indexdef, /used_at IS NULL/);
+    });
+  });
+
   it('creates and atomically consumes a token', async () => {
     await withSharedDatabase({
       cleanup: (pool) => deleteFixtureUsers(pool, [TOKEN_USER_ID]),

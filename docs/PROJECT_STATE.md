@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-26 — M15 Increment 68: Owner-only engine bot decisions and Helm ENGINE_BOT parity._
+_Last updated: 2026-09-26 — M15 Increment 69: Owner-only engine bot decisions and Helm ENGINE_BOT parity._
+
+Prior: _Last updated: 2026-09-26 — M15 Increment 68: Password-reset request safety without target lockout._
+
+Prior: _Last updated: 2026-09-25 — M15 Increment 67: Login step-up instead of account lockout._
 
 Prior: _Last updated: 2026-09-25 — M15 Increment 66: Committed terminal-event recovery and idempotent downstream processing._
 
@@ -4411,7 +4415,13 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Tests cover all of the above in the in-memory stack, in real PostgreSQL (repository semantics under concurrency, and two API replicas sharing the failure count and code), in web unit tests and in Playwright: a 25-source attack that leaves the owner signing in with the emailed code, uniform answers for unknown and real handles, and single-use, expiry, attempt-cap and no-replacement semantics.
 - Scope: API authentication and rate limiting, persistence identity tokens, the web sign-in and registration form, the e2e harness, and their tests. This PR does not touch terminal-outcome recovery, the realtime gateway game logic, tournaments, or messaging budgets.
 
-## M15 Increment 68 — Owner-only engine bot decisions and Helm ENGINE_BOT parity (2026-09-26)
+## M15 Increment 68 — Password-reset request safety without target lockout (2026-09-26)
+
+- Removed the unauthenticated hard per-target reset-request bucket; the per-IP limit remains. The public route answers `202` before account lookup, token issuance, and email delivery, using PR #63's tracked background work and bounded graceful drain for uniform known/unknown timing.
+- An existing usable password-reset token is never replaced by another unauthenticated request. An indexed precheck suppresses repeat requests without queuing on the user-row lock; a recheck under that stable PostgreSQL lock ensures at most one live token is issued per account. Repeated requests send no additional email. Only a definitive provider rejection or throttle discards the exact unsent token; timeout or ambiguous failure leaves it usable. Expiry or single-use consumption permits a future token. Raw tokens are never stored.
+- New deterministic in-memory and real-PostgreSQL two-replica tests cover distributed requests, one live hashed token and email, rotating attacker addresses, unchanged link validity, provider outcomes, public response parity, and shutdown draining. Migration 0039 indexes the live reset-token lookup without changing the token schema; a PostgreSQL schema test verifies the index. Existing recovery tests continue to cover expiry, single use, password update, and full-session revocation. ADR-0146 records the updated security contract. This increment does not redesign login step-up, email verification, or other rate-limit surfaces.
+
+## M15 Increment 69 — Owner-only engine bot decisions and Helm ENGINE_BOT parity (2026-09-26)
 
 - Audit Ops row (Helm omits `ENGINE_BOT`). Compose enabled the engine bot and the gateway image ships Stockfish, but the chart never rendered `ENGINE_BOT`, so a Helm release offered Play vs Computer with an opponent that never moved.
 - Enabling it per replica was not safe on `main`. Each replica with a session in a bot game ran a mover that chose moves from its own cached `GameAuthority`, and a non-owner's copy never sees the owner's moves. A reconnect to the other pod, a second tab, or a spectator was enough. Reproduced with two nodes: the owner applied `…Nf6` at ply 4, computed by the non-owner for ply 1.
