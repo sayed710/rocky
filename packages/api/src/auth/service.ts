@@ -90,6 +90,14 @@ const STEP_UP_MAX_ATTEMPTS = 5;
  * spend attempts, and this caps how many emails they can force: about twelve an hour.
  */
 const STEP_UP_REISSUE_COOLDOWN_MS = 5 * 60 * 1000;
+/**
+ * Delivery outcomes that prove a message was not sent. Only these discard its token: a timeout or an
+ * unreadable provider answer may still have delivered it.
+ */
+const DEFINITELY_UNSENT: ReadonlySet<EmailDeliveryResult['outcome']> = new Set([
+  'provider_rejected',
+  'provider_throttled',
+]);
 /** How often a sign-in attempt on an unverified account may re-send the verification email. */
 const VERIFICATION_RESEND_COOLDOWN_MS = 10 * 60 * 1000;
 
@@ -199,6 +207,8 @@ export class AuthService {
   private readonly webauthn: { rpId: string; origins: readonly string[] };
   private readonly stepUpKey: Buffer;
   private readonly logger: Logger;
+  /** Background work requests were answered for; see {@link drainBackground}. */
+  private readonly background = new Set<Promise<void>>();
   private readonly refreshGracePeriodMs: number;
 
   /** Compose authentication dependencies and enforce the bounded refresh-collision policy. */
@@ -274,7 +284,7 @@ export class AuthService {
     const roles: Role[] = ['user'];
 
     if (input.email) {
-      await this.issueEmailVerification(user.id, input.email);
+      await this.issueEmailVerification(user.id, input.email, undefined, meta);
     }
 
     const tokens = await this.startSession(user, roles, meta);
@@ -308,7 +318,7 @@ export class AuthService {
     const emailVerified = user !== null && user.email !== null && user.emailVerifiedAt !== null;
 
     if (stepUp) {
-      const proven = await this.stepUp(user, input.code, passwordOk && emailVerified);
+      const proven = await this.stepUp(user, input.code, passwordOk && emailVerified, meta);
       if (!proven) {
         if (user) await this.audit(meta, user.id, 'auth.login.fail', user.id);
         throw stepUpRequired();
@@ -323,7 +333,7 @@ export class AuthService {
     if (!emailVerified) {
       if (user.email) {
         const cutoff = new Date(this.clock.now() - VERIFICATION_RESEND_COOLDOWN_MS);
-        await this.issueEmailVerification(user.id, user.email, cutoff);
+        await this.issueEmailVerification(user.id, user.email, cutoff, meta);
       }
       await this.audit(meta, user.id, 'auth.login.fail', user.id);
       throw new HttpError(403, 'forbidden', 'verify your email address before signing in', {
@@ -531,7 +541,7 @@ export class AuthService {
         kind: 'password_reset',
         expiresAt: new Date(this.clock.now() + 30 * 60 * 1000), // 30 minutes
       }, new Date(this.clock.now()));
-      this.dispatchEmail('password_reset', () => this.emailSender.sendPasswordReset(user.email!, resetToken));
+      this.dispatchEmail('password_reset', () => this.emailSender.sendPasswordReset(user.email!, resetToken), meta);
     }
   }
 
@@ -539,13 +549,14 @@ export class AuthService {
     const user = await this.repos.users.findById(userId);
     await this.audit(meta, user?.id ?? null, 'auth.email.verification.request', null);
     if (!user?.email) return;
-    await this.issueEmailVerification(user.id, user.email);
+    await this.issueEmailVerification(user.id, user.email, undefined, meta);
   }
 
   private async issueEmailVerification(
     userId: string,
     email: string,
     reissueCutoff?: Date,
+    meta?: RequestMeta,
   ): Promise<void> {
     const token = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(token).digest('hex');
@@ -558,7 +569,8 @@ export class AuthService {
     this.dispatchEmail(
       'email_verify',
       () => this.emailSender.sendEmailVerification(email, token),
-      // An undelivered link would otherwise count toward the re-send cooldown.
+      meta,
+      // A link the provider refused would otherwise count toward the re-send cooldown.
       () => this.repos.identityTokens.discardEmailVerification(tokenHash),
     );
   }
@@ -566,37 +578,81 @@ export class AuthService {
   /**
    * Delivery is best-effort on the request path; provider outcomes belong to bounded metrics.
    *
-   * `onUndelivered` runs in the background when the provider reports the message was not sent
-   * (anything but success, or suppression by the development sender). Never awaited: the request
-   * must take the same time whether or not a message went out.
+   * The send runs as tracked background work (see {@link drainBackground}), never awaited: the
+   * request must take the same time whether or not a message went out. `onUndelivered` runs only
+   * when the provider says definitively that it did not send — it rejected or throttled the
+   * message. A timeout or an unreadable answer does not prove the message was not delivered, and
+   * discarding its token then could void a link or code the owner is about to use.
    */
   private dispatchEmail(
     purpose: 'password_reset' | 'email_verify' | 'login_step_up',
     send: () => Promise<EmailDeliveryResult>,
+    meta?: RequestMeta,
     onUndelivered?: () => Promise<void>,
   ): void {
-    const undelivered = (): void => {
-      if (!onUndelivered) return;
-      void onUndelivered().catch((error: unknown) => {
-        // The undelivered token is still live, so it blocks a replacement until it expires. Say
-        // so — without the address, user, token or code.
-        this.logger.warn('discarding an undelivered email token failed', {
-          purpose,
-          error: error instanceof Error ? error.message : String(error),
-        });
+    this.runInBackground(async () => {
+      let result: EmailDeliveryResult;
+      try {
+        result = await send();
+      } catch {
+        // A sender that throws gives no definitive outcome; its metrics already record it.
+        return;
+      }
+      if (!onUndelivered || !DEFINITELY_UNSENT.has(result.outcome)) return;
+      try {
+        await onUndelivered();
+      } catch (error: unknown) {
+        // The undelivered token is still live and blocks a replacement until it expires. Say so,
+        // without the address, user, token or code.
+        this.logBackgroundFailure('discarding an undelivered email token failed', error, meta, { purpose });
+      }
+    }, meta);
+  }
+
+  /**
+   * Run `work` without making the request wait, keeping it tracked so a graceful shutdown can let
+   * it finish before shared resources close. A failure that escapes `work` is logged.
+   */
+  private runInBackground(work: () => Promise<void>, meta?: RequestMeta): void {
+    const task: Promise<void> = work()
+      .catch((error: unknown) => this.logBackgroundFailure('background auth work failed', error, meta))
+      .finally(() => {
+        this.background.delete(task);
       });
-    };
+    this.background.add(task);
+  }
+
+  /**
+   * Wait for background work that requests have already been answered for — verification re-sends
+   * and email follow-ups — or `timeoutMs`, whichever comes first. Call on shutdown before closing
+   * the database pool, so accepted work is not cut off halfway.
+   */
+  async drainBackground(timeoutMs = 10_000): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
     try {
-      void send().then(
-        (result) => {
-          if (result.outcome !== 'success' && result.outcome !== 'suppressed') undelivered();
-        },
-        undelivered,
-      );
-    } catch {
-      // Contain a sender that violates its async contract without exposing its error or payload.
-      undelivered();
+      await Promise.race([Promise.allSettled([...this.background]).then(() => undefined), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
+  }
+
+  /** Log a failure nobody is waiting on, with request correlation and stack, but no secrets. */
+  private logBackgroundFailure(
+    message: string,
+    error: unknown,
+    meta?: RequestMeta,
+    fields: Record<string, string> = {},
+  ): void {
+    this.logger.warn(message, {
+      ...fields,
+      requestId: meta?.requestId ?? null,
+      traceId: meta?.traceId ?? null,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? (error.stack ?? null) : null,
+    });
   }
 
   /**
@@ -605,11 +661,13 @@ export class AuthService {
    * one. A failure is logged, since nobody is waiting to hear about it.
    */
   scheduleEmailVerificationResend(handleOrEmail: string, meta: RequestMeta): void {
-    void this.resendEmailVerification(handleOrEmail, meta).catch((error: unknown) => {
-      this.logger.warn('verification re-send failed', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
+    this.runInBackground(async () => {
+      try {
+        await this.resendEmailVerification(handleOrEmail, meta);
+      } catch (error: unknown) {
+        this.logBackgroundFailure('verification re-send failed', error, meta);
+      }
+    }, meta);
   }
 
   /**
@@ -626,7 +684,7 @@ export class AuthService {
     await this.audit(meta, user?.id ?? null, 'auth.email.verification.resend', null);
     if (!user?.email || user.emailVerifiedAt !== null) return;
     const cutoff = new Date(this.clock.now() - VERIFICATION_RESEND_COOLDOWN_MS);
-    await this.issueEmailVerification(user.id, user.email, cutoff);
+    await this.issueEmailVerification(user.id, user.email, cutoff, meta);
   }
 
   /**
@@ -979,6 +1037,7 @@ export class AuthService {
     user: UserRow | null,
     code: string | undefined,
     eligible: boolean,
+    meta: RequestMeta,
   ): Promise<boolean> {
     const userId = user?.id ?? randomUUID();
     const now = new Date(this.clock.now());
@@ -1011,6 +1070,7 @@ export class AuthService {
       this.dispatchEmail(
         'login_step_up',
         () => this.emailSender.sendLoginCode(email, fresh),
+        meta,
         // An undelivered code would otherwise block a new one until it expires.
         () => this.repos.identityTokens.discardLoginStepUp(userId, tokenHash),
       );

@@ -77,6 +77,8 @@ export interface Harness {
   readonly clock: ManualClock;
   readonly tokens: AccessTokenService;
   readonly emailSender: InMemoryEmailSender;
+  /** The server's identity service, for tests that need its background-work lifecycle. */
+  readonly auth: import('../src/auth/service').AuthService;
   readonly baseUrl: string;
   makeUser(handle: string, roles?: Role[]): Promise<{ userId: string; token: string }>;
   json(
@@ -355,6 +357,7 @@ export async function startHarness(
     clock,
     tokens,
     emailSender,
+    auth: server.auth,
     baseUrl,
     async makeUser(handle, roles = ['user']) {
       const user = await repos.users.create({ id: ids.next(), handle });

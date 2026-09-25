@@ -341,11 +341,12 @@ describe('step-up email delivery', () => {
     async sendEmailVerification(): Promise<EmailDeliveryResult> { return { outcome: 'success' }; }
     async sendLoginCode(_to: string, code: string): Promise<EmailDeliveryResult> {
       this.codes.push(code);
-      return { outcome: 'provider_error' };
+      return { outcome: this.outcome };
     }
+    constructor(private readonly outcome: EmailDeliveryResult['outcome'] = 'provider_rejected') {}
   }
 
-  test('an undelivered code is dropped, so the next attempt sends a fresh one', async () => {
+  test('a code the provider refused is dropped, so the next attempt sends a fresh one', async () => {
     const sender = new FailingCodeSender();
     const h = await harness(sender);
     try {
@@ -368,13 +369,78 @@ describe('step-up email delivery', () => {
   });
 });
 
+describe('step-up email delivery that may have succeeded', () => {
+  /**
+   * A timeout does not prove the email was not delivered. Dropping its code could void one the
+   * owner is about to type, so it stays valid; the owner waits out the code at worst.
+   */
+  test('a code whose send timed out stays valid', async () => {
+    const codes: string[] = [];
+    const timingOut: EmailSender = {
+      sendPasswordReset: async () => ({ outcome: 'success' }),
+      sendEmailVerification: async () => ({ outcome: 'success' }),
+      sendLoginCode: async (_to, code) => {
+        codes.push(code);
+        return { outcome: 'timeout' };
+      },
+    };
+    const h = await harness(timingOut);
+    try {
+      await h.json('POST', '/v1/auth/register', {
+        body: { handle: 'alice', password: PASSWORD, email: 'alice@example.test' },
+      });
+      const user = await h.repos.users.findByHandle('alice');
+      h.repos.users.markEmailVerifiedNow(user!.id, new Date(h.clock.now()));
+      await passThreshold(h, 'alice');
+
+      await login(h, 'alice', PASSWORD);
+      await settle();
+      await login(h, 'alice', PASSWORD);
+      assert.equal(codes.length, 1, 'no replacement for a code that may have arrived');
+      assert.equal((await login(h, 'alice', PASSWORD, codes[0])).status, 200);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+test('shutdown drains an accepted re-send before resources close', async () => {
+  const h = await harness();
+  try {
+    await register(h, 'alice', false);
+    h.clock.advance(10 * MINUTE);
+    const findByHandle = h.repos.users.findByHandle.bind(h.repos.users);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    h.repos.users.findByHandle = async (handle) => {
+      await gate;
+      return findByHandle(handle);
+    };
+    const res = await h.json('POST', '/v1/auth/email/verification/resend', { body: { handleOrEmail: 'alice' } });
+    assert.equal(res.status, 202, 'answered while the work is still pending');
+
+    let drained = false;
+    const draining = h.auth.drainBackground(60_000).then(() => { drained = true; });
+    await settle();
+    assert.equal(drained, false, 'drain waits for the pending re-send');
+
+    const before = h.emailSender.sent.filter((m) => m.type === 'email_verify').length;
+    release();
+    await draining;
+    assert.equal(h.emailSender.sent.filter((m) => m.type === 'email_verify').length, before + 1);
+    h.repos.users.findByHandle = findByHandle;
+  } finally {
+    await h.close();
+  }
+});
+
 test('a failed clean-up of an undelivered code is logged, without identifying data', async () => {
   const records: Array<Record<string, unknown>> = [];
   const logger = new JsonLogger({}, { level: 'warn', sink: (line) => records.push(JSON.parse(line)) });
   const failingCodes: EmailSender = {
     sendPasswordReset: async () => ({ outcome: 'success' }),
     sendEmailVerification: async () => ({ outcome: 'success' }),
-    sendLoginCode: async () => ({ outcome: 'provider_error' }),
+    sendLoginCode: async () => ({ outcome: 'provider_rejected' }),
   };
   const h = await startHarness({
     trustProxy: true,
@@ -401,6 +467,8 @@ test('a failed clean-up of an undelivered code is logged, without identifying da
     const warning = records.find((r) => r['msg'] === 'discarding an undelivered email token failed');
     assert.ok(warning, 'the failure is logged');
     assert.equal(warning['purpose'], 'login_step_up');
+    assert.equal(typeof warning['requestId'], 'string', 'correlated with the request');
+    assert.match(String(warning['stack']), /storage unavailable/, 'with the stack');
     const text = JSON.stringify(warning);
     for (const secret of ['alice', user!.id]) assert.ok(!text.includes(secret), `no ${secret} in the log`);
   } finally {
@@ -508,7 +576,7 @@ describe('password accounts require a verified email', () => {
       sendPasswordReset: async () => ({ outcome: 'success' }),
       sendEmailVerification: async (_to, token) => {
         tokens.push(token);
-        return { outcome: 'provider_error' };
+        return { outcome: 'provider_rejected' };
       },
       sendLoginCode: async () => ({ outcome: 'success' }),
     };

@@ -30,10 +30,14 @@ async function main(): Promise<void> {
     // eslint-disable-next-line no-console
     console.log(`${signal} received — shutting down`);
     http.close(() => {
+      // Auth work that requests were already answered for — verification re-sends and email
+      // follow-ups — finishes first (bounded), because it still needs the pool.
       // The legacy-named shutdown handle drains engine subprocesses (ADR-0113) and the
       // independent player-lock pool before the primary query pool closes. A failure must not
       // prevent primary-pool closure, or the container could remain alive until SIGKILL.
-      void shutdownAnalysis()
+      void server.auth
+        .drainBackground()
+        .then(() => shutdownAnalysis())
         .catch((err: unknown) => {
           // eslint-disable-next-line no-console
           console.error('API resource shutdown failed', err);
