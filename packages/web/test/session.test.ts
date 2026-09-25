@@ -1,11 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  isTransientRefreshFailure,
   MemoryTokenStore,
   NoSessionError,
   SessionManager,
   type SessionChannel,
 } from '../src/net/session.js';
+import {
+  DecodeError,
+  NetworkError,
+  RequestAbortedError,
+  TimeoutError,
+  UnauthorizedError,
+  httpErrorFrom,
+} from '../src/net/errors.js';
 import type { StoredSession } from '../src/net/session.js';
 import type { KeyValueStorage } from '../src/net/session.js';
 import type { AuthResponse } from '../src/api/models.js';
@@ -1190,4 +1199,311 @@ test('in-flight refresh started before adopt() cannot overwrite the newly adopte
   assert.equal(mgr.isAuthenticated, true);
 
   mgr.dispose();
+});
+
+// --- P0-5 remainder: a transient refresh failure must not sign the user out -------------------
+
+/** A mock channel pair whose first end records every message it posts. */
+function recordingChannelPair(): { posted: unknown[]; ch1: SessionChannel; ch2: SessionChannel } {
+  const [ch1, ch2] = createMockChannelPair();
+  const posted: unknown[] = [];
+  const send = ch1.postMessage.bind(ch1);
+  ch1.postMessage = (message: unknown): void => {
+    posted.push(message);
+    send(message);
+  };
+  return { posted, ch1, ch2 };
+}
+
+function flushChannel(): Promise<void> {
+  return new Promise<void>((r) => queueMicrotask(() => r()));
+}
+
+test('refresh failures are classified transient only for transport failures, 429 and 5xx', () => {
+  const transient = [
+    new NetworkError(),
+    new TimeoutError(10),
+    httpErrorFrom(429, undefined),
+    httpErrorFrom(500, undefined),
+    httpErrorFrom(502, undefined),
+    httpErrorFrom(503, undefined),
+    httpErrorFrom(504, undefined),
+  ];
+  const definitive = [
+    httpErrorFrom(400, undefined),
+    httpErrorFrom(401, undefined),
+    httpErrorFrom(403, undefined),
+    new DecodeError('bad body', 200),
+    new RequestAbortedError(),
+    new NoSessionError(),
+    new Error('unknown failure'),
+    'not an error',
+  ];
+  for (const error of transient) assert.equal(isTransientRefreshFailure(error), true, String(error));
+  for (const error of definitive) assert.equal(isTransientRefreshFailure(error), false, String(error));
+});
+
+test('a network refresh failure keeps the local session and does not invalidate it', async () => {
+  const mgr = new SessionManager({ refresh: async () => { throw new NetworkError(); }, now: () => 0 });
+  let invalidated = 0;
+  mgr.onInvalidated(() => { invalidated++; });
+  mgr.adopt(authResponse('a', 'r', 1));
+
+  await assert.rejects(mgr.refreshNow(), NetworkError);
+  assert.equal(mgr.current?.tokens.accessToken, 'a');
+  assert.equal(invalidated, 0);
+});
+
+test('a 5xx refresh failure neither broadcasts nor signs out a peer tab', async () => {
+  const { posted, ch1, ch2 } = recordingChannelPair();
+  const mgr1 = new SessionManager({
+    refresh: async () => { throw httpErrorFrom(503, undefined); },
+    now: () => 1000,
+    channel: ch1,
+  });
+  const mgr2 = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: ch2 });
+  let peerReset = 0;
+  mgr2.onReset(() => { peerReset++; });
+  mgr1.adopt(authResponse('tok', 'r', 1), false);
+  mgr2.adopt(authResponse('tok', 'r', 1), false);
+
+  await assert.rejects(mgr1.refreshNow(), (error) => isTransientRefreshFailure(error));
+  await flushChannel();
+
+  assert.deepEqual(posted, []);
+  assert.equal(mgr1.isAuthenticated, true);
+  assert.equal(mgr2.isAuthenticated, true);
+  assert.equal(peerReset, 0);
+  mgr1.dispose();
+  mgr2.dispose();
+});
+
+test('a 401 refresh rejection still clears the session and invalidates the peer exactly once', async () => {
+  const { posted, ch1, ch2 } = recordingChannelPair();
+  const mgr1 = new SessionManager({
+    refresh: async () => { throw httpErrorFrom(401, undefined); },
+    now: () => 1000,
+    channel: ch1,
+  });
+  const mgr2 = new SessionManager({ refresh: async () => authResponse(), now: () => 1000, channel: ch2 });
+  let invalidated = 0;
+  let peerReset = 0;
+  mgr1.onInvalidated(() => { invalidated++; });
+  mgr2.onReset(() => { peerReset++; });
+  // The peer learns the session from this tab, as a real second tab would.
+  mgr1.adopt(authResponse('tok', 'r', 1));
+  await flushChannel();
+  assert.equal(mgr2.current?.tokens.accessToken, 'tok');
+  posted.length = 0;
+
+  // Concurrent callers coalesce, so one rejection yields one reset and one broadcast.
+  const results = await Promise.allSettled([mgr1.refreshNow(), mgr1.refreshNow()]);
+  await flushChannel();
+
+  for (const result of results) {
+    assert.equal(result.status, 'rejected');
+    assert.ok((result as PromiseRejectedResult).reason instanceof UnauthorizedError);
+  }
+  assert.equal(mgr1.isAuthenticated, false);
+  assert.equal(invalidated, 1);
+  assert.equal(posted.length, 1);
+  assert.equal((posted[0] as { cause?: unknown }).cause, 'invalidation');
+  assert.equal(mgr2.isAuthenticated, false, 'the peer held the same rejected session');
+  assert.equal(peerReset, 1);
+  mgr1.dispose();
+  mgr2.dispose();
+});
+
+test('concurrent callers share one transient refresh failure without extra requests', async () => {
+  let calls = 0;
+  const mgr = new SessionManager({
+    refresh: async () => { calls++; throw new NetworkError(); },
+    now: () => 0,
+  });
+  mgr.adopt(authResponse('a', 'r', 1));
+
+  const results = await Promise.allSettled([mgr.refreshNow(), mgr.refreshNow(), mgr.validAccessToken()]);
+
+  assert.equal(calls, 1);
+  assert.ok(results.every((result) => result.status === 'rejected'));
+  assert.equal(mgr.current?.tokens.accessToken, 'a');
+});
+
+test('a refresh retried after a transient failure recovers the session', async () => {
+  let clock = 0;
+  let calls = 0;
+  const mgr = new SessionManager({
+    refresh: async () => {
+      calls++;
+      if (calls === 1) throw httpErrorFrom(502, undefined);
+      return authResponse('b', 'r2', 3600);
+    },
+    now: () => clock,
+  });
+  let invalidated = 0;
+  mgr.onInvalidated(() => { invalidated++; });
+  mgr.adopt(authResponse('a', 'r', 1));
+
+  await assert.rejects(mgr.validAccessToken());
+  clock += 1_000;
+  assert.equal(await mgr.validAccessToken(), 'b');
+  assert.equal(calls, 2);
+  assert.equal(invalidated, 0);
+});
+
+test('an outage backs off refresh requests instead of sending one per call', async () => {
+  let clock = 0;
+  let calls = 0;
+  let outage = true;
+  const mgr = new SessionManager({
+    refresh: async () => {
+      calls++;
+      if (outage) throw new NetworkError();
+      return authResponse('b', 'r2', 3600);
+    },
+    now: () => clock,
+  });
+  mgr.adopt(authResponse('a', 'r', 1));
+
+  await assert.rejects(mgr.refreshNow(), NetworkError);
+  assert.equal(calls, 1);
+  // Within the first 1s backoff every caller gets the cached failure without a request.
+  clock = 999;
+  await assert.rejects(mgr.validAccessToken(), NetworkError);
+  await assert.rejects(mgr.refreshNow(), NetworkError);
+  assert.equal(calls, 1);
+
+  clock = 1_000;
+  await assert.rejects(mgr.refreshNow(), NetworkError);
+  assert.equal(calls, 2);
+  // The second consecutive failure doubles the backoff to 2s.
+  clock = 2_999;
+  await assert.rejects(mgr.refreshNow(), NetworkError);
+  assert.equal(calls, 2);
+
+  outage = false;
+  clock = 3_000;
+  assert.equal((await mgr.refreshNow()).tokens.accessToken, 'b');
+  assert.equal(calls, 3);
+  assert.equal(mgr.current?.tokens.accessToken, 'b');
+});
+
+test('a Retry-After on a transient refresh failure extends the backoff up to the ceiling', async () => {
+  let clock = 0;
+  let calls = 0;
+  const mgr = new SessionManager({
+    refresh: async () => {
+      calls++;
+      throw httpErrorFrom(503, undefined, { retryAfterMs: 600_000 });
+    },
+    now: () => clock,
+  });
+  mgr.adopt(authResponse('a', 'r', 1));
+
+  await assert.rejects(mgr.refreshNow());
+  clock = 29_999;
+  await assert.rejects(mgr.refreshNow());
+  assert.equal(calls, 1);
+  clock = 30_000;
+  await assert.rejects(mgr.refreshNow());
+  assert.equal(calls, 2);
+});
+
+test('a new session or a sign-out clears the refresh backoff', async () => {
+  let calls = 0;
+  const mgr = new SessionManager({
+    refresh: async () => { calls++; throw new NetworkError(); },
+    now: () => 0,
+  });
+  mgr.adopt(authResponse('a', 'r', 1));
+  await assert.rejects(mgr.refreshNow());
+
+  mgr.adopt(authResponse('b', 'r2', 1));
+  await assert.rejects(mgr.refreshNow());
+  assert.equal(calls, 2, 'a newly adopted session may refresh at once');
+
+  mgr.reset();
+  mgr.adopt(authResponse('c', 'r3', 1));
+  await assert.rejects(mgr.refreshNow());
+  assert.equal(calls, 3, 'a sign-out discards the old backoff');
+});
+
+test('a 401 after a transient failure (a rotated or reused token) still invalidates exactly once', async () => {
+  const { posted, ch1, ch2 } = recordingChannelPair();
+  let clock = 0;
+  let calls = 0;
+  const mgr1 = new SessionManager({
+    refresh: async () => {
+      calls++;
+      // The first attempt timed out after the server rotated the token; the retry presents the
+      // old cookie and reuse detection rejects it.
+      if (calls === 1) throw new TimeoutError(10_000);
+      throw httpErrorFrom(401, undefined);
+    },
+    now: () => clock,
+    channel: ch1,
+  });
+  const mgr2 = new SessionManager({ refresh: async () => authResponse(), now: () => clock, channel: ch2 });
+  let invalidated = 0;
+  mgr1.onInvalidated(() => { invalidated++; });
+  mgr1.adopt(authResponse('tok', 'r', 1));
+  await flushChannel();
+  posted.length = 0;
+
+  await assert.rejects(mgr1.refreshNow(), TimeoutError);
+  assert.equal(mgr1.isAuthenticated, true);
+  clock = 1_000;
+  await assert.rejects(mgr1.refreshNow(), UnauthorizedError);
+  await flushChannel();
+
+  assert.equal(mgr1.isAuthenticated, false);
+  assert.equal(mgr2.isAuthenticated, false);
+  assert.equal(invalidated, 1);
+  assert.equal(posted.length, 1);
+  mgr1.dispose();
+  mgr2.dispose();
+});
+
+test('a peer logout persisted during a refresh backoff still clears this tab', async () => {
+  const barriers = sharedBarrierStorage();
+  let calls = 0;
+  const cooling = new SessionManager({
+    refresh: async () => { calls++; throw new NetworkError(); },
+    now: () => 0, channel: null, barrierStorage: barriers, channelSource: 'cooling',
+  });
+  const peer = new SessionManager({
+    refresh: async () => authResponse(), now: () => 0, channel: null,
+    barrierStorage: barriers, channelSource: 'peer',
+  });
+  let resets = 0;
+  cooling.onReset(() => { resets++; });
+  cooling.adopt(authResponse('a', 'r', 1));
+  await assert.rejects(cooling.refreshNow(), NetworkError);
+
+  // The peer's logout message was missed; only the durable barrier records it.
+  peer.reset();
+  await assert.rejects(cooling.validAccessToken(), NoSessionError);
+  assert.equal(cooling.isAuthenticated, false);
+  assert.equal(resets, 1);
+  assert.equal(calls, 1);
+  cooling.dispose();
+  peer.dispose();
+});
+
+test('ignoreBackoff sends one refresh attempt during a backoff', async () => {
+  let calls = 0;
+  const mgr = new SessionManager({
+    refresh: async () => {
+      calls++;
+      if (calls === 1) throw new NetworkError();
+      return authResponse('b', 'r2', 3600);
+    },
+    now: () => 0,
+  });
+  mgr.adopt(authResponse('a', 'r', 1));
+  await assert.rejects(mgr.refreshNow(), NetworkError);
+  await assert.rejects(mgr.validAccessToken(), NetworkError);
+  assert.equal(calls, 1);
+  assert.equal(await mgr.validAccessToken(true), 'b');
+  assert.equal(calls, 2);
 });

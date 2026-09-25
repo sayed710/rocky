@@ -22,6 +22,35 @@
  * and populate the in-memory `SessionManager`.
  */
 import type { AuthResponse, SelfUser, TokenPair } from '../api/models.js';
+import { ApiError, HttpError } from './errors.js';
+
+/**
+ * Whether a refresh failed without the server rejecting the session: the transport failed or timed
+ * out, or the server answered 429/5xx. Such a failure says nothing about the refresh cookie, so the
+ * local session must survive it. Anything else — a 400/401/403, an undecodable body, an abort (the
+ * refresh carries no caller signal, so only the environment can abort it), an unknown error — fails
+ * closed and is treated as a genuine rejection.
+ *
+ * A timeout can land after the server already rotated the refresh token. The browser then still
+ * holds the old cookie, and the next attempt is answered 401 by reuse detection — a definitive
+ * rejection that clears the session as before. That ambiguity is inherent to rotation.
+ */
+export function isTransientRefreshFailure(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false;
+  if (error.kind === 'network' || error.kind === 'timeout') return true;
+  return error.kind === 'http' && (error.status === 429 || error.status >= 500);
+}
+
+/** Backoff after consecutive transient refresh failures: 1s doubling to a 30s ceiling. */
+const REFRESH_BACKOFF_BASE_MS = 1_000;
+const REFRESH_BACKOFF_MAX_MS = 30_000;
+
+/** The last transient refresh failure and when the next refresh request may be sent. */
+interface RefreshCooldown {
+  readonly error: unknown;
+  readonly failures: number;
+  readonly retryAt: number;
+}
 
 /** A cookie refresh paired with its browser-wide mutation order. */
 export interface OrderedAuthResponse {
@@ -96,7 +125,8 @@ export interface SessionChannel {
  *
  * - `logout`: Voluntary explicit user sign-out (e.g. user clicked log out or reset local session).
  *   All peer tabs must immediately clear their session unconditionally.
- * - `invalidation`: Involuntary failed token refresh (e.g. concurrent race loser or network failure).
+ * - `invalidation`: Involuntary failed token refresh (e.g. revoked/expired session or concurrent race loser;
+ *   never a transient transport/server failure).
  *   Peer tabs that hold an active, valid successor session must NOT be cleared by a loser tab.
  */
 export type SessionResetCause = 'logout' | 'invalidation';
@@ -321,6 +351,8 @@ export class SessionManager {
   private adoptedHandler: ((session: StoredSession) => void) | null = null;
   private resetHandler: (() => void) | null = null;
   private refreshInFlight: Promise<StoredSession> | null = null;
+  /** Set after a transient refresh failure so an outage cannot become a refresh-request storm. */
+  private refreshCooldown: RefreshCooldown | null = null;
   private readonly channelSource: string;
   private readonly barrierStorage: KeyValueStorage | null;
   private channelBarrier = INITIAL_CHANNEL_BARRIER;
@@ -629,12 +661,14 @@ export class SessionManager {
     this.sessionGeneration++;
     this.store.clear();
     this.refreshInFlight = null;
+    this.refreshCooldown = null;
   }
 
   /** Store one validated auth response without deciding its cross-tab revision. */
   private storeAuth(auth: AuthResponse): StoredSession {
     this.sessionGeneration++;
     this.refreshInFlight = null;
+    this.refreshCooldown = null;
     const session: StoredSession = {
       user: auth.user,
       tokens: auth.tokens,
@@ -821,12 +855,13 @@ export class SessionManager {
   /**
    * Return a non-expired access token, refreshing proactively when the current
    * one is (near) expiry. Resolves to undefined when there is no session at all.
+   * `ignoreBackoff` is passed to {@link refreshNow}.
    */
-  async validAccessToken(): Promise<string | undefined> {
+  async validAccessToken(ignoreBackoff = false): Promise<string | undefined> {
     const session = this.store.load();
     if (!session) return undefined;
     if (!this.isAccessTokenExpired(session)) return session.tokens.accessToken;
-    const refreshed = await this.refreshNow();
+    const refreshed = await this.refreshNow(ignoreBackoff);
     return refreshed.tokens.accessToken;
   }
 
@@ -846,9 +881,21 @@ export class SessionManager {
     return this.adopt(auth, true, generation, cookieOrder);
   }
 
+  /** Back off exponentially, honouring a server `Retry-After`, both capped at the ceiling. */
+  private startRefreshCooldown(error: unknown): void {
+    const failures = (this.refreshCooldown?.failures ?? 0) + 1;
+    const backoff = REFRESH_BACKOFF_BASE_MS * 2 ** Math.min(failures - 1, 5);
+    const retryAfter = error instanceof HttpError ? (error.retryAfterMs ?? 0) : 0;
+    const delay = Math.min(REFRESH_BACKOFF_MAX_MS, Math.max(backoff, retryAfter));
+    this.refreshCooldown = { error, failures, retryAt: this.now() + delay };
+  }
+
   /**
    * Refresh the session now, coalescing concurrent callers onto one in-flight
-   * refresh. On failure the local session is cleared and the error rethrown.
+   * refresh. On a definitive failure the local session is cleared, peers are told, and the error
+   * rethrown; a transient failure ({@link isTransientRefreshFailure}) keeps the session and starts
+   * a backoff during which further calls reject with that failure without sending a request.
+   * `ignoreBackoff` sends one attempt anyway, for an explicit user action such as logout.
    *
    * Concurrent state transitions:
    * - If the manager adopts a newer session while the refresh is in flight, the
@@ -861,12 +908,16 @@ export class SessionManager {
    * `RefreshFn` sends `credentials: 'include'` so the cookie is attached
    * automatically). The body token is omitted for the browser flow.
    */
-  async refreshNow(): Promise<StoredSession> {
+  async refreshNow(ignoreBackoff = false): Promise<StoredSession> {
     const existing = this.refreshInFlight;
     if (existing) return existing;
 
+    // Apply a peer logout persisted while its message was missed, even during a backoff.
+    this.synchronizeBarrier();
     const session = this.store.load();
     if (!session) throw new NoSessionError('cannot refresh without a session');
+    const cooldown = this.refreshCooldown;
+    if (!ignoreBackoff && cooldown && this.now() < cooldown.retryAt) throw cooldown.error;
 
     const opGen = this.captureGeneration();
 
@@ -899,6 +950,13 @@ export class SessionManager {
             throw error;
           }
           throw new NoSessionError('session was reset while refresh was in flight');
+        }
+        // The server never rejected this session, so keep it (and every peer tab) intact. The
+        // stale access token makes a later authenticated call retry the refresh once the backoff
+        // has elapsed.
+        if (isTransientRefreshFailure(error)) {
+          this.startRefreshCooldown(error);
+          throw error;
         }
         this.reset({ broadcast: true, cause: 'invalidation', token: session.tokens.accessToken });
         this.invalidatedHandler?.();

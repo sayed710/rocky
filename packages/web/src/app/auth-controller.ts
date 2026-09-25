@@ -23,7 +23,7 @@
 import type { GambitClient } from '../api/client.js';
 import type { RegisterRequest } from '../api/models.js';
 import type { KeyValueStorage } from '../net/session.js';
-import { NoSessionError } from '../net/session.js';
+import { isTransientRefreshFailure, NoSessionError } from '../net/session.js';
 import { NativeWebAuthnAdapter } from '../ports/webauthn.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
 
@@ -168,12 +168,14 @@ export class AuthController {
             return null;
           }
           return this.adoptSession(refreshed.user);
-        } catch {
+        } catch (error) {
           if (this.disposed || generation !== this.sessionGeneration) return null;
           // If another concurrent tab refreshed/restored while this request was in flight:
           if (this.client.session.isAuthenticated && this.client.session.current) {
             return this.adoptSession(this.client.session.current.user);
           }
+          // An outage says nothing about the cookie: keep the hint so the next restore retries.
+          if (isTransientRefreshFailure(error)) return null;
           // Cookie expired or absent — clear persisted state and return null.
           this.clearPersisted();
           return null;

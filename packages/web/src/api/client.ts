@@ -25,7 +25,7 @@ import type { HttpTransport } from '../ports/http.js';
 import { HttpClient } from '../net/http-client.js';
 import type { RequestSpec } from '../net/http-client.js';
 import { UnauthorizedError } from '../net/errors.js';
-import { NoSessionError, SessionManager } from '../net/session.js';
+import { isTransientRefreshFailure, NoSessionError, SessionManager } from '../net/session.js';
 import type { TokenStore } from '../net/session.js';
 import { DEFAULT_RETRY_POLICY } from '../net/retry.js';
 import { SocialApi } from './social.js';
@@ -278,6 +278,9 @@ export class GambitClient {
     const headers: Record<string, string> = { ...spec.headers };
 
     if (auth) {
+      // A transient refresh failure rejects here even for optional auth: sending the request
+      // anonymously would silently drop identity-dependent data (e.g. private studies) while the
+      // user still appears signed in.
       const token = await this.session.validAccessToken();
       if (token === undefined) {
         if (auth === true) {
@@ -299,8 +302,9 @@ export class GambitClient {
       if (auth && !retried && error instanceof UnauthorizedError && headers['authorization']) {
         try {
           await this.session.refreshNow();
-        } catch {
-          throw error;
+        } catch (refreshError) {
+          // A transient refresh failure kept the session; report the outage, not a sign-out 401.
+          throw isTransientRefreshFailure(refreshError) ? refreshError : error;
         }
         return this.execute<T>(spec, true);
       }
@@ -426,13 +430,19 @@ export class AuthApi {
     if (!this.session.isAuthenticated) return;
     // A required proactive refresh is itself a session transition. Complete it before capturing
     // the generation that this logout is allowed to clear.
+    const loggingOut = this.session.current?.tokens.accessToken;
     let token: string | undefined;
     try {
-      token = await this.session.validAccessToken();
+      // An explicit sign-out makes one real refresh attempt even during a backoff, so a recovered
+      // server can still revoke the refresh session. If the server stays unreachable only the
+      // local session can be cleared.
+      token = await this.session.validAccessToken(true);
     } catch (error) {
       // A failed refresh is only an invalidation internally, but the user's explicit action is a
-      // durable logout boundary and must still converge across tabs.
-      this.session.reset();
+      // durable logout boundary and must still converge across tabs — unless a newer login or peer
+      // adoption replaced the session while the refresh was in flight.
+      const current = this.session.current;
+      if (!current || current.tokens.accessToken === loggingOut) this.session.reset();
       throw error;
     }
     if (token === undefined) {

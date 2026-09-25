@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-25 — M15 Increment 65: Committed terminal-event recovery and idempotent downstream processing._
+_Last updated: 2026-09-25 — M15 Increment 66: Committed terminal-event recovery and idempotent downstream processing._
+
+Prior: _Last updated: 2026-09-24 — M15 Increment 65: Transient-refresh session preservation._
 
 Prior: _Last updated: 2026-09-24 — M15 Increment 64: Account-wide live-human-game assistance containment._
 
@@ -4377,9 +4379,18 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - The web game view hides in-game assistance controls for an active human participant and restores them after game end; server enforcement remains authoritative across sessions, tabs, arbitrary FENs, and disconnects. Route metadata and generated OpenAPI document describe the `active_human_game` conflict response, including Study Partner completion. Deterministic in-memory and real-PostgreSQL lock-boundary tests, API race tests, package gates, and repository validation cover the contract.
 - Waiting assistance requests use bounded, jittered `pg_try_advisory_lock` retries and return the dedicated lock client after each failed attempt, so many requests for one busy account cannot pin every lock-pool connection and starve unrelated players. The lock pool scales with configured query capacity (minimum ten); connection-capacity exhaustion and the retry deadline surface as HTTP 503 rather than an internal error. Real-PostgreSQL tests oversubscribe one player's waiters, prove an unrelated player can still acquire a lock, and verify a typed refusal when distinct lock holders exhaust capacity.
 
-## M15 Increment 65 — Committed terminal-event recovery (2026-09-25)
+## M15 Increment 65 — Transient-refresh session preservation (2026-09-24)
 
-- `GameEnded` in the PostgreSQL event log is authoritative. The tournament reporter now scans every running tournament in keyset pages at startup and periodically, reads each linked game's committed terminal event, and uses broadcasts only as wake-ups. A failed startup scan retains its retry timer; a failed game remains eligible for later reconciliation. The reporter no longer loses an ending because a live message arrived before subscription or a callback failed after unsubscribing.
+- Narrow remainder of audit item P0-5. PR #48 made concurrent refreshes safe, but any refresh failure still cleared the local session and broadcast a cross-tab `invalidation`, so a network blip or a 5xx signed the user out. `SessionManager.refreshNow()` now classifies the failure with `isTransientRefreshFailure`: a `NetworkError`, `TimeoutError`, 429, or 5xx keeps the session, fires no invalidation handler, and broadcasts nothing. Every other failure (400/401/403, an undecodable body, an environment abort, an unknown error) fails closed and invalidates exactly as before.
+- After a transient failure, refresh backs off on the injected clock: 1s, doubling to a 30s ceiling, and honouring `Retry-After` up to that ceiling. During the backoff, callers get the cached failure without sending a request, so an outage cannot become a refresh storm. The backoff clears on any adoption, reset, logout, or disposal.
+- The 401-replay path surfaces the transient refresh error instead of the original 401. On reload, restore keeps the persisted identity hint after a transient failure so the next restore can retry.
+- A backoff never hides a peer logout: `refreshNow()` applies a persisted logout barrier before consulting it. Optional-auth requests surface the transient outage error rather than going out anonymously, because anonymous fallback would silently drop identity-dependent data such as private studies while the user still appears signed in. An explicit logout ignores the backoff and makes one real refresh attempt, so a recovered server can still revoke the refresh session; if the server stays unreachable, only the local session is cleared, as on `main`. Logout's failure path no longer clears a newer session adopted while its refresh was in flight.
+- Known limit: a timeout can land after the server rotated the refresh token. The retry then presents the old cookie, and reuse detection answers 401, which still invalidates the session. This PR deliberately keeps that security behavior.
+- Scope: `packages/web` session, API-client, and auth-controller code plus their tests only. This PR does not touch timed-game or terminal-event work, the realtime gateway, persistence, or tournaments, and it does not claim the wider auth subsystem is complete.
+
+## M15 Increment 66 — Committed terminal-event recovery (2026-09-25)
+
+- `GameEnded` in the PostgreSQL event log is authoritative. The tournament reporter scans all recoverable tournaments in keyset pages at startup and periodically, reads each linked game's committed terminal event, and uses broadcasts only as wake-ups. A failed startup scan retains its retry timer; a failed game remains eligible for later reconciliation. The reporter no longer loses an ending because a live message arrived before subscription or a callback failed after unsubscribing.
 - Round and arena terminal-result paths use version-CAS retries and no-op on already-applied outcomes, including aborted-game replacement. The deterministic launcher preserves one replacement identity across replicas. Authority append conflicts and uncertain persistence failures reload durable state before the cache serves it again, without publishing a losing move.
 - Bot-detection and anti-cheat automatic analysis replay committed endings through bounded, restartable scans with per-consumer PostgreSQL receipts after successful idempotent report upserts. Migration 0033 adds receipts; 0034 and 0035 add online scan indexes. ADR-0144 records the contract and its at-least-once processing semantics.
 - Search indexing and achievement awards remain pending: both depend on the unfinished durable games projection, and achievement increments additionally require atomic per-game deduplication. This increment does not implement a games projection, ratings, readiness, first-move clock start, no-show policy, or autonomous in-play flag expiry. Timed-game completion remains incomplete until later increments.
