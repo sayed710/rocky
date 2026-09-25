@@ -21,6 +21,10 @@ export interface TournamentSnapshot {
   readonly gameAttempts?: readonly (readonly [string, number])[];
   /** playerId -> 0-based round index at which the participant withdrew. */
   readonly withdrawalRounds?: readonly (readonly [string, number])[];
+  /** matchId -> player whose withdrawal automatically set the current game's forfeit. */
+  readonly withdrawalForfeits?: readonly (readonly [string, string])[];
+  /** Linked match IDs manually decided but not yet checked against a durable GameEnded. */
+  readonly unconfirmedResults?: readonly string[];
 }
 
 export class Tournament {
@@ -29,6 +33,8 @@ export class Tournament {
   private readonly withdrawn = new Set<string>();
   // playerId -> 0-based round index where player withdrew
   private readonly withdrawalRounds = new Map<string, number>();
+  private readonly withdrawalForfeits = new Map<string, string>();
+  private readonly unconfirmedResults = new Set<string>();
   private readonly rounds: Round[] = [];
 
   // matchId -> result
@@ -106,6 +112,7 @@ export class Tournament {
             if (pairing.white === playerId || pairing.black === playerId) {
               const result = pairing.white === playerId ? 'black_win' : 'white_win';
               this.results.set(matchId, result);
+              if (this.gameLinks.has(matchId)) this.withdrawalForfeits.set(matchId, playerId);
             }
           } else if (pairing.kind === 'bye') {
             if (pairing.player === playerId) {
@@ -156,6 +163,9 @@ export class Tournament {
     }
 
     this.results.set(matchId, result);
+    // An explicit result, even one equal to the forfeit, is no longer provably auto-generated.
+    this.withdrawalForfeits.delete(matchId);
+    if (this.gameLinks.has(matchId)) this.unconfirmedResults.add(matchId);
 
     // Check if the current round is fully resolved, and if so advance
     this.tryAdvance();
@@ -230,6 +240,29 @@ export class Tournament {
    */
   resultFor(roundIndex: number, pairingIndex: number): GameResult | 'bye' | 'void' | undefined {
     return this.results.get(`${roundIndex}-${pairingIndex}`);
+  }
+
+  /** Correct only a provable withdrawal-generated forfeit using a committed game result. */
+  correctWithdrawalForfeit(gameId: string, result: GameResult): boolean {
+    const matchId = this.gameIds.get(gameId);
+    if (!matchId) return false;
+    const playerId = this.withdrawalForfeits.get(matchId);
+    const pairing = this.pairingsByMatchId.get(matchId);
+    if (!playerId || !pairing || pairing.p2 === null) return false;
+    const expected = pairing.p1 === playerId ? 'black_win' : pairing.p2 === playerId ? 'white_win' : null;
+    if (expected === null || this.results.get(matchId) !== expected) return false;
+    this.results.set(matchId, result);
+    this.withdrawalForfeits.delete(matchId);
+    this.unconfirmedResults.delete(matchId);
+    // Existing rounds are published history. Standings derive from results; no re-pairing occurs.
+    return true;
+  }
+
+  /** Mark a matching manual result as checked against the committed game ending. */
+  confirmCommittedResult(gameId: string, result: GameResult): boolean {
+    const matchId = this.gameIds.get(gameId);
+    if (!matchId || this.results.get(matchId) !== result) return false;
+    return this.unconfirmedResults.delete(matchId);
   }
 
   /**
@@ -476,6 +509,12 @@ export class Tournament {
       ...(this.withdrawalRounds.size > 0
         ? { withdrawalRounds: Array.from(this.withdrawalRounds.entries()) }
         : {}),
+      ...(this.withdrawalForfeits.size > 0
+        ? { withdrawalForfeits: Array.from(this.withdrawalForfeits.entries()) }
+        : {}),
+      ...(this.unconfirmedResults.size > 0
+        ? { unconfirmedResults: Array.from(this.unconfirmedResults) }
+        : {}),
     };
   }
 
@@ -520,9 +559,41 @@ export class Tournament {
     for (const [matchId, pairing] of snapshot.pairingsByMatchId) {
       t.pairingsByMatchId.set(matchId, { ...pairing });
     }
+    if (snapshot.withdrawalForfeits !== undefined) {
+      if (!Array.isArray(snapshot.withdrawalForfeits)) {
+        throw new Error('Invalid withdrawalForfeits: expected an array');
+      }
+      for (const entry of snapshot.withdrawalForfeits) {
+        if (!Array.isArray(entry) || entry.length !== 2) {
+          throw new Error('Invalid withdrawalForfeits: expected match/player tuples');
+        }
+        const [matchId, playerId] = entry;
+        const pairing = t.pairingsByMatchId.get(matchId);
+        const expected = pairing?.p1 === playerId ? 'black_win' : pairing?.p2 === playerId ? 'white_win' : null;
+        if (typeof matchId !== 'string' || typeof playerId !== 'string' ||
+            !t.withdrawn.has(playerId) || expected === null || t.results.get(matchId) !== expected ||
+            t.withdrawalForfeits.has(matchId)) {
+          throw new Error('Invalid withdrawalForfeits: no matching automatic forfeit');
+        }
+        t.withdrawalForfeits.set(matchId, playerId);
+      }
+    }
     for (const [matchId, gameId] of snapshot.gameLinks || []) {
       t.gameLinks.set(matchId, gameId);
       t.gameIds.set(gameId, matchId);
+    }
+    if (snapshot.unconfirmedResults !== undefined) {
+      if (!Array.isArray(snapshot.unconfirmedResults)) {
+        throw new Error('Invalid unconfirmedResults: expected an array');
+      }
+      for (const matchId of snapshot.unconfirmedResults) {
+        if (typeof matchId !== 'string' || !t.gameLinks.has(matchId) ||
+            !t.results.has(matchId) || t.withdrawalForfeits.has(matchId) ||
+            t.unconfirmedResults.has(matchId)) {
+          throw new Error('Invalid unconfirmedResults: expected a unique linked decided match');
+        }
+        t.unconfirmedResults.add(matchId);
+      }
     }
     for (const [matchId, attempt] of snapshot.gameAttempts || []) {
       t.gameAttempts.set(matchId, attempt);

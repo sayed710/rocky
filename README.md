@@ -71,6 +71,10 @@ chess-platform/
 `services/gateway` is the deployable realtime-gateway binary with its
 production adapters (Postgres event log, Redis pub/sub, `ws`). Deployment
 assets live under `deploy/`; see the roadmap for remaining infrastructure work.
+Committed terminal game events are reconciled from PostgreSQL after lost notifications;
+the tournament reporter and event-store-backed analysis consumers follow
+[ADR-0144](docs/adr/0144-committed-terminal-event-recovery.md). This does not yet
+provide autonomous clock expiry, a durable games projection, or ratings.
 
 For a fresh clone, follow the [host build and test setup](docs/RUNNING.md#host-build-tests-and-live-counts).
 It covers the root workspace build and the separate gateway dependency install required by

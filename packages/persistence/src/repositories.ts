@@ -380,6 +380,8 @@ export interface TournamentsRepository {
   save(snapshot: TournamentAnySnapshot, expectedVersion: number): Promise<void>;
   findById(id: string): Promise<{ snapshot: TournamentAnySnapshot; version: number } | null>;
   list(limit: number): Promise<TournamentSummaryRow[]>;
+  /** Running tournaments plus finished ones with terminal outcomes still requiring confirmation. */
+  listRecoverableIdsAfter(afterId: string | null, limit: number): Promise<string[]>;
 }
 
 

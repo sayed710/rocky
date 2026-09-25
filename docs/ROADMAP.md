@@ -7,6 +7,12 @@ full platform is a multi-year effort, and correctness compounds.
 
 Legend: ✅ done · 🚧 in progress · ⬜ planned
 
+Timed-game lifecycle remediation is split: M15 Increment 66 (ADR-0144) recovers
+committed terminal events for tournaments and event-store-backed analyzers.
+Readiness/no-show, first-move clock start, autonomous in-play expiry, the durable
+games projection, ratings, and projection-dependent search/achievements remain
+future increments; terminal-event recovery alone does not complete timed games.
+
 ---
 
 ## ✅ Milestone 1 — Rules engine core (`@chess-platform/core`)

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TimeControl } from '@chess-platform/game';
 import { GameAuthority } from '../src/authority';
+import { InMemoryEventLog } from '../src/event-log';
 import { InMemoryPubSub } from '../src/pubsub';
 import { InMemoryConnection } from '../src/transport';
 import { RealtimeGateway } from '../src/gateway';
@@ -47,6 +48,53 @@ test('join assigns the correct role and returns current state', async () => {
   const sam = connect('s');
   sam.deliver({ t: 'join', gameId: 'g1' }); // no token → anonymous spectator
   assert.equal(sam.last('joined')!.role, 'spectator');
+});
+
+test('valid joins and resumes wait for a stale takeover reload without disconnecting', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => 1_000, store);
+  await authority.createGame({ gameId: 'reload-join', timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: false });
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier().allow('alice-token', 'alice'));
+  const first = new InMemoryConnection('first');
+  gateway.handleConnection(first);
+  first.deliver({ t: 'join', gameId: 'reload-join', token: 'alice-token' });
+  assert.ok(first.last('joined'));
+  const departing = new InMemoryConnection('departing');
+  gateway.handleConnection(departing);
+  departing.deliver({ t: 'join', gameId: 'reload-join' });
+  assert.ok(departing.last('joined'));
+
+  const originalLoad = store.load.bind(store);
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  store.load = async (gameId) => {
+    await blocked;
+    return originalLoad(gameId);
+  };
+  const reload = authority.reloadFromLog('reload-join');
+  const second = new InMemoryConnection('second');
+  gateway.handleConnection(second);
+  second.deliver({ t: 'join', gameId: 'reload-join' });
+  const vanished = new InMemoryConnection('vanished');
+  gateway.handleConnection(vanished);
+  vanished.deliver({ t: 'join', gameId: 'reload-join' });
+  vanished.close();
+  first.deliver({ t: 'resume', gameId: 'reload-join', lastPly: 0 });
+  departing.deliver({ t: 'resume', gameId: 'reload-join', lastPly: 0 });
+  departing.close();
+  assert.equal(first.isClosed, false);
+  assert.equal(second.isClosed, false);
+  release();
+  await reload;
+  await flush();
+  await flush();
+  assert.ok(second.last('joined'));
+  assert.equal(first.last('presence')?.spectators, 1, 'a closed pending join must not re-enter the room');
+  assert.ok(first.last('resumed'));
+  assert.equal(departing.last('resumed'), undefined, 'closed sessions must not receive a delayed resume');
+  assert.equal(first.isClosed, false);
+  assert.equal(second.isClosed, false);
 });
 
 test('presence reflects seats and spectator count', async () => {

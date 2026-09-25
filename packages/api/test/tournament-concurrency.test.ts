@@ -58,6 +58,31 @@ function makeArenaService(repo: InMemoryTournamentsRepository): ArenaService {
   return new ArenaService(repo, new InMemoryGameLauncher(uuidv7Generator), () => 1_000);
 }
 
+test('round-robin auto-forfeits do not launch contradictory playable games', async () => {
+  const repo = new InMemoryTournamentsRepository();
+  const service = new TournamentService(repo, new InMemoryGameLauncher(uuidv7Generator));
+  await service.create({ id: 'auto-forfeit-links', name: 'Auto forfeits', format: 'round_robin',
+    variant: 'standard', timeControl: TC });
+  for (const player of ['A', 'B', 'C', 'D']) await service.register('auto-forfeit-links', player);
+  await service.start('auto-forfeit-links');
+  const first = await service.load('auto-forfeit-links');
+  const firstRound = first.getRounds()[0]!;
+  const otherPairing = firstRound.pairings.findIndex((pairing) =>
+    pairing.kind === 'game' && pairing.white !== 'A' && pairing.black !== 'A');
+  assert.notEqual(otherPairing, -1);
+  await service.withdraw('auto-forfeit-links', 'A');
+  await service.recordResult('auto-forfeit-links', { roundIndex: 0, pairingIndex: otherPairing, result: 'draw' });
+  const later = await service.load('auto-forfeit-links');
+  const secondRound = later.getRounds()[1]!;
+  assert.ok(secondRound);
+  const autoForfeit = secondRound.pairings.findIndex((pairing) =>
+    pairing.kind === 'game' && (pairing.white === 'A' || pairing.black === 'A'));
+  assert.notEqual(autoForfeit, -1);
+  assert.notEqual(later.resultFor(1, autoForfeit), undefined);
+  assert.equal(later.gameIdFor(1, autoForfeit), undefined,
+    'a decided forfeit must never acquire a game capable of producing GameEnded');
+});
+
 describe('tournament optimistic concurrency', () => {
   it('preserves typed player-lock exhaustion through both launch retry loops', async () => {
     const refusal = new PlayerLockUnavailableError();

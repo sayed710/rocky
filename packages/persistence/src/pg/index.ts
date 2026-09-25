@@ -7,6 +7,7 @@
 export * from './pool';
 export * from './migrate';
 export * from './event-store';
+export * from './terminal-event-inbox';
 export * from './repositories';
 export * from './anti-cheat';
 export * from './bot-reports';

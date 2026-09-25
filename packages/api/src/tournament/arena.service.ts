@@ -72,7 +72,7 @@ export class ArenaService {
 
   private async withRetry(
     id: string,
-    action: (arena: ArenaTournament) => Promise<void> | void
+    action: (arena: ArenaTournament) => Promise<void | false> | void | false
   ): Promise<ArenaTournament> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       const stored = await this.repo.findById(id);
@@ -85,7 +85,8 @@ export class ArenaService {
       const arena = ArenaTournament.restore(stored.snapshot);
       
       try {
-        await action(arena);
+        const changed = await action(arena);
+        if (changed === false) return arena;
         await this.repo.save(arena.toSnapshot(), stored.version);
         return arena;
       } catch (e: any) {
@@ -164,6 +165,16 @@ export class ArenaService {
   async recordResultByGame(id: string, gameId: string, result: GameResult): Promise<ArenaTournament> {
     return this.withRetry(id, async (arena) => {
       arena.recordResultByGame(gameId, result, this.clock());
+      await this.reconcileLaunch(arena);
+    });
+  }
+
+  /** A resolved arena link is absent on replay; CAS retries observe that absence as success. */
+  async recordCommittedOutcome(id: string, gameId: string, result: GameResult | '*'): Promise<ArenaTournament> {
+    return this.withRetry(id, async (arena) => {
+      if (!arena.pairingForGame(gameId)) return false;
+      if (result === '*') arena.abandonGame(gameId);
+      else arena.recordResultByGame(gameId, result, this.clock());
       await this.reconcileLaunch(arena);
     });
   }

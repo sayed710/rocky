@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-24 — M15 Increment 65: Transient-refresh session preservation._
+_Last updated: 2026-09-25 — M15 Increment 66: Committed terminal-event recovery and idempotent downstream processing._
+
+Prior: _Last updated: 2026-09-24 — M15 Increment 65: Transient-refresh session preservation._
 
 Prior: _Last updated: 2026-09-24 — M15 Increment 64: Account-wide live-human-game assistance containment._
 
@@ -4385,3 +4387,13 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - A backoff never hides a peer logout: `refreshNow()` applies a persisted logout barrier before consulting it. Optional-auth requests surface the transient outage error rather than going out anonymously, because anonymous fallback would silently drop identity-dependent data such as private studies while the user still appears signed in. An explicit logout ignores the backoff and makes one real refresh attempt, so a recovered server can still revoke the refresh session; if the server stays unreachable, only the local session is cleared, as on `main`. Logout's failure path no longer clears a newer session adopted while its refresh was in flight.
 - Known limit: a timeout can land after the server rotated the refresh token. The retry then presents the old cookie, and reuse detection answers 401, which still invalidates the session. This PR deliberately keeps that security behavior.
 - Scope: `packages/web` session, API-client, and auth-controller code plus their tests only. This PR does not touch timed-game or terminal-event work, the realtime gateway, persistence, or tournaments, and it does not claim the wider auth subsystem is complete.
+
+## M15 Increment 66 — Committed terminal-event recovery (2026-09-25)
+
+- `GameEnded` in the PostgreSQL event log is authoritative. The tournament reporter scans all recoverable tournaments in keyset pages at startup and periodically, reads each linked game's committed terminal event, and uses broadcasts only as wake-ups. A failed startup scan retains its retry timer; a failed game remains eligible for later reconciliation. The reporter no longer loses an ending because a live message arrived before subscription or a callback failed after unsubscribing.
+- Round and arena terminal-result paths use version-CAS retries and no-op on already-applied outcomes, including aborted-game replacement. The deterministic launcher preserves one replacement identity across replicas. Authority append conflicts and uncertain persistence failures reload durable state before the cache serves it again, without publishing a losing move.
+- Bot-detection and anti-cheat automatic analysis replay committed endings through bounded, restartable scans with per-consumer PostgreSQL receipts after successful idempotent report upserts. Migration 0033 adds receipts; 0034 and 0035 add online scan indexes, and forward-only 0036 covers finished tournaments with pending provenance without altering the applied 0035. ADR-0144 records the contract and its at-least-once processing semantics.
+- Scan position rotates across bounded passes so a persistent failure prefix cannot starve later endings. A corrupt/unsupported ending is reported and left pending without blocking healthy rows. Decided round-based tournament links are excluded using durable result state, avoiding repeated event-log reads of historical games.
+- A descending catch-up page runs beside the forward terminal-event cursor, so an older game that commits after the cursor passed its ID remains recoverable even under continuous newer work. Already-decided future round-robin forfeits do not launch playable games, and delayed WebSocket joins/resumes check for a still-live session after authority reload.
+- Withdrawal-generated forfeits carry narrow durable provenance. If a linked game's committed ending was lost and withdrawal subsequently set a conflicting forfeit, recovery corrects only that proven automatic forfeit, including in a finished tournament; standings derive from the corrected result but already-published later pairings remain unchanged. Manual conflicting results fail closed and remain discoverable through a durable unconfirmed-result marker. Replay and restart are idempotent. Legacy snapshots without provenance cannot justify overwriting an old forfeit.
+- Search indexing and achievement awards remain pending: both depend on the unfinished durable games projection, and achievement increments additionally require atomic per-game deduplication. This increment does not implement a games projection, ratings, readiness, first-move clock start, no-show policy, or autonomous in-play flag expiry. Timed-game completion remains incomplete until later increments.

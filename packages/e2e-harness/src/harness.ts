@@ -183,7 +183,7 @@ export function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   });
   const reporterTournamentService = new TournamentService(tournamentRepo, gameLauncher);
   const reporterArenaService = new ArenaService(tournamentRepo, gameLauncher, () => systemClock.now());
-  reporter = new TournamentResultReporter(pubsub, tournamentRepo, reporterTournamentService, reporterArenaService);
+  reporter = new TournamentResultReporter(pubsub, tournamentRepo, reporterTournamentService, reporterArenaService, repos.events);
 
   // --- API (in-memory) ---
   const config = resolveConfig({
