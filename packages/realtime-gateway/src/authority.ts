@@ -128,6 +128,12 @@ export class GameAuthority {
     return this.games.has(gameId);
   }
 
+  /** A resident game is safe for synchronous edge reads only after any reload completes. */
+  hasFresh(gameId: string): boolean {
+    const record = this.games.get(gameId);
+    return record !== undefined && !record.stale;
+  }
+
   /**
    * Whether a game exists at all — in the hot cache or the durable log.
    * Unlike {@link has} this consults the store, so an evicted/cold game counts.

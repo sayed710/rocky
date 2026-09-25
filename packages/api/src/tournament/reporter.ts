@@ -75,16 +75,37 @@ export class TournamentResultReporter {
     }
   }
 
-  /** Keyset pagination avoids silently excluding older running tournaments. */
+  /** Keyset pagination includes finished tournaments with an unconfirmed withdrawal forfeit. */
   private async scanNow(): Promise<void> {
     let afterId: string | null = null;
+    const unresolved = new Set<string>();
     for (;;) {
-      const ids = await this.repo.listRunningIdsAfter(afterId, 100);
-      if (ids.length === 0) return;
+      const ids = await this.repo.listRecoverableIdsAfter(afterId, 100);
+      if (ids.length === 0) {
+        for (const gameId of this.subscriptions.keys()) {
+          if (!unresolved.has(gameId)) this.forget(gameId);
+        }
+        return;
+      }
       for (const id of ids) {
         const stored = await this.repo.findById(id);
-        if (!stored || stored.snapshot.state !== 'running') continue;
-        for (const [, gameId] of stored.snapshot.gameLinks ?? []) {
+        if (!stored || stored.snapshot.state === 'registration') continue;
+        const resolved = isArenaSnapshot(stored.snapshot)
+          ? new Set<string>()
+          : new Set(stored.snapshot.results.map(([matchId]) => matchId));
+        const withdrawalForfeits = isArenaSnapshot(stored.snapshot)
+          ? new Set<string>()
+          : new Set((stored.snapshot.withdrawalForfeits ?? []).map(([matchId]) => matchId));
+        const unconfirmedResults = isArenaSnapshot(stored.snapshot)
+          ? new Set<string>()
+          : new Set(stored.snapshot.unconfirmedResults ?? []);
+        for (const [matchId, gameId] of stored.snapshot.gameLinks ?? []) {
+          if (resolved.has(matchId) && !withdrawalForfeits.has(matchId) && !unconfirmedResults.has(matchId)) continue;
+          if (withdrawalForfeits.has(matchId) || unconfirmedResults.has(matchId)) {
+            // A later withdrawal/manual write can invalidate this process's prior confirmation.
+            this.processed.delete(gameId);
+          }
+          unresolved.add(gameId);
           this.watch(id, gameId);
           try {
             await this.reconcile(id, gameId);
@@ -123,8 +144,10 @@ export class TournamentResultReporter {
   private async reconcile(tournamentId: string, gameId: string): Promise<void> {
     if (this.processed.has(gameId)) return;
     const stored = await this.repo.findById(tournamentId);
-    if (!stored) return;
-    if (!(stored.snapshot.gameLinks ?? []).some(([, linked]) => linked === gameId)) return;
+    if (!stored || !(stored.snapshot.gameLinks ?? []).some(([, linked]) => linked === gameId)) {
+      this.forget(gameId);
+      return;
+    }
     const ending = (await this.events.load(gameId)).find(({ event }) => event.type === 'GameEnded')?.event;
     if (ending?.type !== 'GameEnded') return;
     const isArena = isArenaSnapshot(stored.snapshot);
@@ -139,6 +162,10 @@ export class TournamentResultReporter {
       if (oldest !== undefined) this.processed.delete(oldest);
     }
     this.processed.add(gameId);
+    this.forget(gameId);
+  }
+
+  private forget(gameId: string): void {
     this.subscriptions.get(gameId)?.();
     this.subscriptions.delete(gameId);
   }

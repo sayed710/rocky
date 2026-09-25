@@ -936,10 +936,12 @@ export class PgTournamentsRepository implements TournamentsRepository {
     }));
   }
 
-  async listRunningIdsAfter(afterId: string | null, limit: number): Promise<string[]> {
+  async listRecoverableIdsAfter(afterId: string | null, limit: number): Promise<string[]> {
     const res = await this.pool.query<{ id: string }>(
       `SELECT id FROM tournaments
-       WHERE state = 'running' AND ($1::text IS NULL OR id > $1)
+       WHERE (state = 'running' OR (state = 'finished' AND
+         (snapshot ? 'withdrawalForfeits' OR snapshot ? 'unconfirmedResults')))
+         AND ($1::text IS NULL OR id > $1)
        ORDER BY id LIMIT $2`,
       [afterId, limit],
     );

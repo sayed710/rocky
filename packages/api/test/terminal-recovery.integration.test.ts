@@ -151,6 +151,108 @@ test('two reporters recover one committed round-based result without double scor
   }, { connectionString: process.env['DATABASE_URL'] });
 });
 
+test('a committed ending corrects only a proven withdrawal forfeit after restart without re-pairing', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const rig = reporterFor(pool);
+    try {
+      const tournamentId = uuidv7();
+      await rig.tournament.create({ id: tournamentId, name: 'withdrawal recovery', format: 'round_robin', variant: 'standard', timeControl: TC });
+      for (let n = 0; n < 4; n += 1) await rig.tournament.register(tournamentId, uuidv7());
+      await rig.tournament.start(tournamentId);
+      const links = (await rig.tournament.load(tournamentId)).toSnapshot().gameLinks ?? [];
+      assert.equal(links.length, 2);
+      const committedGameId = links[0]![1];
+      const created = Game.fromEvents((await rig.store.load(committedGameId)).map(({ event }) => event)).snapshot();
+      assert.ok(created.players.white);
+      await commitEnding(rig.store, committedGameId); // Black resigns; White wins in durable truth.
+      await rig.tournament.withdraw(tournamentId, created.players.white);
+      assert.equal((await rig.tournament.load(tournamentId)).resultFor(0, 0), 'black_win');
+      await rig.tournament.recordResultByGame(tournamentId, links[1]![1], 'draw');
+      const before = await rig.tournament.load(tournamentId);
+      const publishedRounds = before.toSnapshot().rounds;
+      assert.ok(publishedRounds.length > 1, 'withdrawal must already have generated a later round');
+      const oldStandings = before.standings();
+
+      // The reporter first starts after the ending and withdrawal, as after a process crash.
+      await rig.reporter.start();
+      const corrected = await rig.tournament.load(tournamentId);
+      assert.equal(corrected.resultFor(0, 0), 'white_win');
+      assert.deepEqual(corrected.toSnapshot().rounds, publishedRounds, 'published future pairings must not be regenerated');
+      assert.notDeepEqual(corrected.standings(), oldStandings, 'standings derive from the corrected durable result');
+      assert.equal(corrected.toSnapshot().withdrawalForfeits?.some(([matchId]) => matchId === '0-0') ?? false, false);
+      const version = (await rig.repo.findById(tournamentId))!.version;
+      rig.reporter.stop();
+      const restarted = reporterFor(pool);
+      await restarted.reporter.start();
+      assert.equal((await rig.repo.findById(tournamentId))!.version, version, 'replay after restart must be a no-op');
+      assert.deepEqual((await restarted.tournament.load(tournamentId)).toSnapshot().rounds, publishedRounds);
+      restarted.reporter.stop();
+      await restarted.store.closePlayerLocks();
+    } finally {
+      rig.reporter.stop();
+      await rig.store.closePlayerLocks();
+    }
+  }, { connectionString: process.env['DATABASE_URL'] });
+});
+
+test('a finished tournament still corrects a proven forfeit, but manual conflicts fail closed', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const rig = reporterFor(pool);
+    try {
+      const finishedId = uuidv7();
+      await rig.tournament.create({ id: finishedId, name: 'finished recovery', format: 'round_robin', variant: 'standard', timeControl: TC });
+      await rig.tournament.register(finishedId, uuidv7());
+      await rig.tournament.register(finishedId, uuidv7());
+      await rig.tournament.start(finishedId);
+      const gameId = (await rig.tournament.load(finishedId)).toSnapshot().gameLinks![0]![1];
+      const white = Game.fromEvents((await rig.store.load(gameId)).map(({ event }) => event)).snapshot().players.white;
+      assert.ok(white);
+      await commitEnding(rig.store, gameId);
+      await rig.tournament.withdraw(finishedId, white);
+      assert.equal((await rig.tournament.load(finishedId)).getState(), 'finished');
+      assert.equal((await rig.tournament.load(finishedId)).resultFor(0, 0), 'black_win');
+      await rig.reporter.start();
+      assert.equal((await rig.tournament.load(finishedId)).resultFor(0, 0), 'white_win');
+      rig.reporter.stop();
+
+      const manualId = uuidv7();
+      await rig.tournament.create({ id: manualId, name: 'manual conflict', format: 'round_robin', variant: 'standard', timeControl: TC });
+      for (let n = 0; n < 4; n += 1) await rig.tournament.register(manualId, uuidv7());
+      await rig.tournament.start(manualId);
+      const manualGameId = (await rig.tournament.load(manualId)).toSnapshot().gameLinks![0]![1];
+      await commitEnding(rig.store, manualGameId);
+      await rig.tournament.recordResultByGame(manualId, manualGameId, 'black_win');
+      await assert.rejects(rig.tournament.recordCommittedOutcome(manualId, manualGameId, 'white_win'), /conflict/i);
+      assert.deepEqual((await rig.tournament.load(manualId)).toSnapshot().unconfirmedResults, ['0-0']);
+      const originalLoad = rig.store.load.bind(rig.store);
+      let conflictLoads = 0;
+      rig.store.load = async (id) => {
+        if (id === manualGameId) conflictLoads += 1;
+        return originalLoad(id);
+      };
+      await rig.reporter.scan(); // Lost wake-up: the durable marker must keep this conflict discoverable.
+      assert.ok(conflictLoads > 0, 'the scan must actually revisit the manually decided linked game');
+      assert.equal((await rig.tournament.load(manualId)).resultFor(0, 0), 'black_win');
+      assert.deepEqual((await rig.tournament.load(manualId)).toSnapshot().unconfirmedResults, ['0-0']);
+      await rig.tournament.recordResultByGame(manualId, manualGameId, 'white_win');
+      await rig.reporter.scan();
+      assert.equal((await rig.tournament.load(manualId)).toSnapshot().unconfirmedResults, undefined,
+        'a matching committed ending confirms the explicit result');
+      const confirmedLoads = conflictLoads;
+      await rig.tournament.recordResultByGame(manualId, manualGameId, 'black_win');
+      await rig.reporter.scan();
+      assert.ok(conflictLoads > confirmedLoads, 'a later manual override must invalidate the process cache');
+      assert.equal((await rig.tournament.load(manualId)).resultFor(0, 0), 'black_win');
+      assert.deepEqual((await rig.tournament.load(manualId)).toSnapshot().unconfirmedResults, ['0-0']);
+    } finally {
+      rig.reporter.stop();
+      await rig.store.closePlayerLocks();
+    }
+  }, { connectionString: process.env['DATABASE_URL'] });
+});
+
 test('terminal inbox replays a missed ending, receipts survive restart and replicas may race', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);
@@ -216,6 +318,41 @@ test('a failed terminal consumer remains pending and a restarted worker retries 
       assert.equal(recovered, 1);
       assert.equal((await inbox.pendingAfter('retry-test', null, 100)).length, 0);
       restarted.stop();
+    } finally {
+      await store.closePlayerLocks();
+    }
+  }, { connectionString: process.env['DATABASE_URL'] });
+});
+
+test('an unreadable committed ending stays pending without blocking a later ending', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const store = new PostgresEventStore(pool);
+    const inbox = new PgTerminalEventInbox(pool);
+    try {
+      const firstId = '00000000-0000-7000-8000-000000000001';
+      const secondId = '00000000-0000-7000-8000-000000000002';
+      await pool.query(
+        `INSERT INTO game_events (game_id, seq, type, event_version, payload)
+         VALUES ($1, 0, 'GameEnded', 99, $2)`,
+        [firstId, { type: 'GameEnded', result: '1-0', termination: 'resignation', winner: 'w', at: 1_000 }],
+      );
+      const { events } = Game.create({ gameId: secondId, variant: 'standard', players: { white: uuidv7(), black: uuidv7() }, timeControl: TC, rated: false, at: 1_000 });
+      await store.append(secondId, -1, events);
+      await commitEnding(store, secondId);
+      const seen: string[] = [];
+      const errors: string[] = [];
+      const worker = new TerminalEventReconciler(
+        new InMemoryPubSub(), inbox, 'decode-test', async (gameId) => { seen.push(gameId); },
+        { scanIntervalMs: 0, onError: (gameId) => { errors.push(gameId); } },
+      );
+      await worker.start();
+      assert.deepEqual(seen, [secondId]);
+      assert.deepEqual(errors, [firstId]);
+      const pending = await inbox.pendingAfter('decode-test', null, 100);
+      assert.equal(pending.length, 1);
+      assert.ok('decodeError' in pending[0]!);
+      worker.stop();
     } finally {
       await store.closePlayerLocks();
     }

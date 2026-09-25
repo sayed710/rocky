@@ -156,13 +156,19 @@ export class TournamentService {
       if (!pairing) return false;
       const prior = tournament.resultFor(pairing.roundIndex, pairing.pairingIndex);
       if (prior !== undefined) {
-        if (result === '*' || prior !== result) {
-          throw HttpError.conflict('Committed game outcome conflicts with tournament result');
+        if (prior === result) {
+          const corrected = tournament.correctWithdrawalForfeit(gameId, result);
+          const confirmed = tournament.confirmCommittedResult(gameId, result);
+          return corrected || confirmed ? undefined : false;
         }
-        return false;
+        if (result !== '*' && tournament.correctWithdrawalForfeit(gameId, result)) return;
+        throw HttpError.conflict('Committed game outcome conflicts with tournament result');
       }
       if (result === '*') tournament.abandonGame(gameId);
-      else tournament.recordResultByGame(gameId, result);
+      else {
+        tournament.recordResultByGame(gameId, result);
+        tournament.confirmCommittedResult(gameId, result);
+      }
       await this.reconcileLaunch(tournament);
     });
   }

@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { upcast, type StoredEvent, type TerminalEventInbox } from '../event-store';
+import { upcast, type TerminalEventWork, type TerminalEventInbox } from '../event-store';
 
 interface TerminalRow {
   game_id: string;
@@ -17,7 +17,7 @@ export class PgTerminalEventInbox implements TerminalEventInbox {
     consumer: string,
     after: { readonly gameId: string; readonly seq: number } | null,
     limit: number,
-  ): Promise<StoredEvent[]> {
+  ): Promise<TerminalEventWork[]> {
     const res = await this.pool.query<TerminalRow>(
       `SELECT ended.game_id, ended.seq, ended.event_version, ended.payload, ended.server_ts
        FROM game_events AS ended
@@ -30,13 +30,19 @@ export class PgTerminalEventInbox implements TerminalEventInbox {
        ORDER BY ended.game_id, ended.seq LIMIT $4`,
       [consumer, after?.gameId ?? null, after?.seq ?? null, limit],
     );
-    return res.rows.map((row) => ({
-      gameId: row.game_id,
-      seq: Number(row.seq),
-      version: Number(row.event_version),
-      event: upcast('GameEnded', Number(row.event_version), row.payload),
-      serverTs: row.server_ts.getTime(),
-    }));
+    return res.rows.map((row) => {
+      try {
+        return { stored: {
+          gameId: row.game_id,
+          seq: Number(row.seq),
+          version: Number(row.event_version),
+          event: upcast('GameEnded', Number(row.event_version), row.payload),
+          serverTs: row.server_ts.getTime(),
+        } };
+      } catch (error) {
+        return { gameId: row.game_id, seq: Number(row.seq), decodeError: String(error) };
+      }
+    });
   }
 
   async acknowledge(consumer: string, gameId: string, seq: number): Promise<void> {

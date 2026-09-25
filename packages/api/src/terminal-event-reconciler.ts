@@ -12,6 +12,8 @@ export class TerminalEventReconciler {
   private unsubscribe: (() => void) | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private scanInFlight: Promise<void> | undefined;
+  /** Retained across bounded scans so a persistent failure prefix cannot starve later rows. */
+  private cursor: { gameId: string; seq: number } | null = null;
 
   constructor(
     private readonly pubsub: PubSub,
@@ -48,18 +50,24 @@ export class TerminalEventReconciler {
   }
 
   private async scanNow(): Promise<void> {
-    let cursor: { gameId: string; seq: number } | null = null;
     for (let pages = 0; pages < 10; pages += 1) {
-      const page = await this.inbox.pendingAfter(this.consumer, cursor, 100);
-      if (page.length === 0) return;
-      for (const stored of page) {
-        cursor = { gameId: stored.gameId, seq: stored.seq };
+      const page = await this.inbox.pendingAfter(this.consumer, this.cursor, 100);
+      if (page.length === 0) {
+        this.cursor = null;
+        return;
+      }
+      for (const work of page) {
+        const gameId = 'stored' in work ? work.stored.gameId : work.gameId;
+        const seq = 'stored' in work ? work.stored.seq : work.seq;
+        this.cursor = { gameId, seq };
         try {
+          if ('decodeError' in work) throw new Error(`cannot decode committed ending: ${work.decodeError}`);
+          const stored = work.stored;
           if (stored.event.type !== 'GameEnded') throw new Error('terminal inbox returned a non-terminal event');
           await this.consume(stored.gameId, stored.event);
           await this.inbox.acknowledge(this.consumer, stored.gameId, stored.seq);
         } catch (error) {
-          this.report(stored.gameId, error);
+          this.report(gameId, error);
         }
       }
     }

@@ -23,6 +23,7 @@ interface Rig {
   repo: InMemoryTournamentsRepository;
   events: InMemoryEventStore;
   arenaService: ArenaService;
+  tournamentService: TournamentService;
   reporter: TournamentResultReporter;
 }
 
@@ -36,7 +37,7 @@ function makeRig(scanIntervalMs = 0): Rig {
   const reporter = new TournamentResultReporter(pubsub, repo, tournamentService, arenaService, events, {
     scanIntervalMs,
   });
-  return { pubsub, repo, events, arenaService, reporter };
+  return { pubsub, repo, events, arenaService, tournamentService, reporter };
 }
 
 async function seedGame(rig: Rig, gameId: string): Promise<void> {
@@ -86,11 +87,11 @@ function settleAsync(): Promise<void> {
 describe('TournamentResultReporter (production)', () => {
   it('keeps the retry timer when the startup database scan fails', async () => {
     const rig = makeRig(1);
-    const original = rig.repo.listRunningIdsAfter.bind(rig.repo);
+    const original = rig.repo.listRecoverableIdsAfter.bind(rig.repo);
     let attempts = 0;
     let retried!: () => void;
     const retriedPromise = new Promise<void>((resolve) => { retried = resolve; });
-    rig.repo.listRunningIdsAfter = async (afterId, limit) => {
+    rig.repo.listRecoverableIdsAfter = async (afterId, limit) => {
       attempts += 1;
       if (attempts === 1) throw new Error('injected transient database failure');
       retried();
@@ -178,5 +179,46 @@ describe('TournamentResultReporter (production)', () => {
 
     const standings = await rig.arenaService.getStandings('stop-arena');
     assert.equal(standings.filter((s) => s.gamesPlayed === 0).length, 2);
+  });
+
+  it('does not reload historical decided round games after a process restart', async () => {
+    const rig = makeRig();
+    const id = 'historical-rounds';
+    await rig.tournamentService.create({ id, name: id, format: 'round_robin', variant: 'standard', timeControl: TC });
+    for (const player of ['p1', 'p2', 'p3', 'p4']) await rig.tournamentService.register(id, player);
+    await rig.tournamentService.start(id);
+    const links = (await rig.tournamentService.load(id)).toSnapshot().gameLinks ?? [];
+    assert.equal(links.length, 2, 'the round must remain running after one result');
+    for (const [, gameId] of links) await seedGame(rig, gameId);
+    await endGame(rig, links[0]![1], '1-0');
+    await rig.reporter.start();
+    assert.equal((await rig.tournamentService.load(id)).resultFor(0, 0), 'white_win');
+    rig.reporter.stop();
+
+    const originalLoad = rig.events.load.bind(rig.events);
+    let decidedGameLoads = 0;
+    rig.events.load = async (gameId) => {
+      if (gameId === links[0]![1]) decidedGameLoads += 1;
+      return originalLoad(gameId);
+    };
+    const restarted = new TournamentResultReporter(
+      rig.pubsub, rig.repo, rig.tournamentService, rig.arenaService, rig.events,
+      { scanIntervalMs: 0 },
+    );
+    await restarted.start();
+    assert.equal(decidedGameLoads, 0, 'durable result state, not the bounded cache, excludes historical games');
+    restarted.stop();
+  });
+
+  it('releases a subscription when another reporter has already resolved its game', async () => {
+    const rig = makeRig();
+    const id = 'other-reporter-arena';
+    const gameId = await makeRunningArena(rig, id);
+    await rig.reporter.start();
+    assert.equal(rig.pubsub.subscriberCount(gameChannel(gameId)), 1);
+    await rig.arenaService.recordCommittedOutcome(id, gameId, 'white_win');
+    await rig.reporter.scan();
+    assert.equal(rig.pubsub.subscriberCount(gameChannel(gameId)), 0);
+    rig.reporter.stop();
   });
 });

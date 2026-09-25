@@ -24,13 +24,18 @@ export interface StoredEvent {
   readonly serverTs: number;
 }
 
+/** A corrupt row remains pending but must not block other committed endings. */
+export type TerminalEventWork =
+  | { readonly stored: StoredEvent }
+  | { readonly gameId: string; readonly seq: number; readonly decodeError: string };
+
 /** A restartable page of committed terminal work for one idempotent consumer. */
 export interface TerminalEventInbox {
   pendingAfter(
     consumer: string,
     after: { readonly gameId: string; readonly seq: number } | null,
     limit: number,
-  ): Promise<StoredEvent[]>;
+  ): Promise<TerminalEventWork[]>;
   acknowledge(consumer: string, gameId: string, seq: number): Promise<void>;
 }
 
