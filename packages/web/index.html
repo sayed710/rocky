@@ -250,6 +250,9 @@
         </div>
       </form>
       <p class="auth-meta"><a id="auth-forgot-password" href="/password-reset" data-route="password-reset" class="auth-forgot-link">Forgot password?</a></p>
+      <!-- Session-less re-send of the verification link, for an owner who lost it. It uses the
+           handle (or an email typed in the handle field) and answers the same whatever happens. -->
+      <p class="auth-meta"><button id="auth-resend-verification" type="button">Resend verification email</button></p>
       <p id="auth-error" class="error" role="alert"></p>
     </section>
     <section id="password-reset" class="password-reset auth" aria-labelledby="password-reset-heading" hidden>

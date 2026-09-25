@@ -95,6 +95,13 @@ export interface RateLimitConfig {
     readonly perIp: RateLimitEndpointConfig;
     readonly perUser: RateLimitEndpointConfig;
   };
+  /**
+   * The session-less verification re-send. Per IP only: a per-handle bucket would let anyone stop
+   * the owner getting a new link; the account's own 10-minute re-send cooldown bounds its inbox.
+   */
+  readonly emailVerificationResend: {
+    readonly perIp: RateLimitEndpointConfig;
+  };
   readonly webauthnLogin: {
     readonly perIp: RateLimitEndpointConfig;
   };
@@ -171,6 +178,9 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   emailVerificationRequest: {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
     perUser: { maxRequests: 3, windowMs: 60 * 60 * 1000 }, // 3 / 60 min
+  },
+  emailVerificationResend: {
+    perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
   },
   // Per IP only. Asking for a challenge proves nothing and guessing a passkey signature is not
   // feasible, so a per-handle bucket here protected nothing and only let anyone lock a handle out.

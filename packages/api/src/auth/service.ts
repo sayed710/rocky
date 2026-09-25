@@ -39,7 +39,7 @@ import type { Repositories } from '../deps';
 import { generateRefreshToken, hashRefreshToken } from './refresh';
 import type { AccessTokenService } from './tokens';
 import type { PasswordHasher } from './password';
-import type { EmailSender } from '../ports/email';
+import type { EmailDeliveryResult, EmailSender } from '../ports/email';
 
 /** Per-request metadata attached to sessions and audit records. */
 export interface RequestMeta {
@@ -552,13 +552,48 @@ export class AuthService {
     this.dispatchEmail(() => this.emailSender.sendEmailVerification(email, token));
   }
 
-  /** Delivery is best-effort on the request path; provider outcomes belong to bounded metrics. */
-  private dispatchEmail(send: () => Promise<unknown>): void {
+  /**
+   * Delivery is best-effort on the request path; provider outcomes belong to bounded metrics.
+   *
+   * `onUndelivered` runs in the background when the provider reports the message was not sent
+   * (anything but success, or suppression by the development sender). Never awaited: the request
+   * must take the same time whether or not a message went out.
+   */
+  private dispatchEmail(
+    send: () => Promise<EmailDeliveryResult>,
+    onUndelivered?: () => Promise<void>,
+  ): void {
+    const undelivered = (): void => {
+      if (onUndelivered) void onUndelivered().catch(() => undefined);
+    };
     try {
-      void send().catch(() => undefined);
+      void send().then(
+        (result) => {
+          if (result.outcome !== 'success' && result.outcome !== 'suppressed') undelivered();
+        },
+        undelivered,
+      );
     } catch {
       // Contain a sender that violates its async contract without exposing its error or payload.
+      undelivered();
     }
+  }
+
+  /**
+   * Re-send the verification email for `handleOrEmail`, without a session. Always resolves the same
+   * way; it sends only to an existing account whose address is still unverified, and at most once
+   * every {@link VERIFICATION_RESEND_COOLDOWN_MS}. This is the way back for an owner who lost the
+   * link — including while their handle is in step-up, where the password alone gets no answer
+   * that would say the address is unverified.
+   */
+  async resendEmailVerification(handleOrEmail: string, meta: RequestMeta): Promise<void> {
+    const user = handleOrEmail.includes('@')
+      ? await this.repos.users.findByEmail(handleOrEmail)
+      : await this.repos.users.findByHandle(handleOrEmail);
+    await this.audit(meta, user?.id ?? null, 'auth.email.verification.resend', null);
+    if (!user?.email || user.emailVerifiedAt !== null) return;
+    const cutoff = new Date(this.clock.now() - VERIFICATION_RESEND_COOLDOWN_MS);
+    await this.issueEmailVerification(user.id, user.email, cutoff);
   }
 
   /**
@@ -938,7 +973,14 @@ export class AuthService {
       now,
     );
     const email = user?.email;
-    if (issued && email) this.dispatchEmail(() => this.emailSender.sendLoginCode(email, fresh));
+    if (issued && email) {
+      const tokenHash = this.stepUpTokenHash(userId, fresh);
+      this.dispatchEmail(
+        () => this.emailSender.sendLoginCode(email, fresh),
+        // An undelivered code would otherwise block a new one until it expires.
+        () => this.repos.identityTokens.discardLoginStepUp(userId, tokenHash),
+      );
+    }
     return false;
   }
 

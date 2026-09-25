@@ -10,6 +10,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, test } from 'node:test';
 import { DEFAULT_RATE_LIMIT } from '../src/config';
+import type { EmailDeliveryResult, EmailSender } from '../src/ports/email';
 import { startHarness, verifyEmail, type Harness } from './helpers';
 
 const MINUTE = 60_000;
@@ -17,7 +18,7 @@ const PASSWORD = 'correct-horse-battery';
 const THRESHOLD = 3;
 const OWNER_IP = '198.51.100.10';
 
-async function harness(): Promise<Harness> {
+async function harness(emailSender?: EmailSender): Promise<Harness> {
   return startHarness({
     trustProxy: true,
     rateLimit: {
@@ -28,7 +29,7 @@ async function harness(): Promise<Harness> {
         perHandleBeforeStepUp: { maxRequests: THRESHOLD, windowMs: 15 * MINUTE },
       },
     },
-  });
+  }, emailSender ? { emailSender } : {});
 }
 
 async function register(h: Harness, handle: string, verify = true): Promise<void> {
@@ -322,6 +323,41 @@ describe('login step-up past the account-wide failure threshold', () => {
   });
 });
 
+describe('step-up email delivery', () => {
+  /** Records every message, and reports sign-in codes as undelivered. */
+  class FailingCodeSender implements EmailSender {
+    readonly codes: string[] = [];
+    async sendPasswordReset(): Promise<EmailDeliveryResult> { return { outcome: 'success' }; }
+    async sendEmailVerification(): Promise<EmailDeliveryResult> { return { outcome: 'success' }; }
+    async sendLoginCode(_to: string, code: string): Promise<EmailDeliveryResult> {
+      this.codes.push(code);
+      return { outcome: 'provider_error' };
+    }
+  }
+
+  test('an undelivered code is dropped, so the next attempt sends a fresh one', async () => {
+    const sender = new FailingCodeSender();
+    const h = await harness(sender);
+    try {
+      // Verified directly: this sender does not record verification links.
+      await h.json('POST', '/v1/auth/register', {
+        body: { handle: 'alice', password: PASSWORD, email: 'alice@example.test' },
+      });
+      const user = await h.repos.users.findByHandle('alice');
+      h.repos.users.markEmailVerifiedNow(user!.id, new Date(h.clock.now()));
+      await passThreshold(h, 'alice');
+
+      await login(h, 'alice', PASSWORD);
+      await new Promise((resolve) => setImmediate(resolve));
+      await login(h, 'alice', PASSWORD);
+      assert.equal(sender.codes.length, 2, 'the failed code did not block a new one');
+      assert.notEqual(sender.codes[0], sender.codes[1]);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
 describe('password accounts require a verified email', () => {
   test('registration without an email is refused', async () => {
     const h = await harness();
@@ -371,6 +407,57 @@ describe('password accounts require a verified email', () => {
       h.clock.advance(10 * MINUTE);
       assert.equal((await login(h, 'alice', PASSWORD)).status, 403);
       assert.equal(count(), before + 1, 'one re-send once the cooldown has passed');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('the verification link can be re-sent without a session, identically for any handle', async () => {
+    const h = await harness();
+    try {
+      await register(h, 'verified');
+      await register(h, 'pending', false);
+      h.clock.advance(10 * MINUTE);
+      const links = (handle: string) =>
+        h.emailSender.sent.filter((m) => m.type === 'email_verify' && m.to === `${handle}@example.test`).length;
+      const before = { verified: links('verified'), pending: links('pending') };
+
+      const answers = [];
+      for (const handleOrEmail of ['verified', 'pending', 'nobody-here', 'pending@example.test']) {
+        const res = await h.json('POST', '/v1/auth/email/verification/resend', { body: { handleOrEmail } });
+        answers.push([res.status, res.body]);
+      }
+      assert.deepEqual(answers, Array(4).fill([202, undefined]), 'the same answer every time');
+      assert.equal(links('verified'), before.verified, 'a verified address gets nothing');
+      assert.equal(links('pending'), before.pending + 1, 'one new link, then the cooldown holds');
+    } finally {
+      await h.close();
+    }
+  });
+
+  /**
+   * In step-up, a correct password on an unverified account gets only the uniform answer — saying
+   * "verify your email" there would tell an attacker the guess was right. The owner's way back is
+   * the session-less re-send, which no amount of failed sign-ins affects.
+   */
+  test('an unverified owner in step-up can get a new link, verify, and sign in with a code', async () => {
+    const h = await harness();
+    try {
+      await register(h, 'alice', false);
+      h.clock.advance(10 * MINUTE);
+      await passThreshold(h, 'alice');
+      assert.equal((await login(h, 'alice', PASSWORD)).body.error.details.reason, 'step_up_required');
+
+      const resend = await h.json('POST', '/v1/auth/email/verification/resend', {
+        body: { handleOrEmail: 'alice' },
+      });
+      assert.equal(resend.status, 202);
+      await verifyEmail(h, 'alice@example.test');
+
+      await login(h, 'alice', PASSWORD);
+      const [code] = codesSentTo(h, 'alice');
+      assert.ok(code, 'a verified address now receives the code');
+      assert.equal((await login(h, 'alice', PASSWORD, code)).status, 200);
     } finally {
       await h.close();
     }

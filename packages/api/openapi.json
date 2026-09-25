@@ -513,6 +513,40 @@
         }
       }
     },
+    "/v1/auth/email/verification/resend": {
+      "post": {
+        "summary": "Re-send the verification email without a session",
+        "tags": [
+          "auth"
+        ],
+        "operationId": "post_v1_auth_email_verification_resend",
+        "responses": {
+          "202": {
+            "description": "Accepted — the same answer whether or not an email was sent"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailVerificationResendRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/auth/password-reset/confirm": {
       "post": {
         "summary": "Confirm a password reset",
@@ -14623,6 +14657,19 @@
         "properties": {
           "handleOrEmail": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EmailVerificationResendRequest": {
+        "type": "object",
+        "required": [
+          "handleOrEmail"
+        ],
+        "properties": {
+          "handleOrEmail": {
+            "type": "string",
+            "maxLength": 320
           }
         },
         "additionalProperties": false

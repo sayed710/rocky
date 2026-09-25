@@ -310,6 +310,30 @@ export class AuthController {
     }
   }
 
+  /**
+   * Ask for a new verification link for `handleOrEmail`, without a session. The message is the
+   * same whether or not anything was sent, because the server's answer is.
+   */
+  async resendVerification(handleOrEmail: string): Promise<void> {
+    if (this.disposed) return;
+    const trimmed = handleOrEmail.trim();
+    if (!trimmed) {
+      this.callbacks.onError('Enter your handle or email to get a new verification link.');
+      return;
+    }
+    this.beginPendingOperation();
+    try {
+      await this.client.auth.resendEmailVerification({ handleOrEmail: trimmed });
+      this.callbacks.onError(
+        'If that account has an unverified email address, a new verification link is on its way.',
+      );
+    } catch (err) {
+      this.callbacks.onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      this.finishPendingOperation();
+    }
+  }
+
   /** Log out and clear the persisted session. */
   async logout(): Promise<void> {
     if (this.disposed) return;

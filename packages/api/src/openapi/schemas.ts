@@ -633,6 +633,15 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
     additionalProperties: false,
   },
 
+  EmailVerificationResendRequest: {
+    type: 'object',
+    required: ['handleOrEmail'],
+    properties: {
+      handleOrEmail: { type: 'string', maxLength: 320 },
+    },
+    additionalProperties: false,
+  },
+
   PasswordResetConfirmRequest: {
     type: 'object',
     required: ['token', 'newPassword'],

@@ -858,6 +858,10 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
     this.stepUps.set(check.userId, { ...live, attempts: live.attempts + 1 });
     return false;
   }
+
+  async discardLoginStepUp(userId: string, tokenHash: string): Promise<void> {
+    if (this.stepUps.get(userId)?.tokenHash === tokenHash) this.stepUps.delete(userId);
+  }
 }
 
 import type {

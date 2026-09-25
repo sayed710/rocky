@@ -1233,6 +1233,13 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
     );
     return res.rows[0]?.consumed === true;
   }
+
+  async discardLoginStepUp(userId: string, tokenHash: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM identity_tokens WHERE user_id = $1 AND kind = 'login_step_up' AND token_hash = $2`,
+      [userId, tokenHash],
+    );
+  }
 }
 
 export class PgWebAuthnLoginChallengesRepository implements WebAuthnLoginChallengesRepository {

@@ -491,6 +491,15 @@ export class AuthApi {
     });
   }
 
+  /** Re-send the verification email without a session. The same answer whatever the handle. */
+  resendEmailVerification(body: PasswordResetRequest): Promise<void> {
+    return this.execute<void>({
+      method: 'POST',
+      path: '/v1/auth/email/verification/resend',
+      body,
+    });
+  }
+
   confirmPasswordReset(body: PasswordResetConfirmRequest): Promise<void> {
     return this.cookieCoordinator.run(async () => {
       await this.execute<void>({

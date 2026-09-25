@@ -668,6 +668,33 @@ export function buildRouter(deps: RouteDeps): Router {
   );
 
   router.post(
+    '/v1/auth/email/verification/resend',
+    doc({
+      summary: 'Re-send the verification email without a session',
+      tags: ['auth'],
+      requestSchema: 'EmailVerificationResendRequest',
+      responses: { 202: [undefined, 'Accepted — the same answer whether or not an email was sent'] },
+    }),
+    PUBLIC,
+    async (ctx) => {
+      const body = strictObject(ctx.body, ['handleOrEmail']);
+      const handleOrEmail = reqString(body, 'handleOrEmail', { trim: true, max: 320 });
+
+      // Per IP only (audit P1-1): a bucket per handle would let anyone keep the owner's new link
+      // from being sent. The account's own re-send cooldown is what bounds its inbox.
+      await admit([
+        {
+          key: `email-verification-resend:ip:${ctx.ip ?? 'unknown'}`,
+          limit: config.rateLimit.emailVerificationResend.perIp,
+        },
+      ]);
+
+      await auth.resendEmailVerification(handleOrEmail, meta(ctx));
+      return { status: 202 };
+    },
+  );
+
+  router.post(
     '/v1/auth/password-reset/confirm',
     doc({
       summary: 'Confirm a password reset',

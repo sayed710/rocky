@@ -339,6 +339,13 @@ export function bootstrap(
     };
   }
 
+  const authResendEl = doc.getElementById('auth-resend-verification');
+  if (authResendEl instanceof HTMLButtonElement) {
+    authResendEl.onclick = () => {
+      void auth.resendVerification(authHandleEl?.value ?? '');
+    };
+  }
+
   if (authPasskeyEl instanceof HTMLButtonElement) {
     authPasskeyEl.onclick = () => {
       const handle = authHandleEl?.value ?? '';

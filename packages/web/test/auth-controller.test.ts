@@ -1010,3 +1010,24 @@ test('M2: isAuthenticated gates create-seek path', async () => {
   await ctrl.logout();
   assert.equal(ctrl.isAuthenticated(), false);
 });
+
+test('resending verification sends the handle without a session and answers neutrally', async () => {
+  const bodies: unknown[] = [];
+  const errors: string[] = [];
+  const client = makeFakeClient({
+    resendEmailVerification: async (body: unknown) => { bodies.push(body); },
+  }) as unknown as GambitClient;
+  const controller = new AuthController({
+    client,
+    callbacks: { onSessionChange: () => {}, onPending: () => {}, onError: (m) => { errors.push(m); } },
+  });
+
+  await controller.resendVerification('   ');
+  await controller.resendVerification(' alice ');
+
+  assert.deepEqual(bodies, [{ handleOrEmail: 'alice' }], 'a blank field sends nothing');
+  assert.deepEqual(errors, [
+    'Enter your handle or email to get a new verification link.',
+    'If that account has an unverified email address, a new verification link is on its way.',
+  ]);
+});

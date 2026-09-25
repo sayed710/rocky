@@ -116,6 +116,11 @@ export interface IdentityTokensRepository {
    * Resolves to whether the code matched and was used up.
    */
   checkLoginStepUp(check: LoginStepUpCheck, at: Date): Promise<boolean>;
+  /**
+   * Drop the account's step-up code if it is still `tokenHash`: used when its email could not be
+   * delivered, so the owner's next attempt issues a fresh code instead of waiting out this one.
+   */
+  discardLoginStepUp(userId: string, tokenHash: string): Promise<void>;
 }
 
 export interface LoginStepUpIssue {
