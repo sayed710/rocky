@@ -237,6 +237,14 @@ export function bootstrap(
   const authHandleEl = doc.getElementById('auth-handle') as HTMLInputElement | null;
   const authPasswordEl = doc.getElementById('auth-password') as HTMLInputElement | null;
   const authEmailEl = doc.getElementById('auth-email') as HTMLInputElement | null;
+  const authCodeRowEl = doc.getElementById('auth-code-row');
+  const authCodeEl = doc.getElementById('auth-code') as HTMLInputElement | null;
+  // The code field appears only once the server asks for it, and is cleared when it goes away.
+  const showStepUp = (required: boolean): void => {
+    if (authCodeRowEl) authCodeRowEl.hidden = !required;
+    if (!required && authCodeEl) authCodeEl.value = '';
+    if (required && authCodeEl && typeof authCodeEl.focus === 'function') authCodeEl.focus();
+  };
   const authSubmitEl = doc.getElementById('auth-submit');
   const authRegisterEl = doc.getElementById('auth-register');
   const authPasskeyEl = doc.getElementById('auth-passkey');
@@ -290,6 +298,7 @@ export function bootstrap(
       onError: (msg) => {
         if (authErrorEl) authErrorEl.textContent = msg;
       },
+      onStepUp: showStepUp,
     },
     ...(deps?.storage !== undefined ? { storage: deps.storage } : typeof localStorage !== 'undefined' ? { storage: localStorage } : {}),
   });
@@ -305,7 +314,7 @@ export function bootstrap(
     const handle = authHandleEl?.value ?? '';
     const password = authPasswordEl?.value ?? '';
     if (handle && password) {
-      void auth.login(handle, password);
+      void auth.login(handle, password, authCodeEl?.value ?? '');
     }
   };
   if (authFormEl instanceof HTMLFormElement) {
@@ -327,6 +336,13 @@ export function bootstrap(
       if (handle && password) {
         void auth.register(handle, password, authEmailEl?.value ?? '');
       }
+    };
+  }
+
+  const authResendEl = doc.getElementById('auth-resend-verification');
+  if (authResendEl instanceof HTMLButtonElement) {
+    authResendEl.onclick = () => {
+      void auth.resendVerification(authHandleEl?.value ?? '');
     };
   }
 

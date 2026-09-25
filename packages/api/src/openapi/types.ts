@@ -49,8 +49,8 @@ export interface JsonSchema {
  * **Nullable is not optional.** A nullable property is always present and may hold `null`; an
  * optional one may be absent and, when present, still obeys its type. They are independent, and
  * this helper only ever touches the former — it never adds to or removes from a `required` list,
- * so a required field stays required and an optional one stays optional. `RegisterRequest.email`
- * is the case that needs both: optional in `required`, and nullable here.
+ * so a required field stays required and an optional one stays optional. A field that needs both
+ * is left out of `required` and wrapped here.
  *
  * Three shapes, because a single rule would be wrong for two of them:
  *

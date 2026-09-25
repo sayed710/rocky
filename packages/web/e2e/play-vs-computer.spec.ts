@@ -12,7 +12,7 @@ test('play vs computer dialog — open, focus trap, escape close, and game creat
   // 1. Register a user
   const handle = `e2e-dialog-${Date.now()}`;
   const regResp = await request.post('/v1/auth/register', {
-    data: { handle, password: 'test-password-123' },
+    data: { handle, password: 'test-password-123', email: `${handle}@example.test` },
   });
   expect(regResp.ok()).toBeTruthy();
   const auth = await regResp.json();
@@ -91,7 +91,7 @@ test('play vs computer dialog — open, focus trap, escape close, and game creat
 test('play vs computer — Escape and Cancel are inert while the request is in flight', async ({ page, request }) => {
   const handle = `e2e-pending-${Date.now()}`;
   const regResp = await request.post('/v1/auth/register', {
-    data: { handle, password: 'test-password-123' },
+    data: { handle, password: 'test-password-123', email: `${handle}@example.test` },
   });
   expect(regResp.ok()).toBeTruthy();
   const auth = await regResp.json();
@@ -195,6 +195,7 @@ test('POST-AUD-001: a completed bot request cannot reclaim navigation after leav
   const handle = `e2e-stale-lobby-${suffix}`;
   await page.locator('#auth-handle').fill(handle);
   await page.locator('#auth-password').fill('test-password-123');
+  await page.locator('#auth-email').fill(`${handle}@example.test`);
   await page.locator('#auth-register').click();
   await expect(page.locator('#auth-status')).toHaveText(`Signed in as ${handle}`);
 

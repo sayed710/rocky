@@ -263,10 +263,10 @@ describe('routes charge no quota for a request another bucket refuses', () => {
   /**
    * The defect end to end, on a route rather than on the limiter.
    *
-   * `perIp` is 1 and `perHandle` is 2. One login from address A fills A's IP bucket and takes the
-   * handle's first slot. A second login from A is refused by the IP bucket — and under the old
-   * sequential code the handle bucket was charged first and would already be full, so the third
-   * request, from a *fresh* address, would be refused too. It must be admitted.
+   * `perIp` is 1 per minute and the per-handle-and-source budget is 2 per ten minutes. A second
+   * login from the same address is refused by the IP bucket; under the old sequential code the
+   * handle bucket would have been charged first anyway. Once the IP window has passed, the address
+   * must still have its second handle slot — and then no third.
    */
   test('a login refused by the per-IP bucket does not spend the handle bucket', async () => {
     const h = await startHarness({
@@ -274,35 +274,33 @@ describe('routes charge no quota for a request another bucket refuses', () => {
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
+          ...DEFAULT_RATE_LIMIT.login,
           perIp: { maxRequests: 1, windowMs: MINUTE },
-          perHandle: { maxRequests: 2, windowMs: MINUTE },
+          perHandleIp: { maxRequests: 2, windowMs: 10 * MINUTE },
         },
       },
     });
     try {
-      const login = (ip: string) =>
+      const login = () =>
         h.json('POST', '/v1/auth/login', {
           body: { handle: 'victim', password: 'wrong-password' },
-          headers: { 'x-forwarded-for': ip },
+          headers: { 'x-forwarded-for': '203.0.113.1' },
         });
 
-      const first = await login('203.0.113.1');
-      assert.notEqual(first.status, 429, 'first request fits both buckets');
+      assert.notEqual((await login()).status, 429, 'first request fits both buckets');
+      assert.equal((await login()).status, 429, 'the per-IP bucket is full');
 
-      const refused = await login('203.0.113.1');
-      assert.equal(refused.status, 429, 'the per-IP bucket is full');
-
-      const fromFreshIp = await login('203.0.113.2');
+      h.clock.advance(MINUTE);
       assert.notEqual(
-        fromFreshIp.status,
+        (await login()).status,
         429,
         'the refused request must not have spent the handle bucket',
       );
 
       // And the handle bucket is genuinely exhausted after two real admissions, so the test is
       // measuring a preserved slot rather than a limit that never applied.
-      const third = await login('203.0.113.3');
-      assert.equal(third.status, 429, 'the handle bucket really does hold only two');
+      h.clock.advance(MINUTE);
+      assert.equal((await login()).status, 429, 'the handle bucket really does hold only two');
     } finally {
       await h.close();
     }
@@ -319,8 +317,9 @@ describe('routes charge no quota for a request another bucket refuses', () => {
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
+          ...DEFAULT_RATE_LIMIT.login,
           perIp: { maxRequests: 3, windowMs: MINUTE },
-          perHandle: { maxRequests: 1, windowMs: MINUTE },
+          perHandleIp: { maxRequests: 1, windowMs: MINUTE },
         },
       },
     });
@@ -388,5 +387,113 @@ describe('routes charge no quota for a request another bucket refuses', () => {
     } finally {
       await h.close();
     }
+  });
+});
+
+/**
+ * `refund` gives back a slot a request reserved but turned out not to owe — login's failure budget
+ * when the password was right (audit P1-1). It must never mint capacity the bucket did not have,
+ * and must only ever touch the window that took the charge.
+ */
+describe('InMemoryRateLimiter refund', () => {
+  const limit: RateLimit = { maxRequests: 2, windowMs: MINUTE };
+  const reserve = (limiter: InMemoryRateLimiter, key = 'k') => {
+    const result = limiter.admit([{ key, limit, refundable: true }]);
+    assert.equal(result.allowed, true);
+    return result.reservations ?? [];
+  };
+
+  test('only refundable buckets are reserved', () => {
+    const limiter = new InMemoryRateLimiter(new ManualClock(1000));
+    const result = limiter.admit([
+      { key: 'ip', limit },
+      { key: 'handle', limit, refundable: true },
+    ]);
+    assert.deepEqual(result.reservations?.map((r) => r.key), ['handle']);
+    assert.equal(limiter.admit([{ key: 'plain', limit }]).reservations, undefined);
+  });
+
+  test('a refunded slot can be admitted again, and only that one', () => {
+    const limiter = new InMemoryRateLimiter(new ManualClock(1000));
+    const first = reserve(limiter);
+    reserve(limiter);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false);
+
+    limiter.refund(first);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false);
+  });
+
+  test('a refund never takes a bucket below empty', () => {
+    const limiter = new InMemoryRateLimiter(new ManualClock(1000));
+    const reservation = reserve(limiter);
+    limiter.refund(reservation);
+    limiter.refund(reservation);
+    limiter.refund([{ key: 'absent', window: '1000' }]);
+
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false, 'still exactly two');
+  });
+
+  test('a refund against a lapsed window does nothing', () => {
+    const clock = new ManualClock(1000);
+    const limiter = new InMemoryRateLimiter(clock);
+    const reservation = reserve(limiter);
+    clock.advance(MINUTE);
+    limiter.refund(reservation);
+
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false);
+  });
+
+  /**
+   * A login admitted just before its window ends finishes after another request has opened the next
+   * window. Refunding by key alone would take that other request's charge; the reservation names
+   * the old window, so the new one is left as it is. Raised by Qodo and Greptile on PR #63.
+   */
+  test('a refund from a replaced window leaves the new window alone', () => {
+    const clock = new ManualClock(1000);
+    const limiter = new InMemoryRateLimiter(clock);
+    const stale = reserve(limiter);
+    clock.advance(MINUTE);
+    reserve(limiter);
+    reserve(limiter);
+
+    limiter.refund(stale);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false, 'the new window keeps both');
+  });
+
+  /** Raised by Qodo on PR #63: a replay must not take a later request's charge. */
+  test('a replayed or forged reservation refunds nothing', () => {
+    const limiter = new InMemoryRateLimiter(new ManualClock(1000));
+    const first = reserve(limiter);
+    reserve(limiter);
+    limiter.refund(first);
+    reserve(limiter);
+
+    limiter.refund(first);
+    limiter.refund(first.map((r) => ({ ...r })));
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false, 'both live charges survive');
+  });
+
+  test('a refund touches only the buckets it names', () => {
+    const limiter = new InMemoryRateLimiter(new ManualClock(1000));
+    const one: RateLimit = { maxRequests: 1, windowMs: MINUTE };
+    const reservations = limiter.admit([
+      { key: 'a', limit: one, refundable: true },
+      { key: 'b', limit: one, refundable: true },
+    ]).reservations ?? [];
+    limiter.refund(reservations.filter((r) => r.key === 'a'));
+
+    assert.equal(limiter.admit([{ key: 'a', limit: one }]).allowed, true);
+    assert.equal(limiter.admit([{ key: 'b', limit: one }]).allowed, false);
+  });
+
+  test('a key named twice in a refund is a programming error', () => {
+    const limiter = new InMemoryRateLimiter(new ManualClock(1000));
+    const [reservation] = reserve(limiter);
+    assert.throws(() => limiter.refund([reservation!, reservation!]), /duplicate bucket key/);
   });
 });

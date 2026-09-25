@@ -43,9 +43,19 @@ async function accountWithTwoSessions(
 ): Promise<{ handle: string }> {
   const handle = `sess-${randomUUID().replaceAll('-', '').slice(0, 8)}`;
 
-  const registered = await request.post('/v1/auth/register', { data: { handle, password: PASSWORD } });
+  const registered = await request.post('/v1/auth/register', { data: { handle, password: PASSWORD, email: `${handle}@example.test` } });
   expect(registered.ok()).toBeTruthy();
   const auth = await registered.json();
+
+  // Password sign-in needs a verified email (audit P1-1). Follow the verification email the harness
+  // recorded, as the owner would.
+  const outbox = await request.get(`/e2e/outbox?to=${encodeURIComponent(`${handle}@example.test`)}`);
+  expect(outbox.ok()).toBeTruthy();
+  const verification = ((await outbox.json()) as { type: string; token: string }[])
+    .find((message) => message.type === 'email_verify');
+  expect(verification).toBeTruthy();
+  const verified = await request.post('/v1/auth/email/verify', { data: { token: verification!.token } });
+  expect(verified.status()).toBe(204);
 
   // A second sign-in creates a second session server-side, so the list has something to choose
   // between and revoking one leaves the account reachable.

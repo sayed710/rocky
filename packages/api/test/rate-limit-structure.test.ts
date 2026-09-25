@@ -67,12 +67,15 @@ function routes(): Route[] {
   return found;
 }
 
-/** Calls to the local `admit(...)` helper inside `node` — an identifier call, not a property one. */
+/**
+ * Calls to the local `admit(...)` or `reserve(...)` helpers inside `node` — identifier calls, not
+ * property ones. `admit` wraps `reserve`, so each is one admission decision.
+ */
 function admissions(node: ts.Node): ts.CallExpression[] {
   const calls: ts.CallExpression[] = [];
   walk(node, (n) => {
     if (!ts.isCallExpression(n)) return;
-    if (ts.isIdentifier(n.expression) && n.expression.text === 'admit') calls.push(n);
+    if (ts.isIdentifier(n.expression) && ['admit', 'reserve'].includes(n.expression.text)) calls.push(n);
   });
   return calls;
 }
@@ -134,7 +137,7 @@ test('no handler makes more than one admission decision', () => {
   assert.deepEqual(
     offenders,
     [],
-    'a handler calling `admit(...)` twice is two independent decisions, so the first can be ' +
+    'a handler calling `admit(...)` or `reserve(...)` twice is two independent decisions, so the first can be ' +
       'charged before the second refuses — hand every bucket to one call instead',
   );
 });
@@ -146,10 +149,9 @@ test('no handler makes more than one admission decision', () => {
  */
 test('every multi-bucket route hands both buckets to a single admission', () => {
   const expected: Record<string, readonly string[]> = {
-    '/v1/auth/login': ['login:ip:', 'login:handle:'],
+    '/v1/auth/login': ['login:ip:', 'login:handle-ip:'],
     '/v1/auth/password-reset/request': ['password-reset:ip:', 'password-reset:target:'],
     '/v1/auth/email/verification/request': ['email-verification:user:', 'email-verification:ip:'],
-    '/v1/auth/webauthn/login/options': ['webauthn-login:ip:', 'webauthn-login:handle:'],
     '/v1/analysis': ['analysis:user:', 'analysis:ip:'],
     '/v1/analysis/mistake-prediction': ['mistake-prediction:user:', 'mistake-prediction:ip:'],
     '/v1/ai/move-explanation': ['move-explanation:user:', 'move-explanation:ip:'],
@@ -189,10 +191,12 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
 /**
  * `/v1/analysis`, `/v1/analysis/mistake-prediction` and `/v1/ai/move-explanation` each buy real
  * engine time, so a request rejected by validation must reach no bucket at all. The cheap way to
- * lose that is to move the charge back above the parsing, where it started.
+ * lose that is to move the charge back above the parsing, where it started. `/v1/auth/login` is
+ * here for a different reason (audit P1-1): a malformed body, such as a code that is not eight
+ * digits, must not spend a failure budget or count toward step-up.
  */
 test('the expensive routes parse the body before they charge for it', () => {
-  for (const path of ['/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation']) {
+  for (const path of ['/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation', '/v1/auth/login']) {
     const route = routeNamed(path);
 
     let parse: ts.CallExpression | undefined;
@@ -213,4 +217,84 @@ test('the expensive routes parse the body before they charge for it', () => {
       `${path} must charge quota only after the body is known to be real`,
     );
   }
+});
+
+/**
+ * Login's handle-and-source bucket is a failure budget (audit P1-1): reserved at admission and
+ * refunded once the password is known to be right. Refunding before the check would make them free for an
+ * attacker, and marking the IP bucket refundable would stop it counting every attempt.
+ */
+test('login refunds exactly its failure bucket, and only after the password check', () => {
+  const route = routeNamed('/v1/auth/login');
+  const refunds: ts.CallExpression[] = [];
+  let check: ts.CallExpression | undefined;
+  walk(route.node, (n) => {
+    if (!ts.isCallExpression(n)) return;
+    if (ts.isIdentifier(n.expression) && n.expression.text === 'refund') refunds.push(n);
+    if (
+      ts.isPropertyAccessExpression(n.expression) &&
+      n.expression.name.text === 'login' &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === 'auth'
+    ) {
+      check = n;
+    }
+  });
+
+  assert.equal(refunds.length, 1, 'login must refund in exactly one place');
+  assert.ok(check, 'login must call auth.login');
+  assert.ok(refunds[0]!.getStart(SOURCE) > check.getStart(SOURCE), 'refund must follow auth.login');
+
+  // What is refunded is exactly what the admission reserved: the value `reserve(...)` resolved to.
+  const [admission] = admissions(route.node);
+  assert.ok(admission && ts.isIdentifier(admission.expression));
+  assert.equal(admission.expression.text, 'reserve', 'login must use `reserve` to get reservations');
+  const declaration = admission.parent.parent;
+  assert.ok(
+    ts.isAwaitExpression(admission.parent) && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name),
+    'the reservations must be bound to a variable',
+  );
+  // The refund's argument is built from what `reserve` returned (plus the account-wide count's own
+  // reservation), never from a bucket list written out again at the refund.
+  const refunded = refunds[0]!.arguments[1];
+  assert.ok(refunded && ts.isIdentifier(refunded), 'refund must take a named value');
+  let built: ts.VariableDeclaration | undefined;
+  walk(route.node, (n) => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === refunded.text) built = n;
+  });
+  const mentions = new Set<string>();
+  if (built?.initializer) walk(built.initializer, (n) => { if (ts.isIdentifier(n)) mentions.add(n.text); });
+  assert.ok(
+    refunded.text === declaration.name.text || mentions.has(declaration.name.text),
+    'refund must hand back the reservations `reserve` returned',
+  );
+
+  // The account-wide count is a tally — it signals step-up, it never refuses — and it is keyed by
+  // the handle alone.
+  const tallies: ts.CallExpression[] = [];
+  walk(route.node, (n) => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === 'tally') {
+      tallies.push(n);
+    }
+  });
+  assert.equal(tallies.length, 1, 'login must tally exactly once');
+  const tallied = tallies[0]!.arguments[0];
+  assert.ok(tallied !== undefined && ts.isObjectLiteralExpression(tallied));
+  assert.equal(bucketKey(tallied, '/v1/auth/login'), 'login:handle:');
+
+  const argument = admission.arguments[0];
+  assert.ok(argument !== undefined && ts.isArrayLiteralExpression(argument));
+  const refundable = argument.elements
+    .filter((element) =>
+      ts.isObjectLiteralExpression(element) &&
+      element.properties.some(
+        (p) =>
+          ts.isPropertyAssignment(p) &&
+          ts.isIdentifier(p.name) &&
+          p.name.text === 'refundable' &&
+          p.initializer.kind === ts.SyntaxKind.TrueKeyword,
+      ))
+    .map((element) => bucketKey(element, '/v1/auth/login'))
+    .sort();
+  assert.deepEqual(refundable, ['login:handle-ip:']);
 });

@@ -13,7 +13,7 @@ test('the game board stays square and usable across constrained viewports', asyn
     const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
     const handle = `e2e-board-${suffix}`;
     const registration = await request.post('/v1/auth/register', {
-      data: { handle, password: 'test-password-123' },
+      data: { handle, password: 'test-password-123', email: `${handle}@example.test` },
     });
     expect(registration.ok()).toBeTruthy();
     const auth = await registration.json();

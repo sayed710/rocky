@@ -105,7 +105,7 @@ test('indexed player query returns a hit and renders the resolved handle', async
   const password = 'test-password-search-123';
 
   const regResp = await request.post('/v1/auth/register', {
-    data: { handle, password },
+    data: { handle, password, email: `${handle}@example.test` },
   });
   expect(regResp.ok()).toBeTruthy();
   const authData = await regResp.json();

@@ -102,7 +102,7 @@ test('registration refuses a reserved engine bot handle', async () => {
   try {
     for (const bot of BOT_ACCOUNTS) {
       const res = await h.json('POST', '/v1/auth/register', {
-        body: { handle: bot.handle, password: 'correct horse battery' },
+        body: { handle: bot.handle, password: 'correct horse battery', email: `${bot.handle}@example.test` },
       });
       assert.equal(res.status, 409, `${bot.handle} must be reserved`);
       assert.equal(res.body.error.code, 'conflict');
@@ -110,13 +110,13 @@ test('registration refuses a reserved engine bot handle', async () => {
 
     // Case-insensitively, because the column is CITEXT.
     const upper = await h.json('POST', '/v1/auth/register', {
-      body: { handle: BOT_ACCOUNTS[0]!.handle.toUpperCase(), password: 'correct horse battery' },
+      body: { handle: BOT_ACCOUNTS[0]!.handle.toUpperCase(), password: 'correct horse battery', email: `${BOT_ACCOUNTS[0]!.handle.toUpperCase()}@example.test` },
     });
     assert.equal(upper.status, 409, 'reservation is case-insensitive');
 
     // An ordinary handle still registers.
     const ok = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'ordinary-human', password: 'correct horse battery' },
+      body: { handle: 'ordinary-human', password: 'correct horse battery', email: 'ordinary-human@example.test' },
     });
     assert.equal(ok.status, 201);
   } finally {

@@ -16,7 +16,7 @@ test('learner can browse courses, open a lesson, attempt steps, and see progress
 
   // Register a player
   const registered = await request.post('/v1/auth/register', {
-    data: { handle, password },
+    data: { handle, password, email: `${handle}@example.test` },
   });
   expect(registered.ok()).toBeTruthy();
   const auth = await registered.json();

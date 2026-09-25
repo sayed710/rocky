@@ -17,6 +17,7 @@ import type { Chess960StartSelector } from '../src/ports/chess960';
 import { ManualClock } from '../src/ports/clock';
 import { uuidv7Generator } from '../src/ports/ids';
 import { InMemoryRateLimiter } from '../src/ports/in-memory-rate-limiter';
+import type { RateLimiter } from '../src/ports/rate-limiter';
 import { createApiServer } from '../src/server';
 import type { ApiServer } from '../src/server';
 import { InMemoryGameLauncher } from '../src/tournament/launcher';
@@ -76,6 +77,8 @@ export interface Harness {
   readonly clock: ManualClock;
   readonly tokens: AccessTokenService;
   readonly emailSender: InMemoryEmailSender;
+  /** The server's identity service, for tests that need its background-work lifecycle. */
+  readonly auth: import('../src/auth/service').AuthService;
   readonly baseUrl: string;
   makeUser(handle: string, roles?: Role[]): Promise<{ userId: string; token: string }>;
   json(
@@ -102,6 +105,8 @@ export interface HarnessOptions {
   readonly chess960Starts?: Chess960StartSelector;
   /** Readiness probe backing `/v1/ready`; default resolves (healthy). */
   readonly readiness?: () => Promise<void>;
+  /** Replace the in-memory rate limiter, e.g. with one that faults. */
+  readonly rateLimiter?: RateLimiter;
   /** Structured logger; inject a capturing one to assert on log output. */
   readonly logger?: Logger;
   /** Tracer; inject a capturing one to assert on span emission. */
@@ -201,7 +206,7 @@ export async function startHarness(
   const repos = createInMemoryRepositories(clock);
   const tournamentRepo = new InMemoryTournamentsRepository();
   const hasher = new ScryptPasswordHasher({ N: 1024 }); // low cost for test speed
-  const rateLimiter = new InMemoryRateLimiter(clock);
+  const rateLimiter = harnessOptions.rateLimiter ?? new InMemoryRateLimiter(clock);
   const gameLauncher = harnessOptions.gameLauncher ?? new InMemoryGameLauncher(ids);
   const liveView = { activeGames: () => [] };
   const emailSender = new InMemoryEmailSender();
@@ -352,6 +357,7 @@ export async function startHarness(
     clock,
     tokens,
     emailSender,
+    auth: server.auth,
     baseUrl,
     async makeUser(handle, roles = ['user']) {
       const user = await repos.users.create({ id: ids.next(), handle });
@@ -375,4 +381,18 @@ export async function startHarness(
     },
     close: () => closeServer(http),
   };
+}
+
+/**
+ * Confirm the latest verification email sent to `email`, the way its owner would: through the
+ * public verify endpoint with the token from the message. Password sign-in requires a verified
+ * address (audit P1-1), so tests that log in with a password call this after registering.
+ */
+export async function verifyEmail(h: Harness, email: string): Promise<void> {
+  const message = [...h.emailSender.sent]
+    .reverse()
+    .find((m) => m.type === 'email_verify' && m.to === email);
+  if (!message) throw new Error(`no verification email was sent to ${email}`);
+  const res = await h.json('POST', '/v1/auth/email/verify', { body: { token: message.token } });
+  if (res.status !== 204) throw new Error(`verifying ${email} failed with ${res.status}`);
 }

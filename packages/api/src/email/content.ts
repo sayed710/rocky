@@ -1,4 +1,4 @@
-export type EmailPurpose = 'password_reset' | 'email_verify';
+export type EmailPurpose = 'password_reset' | 'email_verify' | 'login_step_up';
 
 export interface EmailContent {
   readonly subject: string;
@@ -26,6 +26,26 @@ export function buildEmailContent(
       subject: 'Reset your Shatarang password',
       text: `Use this link to reset your Shatarang password. It expires in 30 minutes.\n\n${url}`,
       html: `<p>Use this link to reset your Shatarang password. It expires in 30 minutes.</p>${htmlLink(url, 'Reset password')}`,
+      url,
+    };
+  }
+
+  if (purpose === 'login_step_up') {
+    // A code, not a link: it is typed into the sign-in form the owner already has open, and a link
+    // would sign in whichever browser opened the email.
+    const url = `${publicWebOrigin}/`;
+    return {
+      subject: 'Your Shatarang sign-in code',
+      text:
+        `Your Shatarang sign-in code is ${token}. It expires in 10 minutes.
+
+` +
+        'Someone, possibly you, entered your password after many failed sign-in attempts on your ' +
+        'account. If it was not you, change your password.',
+      html:
+        `<p>Your Shatarang sign-in code is <strong>${token}</strong>. It expires in 10 minutes.</p>` +
+        '<p>Someone, possibly you, entered your password after many failed sign-in attempts on your ' +
+        'account. If it was not you, change your password.</p>',
       url,
     };
   }

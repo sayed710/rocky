@@ -71,7 +71,7 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
       // DEFAULT_RATE_LIMIT.register.perIp is 5 requests.
       for (let i = 0; i < 5; i++) {
         const res = await h.json('POST', '/v1/auth/register', {
-          body: { handle: `user${i}`, password: 'password123' },
+          body: { handle: `user${i}`, password: 'password123', email: `user${i}@example.test` },
           headers: { 'x-forwarded-for': '10.0.0.1' },
         });
         assert.equal(res.status, 201, `Request ${i} should be 201`);
@@ -79,7 +79,7 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
 
       // 6th request from same IP should be blocked
       const blocked = await h.json('POST', '/v1/auth/register', {
-        body: { handle: 'user6', password: 'password123' },
+        body: { handle: 'user6', password: 'password123', email: 'user6@example.test' },
         headers: { 'x-forwarded-for': '10.0.0.1' },
       });
       assert.equal(blocked.status, 429);
@@ -88,7 +88,7 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
 
       // Different IP is allowed
       const ok = await h.json('POST', '/v1/auth/register', {
-        body: { handle: 'user7', password: 'password123' },
+        body: { handle: 'user7', password: 'password123', email: 'user7@example.test' },
         headers: { 'x-forwarded-for': '10.0.0.2' },
       });
       assert.equal(ok.status, 201);
@@ -100,20 +100,20 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
   test('login endpoint is rate limited per IP and per handle independently', async () => {
     const h = await startHarness({ trustProxy: true });
     try {
-      // DEFAULT_RATE_LIMIT.login.perHandle is 5, perIp is 10.
-      await h.json('POST', '/v1/auth/register', { body: { handle: 'alice', password: 'password123' } });
+      // DEFAULT_RATE_LIMIT.login: perIp 10 attempts, perHandleIp 5 failures.
+      await h.json('POST', '/v1/auth/register', { body: { handle: 'alice', password: 'password123', email: 'alice@example.test' } });
 
-      // Hit handle limit (5)
+      // Hit the per-source handle limit (5) from one address.
       for (let i = 0; i < 5; i++) {
         await h.json('POST', '/v1/auth/login', {
           body: { handle: 'alice', password: 'wrong' },
-          headers: { 'x-forwarded-for': `192.168.1.${i}` }, // different IPs, same handle
+          headers: { 'x-forwarded-for': '192.168.1.1' },
         });
       }
 
       const blockedHandle = await h.json('POST', '/v1/auth/login', {
         body: { handle: 'alice', password: 'wrong' },
-        headers: { 'x-forwarded-for': '192.168.1.100' },
+        headers: { 'x-forwarded-for': '192.168.1.1' },
       });
       assert.equal(blockedHandle.status, 429, 'Blocked by handle limit');
       assert.equal(blockedHandle.headers.get('retry-after'), '900'); // 15 mins
@@ -141,17 +141,19 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
     const h = await startHarness({ trustProxy: true });
     try {
       await h.json('POST', '/v1/auth/register', {
-        body: { handle: 'CaseUser', password: 'password123' },
+        body: { handle: 'CaseUser', password: 'password123', email: 'CaseUser@example.test' },
       });
-      for (const handle of ['caseuser', 'CASEUSER', 'CaseUser', 'cAsEuSeR', 'caseUser']) {
+      // One address, five spellings: they must all land in the same per-handle-and-source budget.
+      const spellings = ['caseuser', 'CASEUSER', 'CaseUser', 'cAsEuSeR', 'caseUser'];
+      for (const handle of spellings) {
         await h.json('POST', '/v1/auth/login', {
           body: { handle, password: 'wrong' },
-          headers: { 'x-forwarded-for': `198.51.100.${handle.length}` },
+          headers: { 'x-forwarded-for': '198.51.100.8' },
         });
       }
       const blocked = await h.json('POST', '/v1/auth/login', {
         body: { handle: 'CASEuser', password: 'wrong' },
-        headers: { 'x-forwarded-for': '198.51.100.200' },
+        headers: { 'x-forwarded-for': '198.51.100.8' },
       });
       assert.equal(blocked.status, 429);
     } finally {
@@ -162,7 +164,7 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
   test('refresh endpoint is rate limited per IP', async () => {
     const h = await startHarness({ trustProxy: true });
     try {
-      const reg = await h.json('POST', '/v1/auth/register', { body: { handle: 'bob', password: 'password123' } });
+      const reg = await h.json('POST', '/v1/auth/register', { body: { handle: 'bob', password: 'password123', email: 'bob@example.test' } });
       const refreshToken = reg.body.tokens.refreshToken;
 
       // refresh limit is 60/5min

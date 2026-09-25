@@ -34,6 +34,8 @@ import type {
   IdentityTokenKind,
   IdentityTokenRow,
   NewIdentityToken,
+  LoginStepUpIssue,
+  LoginStepUpCheck,
   IdentityTokensRepository,
 } from '@chess-platform/persistence';
 import { DuplicateUserError, VersionConflictError, SEEK_TTL_MS } from '@chess-platform/persistence';
@@ -773,9 +775,27 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
   async replaceActiveEmailVerification(
     token: Omit<NewIdentityToken, 'kind'>,
     at: Date,
+    reissueCutoff?: Date,
   ): Promise<IdentityTokenRow | null> {
     if (!this.users.emailIsUnverified(token.userId)) return null;
-    return this.replaceActive({ ...token, kind: 'email_verify' }, at);
+    if (reissueCutoff) {
+      for (const row of this.byHash.values()) {
+        if (
+          row.userId === token.userId && row.kind === 'email_verify' && row.usedAt === null &&
+          row.expiresAt.getTime() > at.getTime() && row.createdAt.getTime() > reissueCutoff.getTime()
+        ) {
+          return null;
+        }
+      }
+    }
+    // With a cutoff, earlier links stay valid (see the port); otherwise they are superseded.
+    const row = reissueCutoff
+      ? await this.create({ ...token, kind: 'email_verify' })
+      : await this.replaceActive({ ...token, kind: 'email_verify' }, at);
+    // Stamped with the caller's clock, as the Postgres adapter does, so the cutoff compares alike.
+    const stamped = { ...row, createdAt: at };
+    this.byHash.set(row.tokenHash, stamped);
+    return stamped;
   }
 
   async consume(
@@ -806,6 +826,49 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
     this.byHash.set(tokenHash, consumed);
     this.users.markEmailVerifiedNow(consumed.userId, at);
     return consumed;
+  }
+
+  /** Login step-up codes, one per user. Kept apart from `byHash` because a used code is deleted. */
+  private readonly stepUps = new Map<
+    string,
+    { tokenHash: string; expiresAt: Date; attempts: number; createdAt: Date }
+  >();
+
+  async issueLoginStepUp(code: LoginStepUpIssue, at: Date): Promise<boolean> {
+    if (!code.eligible) return false;
+    const current = this.stepUps.get(code.userId);
+    if (current && current.expiresAt.getTime() > at.getTime()) {
+      const exhausted = current.attempts >= code.maxAttempts;
+      if (!exhausted || current.createdAt.getTime() > code.reissueCutoff.getTime()) return false;
+    }
+    this.stepUps.set(code.userId, {
+      tokenHash: code.tokenHash,
+      expiresAt: code.expiresAt,
+      attempts: 0,
+      createdAt: at,
+    });
+    return true;
+  }
+
+  async checkLoginStepUp(check: LoginStepUpCheck, at: Date): Promise<boolean> {
+    const live = this.stepUps.get(check.userId);
+    if (!check.checked || !live) return false;
+    if (live.expiresAt.getTime() <= at.getTime() || live.attempts >= check.maxAttempts) return false;
+    if (live.tokenHash === check.tokenHash) {
+      this.stepUps.delete(check.userId);
+      return true;
+    }
+    this.stepUps.set(check.userId, { ...live, attempts: live.attempts + 1 });
+    return false;
+  }
+
+  async discardEmailVerification(tokenHash: string): Promise<void> {
+    const row = this.byHash.get(tokenHash);
+    if (row && row.kind === 'email_verify' && row.usedAt === null) this.byHash.delete(tokenHash);
+  }
+
+  async discardLoginStepUp(userId: string, tokenHash: string): Promise<void> {
+    if (this.stepUps.get(userId)?.tokenHash === tokenHash) this.stepUps.delete(userId);
   }
 }
 

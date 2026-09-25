@@ -141,7 +141,7 @@ export function setup() {
 
 function register(handle) {
   const password = crypto.hexEncode(crypto.randomBytes(24));
-  const res = http.post(`${API_URL}/v1/auth/register`, JSON.stringify({ handle, password }), {
+  const res = http.post(`${API_URL}/v1/auth/register`, JSON.stringify({ handle, password, email: `${handle}@example.test` }), {
     headers: { 'content-type': 'application/json' },
   });
   if (res.status !== 201 && res.status !== 200) {

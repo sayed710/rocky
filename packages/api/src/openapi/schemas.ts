@@ -494,11 +494,16 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
   // --- Request bodies ---
   RegisterRequest: {
     type: 'object',
-    required: ['handle', 'password'],
+    required: ['handle', 'password', 'email'],
     properties: {
       handle: { type: 'string', minLength: 3, maxLength: 30, description: 'Alphanumeric, _ and -.' },
       password: { type: 'string', minLength: 8, maxLength: 1024 },
-      email: nullable({ type: 'string', format: 'email' }),
+      email: {
+        type: 'string',
+        format: 'email',
+        maxLength: 320,
+        description: 'Required. Must be verified before the password can be used to sign in.',
+      },
     },
     additionalProperties: false,
   },
@@ -509,6 +514,13 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
     properties: {
       handle: { type: 'string' },
       password: { type: 'string' },
+      code: {
+        type: 'string',
+        pattern: '^[0-9]{8}$',
+        description:
+          'The sign-in code emailed after a `step_up_required` answer. Send the password without ' +
+          'it first; a correct password then emails a code to the verified address.',
+      },
     },
     additionalProperties: false,
   },
@@ -617,6 +629,15 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
     required: ['handleOrEmail'],
     properties: {
       handleOrEmail: { type: 'string' },
+    },
+    additionalProperties: false,
+  },
+
+  EmailVerificationResendRequest: {
+    type: 'object',
+    required: ['handleOrEmail'],
+    properties: {
+      handleOrEmail: { type: 'string', maxLength: 320 },
     },
     additionalProperties: false,
   },

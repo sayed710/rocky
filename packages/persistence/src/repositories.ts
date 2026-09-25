@@ -63,7 +63,7 @@ export interface UsersRepository {
 
 // --- Identity Tokens -------------------------------------------------------
 
-export type IdentityTokenKind = 'password_reset' | 'email_verify' | 'webauthn_register';
+export type IdentityTokenKind = 'password_reset' | 'email_verify' | 'webauthn_register' | 'login_step_up';
 
 export interface IdentityTokenRow {
   readonly tokenHash: string;
@@ -85,15 +85,66 @@ export interface IdentityTokensRepository {
   create(token: NewIdentityToken): Promise<IdentityTokenRow>;
   /** Atomically supersede every unused token of the same kind for this user. */
   replaceActive(token: NewIdentityToken, at: Date): Promise<IdentityTokenRow>;
-  /** Atomically issue a replacement only while the owning user's email remains unverified. */
+  /**
+   * Atomically issue a replacement only while the owning user's email remains unverified.
+   *
+   * With `reissueCutoff` — the path anyone can trigger — it issues only when no unused verification
+   * token was issued after the cutoff, so repeated triggers cannot flood the inbox, and it leaves
+   * earlier links valid rather than superseding them, so nobody can invalidate the owner's link by
+   * asking for another. Without it, earlier unused links are superseded as before.
+   */
   replaceActiveEmailVerification(
     token: Omit<NewIdentityToken, 'kind'>,
     at: Date,
+    reissueCutoff?: Date,
   ): Promise<IdentityTokenRow | null>;
   /** Atomically consume a token. Returns null if missing, expired, or already used. */
   consume(tokenHash: string, kind: IdentityTokenKind, at: Date): Promise<IdentityTokenRow | null>;
   /** Atomically consume an email token and mark its owning user verified. */
   consumeEmailVerification(tokenHash: string, at: Date): Promise<IdentityTokenRow | null>;
+  /**
+   * Issue a login step-up code, unless the account already has a live one. An expired code is
+   * replaced; one that has used up its attempts is replaced only if it was issued at or before
+   * `reissueCutoff`, so someone who knows the password cannot burn and re-mint codes back to back.
+   *
+   * `eligible` is decided by the caller, which passes `false` whenever no code should be sent. The
+   * statement is issued either way, so the request costs about the same whichever it is. Resolves
+   * to whether a code was issued, which is the only case where the caller sends it.
+   */
+  issueLoginStepUp(code: LoginStepUpIssue, at: Date): Promise<boolean>;
+  /**
+   * Check a login step-up code. It deletes the account's live code if `tokenHash` matches;
+   * otherwise it counts a failed attempt. It does either only when `checked` is true, which the
+   * caller sets only once the password is known to be right; the statement is issued either way.
+   * Resolves to whether the code matched and was used up.
+   */
+  checkLoginStepUp(check: LoginStepUpCheck, at: Date): Promise<boolean>;
+  /**
+   * Drop the account's step-up code if it is still `tokenHash`: used when its email could not be
+   * delivered, so the owner's next attempt issues a fresh code instead of waiting out this one.
+   */
+  discardLoginStepUp(userId: string, tokenHash: string): Promise<void>;
+  /**
+   * Drop one unused verification token whose email could not be delivered, so it neither counts
+   * toward the re-send cooldown nor lingers as a link nobody received. Other links are untouched.
+   */
+  discardEmailVerification(tokenHash: string): Promise<void>;
+}
+
+export interface LoginStepUpIssue {
+  readonly userId: string;
+  readonly tokenHash: string;
+  readonly expiresAt: Date;
+  readonly eligible: boolean;
+  readonly maxAttempts: number;
+  readonly reissueCutoff: Date;
+}
+
+export interface LoginStepUpCheck {
+  readonly userId: string;
+  readonly tokenHash: string;
+  readonly checked: boolean;
+  readonly maxAttempts: number;
 }
 
 // --- WebAuthn Credentials ----------------------------------------------------

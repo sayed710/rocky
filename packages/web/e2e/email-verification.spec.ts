@@ -234,7 +234,7 @@ test.describe('Email verification web UI', () => {
     await expect(page.locator('#email-verify')).toBeHidden();
   });
 
-  test('registration email field is optional, sign-in is not gated, and registration sends trimmed email', async ({ page }) => {
+  test('sign-in is not gated by the email field, and registration sends a trimmed email and requires one', async ({ page }) => {
     let loginBody: unknown = null;
     let registerBody: unknown = null;
     let logoutCalls = 0;
@@ -310,16 +310,17 @@ test.describe('Email verification web UI', () => {
     await expect(page.locator('#auth-status')).toHaveText('Not signed in');
     expect(logoutCalls).toBe(2);
 
-    // 3. Register with empty email omits email key
+    // 3. Register with an empty email sends nothing: a password account needs an email it can
+    //    verify (audit P1-1), so the form says so instead of creating one.
     registerBody = null;
     await handleInput.fill('charlie');
     await passInput.fill('hunter2');
     await emailInput.fill('');
     await registerBtn.click();
 
-    await expect(page.locator('#auth-status')).toHaveText('Signed in as bob');
-    expect(registerBody).toEqual({ handle: 'charlie', password: 'hunter2' });
-    expect(registerBody).not.toHaveProperty('email');
+    await expect(page.locator('#auth-error')).toHaveText('An email address is required to create an account.');
+    await expect(page.locator('#auth-status')).toHaveText('Not signed in');
+    expect(registerBody).toBeNull();
   });
 
   test('responsive mobile layout at 390x844: #email-verify has no horizontal overflow and retry button min-height >= 44px', async ({ page }) => {

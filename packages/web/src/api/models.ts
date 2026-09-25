@@ -126,12 +126,15 @@ export interface AuthResponse {
 export interface RegisterRequest {
   readonly handle: string;
   readonly password: string;
-  readonly email?: string | null;
+  /** Required: the password can sign in only once this address is verified. */
+  readonly email: string;
 }
 
 export interface LoginRequest {
   readonly handle: string;
   readonly password: string;
+  /** The emailed sign-in code, after the server answered `step_up_required`. */
+  readonly code?: string;
 }
 
 export interface PasswordResetRequest {

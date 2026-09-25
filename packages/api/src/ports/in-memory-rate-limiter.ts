@@ -1,5 +1,11 @@
 import type { Clock } from './clock';
-import type { RateLimit, RateLimiter, RateLimitRequest, RateLimitResult } from './rate-limiter';
+import type {
+  RateLimit,
+  RateLimiter,
+  RateLimitRequest,
+  RateLimitReservation,
+  RateLimitResult,
+} from './rate-limiter';
 
 interface Bucket {
   count: number;
@@ -25,6 +31,8 @@ const ADMITTED: RateLimitResult = { allowed: true, retryAfterSeconds: 0 };
  */
 export class InMemoryRateLimiter implements RateLimiter {
   private readonly buckets = new Map<string, Bucket>();
+  /** Reservations issued and not yet refunded. See `RateLimiter.refund`. */
+  private readonly outstanding = new WeakSet<RateLimitReservation>();
   private callsSinceSweep = 0;
 
   constructor(private readonly clock: Clock) {}
@@ -66,12 +74,33 @@ export class InMemoryRateLimiter implements RateLimiter {
     if (worstRetry > 0) return { allowed: false, retryAfterSeconds: worstRetry };
 
     // Phase 2 — commit. Every bucket admitted, so every bucket is charged.
-    for (const { key, limit } of requests) {
+    const reservations: RateLimitReservation[] = [];
+    for (const { key, limit, refundable } of requests) {
       const bucket = this.openBucket(key, now, limit);
       bucket.count += 1;
+      if (!refundable) continue;
+      const reservation: RateLimitReservation = { key, window: String(bucket.windowStart) };
+      this.outstanding.add(reservation);
+      reservations.push(reservation);
     }
 
-    return ADMITTED;
+    return reservations.length > 0 ? { ...ADMITTED, reservations } : ADMITTED;
+  }
+
+  refund(reservations: readonly RateLimitReservation[]): void {
+    assertDistinctKeys(reservations);
+    const now = this.clock.now();
+    // `delete` both checks and consumes, so a replayed or foreign reservation is skipped.
+    for (const { key, window } of reservations.filter((r) => this.outstanding.delete(r))) {
+      const bucket = this.buckets.get(key);
+      if (!bucket || now >= bucket.expiresAt || String(bucket.windowStart) !== window) continue;
+      if (bucket.count > 0) bucket.count -= 1;
+    }
+  }
+
+  tally(request: RateLimitRequest): RateLimitReservation | null {
+    const result = this.admit([{ ...request, refundable: true }]);
+    return result.reservations?.[0] ?? null;
   }
 
   reset(key: string): void {
@@ -121,7 +150,7 @@ export class InMemoryRateLimiter implements RateLimiter {
  * forwards and another backwards. Shared with `PgRateLimiter`, which had the same reversal.
  * Raised in the Qodo review of PR #137.
  */
-export function assertDistinctKeys(requests: readonly RateLimitRequest[]): void {
+export function assertDistinctKeys(requests: readonly { readonly key: string }[]): void {
   if (requests.length < 2) return;
   const seen = new Set<string>();
   for (const { key } of requests) {

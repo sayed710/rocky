@@ -14,6 +14,21 @@ export interface RateLimit {
 export interface RateLimitRequest {
   readonly key: string;
   readonly limit: RateLimit;
+  /**
+   * The bucket is a failure budget whose charge may be handed back with `refund` once the request
+   * succeeds. An admission returns a {@link RateLimitReservation} for each such bucket.
+   */
+  readonly refundable?: boolean;
+}
+
+/**
+ * A charge an admission made to a refundable bucket: its key, and an opaque identity of the window
+ * the charge landed in. A refund applies only while that same window is current, so a request that
+ * outlives its window cannot hand a slot back to the next one, which other requests have charged.
+ */
+export interface RateLimitReservation {
+  readonly key: string;
+  readonly window: string;
 }
 
 export interface RateLimitResult {
@@ -26,6 +41,8 @@ export interface RateLimitResult {
    * and the value must not depend on the order the buckets happened to be evaluated in.
    */
   readonly retryAfterSeconds: number;
+  /** One per `refundable` bucket charged by an admitted request; absent when there are none. */
+  readonly reservations?: readonly RateLimitReservation[];
 }
 
 /**
@@ -71,6 +88,34 @@ export interface RateLimiter {
    * refused nothing.
    */
   admit(requests: readonly RateLimitRequest[]): RateLimitResult | Promise<RateLimitResult>;
+  /**
+   * Hand back the unit each reservation charged, when the request turned out not to be the thing
+   * the bucket counts.
+   *
+   * This exists for failure budgets. Login reserves a slot in its per-handle-and-source bucket —
+   * so concurrent guesses cannot all slip past a nearly full bucket — and refunds it when the
+   * password was right, so a successful login spends none of the budget an attacker would need.
+   *
+   * A refund applies only while the reservation's window is still current and live; after the
+   * window has lapsed or been replaced there is nothing of this request's left to hand back, and
+   * the refund does nothing. It never takes a bucket below zero.
+   *
+   * A reservation is single-use and valid only on the limiter instance that issued it. Refunding it
+   * a second time, or refunding an object the limiter did not issue, does nothing: otherwise a
+   * replay would take back a charge some later request made in the same window. Reservations never
+   * leave the request that made them, so tracking them in-process is enough. A refund that faults leaves its
+   * slots charged, which fails closed: the budget recovers when the window ends instead of at once.
+   */
+  refund(reservations: readonly RateLimitReservation[]): void | Promise<void>;
+  /**
+   * Count one unit against a bucket that signals rather than refuses: while there is room, charge
+   * it and return a refundable reservation; once it is full, charge nothing and return `null`.
+   *
+   * A full bucket here is information for the caller, never a refusal on its own. Login uses it
+   * to switch to step-up: past the account-wide failure threshold a password still works, but
+   * only together with a second proof.
+   */
+  tally(request: RateLimitRequest): RateLimitReservation | null | Promise<RateLimitReservation | null>;
   /**
    * Reset the limit for a given key.
    * Useful for testing or administrative actions.

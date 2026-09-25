@@ -85,7 +85,7 @@ test('full game vs. human — Fool\'s Mate through DOM clicks, checkmate in 4 pl
     const password = 'test-password-123';
 
     const reg1 = await request.post('/v1/auth/register', {
-      data: { handle: handle1, password },
+      data: { handle: handle1, password, email: `${handle1}@example.test` },
     });
     expect(reg1.ok()).toBeTruthy();
     const auth1 = await reg1.json();
@@ -94,7 +94,7 @@ test('full game vs. human — Fool\'s Mate through DOM clicks, checkmate in 4 pl
     const userId1 = auth1.user.id;
 
     const reg2 = await request.post('/v1/auth/register', {
-      data: { handle: handle2, password },
+      data: { handle: handle2, password, email: `${handle2}@example.test` },
     });
     expect(reg2.ok()).toBeTruthy();
     const auth2 = await reg2.json();

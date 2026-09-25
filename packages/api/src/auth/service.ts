@@ -15,7 +15,17 @@
  *   and is audited.
  */
 
-import { createHash, generateKeyPairSync, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  generateKeyPairSync,
+  hkdfSync,
+  randomBytes,
+  randomInt,
+  randomUUID,
+  timingSafeEqual,
+  type KeyObject,
+} from 'node:crypto';
 import { DuplicateUserError } from '@chess-platform/persistence';
 import type { WebAuthnCredentialRow } from '@chess-platform/persistence';
 import { decodeFirst } from './cbor';
@@ -29,7 +39,9 @@ import type { Repositories } from '../deps';
 import { generateRefreshToken, hashRefreshToken } from './refresh';
 import type { AccessTokenService } from './tokens';
 import type { PasswordHasher } from './password';
-import type { EmailSender } from '../ports/email';
+import type { EmailDeliveryResult, EmailSender } from '../ports/email';
+import type { Logger } from '../ports/logger';
+import { NullLogger } from '../ports/logger';
 
 /** Per-request metadata attached to sessions and audit records. */
 export interface RequestMeta {
@@ -68,6 +80,36 @@ const DECOY_HASH =
 // Reused for unknown credentials so unauthenticated requests cannot force an
 // expensive synchronous key generation on the event loop.
 const DUMMY_WEBAUTHN_PUBLIC_KEY = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey;
+
+/** Login step-up codes (audit P1-1): digits, lifetime, and wrong codes tolerated per code. */
+const STEP_UP_CODE_DIGITS = 8;
+const STEP_UP_CODE_TTL_MS = 10 * 60 * 1000;
+const STEP_UP_MAX_ATTEMPTS = 5;
+/**
+ * How long a code that used up its attempts blocks a new one. Only someone with the password can
+ * spend attempts, and this caps how many emails they can force: about twelve an hour.
+ */
+const STEP_UP_REISSUE_COOLDOWN_MS = 5 * 60 * 1000;
+/**
+ * Delivery outcomes that prove a message was not sent. Only these discard its token: a timeout or an
+ * unreadable provider answer may still have delivered it.
+ */
+const DEFINITELY_UNSENT: ReadonlySet<EmailDeliveryResult['outcome']> = new Set([
+  'provider_rejected',
+  'provider_throttled',
+]);
+/** How often a sign-in attempt on an unverified account may re-send the verification email. */
+const VERIFICATION_RESEND_COOLDOWN_MS = 10 * 60 * 1000;
+
+/**
+ * The single answer to any sign-in attempt that needs a second proof. It is the same for a wrong
+ * password, a right one, an unknown handle, and a bad or missing code, so it reveals none of them.
+ */
+function stepUpRequired(): HttpError {
+  return new HttpError(401, 'unauthorized', 'additional verification required', {
+    reason: 'step_up_required',
+  });
+}
 
 function strictBase64UrlDecode(input: unknown, name: string): Buffer {
   if (typeof input !== 'string') throw HttpError.validation(`${name} must be a string`);
@@ -163,6 +205,10 @@ export class AuthService {
   private readonly refreshTtlSec: number;
   private readonly emailSender: EmailSender;
   private readonly webauthn: { rpId: string; origins: readonly string[] };
+  private readonly stepUpKey: Buffer;
+  private readonly logger: Logger;
+  /** Background work requests were answered for; see {@link drainBackground}. */
+  private readonly background = new Set<Promise<void>>();
   private readonly refreshGracePeriodMs: number;
 
   /** Compose authentication dependencies and enforce the bounded refresh-collision policy. */
@@ -175,6 +221,13 @@ export class AuthService {
     refreshTtlSec: number;
     emailSender: EmailSender;
     webauthn: { rpId: string; origins: readonly string[] };
+    /**
+     * Server secret that keys the stored form of login step-up codes. An 8-digit code has too
+     * little entropy for a plain hash: anyone who read the table could recover live codes offline.
+     */
+    codeSecret: string;
+    /** For background work the request never waits on. Defaults to silent. */
+    logger?: Logger;
     refreshGracePeriodMs?: number;
   }) {
     this.repos = deps.repos;
@@ -185,6 +238,10 @@ export class AuthService {
     this.refreshTtlSec = deps.refreshTtlSec;
     this.emailSender = deps.emailSender;
     this.webauthn = deps.webauthn;
+    this.logger = deps.logger ?? new NullLogger();
+    this.stepUpKey = Buffer.from(
+      hkdfSync('sha256', deps.codeSecret, Buffer.alloc(0), 'shatarang/login-step-up-code', 32),
+    );
     const refreshGracePeriodMs = deps.refreshGracePeriodMs ?? DEFAULT_REFRESH_GRACE_PERIOD_MS;
     if (
       !Number.isFinite(refreshGracePeriodMs) ||
@@ -203,6 +260,8 @@ export class AuthService {
     input: { handle: string; password: string; email?: string | null },
     meta: RequestMeta,
   ): Promise<AuthResult> {
+    // Password accounts need an email they can verify: it is the second proof when step-up applies.
+    if (!input.email) throw HttpError.validation('email is required');
     const existing = await this.repos.users.findByHandle(input.handle);
     if (existing) {
       throw HttpError.conflict('handle is already taken', { handle: 'taken' });
@@ -225,7 +284,7 @@ export class AuthService {
     const roles: Role[] = ['user'];
 
     if (input.email) {
-      await this.issueEmailVerification(user.id, input.email);
+      await this.issueEmailVerification(user.id, input.email, undefined, meta);
     }
 
     const tokens = await this.startSession(user, roles, meta);
@@ -233,23 +292,55 @@ export class AuthService {
     return { user, roles, tokens };
   }
 
-  /** Verify credentials and start a session. */
+  /**
+   * Verify credentials and start a session.
+   *
+   * With `stepUp` — decided by the caller, once a handle has had too many recent failures — a
+   * correct password is not enough: it must come with the code most recently emailed to the
+   * account's verified address. Without a code, a correct password on a verified account is what
+   * triggers sending one. Every failure in that mode is the same {@link stepUpRequired} answer.
+   *
+   * A password account whose email is not verified cannot sign in with its password; the correct
+   * password gets a fresh verification email and a `403` saying so. Registration requires an
+   * email, so this only affects accounts that have not confirmed theirs yet.
+   */
   async login(
-    input: { handle: string; password: string },
+    input: { handle: string; password: string; code?: string | undefined },
     meta: RequestMeta,
+    stepUp = false,
   ): Promise<AuthResult> {
     const user = await this.repos.users.findByHandle(input.handle);
-    if (!user) {
-      // Spend comparable time to a real verify so timing does not leak existence.
-      await this.hasher.verify(input.password, DECOY_HASH);
+    const stored = user ? await this.repos.users.getPasswordHash(user.id) : null;
+    // Always one real verify, against the decoy when there is nothing to compare with, so timing
+    // does not tell an unknown handle or a password-less account from a wrong password.
+    const matches = await this.hasher.verify(input.password, stored ?? DECOY_HASH);
+    const passwordOk = user !== null && stored !== null && matches;
+    const emailVerified = user !== null && user.email !== null && user.emailVerifiedAt !== null;
+
+    if (stepUp) {
+      const proven = await this.stepUp(user, input.code, passwordOk && emailVerified, meta);
+      if (!proven) {
+        if (user) await this.audit(meta, user.id, 'auth.login.fail', user.id);
+        throw stepUpRequired();
+      }
+    } else if (!passwordOk) {
+      if (user) await this.audit(meta, user.id, 'auth.login.fail', user.id);
       throw HttpError.unauthorized('invalid credentials');
     }
-    const stored = await this.repos.users.getPasswordHash(user.id);
-    const ok = stored ? await this.hasher.verify(input.password, stored) : false;
-    if (!ok) {
+    // Both branches above leave only a correct password on an existing account.
+    if (!user) throw new Error('Unreachable: a verified password implies an account');
+
+    if (!emailVerified) {
+      if (user.email) {
+        const cutoff = new Date(this.clock.now() - VERIFICATION_RESEND_COOLDOWN_MS);
+        await this.issueEmailVerification(user.id, user.email, cutoff, meta);
+      }
       await this.audit(meta, user.id, 'auth.login.fail', user.id);
-      throw HttpError.unauthorized('invalid credentials');
+      throw new HttpError(403, 'forbidden', 'verify your email address before signing in', {
+        reason: 'email_unverified',
+      });
     }
+
     const roles = await this.repos.users.rolesOf(user.id);
     const prepared = this.prepareSession(user, roles, meta);
     await this.repos.sessions.create(prepared.session);
@@ -450,7 +541,7 @@ export class AuthService {
         kind: 'password_reset',
         expiresAt: new Date(this.clock.now() + 30 * 60 * 1000), // 30 minutes
       }, new Date(this.clock.now()));
-      this.dispatchEmail(() => this.emailSender.sendPasswordReset(user.email!, resetToken));
+      this.dispatchEmail('password_reset', () => this.emailSender.sendPasswordReset(user.email!, resetToken), meta);
     }
   }
 
@@ -458,28 +549,142 @@ export class AuthService {
     const user = await this.repos.users.findById(userId);
     await this.audit(meta, user?.id ?? null, 'auth.email.verification.request', null);
     if (!user?.email) return;
-    await this.issueEmailVerification(user.id, user.email);
+    await this.issueEmailVerification(user.id, user.email, undefined, meta);
   }
 
-  private async issueEmailVerification(userId: string, email: string): Promise<void> {
+  private async issueEmailVerification(
+    userId: string,
+    email: string,
+    reissueCutoff?: Date,
+    meta?: RequestMeta,
+  ): Promise<void> {
     const token = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(token).digest('hex');
     const issued = await this.repos.identityTokens.replaceActiveEmailVerification({
       tokenHash,
       userId,
       expiresAt: new Date(this.clock.now() + 24 * 60 * 60 * 1000), // 24 hours
-    }, new Date(this.clock.now()));
+    }, new Date(this.clock.now()), reissueCutoff);
     if (!issued) return;
-    this.dispatchEmail(() => this.emailSender.sendEmailVerification(email, token));
+    this.dispatchEmail(
+      'email_verify',
+      () => this.emailSender.sendEmailVerification(email, token),
+      meta,
+      // A link the provider refused would otherwise count toward the re-send cooldown.
+      () => this.repos.identityTokens.discardEmailVerification(tokenHash),
+    );
   }
 
-  /** Delivery is best-effort on the request path; provider outcomes belong to bounded metrics. */
-  private dispatchEmail(send: () => Promise<unknown>): void {
+  /**
+   * Delivery is best-effort on the request path; provider outcomes belong to bounded metrics.
+   *
+   * The send runs as tracked background work (see {@link drainBackground}), never awaited: the
+   * request must take the same time whether or not a message went out. `onUndelivered` runs only
+   * when the provider says definitively that it did not send — it rejected or throttled the
+   * message. A timeout or an unreadable answer does not prove the message was not delivered, and
+   * discarding its token then could void a link or code the owner is about to use.
+   */
+  private dispatchEmail(
+    purpose: 'password_reset' | 'email_verify' | 'login_step_up',
+    send: () => Promise<EmailDeliveryResult>,
+    meta?: RequestMeta,
+    onUndelivered?: () => Promise<void>,
+  ): void {
+    this.runInBackground(async () => {
+      let result: EmailDeliveryResult;
+      try {
+        result = await send();
+      } catch {
+        // A sender that throws gives no definitive outcome; its metrics already record it.
+        return;
+      }
+      if (!onUndelivered || !DEFINITELY_UNSENT.has(result.outcome)) return;
+      try {
+        await onUndelivered();
+      } catch (error: unknown) {
+        // The undelivered token is still live and blocks a replacement until it expires. Say so,
+        // without the address, user, token or code.
+        this.logBackgroundFailure('discarding an undelivered email token failed', error, meta, { purpose });
+      }
+    }, meta);
+  }
+
+  /**
+   * Run `work` without making the request wait, keeping it tracked so a graceful shutdown can let
+   * it finish before shared resources close. A failure that escapes `work` is logged.
+   */
+  private runInBackground(work: () => Promise<void>, meta?: RequestMeta): void {
+    const task: Promise<void> = work()
+      .catch((error: unknown) => this.logBackgroundFailure('background auth work failed', error, meta))
+      .finally(() => {
+        this.background.delete(task);
+      });
+    this.background.add(task);
+  }
+
+  /**
+   * Wait for background work that requests have already been answered for — verification re-sends
+   * and email follow-ups — or `timeoutMs`, whichever comes first. Call on shutdown before closing
+   * the database pool, so accepted work is not cut off halfway.
+   */
+  async drainBackground(timeoutMs = 10_000): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
     try {
-      void send().catch(() => undefined);
-    } catch {
-      // Contain a sender that violates its async contract without exposing its error or payload.
+      await Promise.race([Promise.allSettled([...this.background]).then(() => undefined), deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
+  }
+
+  /** Log a failure nobody is waiting on, with request correlation and stack, but no secrets. */
+  private logBackgroundFailure(
+    message: string,
+    error: unknown,
+    meta?: RequestMeta,
+    fields: Record<string, string> = {},
+  ): void {
+    this.logger.warn(message, {
+      ...fields,
+      requestId: meta?.requestId ?? null,
+      traceId: meta?.traceId ?? null,
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? (error.stack ?? null) : null,
+    });
+  }
+
+  /**
+   * {@link resendEmailVerification} in the background, for the public route. The route answers
+   * before any lookup, so its timing cannot tell an unverified account from an unknown or verified
+   * one. A failure is logged, since nobody is waiting to hear about it.
+   */
+  scheduleEmailVerificationResend(handleOrEmail: string, meta: RequestMeta): void {
+    this.runInBackground(async () => {
+      try {
+        await this.resendEmailVerification(handleOrEmail, meta);
+      } catch (error: unknown) {
+        this.logBackgroundFailure('verification re-send failed', error, meta);
+      }
+    }, meta);
+  }
+
+  /**
+   * Re-send the verification email for `handleOrEmail`, without a session. Always resolves the same
+   * way; it sends only to an existing account whose address is still unverified, and at most once
+   * every {@link VERIFICATION_RESEND_COOLDOWN_MS}. This is the way back for an owner who lost the
+   * link — including while their handle is in step-up, where the password alone gets no answer
+   * that would say the address is unverified.
+   */
+  async resendEmailVerification(handleOrEmail: string, meta: RequestMeta): Promise<void> {
+    const user = handleOrEmail.includes('@')
+      ? await this.repos.users.findByEmail(handleOrEmail)
+      : await this.repos.users.findByHandle(handleOrEmail);
+    await this.audit(meta, user?.id ?? null, 'auth.email.verification.resend', null);
+    if (!user?.email || user.emailVerifiedAt !== null) return;
+    const cutoff = new Date(this.clock.now() - VERIFICATION_RESEND_COOLDOWN_MS);
+    await this.issueEmailVerification(user.id, user.email, cutoff, meta);
   }
 
   /**
@@ -817,6 +1022,68 @@ export class AuthService {
     await this.audit(meta, user.id, 'auth.login', user.id);
 
     return { user, roles, tokens };
+  }
+
+  /**
+   * The step-up proof for {@link login}: resolves `true` only when `code` is the account's live
+   * code and `eligible` (a correct password on a verified account) holds.
+   *
+   * Without a code it issues one — to an eligible account only, and only when the account has no
+   * live code already, so an attacker cannot make codes pile up or keep replacing the owner's.
+   * The storage statement runs in every case, for a decoy id when the handle is unknown, so
+   * neither the handle nor the password's correctness changes what the request does.
+   */
+  private async stepUp(
+    user: UserRow | null,
+    code: string | undefined,
+    eligible: boolean,
+    meta: RequestMeta,
+  ): Promise<boolean> {
+    const userId = user?.id ?? randomUUID();
+    const now = new Date(this.clock.now());
+    if (code !== undefined) {
+      return this.repos.identityTokens.checkLoginStepUp(
+        {
+          userId,
+          tokenHash: this.stepUpTokenHash(userId, code),
+          checked: eligible,
+          maxAttempts: STEP_UP_MAX_ATTEMPTS,
+        },
+        now,
+      );
+    }
+    const fresh = String(randomInt(0, 10 ** STEP_UP_CODE_DIGITS)).padStart(STEP_UP_CODE_DIGITS, '0');
+    const issued = await this.repos.identityTokens.issueLoginStepUp(
+      {
+        userId,
+        tokenHash: this.stepUpTokenHash(userId, fresh),
+        expiresAt: new Date(now.getTime() + STEP_UP_CODE_TTL_MS),
+        eligible,
+        maxAttempts: STEP_UP_MAX_ATTEMPTS,
+        reissueCutoff: new Date(now.getTime() - STEP_UP_REISSUE_COOLDOWN_MS),
+      },
+      now,
+    );
+    const email = user?.email;
+    if (issued && email) {
+      const tokenHash = this.stepUpTokenHash(userId, fresh);
+      this.dispatchEmail(
+        'login_step_up',
+        () => this.emailSender.sendLoginCode(email, fresh),
+        meta,
+        // An undelivered code would otherwise block a new one until it expires.
+        () => this.repos.identityTokens.discardLoginStepUp(userId, tokenHash),
+      );
+    }
+    return false;
+  }
+
+  /**
+   * The stored form of a step-up code: an HMAC under a server key, over the user id and the code.
+   * The id makes equal codes for two accounts differ, so a code only matches its own account.
+   */
+  private stepUpTokenHash(userId: string, code: string): string {
+    return createHmac('sha256', this.stepUpKey).update(`${userId}:${code}`).digest('hex');
   }
 
   private async startSession(

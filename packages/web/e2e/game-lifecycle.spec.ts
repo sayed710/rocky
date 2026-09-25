@@ -9,10 +9,10 @@ test('leaving a game closes its WebSocket before another game route mounts', asy
   const blackHandle = `e2e-life-b-${suffix}`;
   const password = 'test-password-123';
   const whiteRegistration = await request.post('/v1/auth/register', {
-    data: { handle: whiteHandle, password },
+    data: { handle: whiteHandle, password, email: `${whiteHandle}@example.test` },
   });
   const blackRegistration = await request.post('/v1/auth/register', {
-    data: { handle: blackHandle, password },
+    data: { handle: blackHandle, password, email: `${blackHandle}@example.test` },
   });
   expect(whiteRegistration.ok()).toBeTruthy();
   expect(blackRegistration.ok()).toBeTruthy();

@@ -241,7 +241,17 @@
             }
           },
           "401": {
-            "description": "Invalid credentials",
+            "description": "Invalid credentials, or `details.reason` = `step_up_required`: a password alone is no longer enough for this handle; resend with the emailed `code`, or use a passkey",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "`details.reason` = `email_unverified`: verify the email address first",
             "content": {
               "application/json": {
                 "schema": {
@@ -497,6 +507,40 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/PasswordResetRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/email/verification/resend": {
+      "post": {
+        "summary": "Re-send the verification email without a session",
+        "tags": [
+          "auth"
+        ],
+        "operationId": "post_v1_auth_email_verification_resend",
+        "responses": {
+          "202": {
+            "description": "Accepted — the same answer whether or not an email was sent"
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmailVerificationResendRequest"
               }
             }
           }
@@ -14304,7 +14348,8 @@
         "type": "object",
         "required": [
           "handle",
-          "password"
+          "password",
+          "email"
         ],
         "properties": {
           "handle": {
@@ -14319,11 +14364,10 @@
             "maxLength": 1024
           },
           "email": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "email"
+            "type": "string",
+            "format": "email",
+            "maxLength": 320,
+            "description": "Required. Must be verified before the password can be used to sign in."
           }
         },
         "additionalProperties": false
@@ -14340,6 +14384,11 @@
           },
           "password": {
             "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[0-9]{8}$",
+            "description": "The sign-in code emailed after a `step_up_required` answer. Send the password without it first; a correct password then emails a code to the verified address."
           }
         },
         "additionalProperties": false
@@ -14608,6 +14657,19 @@
         "properties": {
           "handleOrEmail": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EmailVerificationResendRequest": {
+        "type": "object",
+        "required": [
+          "handleOrEmail"
+        ],
+        "properties": {
+          "handleOrEmail": {
+            "type": "string",
+            "maxLength": 320
           }
         },
         "additionalProperties": false

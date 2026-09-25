@@ -76,7 +76,7 @@ test('full game vs. bot — DOM clicks, bot resigns, terminal state shown', asyn
   // 1. Register a user
   const handle = `e2e-bot-${Date.now()}`;
   const regResp = await request.post('/v1/auth/register', {
-    data: { handle, password: 'test-password-123' },
+    data: { handle, password: 'test-password-123', email: `${handle}@example.test` },
   });
   expect(regResp.ok()).toBeTruthy();
   const auth = await regResp.json();

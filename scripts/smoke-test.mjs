@@ -47,7 +47,7 @@ async function registerUser(handle, password) {
   const res = await fetch(`${apiUrl}/v1/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ handle, password }),
+    body: JSON.stringify({ handle, password, email: `${handle}@example.test` }),
   });
   if (!res.ok) {
     const text = await res.text();

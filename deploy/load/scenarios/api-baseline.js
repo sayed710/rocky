@@ -128,6 +128,7 @@ export function authPath() {
   const payload = JSON.stringify({
     handle: `load_${suffix}`,
     password: 'load-test-password-123',
+    email: `load_${suffix}@example.test`,
   });
   const params = { headers: { 'content-type': 'application/json' }, tags: { name: 'register' } };
 

@@ -7,7 +7,7 @@ import type { AuthResponse, LoginRequest, RegisterRequest } from '../src/api/mod
 import type { StoredSession, KeyValueStorage } from '../src/net/session.js';
 import { MemoryTokenStore } from '../src/net/session.js';
 import { json } from './support/fake-transport.js';
-import { NetworkError } from '../src/net/errors.js';
+import { ForbiddenError, NetworkError, UnauthorizedError } from '../src/net/errors.js';
 
 /** Provide isolated Web Storage semantics for each controller test. */
 function makeFakeStorage(): KeyValueStorage {
@@ -134,7 +134,7 @@ test('register creates a session with correct fields', async () => {
     client,
     callbacks: { onSessionChange: () => {}, onPending: () => {}, onError: () => {} },
   });
-  const session = await ctrl.register('bob', 'pw');
+  const session = await ctrl.register('bob', 'pw', 'bob@example.com');
   assert.ok(session);
   assert.equal(session!.handle, 'bob');
   assert.equal(session!.userId, 'u2');
@@ -143,7 +143,7 @@ test('register creates a session with correct fields', async () => {
 /**
  * Capture the exact body the controller hands `GambitClient.auth`, for one method.
  *
- * The assertion that matters for the optional registration email is the *shape* of that object,
+ * The assertion that matters for the registration email and the sign-in code is the *shape* of that object,
  * not a serialization of it: `assert.deepEqual` under `node:assert/strict` already treats
  * `{ handle, password, email: undefined }` as different from `{ handle, password }`, and comparing
  * the key set on top says so in the language of the requirement. Comparing `JSON.stringify` output
@@ -171,7 +171,7 @@ function captureAuthBody<T>(method: 'register' | 'login'): {
   return { controller, bodies };
 }
 
-test('register forwards a trimmed optional email', async () => {
+test('register forwards a trimmed email', async () => {
   const { controller, bodies } = captureAuthBody<RegisterRequest>('register');
 
   await controller.register('bob', 'pw', '  bob@example.com  ');
@@ -180,29 +180,107 @@ test('register forwards a trimmed optional email', async () => {
   assert.deepEqual(bodies[0], { handle: 'bob', password: 'pw', email: 'bob@example.com' });
 });
 
-test('register omits the email key entirely when no email is given or it is blank', async () => {
-  const { controller, bodies } = captureAuthBody<RegisterRequest>('register');
+test('register refuses a missing or blank email before sending anything', async () => {
+  const bodies: RegisterRequest[] = [];
+  const errors: string[] = [];
+  const client = makeFakeClient({
+    register: async (body: RegisterRequest) => {
+      bodies.push(body);
+      throw new Error('must not be called');
+    },
+  }) as unknown as GambitClient;
+  const controller = new AuthController({
+    client,
+    callbacks: { onSessionChange: () => {}, onPending: () => {}, onError: (m) => { errors.push(m); } },
+  });
 
-  await controller.register('bob', 'pw');
-  await controller.register('bob', 'pw', '   ');
+  assert.equal(await controller.register('bob', 'pw'), null);
+  assert.equal(await controller.register('bob', 'pw', '   '), null);
 
-  assert.equal(bodies.length, 2);
-  for (const body of bodies) {
-    assert.deepEqual(body, { handle: 'bob', password: 'pw' });
-    // Absent, not present-and-empty: the server treats a supplied address as one to verify, so an
-    // `email: ''` or `email: null` reaching the wire is a different request from an email-less one.
-    assert.deepEqual(Object.keys(body).sort(), ['handle', 'password']);
-  }
+  assert.equal(bodies.length, 0, 'a password account needs an email it can verify');
+  assert.deepEqual(errors, [
+    'An email address is required to create an account.',
+    'An email address is required to create an account.',
+  ]);
 });
 
-test('sign-in is unaffected by the optional registration email and still sends only credentials', async () => {
+test('sign-in sends only credentials unless a code is given', async () => {
   const { controller, bodies } = captureAuthBody<LoginRequest>('login');
 
   await controller.login('alice', 'pw');
+  await controller.login('alice', 'pw', '   ');
+  await controller.login('alice', 'pw', ' 12345678 ');
 
-  assert.equal(bodies.length, 1);
-  assert.deepEqual(bodies[0], { handle: 'alice', password: 'pw' });
-  assert.deepEqual(Object.keys(bodies[0]!).sort(), ['handle', 'password']);
+  assert.deepEqual(bodies, [
+    { handle: 'alice', password: 'pw' },
+    { handle: 'alice', password: 'pw' },
+    { handle: 'alice', password: 'pw', code: '12345678' },
+  ]);
+});
+
+/** A controller whose sign-in fails with `err`, recording what it tells the page. */
+function refusedSignIn(err: Error): {
+  readonly controller: AuthController;
+  readonly errors: string[];
+  readonly stepUps: boolean[];
+} {
+  const errors: string[] = [];
+  const stepUps: boolean[] = [];
+  const client = makeFakeClient({ login: async () => { throw err; } }) as unknown as GambitClient;
+  const controller = new AuthController({
+    client,
+    callbacks: {
+      onSessionChange: () => {},
+      onPending: () => {},
+      onError: (m) => { errors.push(m); },
+      onStepUp: (required) => { stepUps.push(required); },
+    },
+  });
+  return { controller, errors, stepUps };
+}
+
+test('a step-up answer asks for the emailed code without saying whether the account exists', async () => {
+  const { controller, errors, stepUps } = refusedSignIn(new UnauthorizedError({
+    status: 401,
+    code: 'unauthorized',
+    message: 'additional verification required',
+    retryable: false,
+    details: { reason: 'step_up_required' },
+  }));
+
+  assert.equal(await controller.login('alice', 'pw'), null);
+  assert.deepEqual(stepUps, [true]);
+  assert.match(errors[0] ?? '', /^Additional verification is required\. If this account has a verified email/);
+});
+
+test('an unverified email is explained, and does not ask for a code', async () => {
+  const { controller, errors, stepUps } = refusedSignIn(new ForbiddenError({
+    status: 403,
+    code: 'forbidden',
+    message: 'verify your email address before signing in',
+    retryable: false,
+    details: { reason: 'email_unverified' },
+  }));
+
+  assert.equal(await controller.login('alice', 'pw'), null);
+  assert.deepEqual(stepUps, []);
+  assert.equal(errors[0], 'Verify your email address before signing in. We sent a new verification link.');
+});
+
+test('a successful sign-in withdraws the code field', async () => {
+  const stepUps: boolean[] = [];
+  const controller = new AuthController({
+    client: makeFakeClient() as unknown as GambitClient,
+    callbacks: {
+      onSessionChange: () => {},
+      onPending: () => {},
+      onError: () => {},
+      onStepUp: (required) => { stepUps.push(required); },
+    },
+  });
+
+  assert.ok(await controller.login('alice', 'pw', '12345678'));
+  assert.deepEqual(stepUps, [false]);
 });
 
 test('logout clears session and calls onSessionChange(null)', async () => {
@@ -931,4 +1009,44 @@ test('M2: isAuthenticated gates create-seek path', async () => {
   // After logout: not authenticated
   await ctrl.logout();
   assert.equal(ctrl.isAuthenticated(), false);
+});
+
+test('resending verification sends the handle without a session and answers neutrally', async () => {
+  const bodies: unknown[] = [];
+  const errors: string[] = [];
+  const client = makeFakeClient({
+    resendEmailVerification: async (body: unknown) => { bodies.push(body); },
+  }) as unknown as GambitClient;
+  const controller = new AuthController({
+    client,
+    callbacks: { onSessionChange: () => {}, onPending: () => {}, onError: (m) => { errors.push(m); } },
+  });
+
+  await controller.resendVerification('   ');
+  await controller.resendVerification(' alice ');
+
+  assert.deepEqual(bodies, [{ handleOrEmail: 'alice' }], 'a blank field sends nothing');
+  assert.deepEqual(errors, [
+    'Enter your handle or email to get a new verification link.',
+    'If that account has an unverified email address, a new verification link is on its way.',
+  ]);
+});
+
+// Every sign-in path (password, passkey, registration, restore) adopts the session through the
+// same step, and every sign-out clears it through one, so these two cover all of them.
+test('adopting or clearing a session withdraws a pending step-up', async () => {
+  const stepUps: boolean[] = [];
+  const controller = new AuthController({
+    client: makeFakeClient() as unknown as GambitClient,
+    callbacks: {
+      onSessionChange: () => {},
+      onPending: () => {},
+      onError: () => {},
+      onStepUp: (required) => { stepUps.push(required); },
+    },
+  });
+
+  assert.ok(await controller.login('alice', 'pw'));
+  await controller.logout();
+  assert.deepEqual(stepUps, [false, false], 'signing in and signing out each clear the code field');
 });

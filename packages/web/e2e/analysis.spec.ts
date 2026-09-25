@@ -44,7 +44,7 @@ async function gameAsSignedInPlayer(
 ): Promise<{ gameId: string }> {
   const handle = `an-${randomUUID().replaceAll('-', '').slice(0, 8)}`;
 
-  const registered = await request.post('/v1/auth/register', { data: { handle, password: PASSWORD } });
+  const registered = await request.post('/v1/auth/register', { data: { handle, password: PASSWORD, email: `${handle}@example.test` } });
   expect(registered.ok()).toBeTruthy();
   const auth = await registered.json();
 

@@ -23,6 +23,7 @@
 import type { GambitClient } from '../api/client.js';
 import type { RegisterRequest } from '../api/models.js';
 import type { KeyValueStorage } from '../net/session.js';
+import { HttpError } from '../net/errors.js';
 import { isTransientRefreshFailure, NoSessionError } from '../net/session.js';
 import { NativeWebAuthnAdapter } from '../ports/webauthn.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
@@ -35,6 +36,34 @@ export interface AuthCallbacks {
   onPending: (pending: boolean) => void;
   /** Called when an error occurs (for UI error display). */
   onError: (message: string) => void;
+  /**
+   * Called with `true` when sign-in needs the emailed code as well as the password, and with
+   * `false` once it is no longer needed. Optional: without it the error message still explains.
+   */
+  onStepUp?: (required: boolean) => void;
+}
+
+/** The server's `details.reason` on a refused sign-in, when it gives one. */
+function refusalReason(err: unknown): string | undefined {
+  if (!(err instanceof HttpError)) return undefined;
+  const reason = err.details?.['reason'];
+  return typeof reason === 'string' ? reason : undefined;
+}
+
+/**
+ * What to tell the person for a refused password sign-in. The step-up wording is the same whether
+ * or not the handle exists, because the server's answer is.
+ */
+function signInError(err: unknown): string {
+  switch (refusalReason(err)) {
+    case 'step_up_required':
+      return 'Additional verification is required. If this account has a verified email address, ' +
+        'a sign-in code has been sent to it. Enter the code, or sign in with a passkey.';
+    case 'email_unverified':
+      return 'Verify your email address before signing in. We sent a new verification link.';
+    default:
+      return err instanceof Error ? err.message : String(err);
+  }
 }
 
 /**
@@ -192,19 +221,25 @@ export class AuthController {
     return null;
   }
 
-  /** Log in with handle + password. Returns the session on success. */
-  async login(handle: string, password: string): Promise<AuthSession | null> {
+  /**
+   * Log in with handle + password, plus the emailed code when the server asked for one. Returns the
+   * session on success.
+   */
+  async login(handle: string, password: string, code?: string): Promise<AuthSession | null> {
     if (this.disposed) return null;
     const managerGeneration = this.client.session.captureGeneration();
     const generation = this.sessionGeneration;
     this.beginPendingOperation();
     try {
-      const result = await this.client.auth.login({ handle, password }, managerGeneration);
+      const trimmedCode = code?.trim() ?? '';
+      const body = trimmedCode ? { handle, password, code: trimmedCode } : { handle, password };
+      const result = await this.client.auth.login(body, managerGeneration);
       if (this.disposed || generation !== this.sessionGeneration) return null;
       return this.adoptSession(result.user);
     } catch (err) {
       if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
-      this.callbacks.onError(err instanceof Error ? err.message : String(err));
+      if (refusalReason(err) === 'step_up_required') this.callbacks.onStepUp?.(true);
+      this.callbacks.onError(signInError(err));
       return null;
     } finally {
       this.finishPendingOperation();
@@ -244,15 +279,24 @@ export class AuthController {
     }
   }
 
-  /** Register a new account. Returns the session on success. */
+  /**
+   * Register a new account. Returns the session on success.
+   *
+   * An email is required: the password can sign in only once it is verified, and it receives the
+   * sign-in code when the account is under attack. A blank one is refused here, before any request.
+   */
   async register(handle: string, password: string, email?: string): Promise<AuthSession | null> {
     if (this.disposed) return null;
+    const trimmed = email?.trim() ?? '';
+    if (!trimmed) {
+      this.callbacks.onError('An email address is required to create an account.');
+      return null;
+    }
     const managerGeneration = this.client.session.captureGeneration();
     const generation = this.sessionGeneration;
     this.beginPendingOperation();
     try {
-      const trimmed = email?.trim() ?? '';
-      const body: RegisterRequest = trimmed ? { handle, password, email: trimmed } : { handle, password };
+      const body: RegisterRequest = { handle, password, email: trimmed };
       const result = await this.client.auth.register(body, managerGeneration);
       if (this.disposed || generation !== this.sessionGeneration) return null;
       return this.adoptSession(result.user);
@@ -260,6 +304,30 @@ export class AuthController {
       if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
       this.callbacks.onError(err instanceof Error ? err.message : String(err));
       return null;
+    } finally {
+      this.finishPendingOperation();
+    }
+  }
+
+  /**
+   * Ask for a new verification link for `handleOrEmail`, without a session. The message is the
+   * same whether or not anything was sent, because the server's answer is.
+   */
+  async resendVerification(handleOrEmail: string): Promise<void> {
+    if (this.disposed) return;
+    const trimmed = handleOrEmail.trim();
+    if (!trimmed) {
+      this.callbacks.onError('Enter your handle or email to get a new verification link.');
+      return;
+    }
+    this.beginPendingOperation();
+    try {
+      await this.client.auth.resendEmailVerification({ handleOrEmail: trimmed });
+      this.callbacks.onError(
+        'If that account has an unverified email address, a new verification link is on its way.',
+      );
+    } catch (err) {
+      this.callbacks.onError(err instanceof Error ? err.message : String(err));
     } finally {
       this.finishPendingOperation();
     }
@@ -313,6 +381,8 @@ export class AuthController {
     this.sessionGeneration++;
     this.session = null;
     this.clearPersisted();
+    // Any session change ends a pending step-up, so a later sign-in starts without a stale code.
+    this.callbacks.onStepUp?.(false);
     this.callbacks.onSessionChange(null);
   }
 
@@ -360,6 +430,8 @@ export class AuthController {
       userId: user.id,
     };
     this.persist();
+    // However the session arrived — password, passkey, registration, restore — step-up is over.
+    this.callbacks.onStepUp?.(false);
     this.callbacks.onSessionChange(this.session);
     return this.session;
   }

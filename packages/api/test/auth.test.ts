@@ -7,7 +7,7 @@ import { createInMemoryRepositories } from '../src/fakes';
 import { InMemoryEmailSender } from '../src/ports/email';
 import { ManualClock } from '../src/ports/clock';
 import { uuidv7Generator } from '../src/ports/ids';
-import { START_MS, TEST_SECRET, startHarness } from './helpers';
+import { START_MS, TEST_SECRET, startHarness, verifyEmail } from './helpers';
 
 /** Construct the auth service at a chosen refresh-collision grace boundary. */
 function authServiceWithGrace(refreshGracePeriodMs: number): AuthService {
@@ -21,6 +21,7 @@ function authServiceWithGrace(refreshGracePeriodMs: number): AuthService {
     refreshTtlSec: 3_600,
     emailSender: new InMemoryEmailSender(),
     webauthn: { rpId: 'localhost', origins: ['http://localhost'] },
+    codeSecret: TEST_SECRET,
     refreshGracePeriodMs,
   });
 }
@@ -37,7 +38,7 @@ test('register issues tokens and grants the base user role', async () => {
   const h = await startHarness();
   try {
     const res = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'alice', password: 'hunter2hunter2' },
+      body: { handle: 'alice', password: 'hunter2hunter2', email: 'alice@example.test' },
     });
     assert.equal(res.status, 201);
     assert.equal(res.body.user.handle, 'alice');
@@ -58,9 +59,9 @@ test('register issues tokens and grants the base user role', async () => {
 test('duplicate handle is rejected with 409 (case-insensitive)', async () => {
   const h = await startHarness();
   try {
-    await h.json('POST', '/v1/auth/register', { body: { handle: 'Bob', password: 'password123' } });
+    await h.json('POST', '/v1/auth/register', { body: { handle: 'Bob', password: 'password123', email: 'Bob@example.test' } });
     const dup = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'bob', password: 'password123' },
+      body: { handle: 'bob', password: 'password123', email: 'bob@example.test' },
     });
     assert.equal(dup.status, 409);
     assert.equal(dup.body.error.code, 'conflict');
@@ -74,7 +75,7 @@ test('concurrent registration creates one complete account and returns one confl
   try {
     const requests = ['RaceUser', 'raceuser'].map((handle) =>
       h.json('POST', '/v1/auth/register', {
-        body: { handle, password: 'password123' },
+        body: { handle, password: 'password123', email: `${handle}@example.test` },
       }));
     const responses = await Promise.all(requests);
     assert.deepEqual(responses.map((response) => response.status).sort(), [201, 409]);
@@ -91,7 +92,7 @@ test('invalid registration input is a 422 with details', async () => {
   const h = await startHarness();
   try {
     const res = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'a', password: 'short' },
+      body: { handle: 'a', password: 'short', email: 'a@example.test' },
     });
     assert.equal(res.status, 422);
     assert.equal(res.body.error.code, 'validation_failed');
@@ -104,7 +105,8 @@ test('invalid registration input is a 422 with details', async () => {
 test('login succeeds with correct password and fails otherwise', async () => {
   const h = await startHarness();
   try {
-    await h.json('POST', '/v1/auth/register', { body: { handle: 'carol', password: 'passw0rd!!' } });
+    await h.json('POST', '/v1/auth/register', { body: { handle: 'carol', password: 'passw0rd!!', email: 'carol@example.test' } });
+    await verifyEmail(h, 'carol@example.test');
     const ok = await h.json('POST', '/v1/auth/login', {
       body: { handle: 'carol', password: 'passw0rd!!' },
     });
@@ -125,9 +127,10 @@ test('a login verified before password reset cannot create a surviving session a
   const h = await startHarness();
   try {
     const registered = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'reset-race', password: 'old-passw0rd!!' },
+      body: { handle: 'reset-race', password: 'old-passw0rd!!', email: 'reset-race@example.test' },
     });
     const userId = registered.body.user.id as string;
+    await verifyEmail(h, 'reset-race@example.test');
     const originalCreate = h.repos.sessions.create.bind(h.repos.sessions);
     let releaseCreate!: () => void;
     const createGate = new Promise<void>((resolve) => { releaseCreate = resolve; });
@@ -173,7 +176,7 @@ test('the access token authorizes /v1/users/me', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'dave', password: 'passw0rd!!' },
+      body: { handle: 'dave', password: 'passw0rd!!', email: 'dave@example.test' },
     });
     const me = await h.json('GET', '/v1/users/me', { token: reg.body.tokens.accessToken });
     assert.equal(me.status, 200);
@@ -187,7 +190,7 @@ test('refresh rotates the token and revokes the old session', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'erin', password: 'passw0rd!!' },
+      body: { handle: 'erin', password: 'passw0rd!!', email: 'erin@example.test' },
     });
     const first = reg.body.tokens.refreshToken;
     const rot = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: first } });
@@ -207,7 +210,7 @@ test('two concurrent refreshes consume a token at most once', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'refresh-race', password: 'passw0rd!!' },
+      body: { handle: 'refresh-race', password: 'passw0rd!!', email: 'refresh-race@example.test' },
     });
     const refreshToken = reg.body.tokens.refreshToken;
     const responses = await Promise.all([
@@ -224,7 +227,7 @@ test('two concurrent refreshes from the same token family leave the winner succe
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'refresh-race-survives', password: 'passw0rd!!' },
+      body: { handle: 'refresh-race-survives', password: 'passw0rd!!', email: 'refresh-race-survives@example.test' },
     });
     const refreshToken = reg.body.tokens.refreshToken;
     const responses = await Promise.all([
@@ -249,7 +252,7 @@ test('a refresh collision delayed beyond the grace period triggers reuse detecti
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'delayed-refresh-race', password: 'passw0rd!!' },
+      body: { handle: 'delayed-refresh-race', password: 'passw0rd!!', email: 'delayed-refresh-race@example.test' },
     });
     const refreshToken = reg.body.tokens.refreshToken;
     const rotate = h.repos.sessions.rotate.bind(h.repos.sessions);
@@ -291,7 +294,7 @@ test('replaying a rotated token within the grace period returns 401 without burn
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'grace-user', password: 'passw0rd!!' },
+      body: { handle: 'grace-user', password: 'passw0rd!!', email: 'grace-user@example.test' },
     });
     const t0 = reg.body.tokens.refreshToken;
     const r1 = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
@@ -316,7 +319,7 @@ test('reusing a rotated refresh token burns the whole session chain', async () =
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'frank', password: 'passw0rd!!' },
+      body: { handle: 'frank', password: 'passw0rd!!', email: 'frank@example.test' },
     });
     const t0 = reg.body.tokens.refreshToken;
     const r1 = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
@@ -340,7 +343,7 @@ test('clock rollback when replaying a rotated token triggers reuse detection', a
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'clock-skew-user', password: 'passw0rd!!' },
+      body: { handle: 'clock-skew-user', password: 'passw0rd!!', email: 'clock-skew-user@example.test' },
     });
     const t0 = reg.body.tokens.refreshToken;
     const r1 = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: t0 } });
@@ -370,7 +373,7 @@ test('expired refresh tokens are rejected', async () => {
   const h = await startHarness({ refreshTokenTtlSec: 60 });
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'gail', password: 'passw0rd!!' },
+      body: { handle: 'gail', password: 'passw0rd!!', email: 'gail@example.test' },
     });
     h.clock.advance(61_000);
     const res = await h.json('POST', '/v1/auth/refresh', {
@@ -386,7 +389,7 @@ test('logout revokes the session; listing sessions reflects it', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'hank', password: 'passw0rd!!' },
+      body: { handle: 'hank', password: 'passw0rd!!', email: 'hank@example.test' },
     });
     const token = reg.body.tokens.accessToken;
     const refresh = reg.body.tokens.refreshToken;
@@ -413,7 +416,7 @@ test('logout of a rotated token revokes its live successor chain', async () => {
   const h = await startHarness();
   try {
     const registered = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'logout-race', password: 'passw0rd!!' },
+      body: { handle: 'logout-race', password: 'passw0rd!!', email: 'logout-race@example.test' },
     });
     const originalRefresh = registered.body.tokens.refreshToken;
     const rotated = await h.json('POST', '/v1/auth/refresh', {
@@ -457,10 +460,11 @@ test('a user can revoke one of their own sessions, and the refresh token dies wi
   try {
     // Two sessions for the same user: register, then log in again.
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'sonia', password: 'passw0rd!!' },
+      body: { handle: 'sonia', password: 'passw0rd!!', email: 'sonia@example.test' },
     });
     const token = reg.body.tokens.accessToken;
     const firstRefresh = reg.body.tokens.refreshToken;
+    await verifyEmail(h, 'sonia@example.test');
 
     const second = await h.json('POST', '/v1/auth/login', {
       body: { handle: 'sonia', password: 'passw0rd!!' },
@@ -519,10 +523,10 @@ test('a user cannot revoke another user\'s session, and is not told it exists', 
   const h = await startHarness();
   try {
     const mallory = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'mallory', password: 'passw0rd!!' },
+      body: { handle: 'mallory', password: 'passw0rd!!', email: 'mallory@example.test' },
     });
     const victim = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'victim', password: 'passw0rd!!' },
+      body: { handle: 'victim', password: 'passw0rd!!', email: 'victim@example.test' },
     });
 
     const victimSessions = await h.json('GET', '/v1/auth/sessions', {
@@ -551,7 +555,7 @@ test('revoking an unknown session id is a 404', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'nadia', password: 'passw0rd!!' },
+      body: { handle: 'nadia', password: 'passw0rd!!', email: 'nadia@example.test' },
     });
     const res = await h.json('DELETE', '/v1/auth/sessions/does-not-exist', {
       token: reg.body.tokens.accessToken,
@@ -571,7 +575,7 @@ test('revoking an already-revoked session succeeds and does not audit twice', as
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'ivan', password: 'passw0rd!!' },
+      body: { handle: 'ivan', password: 'passw0rd!!', email: 'ivan@example.test' },
     });
     const token = reg.body.tokens.accessToken;
     const list = await h.json('GET', '/v1/auth/sessions', { token });
@@ -596,7 +600,7 @@ test('simultaneous revocations of the same session audit it once', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'wanda', password: 'passw0rd!!' },
+      body: { handle: 'wanda', password: 'passw0rd!!', email: 'wanda@example.test' },
     });
     const token = reg.body.tokens.accessToken;
     const list = await h.json('GET', '/v1/auth/sessions', { token });
@@ -628,7 +632,7 @@ test('revoking a session also ends the session it was rotated into', async () =>
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'oscar', password: 'passw0rd!!' },
+      body: { handle: 'oscar', password: 'passw0rd!!', email: 'oscar@example.test' },
     });
     const originalId = (await h.json('GET', '/v1/auth/sessions', { token: reg.body.tokens.accessToken }))
       .body[0].id;
@@ -660,7 +664,7 @@ test('replaying a rotated-away refresh token still burns the account', async () 
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'trudy', password: 'passw0rd!!' },
+      body: { handle: 'trudy', password: 'passw0rd!!', email: 'trudy@example.test' },
     });
     const stolen = reg.body.tokens.refreshToken;
 
@@ -691,7 +695,7 @@ test('a stolen refresh token is detected however many rotations have happened si
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'peggy', password: 'passw0rd!!' },
+      body: { handle: 'peggy', password: 'passw0rd!!', email: 'peggy@example.test' },
     });
     const stolen = reg.body.tokens.refreshToken;
 
@@ -720,7 +724,7 @@ test('refresh reuse detection is independent of repository session ordering', as
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'ordering', password: 'passw0rd!!' },
+      body: { handle: 'ordering', password: 'passw0rd!!', email: 'ordering@example.test' },
     });
     const stolen = reg.body.tokens.refreshToken;
     const second = await h.json('POST', '/v1/auth/refresh', { body: { refreshToken: stolen } });

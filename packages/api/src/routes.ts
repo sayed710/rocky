@@ -31,7 +31,8 @@ import {
   REFRESH_COOKIE_NAME,
 } from './http/cookie';
 import { strictObject, oneOf, optBoolean, optInt, optString, parseLimit, reqBoolean, reqString } from './http/validate';
-import type { RateLimiter, RateLimitRequest } from './ports/rate-limiter';
+import type { RateLimiter, RateLimitRequest, RateLimitReservation } from './ports/rate-limiter';
+import type { Logger } from './ports/logger';
 import type { Metrics } from './ports/metrics';
 import type { ApiConfig } from './config';
 import type { Chess960StartSelector } from './ports/chess960';
@@ -311,12 +312,14 @@ export function buildRouter(deps: RouteDeps): Router {
    * Admit a request against every bucket that guards it, or refuse it having charged none.
    *
    * This is the only caller of `rateLimiter.admit` in the file, and routes reach the limiter
-   * only through it. That is deliberate: the defect this replaced was six routes each calling
-   * the limiter twice in sequence, charging the first bucket before learning that the second
-   * refused. Handing every bucket over in one call is what lets the limiter decide before it
-   * commits; a second `await admit(...)` in the same handler would be two independent
-   * decisions again and would reintroduce exactly that bug. `rate-limit-structure.test.ts`
-   * fails if one appears.
+   * only through it or through `admit`, which wraps it. That is deliberate: the defect this
+   * replaced was six routes each calling the limiter twice in sequence, charging the first bucket
+   * before learning that the second refused. Handing every bucket over in one call is what lets
+   * the limiter decide before it commits; a second `admit(...)` or `reserve(...)` in the same
+   * handler would be two independent decisions again and would reintroduce exactly that bug.
+   * `rate-limit-structure.test.ts` fails if one appears.
+   *
+   * Resolves to the reservations for the buckets marked `refundable`, for `refund` to hand back.
    *
    * `retryAfterSeconds` is whatever the limiter reports, which for a multi-bucket refusal is
    * the longest wait among the buckets that refused rather than the first one it looked at.
@@ -329,10 +332,44 @@ export function buildRouter(deps: RouteDeps): Router {
    * `/v1/auth/refresh` keeps that single statement and its exposure is unchanged. Raised in the
    * CodeRabbit review of PR #137.
    */
-  const admit = async (buckets: readonly RateLimitRequest[]): Promise<void> => {
-    if (!config.rateLimit.enabled) return;
+  const reserve = async (
+    buckets: readonly RateLimitRequest[],
+  ): Promise<readonly RateLimitReservation[]> => {
+    if (!config.rateLimit.enabled) return [];
     const result = await rateLimiter.admit(buckets);
     if (!result.allowed) throw HttpError.rateLimited(result.retryAfterSeconds);
+    return result.reservations ?? [];
+  };
+
+  /** {@link reserve} for a route with no failure budget to refund later. */
+  const admit = async (buckets: readonly RateLimitRequest[]): Promise<void> => {
+    await reserve(buckets);
+  };
+
+  /**
+   * Hand back the slots `reserve` took in failure budgets (the buckets it was given as
+   * `refundable`), once the request is known to have succeeded.
+   *
+   * Unlike `admit`, a fault here is logged, not thrown. The work the bucket guards has already
+   * happened — for login, a session exists — so failing the response would discard a real success,
+   * and a retry would spend more quota. A lost refund leaves the slot charged until the window ends,
+   * which is the fail-closed direction anyway.
+   */
+  const refund = async (
+    log: Logger,
+    reservations: readonly RateLimitReservation[],
+  ): Promise<void> => {
+    if (reservations.length === 0) return;
+    try {
+      await rateLimiter.refund(reservations);
+    } catch (error: unknown) {
+      log.warn('rate limit refund failed; slots stay charged until their window ends', {
+        // Keys embed handles and addresses, so only their number is logged.
+        buckets: reservations.length,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? (error.stack ?? null) : null,
+      });
+    }
   };
 
   const cookieOpts = { secure: config.cookieSecure };
@@ -430,8 +467,9 @@ export function buildRouter(deps: RouteDeps): Router {
         throw HttpError.conflict('handle is reserved');
       }
       const password = reqString(body, 'password', { min: 8, max: 1024 });
-      const email = optString(body, 'email', { max: 320, trim: true, pattern: EMAIL_ADDRESS_PATTERN });
-      const result = await auth.register({ handle, password, email: email ?? null }, meta(ctx));
+      // Required (audit P1-1): a password account's verified email is its step-up proof.
+      const email = reqString(body, 'email', { max: 320, trim: true, pattern: EMAIL_ADDRESS_PATTERN });
+      const result = await auth.register({ handle, password, email }, meta(ctx));
       return json(201, {
         user: selfUser(result.user, result.roles),
         tokens: result.tokens,
@@ -447,20 +485,58 @@ export function buildRouter(deps: RouteDeps): Router {
       summary: 'Log in with a password',
       tags: ['auth'],
       requestSchema: 'LoginRequest',
-      responses: { 200: ['AuthResponse', 'Authenticated'], 401: ['Error', 'Invalid credentials'] },
+      responses: {
+        200: ['AuthResponse', 'Authenticated'],
+        401: [
+          'Error',
+          'Invalid credentials, or `details.reason` = `step_up_required`: a password alone is no ' +
+            'longer enough for this handle; resend with the emailed `code`, or use a passkey',
+        ],
+        403: ['Error', '`details.reason` = `email_unverified`: verify the email address first'],
+      },
     }),
     PUBLIC,
     async (ctx) => {
-      const body = strictObject(ctx.body, ['handle', 'password']);
+      const body = strictObject(ctx.body, ['handle', 'password', 'code']);
       const handle = reqString(body, 'handle', { trim: true });
       const password = reqString(body, 'password');
+      const code = optString(body, 'code', { trim: true, pattern: /^\d{8}$/ });
+      const ip = ctx.ip ?? 'unknown';
+      // The IP is encoded so it cannot contain the `:` separating it from the handle (IPv6 does).
+      const sourceKey = `${encodeURIComponent(ip)}:${handle.toLowerCase()}`;
 
-      await admit([
-        { key: `login:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.login.perIp },
-        { key: `login:handle:${handle.toLowerCase()}`, limit: config.rateLimit.login.perHandle },
+      // Audit P1-1. The IP bucket counts every attempt. The handle bucket is a failure budget per
+      // handle *and source address*: a slot is reserved here, before the password is checked, so
+      // concurrent guesses cannot all pass a nearly full bucket, and refunded below when the
+      // password is right. One address guessing at a handle exhausts only its own budget.
+      //
+      // There is deliberately no account-wide bucket that refuses. Anything a remote party can fill
+      // before authentication — from any number of addresses — would refuse the owner's correct
+      // password too. Instead the account-wide failure count below *signals*: past it, a password
+      // alone stops being enough and the owner adds a code from their verified email (or uses a
+      // passkey), which no number of extra addresses supplies. Keys use the submitted handle,
+      // never whether it exists, so unknown handles behave exactly like real ones.
+      const reservations = await reserve([
+        { key: `login:ip:${ip}`, limit: config.rateLimit.login.perIp },
+        {
+          key: `login:handle-ip:${sourceKey}`,
+          limit: config.rateLimit.login.perHandleIp,
+          refundable: true,
+        },
       ]);
 
-      const result = await auth.login({ handle, password }, meta(ctx));
+      const counted = config.rateLimit.enabled
+        ? await rateLimiter.tally({
+            key: `login:handle:${handle.toLowerCase()}`,
+            limit: config.rateLimit.login.perHandleBeforeStepUp,
+          })
+        : null;
+      const stepUp = config.rateLimit.enabled && counted === null;
+      // A success hands back the source slot and the account-wide count; a failure keeps both.
+      const refundable = counted ? [...reservations, counted] : reservations;
+
+      const result = await auth.login({ handle, password, code }, meta(ctx), stepUp);
+      await refund(ctx.logger, refundable);
       return json(200, {
         user: selfUser(result.user, result.roles),
         tokens: result.tokens,
@@ -587,6 +663,35 @@ export function buildRouter(deps: RouteDeps): Router {
       ]);
 
       await auth.requestPasswordReset(handleOrEmail, meta(ctx));
+      return { status: 202 };
+    },
+  );
+
+  router.post(
+    '/v1/auth/email/verification/resend',
+    doc({
+      summary: 'Re-send the verification email without a session',
+      tags: ['auth'],
+      requestSchema: 'EmailVerificationResendRequest',
+      responses: { 202: [undefined, 'Accepted — the same answer whether or not an email was sent'] },
+    }),
+    PUBLIC,
+    async (ctx) => {
+      const body = strictObject(ctx.body, ['handleOrEmail']);
+      const handleOrEmail = reqString(body, 'handleOrEmail', { trim: true, max: 320 });
+
+      // Per IP only (audit P1-1): a bucket per handle would let anyone keep the owner's new link
+      // from being sent. The account's own re-send cooldown is what bounds its inbox.
+      await admit([
+        {
+          key: `email-verification-resend:ip:${ctx.ip ?? 'unknown'}`,
+          limit: config.rateLimit.emailVerificationResend.perIp,
+        },
+      ]);
+
+      // Not awaited: the answer must not wait on whether the account exists or is verified, or its
+      // timing would tell. The service logs a background failure.
+      auth.scheduleEmailVerificationResend(handleOrEmail, meta(ctx));
       return { status: 202 };
     },
   );
@@ -768,12 +873,11 @@ export function buildRouter(deps: RouteDeps): Router {
       const body = strictObject(ctx.body, ['handle']);
       const handle = reqString(body, 'handle', { trim: true });
 
+      // Per IP only (audit P1-1). A per-handle bucket here counted challenge requests, which anyone
+      // can make for any handle, so it was a lockout lever. It guarded nothing: challenges are
+      // random, single-use, and bound server side, and a passkey signature cannot be guessed.
       await admit([
         { key: `webauthn-login:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.webauthnLogin.perIp },
-        {
-          key: `webauthn-login:handle:${handle.toLowerCase()}`,
-          limit: config.rateLimit.webauthnLogin.perHandle,
-        },
       ]);
 
       const options = await auth.generateWebAuthnLoginOptions(handle);

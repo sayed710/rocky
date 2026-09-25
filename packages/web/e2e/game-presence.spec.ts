@@ -11,10 +11,10 @@ test.describe('Game presence flow', () => {
     const handle2 = `e2e-pres2-${suffix}`;
     const password = 'test-password-123';
 
-    const reg1 = await request.post('/v1/auth/register', { data: { handle: handle1, password } });
+    const reg1 = await request.post('/v1/auth/register', { data: { handle: handle1, password, email: `${handle1}@example.test` } });
     expect(reg1.ok()).toBeTruthy();
     const auth1 = await reg1.json();
-    const reg2 = await request.post('/v1/auth/register', { data: { handle: handle2, password } });
+    const reg2 = await request.post('/v1/auth/register', { data: { handle: handle2, password, email: `${handle2}@example.test` } });
     expect(reg2.ok()).toBeTruthy();
     const auth2 = await reg2.json();
 

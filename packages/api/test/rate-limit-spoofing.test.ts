@@ -18,7 +18,7 @@ describe('Trusted Edge Contract: API Rate Limit Spoof Resistance', () => {
         const spoofedPrefix = `203.0.113.${i + 1}`;
         const xffHeader = `${spoofedPrefix}, ${realClientIp}`;
         const res = await h.json('POST', '/v1/auth/register', {
-          body: { handle: `spoofuser${i}`, password: 'password123' },
+          body: { handle: `spoofuser${i}`, password: 'password123', email: `spoofuser${i}@example.test` },
           headers: { 'x-forwarded-for': xffHeader },
         });
         assert.equal(res.status, 201, `Request ${i + 1} should be admitted (status 201)`);
@@ -27,7 +27,7 @@ describe('Trusted Edge Contract: API Rate Limit Spoof Resistance', () => {
       // 6th request from the same real IP must be rate-limited (429),
       // even if the attacker invents a new spoofed prefix!
       const blocked = await h.json('POST', '/v1/auth/register', {
-        body: { handle: 'spoofuser6', password: 'password123' },
+        body: { handle: 'spoofuser6', password: 'password123', email: 'spoofuser6@example.test' },
         headers: { 'x-forwarded-for': `203.0.113.99, ${realClientIp}` },
       });
 
@@ -56,14 +56,14 @@ describe('Trusted Edge Contract: API Rate Limit Spoof Resistance', () => {
     try {
       for (let i = 0; i < 5; i++) {
         const res = await h.json('POST', '/v1/auth/register', {
-          body: { handle: `ipv6user${i}`, password: 'password123' },
+          body: { handle: `ipv6user${i}`, password: 'password123', email: `ipv6user${i}@example.test` },
           headers: { 'x-forwarded-for': spellings[i]! },
         });
         assert.equal(res.status, 201);
       }
 
       const blocked = await h.json('POST', '/v1/auth/register', {
-        body: { handle: 'ipv6user5', password: 'password123' },
+        body: { handle: 'ipv6user5', password: 'password123', email: 'ipv6user5@example.test' },
         headers: { 'x-forwarded-for': spellings[5]! },
       });
       assert.equal(blocked.status, 429);

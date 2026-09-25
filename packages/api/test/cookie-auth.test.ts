@@ -11,7 +11,7 @@
 
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { startHarness } from './helpers.js';
+import { startHarness, verifyEmail } from './helpers.js';
 import { REFRESH_COOKIE_NAME, REFRESH_COOKIE_PATH } from '../src/http/cookie.js';
 
 /** Extract the Set-Cookie value from a Headers object (Node fetch). */
@@ -45,8 +45,9 @@ test('login sets an httpOnly refresh cookie with the right attributes', async ()
     });
     // Register first so login succeeds.
     await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'alice', password: 'passw0rd!!' },
+      body: { handle: 'alice', password: 'passw0rd!!', email: 'alice@example.test' },
     });
+    await verifyEmail(h, 'alice@example.test');
     const loginRes = await h.json('POST', '/v1/auth/login', {
       body: { handle: 'alice', password: 'passw0rd!!' },
     });
@@ -71,7 +72,7 @@ test('register sets an httpOnly refresh cookie', async () => {
   const h = await startHarness();
   try {
     const res = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'bob', password: 'passw0rd!!' },
+      body: { handle: 'bob', password: 'passw0rd!!', email: 'bob@example.test' },
     });
     assert.equal(res.status, 201);
     const raw = getSetCookie(res.headers);
@@ -89,7 +90,7 @@ test('refresh works using the cookie (no body token)', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'carol', password: 'passw0rd!!' },
+      body: { handle: 'carol', password: 'passw0rd!!', email: 'carol@example.test' },
     });
     // Extract the refresh cookie from the register response.
     const raw = getSetCookie(reg.headers);
@@ -113,7 +114,7 @@ test('refresh still works with a body token (API-client path)', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'dave', password: 'passw0rd!!' },
+      body: { handle: 'dave', password: 'passw0rd!!', email: 'dave@example.test' },
     });
     const bodyToken = reg.body.tokens.refreshToken;
     // Refresh using the body — no cookie.
@@ -131,7 +132,7 @@ test('refresh prefers the cookie over the body token', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'erin', password: 'passw0rd!!' },
+      body: { handle: 'erin', password: 'passw0rd!!', email: 'erin@example.test' },
     });
     const raw = getSetCookie(reg.headers);
     assert.ok(raw);
@@ -152,7 +153,7 @@ test('logout clears the cookie', async () => {
   const h = await startHarness();
   try {
     const reg = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'frank', password: 'passw0rd!!' },
+      body: { handle: 'frank', password: 'passw0rd!!', email: 'frank@example.test' },
     });
     const token = reg.body.tokens.accessToken;
     const raw = getSetCookie(reg.headers);
@@ -194,7 +195,7 @@ test('Secure policy applies compatibly when setting and clearing the cookie', as
   const h = await startHarness({ cookieSecure: true });
   try {
     const res = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'gail', password: 'passw0rd!!' },
+      body: { handle: 'gail', password: 'passw0rd!!', email: 'gail@example.test' },
     });
     assert.equal(res.status, 201);
     const raw = getSetCookie(res.headers);

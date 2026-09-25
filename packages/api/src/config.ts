@@ -70,8 +70,16 @@ export interface RateLimitEndpointConfig {
 export interface RateLimitConfig {
   readonly enabled: boolean;
   readonly login: {
+    /** Every attempt from one address, charged before the password is checked. */
     readonly perIp: RateLimitEndpointConfig;
-    readonly perHandle: RateLimitEndpointConfig;
+    /** Failed attempts against one handle from one address. Exhausting it refuses that address. */
+    readonly perHandleIp: RateLimitEndpointConfig;
+    /**
+     * Failed attempts against one handle from all addresses together, before a password alone
+     * stops being enough. It never refuses anyone: past it, sign-in also needs a passkey or a
+     * code sent to the account's verified email, which extra addresses do not supply.
+     */
+    readonly perHandleBeforeStepUp: RateLimitEndpointConfig;
   };
   readonly register: {
     readonly perIp: RateLimitEndpointConfig;
@@ -87,9 +95,15 @@ export interface RateLimitConfig {
     readonly perIp: RateLimitEndpointConfig;
     readonly perUser: RateLimitEndpointConfig;
   };
+  /**
+   * The session-less verification re-send. Per IP only: a per-handle bucket would let anyone stop
+   * the owner getting a new link; the account's own 10-minute re-send cooldown bounds its inbox.
+   */
+  readonly emailVerificationResend: {
+    readonly perIp: RateLimitEndpointConfig;
+  };
   readonly webauthnLogin: {
     readonly perIp: RateLimitEndpointConfig;
-    readonly perHandle: RateLimitEndpointConfig;
   };
   readonly webauthnRegister: {
     readonly perIp: RateLimitEndpointConfig;
@@ -147,7 +161,9 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   enabled: true,
   login: {
     perIp: { maxRequests: 10, windowMs: 5 * 60 * 1000 }, // 10 / 5 min
-    perHandle: { maxRequests: 5, windowMs: 15 * 60 * 1000 }, // 5 / 15 min
+    // One address gets the old per-handle budget of guesses against each handle.
+    perHandleIp: { maxRequests: 5, windowMs: 15 * 60 * 1000 }, // 5 failures / 15 min
+    perHandleBeforeStepUp: { maxRequests: 10, windowMs: 15 * 60 * 1000 }, // 10 failures / 15 min
   },
   register: {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
@@ -163,9 +179,13 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
     perUser: { maxRequests: 3, windowMs: 60 * 60 * 1000 }, // 3 / 60 min
   },
+  emailVerificationResend: {
+    perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
+  },
+  // Per IP only. Asking for a challenge proves nothing and guessing a passkey signature is not
+  // feasible, so a per-handle bucket here protected nothing and only let anyone lock a handle out.
   webauthnLogin: {
     perIp: { maxRequests: 10, windowMs: 5 * 60 * 1000 }, // 10 / 5 min
-    perHandle: { maxRequests: 5, windowMs: 15 * 60 * 1000 }, // 5 / 15 min
   },
   webauthnRegister: {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
