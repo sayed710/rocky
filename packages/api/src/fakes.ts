@@ -772,6 +772,22 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
     return this.create(token);
   }
 
+  async issuePasswordReset(token: Omit<NewIdentityToken, 'kind'>, at: Date): Promise<boolean> {
+    if (!await this.users.findById(token.userId)) return false;
+    for (const row of this.byHash.values()) {
+      if (row.userId === token.userId && row.kind === 'password_reset' &&
+          row.usedAt === null && row.expiresAt.getTime() > at.getTime()) return false;
+    }
+    const row = await this.create({ ...token, kind: 'password_reset' });
+    this.byHash.set(row.tokenHash, { ...row, createdAt: at });
+    return true;
+  }
+
+  async discardPasswordReset(tokenHash: string): Promise<void> {
+    const row = this.byHash.get(tokenHash);
+    if (row?.kind === 'password_reset' && row.usedAt === null) this.byHash.delete(tokenHash);
+  }
+
   async replaceActiveEmailVerification(
     token: Omit<NewIdentityToken, 'kind'>,
     at: Date,

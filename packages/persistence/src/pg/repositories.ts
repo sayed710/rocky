@@ -1024,6 +1024,49 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
     }
   }
 
+  async issuePasswordReset(token: Omit<NewIdentityToken, 'kind'>, at: Date): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // The user row is stable even when no token exists. All replicas serialize issuance here.
+      const owner = await client.query('SELECT id FROM users WHERE id = $1 FOR UPDATE', [token.userId]);
+      if (!owner.rows[0]) {
+        await client.query('COMMIT');
+        return false;
+      }
+      const live = await client.query(
+        `SELECT 1 FROM identity_tokens
+         WHERE user_id = $1 AND kind = 'password_reset' AND used_at IS NULL AND expires_at > $2
+         LIMIT 1`,
+        [token.userId, at],
+      );
+      if ((live.rowCount ?? 0) > 0) {
+        await client.query('COMMIT');
+        return false;
+      }
+      await client.query(
+        `INSERT INTO identity_tokens (token_hash, user_id, kind, expires_at, created_at)
+         VALUES ($1, $2, 'password_reset', $3, $4)`,
+        [token.tokenHash, token.userId, token.expiresAt, at],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async discardPasswordReset(tokenHash: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM identity_tokens
+       WHERE token_hash = $1 AND kind = 'password_reset' AND used_at IS NULL`,
+      [tokenHash],
+    );
+  }
+
   async replaceActiveEmailVerification(
     token: Omit<NewIdentityToken, 'kind'>,
     at: Date,

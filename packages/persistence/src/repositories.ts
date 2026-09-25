@@ -85,6 +85,10 @@ export interface IdentityTokensRepository {
   create(token: NewIdentityToken): Promise<IdentityTokenRow>;
   /** Atomically supersede every unused token of the same kind for this user. */
   replaceActive(token: NewIdentityToken, at: Date): Promise<IdentityTokenRow>;
+  /** Issue at most one usable password-reset token per account; never supersede a live link. */
+  issuePasswordReset(token: Omit<NewIdentityToken, 'kind'>, at: Date): Promise<boolean>;
+  /** Discard only this unused reset token after a definitively undelivered email. */
+  discardPasswordReset(tokenHash: string): Promise<void>;
   /**
    * Atomically issue a replacement only while the owning user's email remains unverified.
    *
