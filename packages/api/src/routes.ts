@@ -492,17 +492,20 @@ export function buildRouter(deps: RouteDeps): Router {
       const handle = reqString(body, 'handle', { trim: true });
       const password = reqString(body, 'password');
       const ip = ctx.ip ?? 'unknown';
-      const handleKey = handle.toLowerCase();
       // The IP is encoded so it cannot contain the `:` separating it from the handle (IPv6 does).
-      const sourceKey = `${encodeURIComponent(ip)}:${handleKey}`;
+      const sourceKey = `${encodeURIComponent(ip)}:${handle.toLowerCase()}`;
 
-      // Audit P1-1. The IP bucket counts every attempt. The two handle buckets are failure budgets:
-      // a slot is reserved here, before the password is checked, so concurrent guesses cannot all
-      // pass a nearly full bucket, and refunded below when the password is right. The per-source
-      // bucket is the tight one, so one address guessing at a handle exhausts only its own budget
-      // and cannot refuse the owner; the account-wide one bounds guesses spread over many
-      // addresses. Both are keyed by the submitted handle, never by whether it exists, so unknown
-      // handles are throttled exactly like real ones.
+      // Audit P1-1. The IP bucket counts every attempt. The handle bucket is a failure budget per
+      // handle *and source address*: a slot is reserved here, before the password is checked, so
+      // concurrent guesses cannot all pass a nearly full bucket, and refunded below when the
+      // password is right. One address guessing at a handle exhausts only its own budget.
+      //
+      // There is deliberately no account-wide bucket. Anything a remote party can fill before
+      // authentication — from any number of addresses — refuses the owner's correct password too.
+      // Guessing spread over many addresses is therefore limited per address, not globally;
+      // bounding it without a lockout lever needs a second proof (a challenge), which is separate
+      // work. The key uses the submitted handle, never whether it exists, so unknown handles are
+      // throttled exactly like real ones.
       const reservations = await reserve([
         { key: `login:ip:${ip}`, limit: config.rateLimit.login.perIp },
         {
@@ -510,7 +513,6 @@ export function buildRouter(deps: RouteDeps): Router {
           limit: config.rateLimit.login.perHandleIp,
           refundable: true,
         },
-        { key: `login:handle:${handleKey}`, limit: config.rateLimit.login.perHandle, refundable: true },
       ]);
 
       const result = await auth.login({ handle, password }, meta(ctx));

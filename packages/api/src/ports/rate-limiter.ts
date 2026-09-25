@@ -92,7 +92,7 @@ export interface RateLimiter {
    * Hand back the unit each reservation charged, when the request turned out not to be the thing
    * the bucket counts.
    *
-   * This exists for failure budgets. Login reserves a slot in its per-handle buckets at admission —
+   * This exists for failure budgets. Login reserves a slot in its per-handle-and-source bucket —
    * so concurrent guesses cannot all slip past a nearly full bucket — and refunds it when the
    * password was right, so a successful login spends none of the budget an attacker would need.
    *

@@ -72,10 +72,11 @@ export interface RateLimitConfig {
   readonly login: {
     /** Every attempt from one address, charged before the password is checked. */
     readonly perIp: RateLimitEndpointConfig;
-    /** Failed attempts against one handle from one address. */
+    /**
+     * Failed attempts against one handle from one address. There is deliberately no account-wide
+     * counterpart: a bucket any remote party can fill would let them refuse the owner's password.
+     */
     readonly perHandleIp: RateLimitEndpointConfig;
-    /** Failed attempts against one handle from all addresses together. */
-    readonly perHandle: RateLimitEndpointConfig;
   };
   readonly register: {
     readonly perIp: RateLimitEndpointConfig;
@@ -150,10 +151,8 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   enabled: true,
   login: {
     perIp: { maxRequests: 10, windowMs: 5 * 60 * 1000 }, // 10 / 5 min
-    // One address gets the old per-handle budget of guesses. Locking the owner out now takes
-    // failures from at least perHandle / perHandleIp = 10 distinct addresses per window.
+    // One address gets the old per-handle budget of guesses against each handle.
     perHandleIp: { maxRequests: 5, windowMs: 15 * 60 * 1000 }, // 5 failures / 15 min
-    perHandle: { maxRequests: 50, windowMs: 15 * 60 * 1000 }, // 50 failures / 15 min
   },
   register: {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min

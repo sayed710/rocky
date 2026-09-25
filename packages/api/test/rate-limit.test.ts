@@ -100,7 +100,7 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
   test('login endpoint is rate limited per IP and per handle independently', async () => {
     const h = await startHarness({ trustProxy: true });
     try {
-      // DEFAULT_RATE_LIMIT.login: perIp 10 attempts, perHandleIp 5 failures, perHandle 50 failures.
+      // DEFAULT_RATE_LIMIT.login: perIp 10 attempts, perHandleIp 5 failures.
       await h.json('POST', '/v1/auth/register', { body: { handle: 'alice', password: 'password123' } });
 
       // Hit the per-source handle limit (5) from one address.
@@ -138,28 +138,22 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
   });
 
   test('login handle limiting is case-insensitive like the identity store', async () => {
-    const h = await startHarness({
-      trustProxy: true,
-      rateLimit: {
-        ...DEFAULT_RATE_LIMIT,
-        login: { ...DEFAULT_RATE_LIMIT.login, perHandle: { maxRequests: 5, windowMs: 15 * 60 * 1000 } },
-      },
-    });
+    const h = await startHarness({ trustProxy: true });
     try {
       await h.json('POST', '/v1/auth/register', {
         body: { handle: 'CaseUser', password: 'password123' },
       });
-      // Distinct addresses, so only the account-wide bucket can join the spellings together.
+      // One address, five spellings: they must all land in the same per-handle-and-source budget.
       const spellings = ['caseuser', 'CASEUSER', 'CaseUser', 'cAsEuSeR', 'caseUser'];
-      for (const [i, handle] of spellings.entries()) {
+      for (const handle of spellings) {
         await h.json('POST', '/v1/auth/login', {
           body: { handle, password: 'wrong' },
-          headers: { 'x-forwarded-for': `198.51.100.${i}` },
+          headers: { 'x-forwarded-for': '198.51.100.8' },
         });
       }
       const blocked = await h.json('POST', '/v1/auth/login', {
         body: { handle: 'CASEuser', password: 'wrong' },
-        headers: { 'x-forwarded-for': '198.51.100.200' },
+        headers: { 'x-forwarded-for': '198.51.100.8' },
       });
       assert.equal(blocked.status, 429);
     } finally {

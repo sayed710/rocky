@@ -1,5 +1,5 @@
 /**
- * Audit P1-1: handle-targeted login throttling must not become an account-lockout lever.
+ * Audit P1-1: login throttling must not become an account-lockout lever.
  *
  * The login route used to charge a per-handle bucket on every attempt, before the password was
  * checked. Anyone who knew a handle could spend that bucket with wrong passwords and keep its owner
@@ -9,10 +9,10 @@
  * The policy these tests hold:
  *
  * - Per-IP admission is charged on every attempt, before any credential work, as before.
- * - Failed password attempts are counted against the handle twice: once per source address (tight)
- *   and once across all addresses (looser). A slot is reserved at admission, so concurrent attempts
- *   cannot overshoot, and handed back when the password turns out to be right.
- * - One attacker address exhausting its own budget for a handle does not refuse the owner.
+ * - Failed password attempts are counted per handle *and source address*. A slot is reserved at
+ *   admission, so concurrent attempts cannot overshoot, and handed back when the password is right.
+ * - There is no account-wide pre-authentication bucket. Anything a remote third party can fill is
+ *   a lever to refuse the owner's correct password, however many addresses filling it takes.
  * - Passkey login options are limited per IP only.
  */
 import { strict as assert } from 'node:assert';
@@ -58,6 +58,32 @@ describe('password login throttling cannot lock an account out', () => {
     }
   });
 
+  /**
+   * The distributed form of the attack. Every source spends its whole per-handle budget, and each
+   * is then refused — but nothing account-wide fills up, so the owner's correct password from a
+   * clean address still works. An earlier revision of this fix kept an account-wide cap, and ten
+   * addresses were enough to refuse the owner for the rest of the window.
+   */
+  test('failures from many sources do not refuse the owner from a clean source', async () => {
+    const h = await startHarness({ trustProxy: true });
+    try {
+      await register(h, 'alice');
+      const perSource = DEFAULT_RATE_LIMIT.login.perHandleIp.maxRequests;
+      const sources = Array.from({ length: 25 }, (_, i) => `203.0.113.${i + 1}`);
+      for (const ip of sources) {
+        for (let i = 0; i < perSource; i++) {
+          assert.equal((await login(h, 'alice', 'wrong', ip)).status, 401, `${ip} guess ${i}`);
+        }
+        assert.equal((await login(h, 'alice', 'wrong', ip)).status, 429, `${ip} is stopped`);
+      }
+      const owner = await login(h, 'alice', PASSWORD, VICTIM_IP);
+      assert.equal(owner.status, 200, `the owner gets in after ${sources.length * perSource} failures`);
+      assert.equal(typeof owner.body.tokens.accessToken, 'string');
+    } finally {
+      await h.close();
+    }
+  });
+
   test('a successful login spends no failure budget', async () => {
     const h = await startHarness({
       trustProxy: true,
@@ -66,7 +92,6 @@ describe('password login throttling cannot lock an account out', () => {
         login: {
           perIp: { maxRequests: 100, windowMs: MINUTE },
           perHandleIp: { maxRequests: 2, windowMs: MINUTE },
-          perHandle: { maxRequests: 2, windowMs: MINUTE },
         },
       },
     });
@@ -75,7 +100,7 @@ describe('password login throttling cannot lock an account out', () => {
       for (let i = 0; i < 5; i++) {
         assert.equal((await login(h, 'alice', PASSWORD, VICTIM_IP)).status, 200, `success ${i}`);
       }
-      // Both failure buckets still hold their full two slots.
+      // The failure budget still holds its full two slots.
       assert.equal((await login(h, 'alice', 'wrong', VICTIM_IP)).status, 401);
       assert.equal((await login(h, 'alice', 'wrong', VICTIM_IP)).status, 401);
       assert.equal((await login(h, 'alice', 'wrong', VICTIM_IP)).status, 429, 'and exactly two');
@@ -84,7 +109,7 @@ describe('password login throttling cannot lock an account out', () => {
     }
   });
 
-  test('repeated failures from one address are blocked, and so is the owner from that address', async () => {
+  test('repeated failures from one source are blocked, and so is the owner from that source', async () => {
     const h = await startHarness({ trustProxy: true });
     try {
       await register(h, 'alice');
@@ -98,82 +123,9 @@ describe('password login throttling cannot lock an account out', () => {
         blocked.headers.get('retry-after'),
         String(DEFAULT_RATE_LIMIT.login.perHandleIp.windowMs / 1000),
       );
-    } finally {
-      await h.close();
-    }
-  });
 
-  test('failures spread across many addresses still hit the account-wide ceiling', async () => {
-    const h = await startHarness({
-      trustProxy: true,
-      rateLimit: {
-        ...DEFAULT_RATE_LIMIT,
-        login: {
-          perIp: { maxRequests: 100, windowMs: MINUTE },
-          perHandleIp: { maxRequests: 5, windowMs: MINUTE },
-          perHandle: { maxRequests: 3, windowMs: MINUTE },
-        },
-      },
-    });
-    try {
-      await register(h, 'alice');
-      for (let i = 0; i < 3; i++) {
-        assert.equal((await login(h, 'alice', 'wrong', `203.0.113.${i}`)).status, 401);
-      }
-      assert.equal((await login(h, 'alice', 'wrong', '203.0.113.200')).status, 429);
-    } finally {
-      await h.close();
-    }
-  });
-
-  /**
-   * The accepted residual risk, pinned rather than left to a comment: a distributed attacker that
-   * exhausts the account-wide budget does refuse the owner — from any address — until the window
-   * ends, and then the owner gets in. With the defaults that takes ten addresses per window.
-   */
-  test('an exhausted account-wide budget refuses the owner only until its window ends', async () => {
-    const perHandle = { maxRequests: 3, windowMs: MINUTE };
-    const h = await startHarness({
-      trustProxy: true,
-      rateLimit: {
-        ...DEFAULT_RATE_LIMIT,
-        login: { ...DEFAULT_RATE_LIMIT.login, perIp: { maxRequests: 100, windowMs: MINUTE }, perHandle },
-      },
-    });
-    try {
-      await register(h, 'alice');
-      for (let i = 0; i < perHandle.maxRequests; i++) {
-        assert.equal((await login(h, 'alice', 'wrong', `203.0.113.${i}`)).status, 401);
-      }
-      const refused = await login(h, 'alice', PASSWORD, VICTIM_IP);
-      assert.equal(refused.status, 429, 'the owner is refused while the budget is spent');
-      assert.equal(refused.headers.get('retry-after'), '60');
-
-      h.clock.advance(perHandle.windowMs);
-      assert.equal((await login(h, 'alice', PASSWORD, VICTIM_IP)).status, 200, 'and recovers after');
-    } finally {
-      await h.close();
-    }
-  });
-
-  test('a refund that faults does not turn a successful login into an error', async () => {
-    const records: Array<{ level: string; msg: string; buckets?: number }> = [];
-    const logger = new JsonLogger({}, { level: 'warn', sink: (line) => records.push(JSON.parse(line)) });
-    const faulty = new (class extends InMemoryRateLimiter {
-      override refund(): void {
-        throw new Error('database unavailable');
-      }
-    })(new ManualClock(0));
-    const h = await startHarness({ trustProxy: true }, { rateLimiter: faulty, logger });
-    try {
-      await register(h, 'alice');
-      const res = await login(h, 'alice', PASSWORD, VICTIM_IP);
-      assert.equal(res.status, 200);
-      assert.equal(typeof res.body.tokens.accessToken, 'string');
-      const warning = records.find((r) => r.msg.startsWith('rate limit refund failed'));
-      assert.ok(warning, 'the fault is logged');
-      assert.equal(warning.level, 'warn');
-      assert.equal(warning.buckets, 2);
+      // The source budget is per handle: the same address may still try another account.
+      assert.equal((await login(h, 'someone-else', 'wrong', ATTACKER_IP)).status, 401);
     } finally {
       await h.close();
     }
@@ -196,6 +148,29 @@ describe('password login throttling cannot lock an account out', () => {
       assert.equal(blocked.status, 429);
       assert.equal(blocked.headers.get('retry-after'), '60');
       assert.equal((await login(h, 'alice', PASSWORD, VICTIM_IP)).status, 200, 'other addresses unaffected');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('a refund that faults does not turn a successful login into an error', async () => {
+    const records: Array<{ level: string; msg: string; buckets?: number }> = [];
+    const logger = new JsonLogger({}, { level: 'warn', sink: (line) => records.push(JSON.parse(line)) });
+    const faulty = new (class extends InMemoryRateLimiter {
+      override refund(): void {
+        throw new Error('database unavailable');
+      }
+    })(new ManualClock(0));
+    const h = await startHarness({ trustProxy: true }, { rateLimiter: faulty, logger });
+    try {
+      await register(h, 'alice');
+      const res = await login(h, 'alice', PASSWORD, VICTIM_IP);
+      assert.equal(res.status, 200);
+      assert.equal(typeof res.body.tokens.accessToken, 'string');
+      const warning = records.find((r) => r.msg.startsWith('rate limit refund failed'));
+      assert.ok(warning, 'the fault is logged');
+      assert.equal(warning.level, 'warn');
+      assert.equal(warning.buckets, 1);
     } finally {
       await h.close();
     }
@@ -226,15 +201,14 @@ describe('password login throttling cannot lock an account out', () => {
     }
   });
 
-  test('concurrent failed attempts cannot overshoot the budget', async () => {
+  test('concurrent failures from one source cannot overshoot its budget', async () => {
     const h = await startHarness({
       trustProxy: true,
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
           perIp: { maxRequests: 100, windowMs: MINUTE },
-          perHandleIp: { maxRequests: 100, windowMs: MINUTE },
-          perHandle: { maxRequests: 3, windowMs: MINUTE },
+          perHandleIp: { maxRequests: 3, windowMs: MINUTE },
         },
       },
     });
@@ -243,10 +217,11 @@ describe('password login throttling cannot lock an account out', () => {
       // Every request is in flight before any password check finishes. A check-then-charge design
       // would admit all twenty; a reservation admits exactly three.
       const results = await Promise.all(
-        Array.from({ length: 20 }, (_, i) => login(h, 'alice', 'wrong', `203.0.113.${i}`)),
+        Array.from({ length: 20 }, () => login(h, 'alice', 'wrong', ATTACKER_IP)),
       );
       const statuses = results.map((r) => r.status).sort((a, b) => a - b);
       assert.deepEqual(statuses, [...Array(3).fill(401), ...Array(17).fill(429)]);
+      assert.equal((await login(h, 'alice', PASSWORD, VICTIM_IP)).status, 200, 'owner unaffected');
     } finally {
       await h.close();
     }

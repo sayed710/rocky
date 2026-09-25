@@ -700,9 +700,10 @@ test('Postgres refund of a replayed or forged reservation does nothing', { skip 
 
 /**
  * Login's reservation across replicas: two limiter instances share one database, and twenty
- * concurrent failed-login admissions from twenty addresses race for an account-wide budget of
- * three. A check-then-charge design would let every one of them through; the reservation admits
- * exactly three. A refund on one replica is then visible to the other.
+ * concurrent failed logins from one source address race for its per-handle budget of three. A
+ * check-then-charge design would let every one of them through; the reservation admits exactly
+ * three, and charges each attempt to the shared IP bucket too. A refund on one replica is then
+ * visible to the other.
  */
 test('Postgres login reservations hold across replicas under concurrency', { skip }, async () => {
   const keys: string[] = [];
@@ -711,44 +712,35 @@ test('Postgres login reservations hold across replicas under concurrency', { ski
     const a = new PgRateLimiter(pool);
     const b = new PgRateLimiter(pool);
     const run = uuidv7();
-    const handle = {
-      key: `integration:login-handle:${run}`,
+    const ip = { key: `integration:login-ip:${run}`, limit: { maxRequests: 100, windowMs: 600_000 } };
+    const source = {
+      key: `integration:login-source:${run}`,
       limit: { maxRequests: 3, windowMs: 600_000 },
       refundable: true,
     };
-    keys.push(handle.key);
-    const attempt = (i: number) => {
-      const ip = { key: `integration:login-ip:${run}:${i}`, limit: { maxRequests: 10, windowMs: 600_000 } };
-      const source = {
-        key: `integration:login-source:${run}:${i}`,
-        limit: { maxRequests: 5, windowMs: 600_000 },
-        refundable: true,
-      };
-      keys.push(ip.key, source.key);
-      return { ip, source, buckets: [ip, source, handle] };
-    };
+    keys.push(ip.key, source.key);
+    const limiterFor = (i: number) => (i % 2 === 0 ? a : b);
 
-    const attempts = Array.from({ length: 20 }, (_, i) => attempt(i));
     const results = await Promise.all(
-      attempts.map(({ buckets }, i) => (i % 2 === 0 ? a : b).admit(buckets)),
+      Array.from({ length: 20 }, (_, i) => limiterFor(i).admit([ip, source])),
     );
-    assert.equal(results.filter((r) => r.allowed).length, 3);
-    results.forEach((result, i) => {
-      if (!result.allowed) return;
+    const winners = results.flatMap((result, i) => (result.allowed ? [i] : []));
+    assert.equal(winners.length, 3);
+    for (const i of winners) {
       assert.deepEqual(
-        (result.reservations ?? []).map((r) => r.key).sort(),
-        [attempts[i]!.source.key, handle.key].sort(),
-        'an admission reserves its source and handle buckets, never the IP bucket',
+        (results[i]!.reservations ?? []).map((r) => r.key),
+        [source.key],
+        'an admission reserves the source bucket, never the IP bucket',
       );
-    });
+    }
+    assert.equal(await storedCount(pool, ip.key), 3, 'refusals charged the IP bucket nothing');
 
     // A reservation is refunded by the replica that issued it; the freed slot is shared.
-    const winner = results.findIndex((r) => r.allowed);
-    const issuer = winner % 2 === 0 ? a : b;
+    const issuer = limiterFor(winners[0]!);
     const other = issuer === a ? b : a;
-    await issuer.refund((results[winner]!.reservations ?? []).filter((r) => r.key === handle.key));
-    assert.equal((await other.admit(attempt(100).buckets)).allowed, true, 'the refunded slot is shared');
-    assert.equal((await other.admit(attempt(101).buckets)).allowed, false);
+    await issuer.refund(results[winners[0]!]!.reservations ?? []);
+    assert.equal((await other.admit([ip, source])).allowed, true, 'the refunded slot is shared');
+    assert.equal((await other.admit([ip, source])).allowed, false);
   });
 });
 

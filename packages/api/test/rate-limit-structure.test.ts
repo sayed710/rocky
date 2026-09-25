@@ -149,7 +149,7 @@ test('no handler makes more than one admission decision', () => {
  */
 test('every multi-bucket route hands both buckets to a single admission', () => {
   const expected: Record<string, readonly string[]> = {
-    '/v1/auth/login': ['login:ip:', 'login:handle-ip:', 'login:handle:'],
+    '/v1/auth/login': ['login:ip:', 'login:handle-ip:'],
     '/v1/auth/password-reset/request': ['password-reset:ip:', 'password-reset:target:'],
     '/v1/auth/email/verification/request': ['email-verification:user:', 'email-verification:ip:'],
     '/v1/analysis': ['analysis:user:', 'analysis:ip:'],
@@ -218,11 +218,11 @@ test('the expensive routes parse the body before they charge for it', () => {
 });
 
 /**
- * Login's handle buckets are failure budgets (audit P1-1): reserved at admission and refunded once
- * the password is known to be right. Refunding before the check would make them free for an
+ * Login's handle-and-source bucket is a failure budget (audit P1-1): reserved at admission and
+ * refunded once the password is known to be right. Refunding before the check would make them free for an
  * attacker, and marking the IP bucket refundable would stop it counting every attempt.
  */
-test('login refunds exactly its failure buckets, and only after the password check', () => {
+test('login refunds exactly its failure bucket, and only after the password check', () => {
   const route = routeNamed('/v1/auth/login');
   const refunds: ts.CallExpression[] = [];
   let check: ts.CallExpression | undefined;
@@ -269,5 +269,5 @@ test('login refunds exactly its failure buckets, and only after the password che
       ))
     .map((element) => bucketKey(element, '/v1/auth/login'))
     .sort();
-  assert.deepEqual(refundable, ['login:handle-ip:', 'login:handle:'].sort());
+  assert.deepEqual(refundable, ['login:handle-ip:']);
 });

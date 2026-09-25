@@ -263,10 +263,10 @@ describe('routes charge no quota for a request another bucket refuses', () => {
   /**
    * The defect end to end, on a route rather than on the limiter.
    *
-   * `perIp` is 1 and `perHandle` is 2. One login from address A fills A's IP bucket and takes the
-   * handle's first slot. A second login from A is refused by the IP bucket — and under the old
-   * sequential code the handle bucket was charged first and would already be full, so the third
-   * request, from a *fresh* address, would be refused too. It must be admitted.
+   * `perIp` is 1 per minute and the per-handle-and-source budget is 2 per ten minutes. A second
+   * login from the same address is refused by the IP bucket; under the old sequential code the
+   * handle bucket would have been charged first anyway. Once the IP window has passed, the address
+   * must still have its second handle slot — and then no third.
    */
   test('a login refused by the per-IP bucket does not spend the handle bucket', async () => {
     const h = await startHarness({
@@ -274,36 +274,32 @@ describe('routes charge no quota for a request another bucket refuses', () => {
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
-          ...DEFAULT_RATE_LIMIT.login,
           perIp: { maxRequests: 1, windowMs: MINUTE },
-          perHandle: { maxRequests: 2, windowMs: MINUTE },
+          perHandleIp: { maxRequests: 2, windowMs: 10 * MINUTE },
         },
       },
     });
     try {
-      const login = (ip: string) =>
+      const login = () =>
         h.json('POST', '/v1/auth/login', {
           body: { handle: 'victim', password: 'wrong-password' },
-          headers: { 'x-forwarded-for': ip },
+          headers: { 'x-forwarded-for': '203.0.113.1' },
         });
 
-      const first = await login('203.0.113.1');
-      assert.notEqual(first.status, 429, 'first request fits both buckets');
+      assert.notEqual((await login()).status, 429, 'first request fits both buckets');
+      assert.equal((await login()).status, 429, 'the per-IP bucket is full');
 
-      const refused = await login('203.0.113.1');
-      assert.equal(refused.status, 429, 'the per-IP bucket is full');
-
-      const fromFreshIp = await login('203.0.113.2');
+      h.clock.advance(MINUTE);
       assert.notEqual(
-        fromFreshIp.status,
+        (await login()).status,
         429,
         'the refused request must not have spent the handle bucket',
       );
 
       // And the handle bucket is genuinely exhausted after two real admissions, so the test is
       // measuring a preserved slot rather than a limit that never applied.
-      const third = await login('203.0.113.3');
-      assert.equal(third.status, 429, 'the handle bucket really does hold only two');
+      h.clock.advance(MINUTE);
+      assert.equal((await login()).status, 429, 'the handle bucket really does hold only two');
     } finally {
       await h.close();
     }
@@ -320,9 +316,8 @@ describe('routes charge no quota for a request another bucket refuses', () => {
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
-          ...DEFAULT_RATE_LIMIT.login,
           perIp: { maxRequests: 3, windowMs: MINUTE },
-          perHandle: { maxRequests: 1, windowMs: MINUTE },
+          perHandleIp: { maxRequests: 1, windowMs: MINUTE },
         },
       },
     });
