@@ -1,5 +1,11 @@
 import type { Clock } from './clock';
-import type { RateLimit, RateLimiter, RateLimitRequest, RateLimitResult } from './rate-limiter';
+import type {
+  RateLimit,
+  RateLimiter,
+  RateLimitRequest,
+  RateLimitReservation,
+  RateLimitResult,
+} from './rate-limiter';
 
 interface Bucket {
   count: number;
@@ -66,20 +72,23 @@ export class InMemoryRateLimiter implements RateLimiter {
     if (worstRetry > 0) return { allowed: false, retryAfterSeconds: worstRetry };
 
     // Phase 2 — commit. Every bucket admitted, so every bucket is charged.
-    for (const { key, limit } of requests) {
+    const reservations: RateLimitReservation[] = [];
+    for (const { key, limit, refundable } of requests) {
       const bucket = this.openBucket(key, now, limit);
       bucket.count += 1;
+      if (refundable) reservations.push({ key, window: String(bucket.windowStart) });
     }
 
-    return ADMITTED;
+    return reservations.length > 0 ? { ...ADMITTED, reservations } : ADMITTED;
   }
 
-  refund(requests: readonly RateLimitRequest[]): void {
-    assertDistinctKeys(requests);
+  refund(reservations: readonly RateLimitReservation[]): void {
+    assertDistinctKeys(reservations);
     const now = this.clock.now();
-    for (const { key } of requests) {
+    for (const { key, window } of reservations) {
       const bucket = this.buckets.get(key);
-      if (bucket && now < bucket.expiresAt && bucket.count > 0) bucket.count -= 1;
+      if (!bucket || now >= bucket.expiresAt || String(bucket.windowStart) !== window) continue;
+      if (bucket.count > 0) bucket.count -= 1;
     }
   }
 
@@ -130,7 +139,7 @@ export class InMemoryRateLimiter implements RateLimiter {
  * forwards and another backwards. Shared with `PgRateLimiter`, which had the same reversal.
  * Raised in the Qodo review of PR #137.
  */
-export function assertDistinctKeys(requests: readonly RateLimitRequest[]): void {
+export function assertDistinctKeys(requests: readonly { readonly key: string }[]): void {
   if (requests.length < 2) return;
   const seen = new Set<string>();
   for (const { key } of requests) {

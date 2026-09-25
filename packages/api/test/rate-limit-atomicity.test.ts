@@ -395,28 +395,44 @@ describe('routes charge no quota for a request another bucket refuses', () => {
 
 /**
  * `refund` gives back a slot a request reserved but turned out not to owe — login's failure budget
- * when the password was right (audit P1-1). It must never mint capacity the bucket did not have.
+ * when the password was right (audit P1-1). It must never mint capacity the bucket did not have,
+ * and must only ever touch the window that took the charge.
  */
 describe('InMemoryRateLimiter refund', () => {
   const limit: RateLimit = { maxRequests: 2, windowMs: MINUTE };
+  const reserve = (limiter: InMemoryRateLimiter, key = 'k') => {
+    const result = limiter.admit([{ key, limit, refundable: true }]);
+    assert.equal(result.allowed, true);
+    return result.reservations ?? [];
+  };
+
+  test('only refundable buckets are reserved', () => {
+    const limiter = new InMemoryRateLimiter(new ManualClock(1000));
+    const result = limiter.admit([
+      { key: 'ip', limit },
+      { key: 'handle', limit, refundable: true },
+    ]);
+    assert.deepEqual(result.reservations?.map((r) => r.key), ['handle']);
+    assert.equal(limiter.admit([{ key: 'plain', limit }]).reservations, undefined);
+  });
 
   test('a refunded slot can be admitted again, and only that one', () => {
     const limiter = new InMemoryRateLimiter(new ManualClock(1000));
-    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
-    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
+    const first = reserve(limiter);
+    reserve(limiter);
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false);
 
-    limiter.refund([{ key: 'k', limit }]);
+    limiter.refund(first);
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false);
   });
 
   test('a refund never takes a bucket below empty', () => {
     const limiter = new InMemoryRateLimiter(new ManualClock(1000));
-    limiter.admit([{ key: 'k', limit }]);
-    limiter.refund([{ key: 'k', limit }]);
-    limiter.refund([{ key: 'k', limit }]);
-    limiter.refund([{ key: 'absent', limit }]);
+    const reservation = reserve(limiter);
+    limiter.refund(reservation);
+    limiter.refund(reservation);
+    limiter.refund([{ key: 'absent', window: '1000' }]);
 
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
@@ -426,20 +442,40 @@ describe('InMemoryRateLimiter refund', () => {
   test('a refund against a lapsed window does nothing', () => {
     const clock = new ManualClock(1000);
     const limiter = new InMemoryRateLimiter(clock);
-    limiter.admit([{ key: 'k', limit }]);
+    const reservation = reserve(limiter);
     clock.advance(MINUTE);
-    limiter.refund([{ key: 'k', limit }]);
+    limiter.refund(reservation);
 
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, true);
     assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false);
   });
 
+  /**
+   * A login admitted just before its window ends finishes after another request has opened the next
+   * window. Refunding by key alone would take that other request's charge; the reservation names
+   * the old window, so the new one is left as it is. Raised by Qodo and Greptile on PR #63.
+   */
+  test('a refund from a replaced window leaves the new window alone', () => {
+    const clock = new ManualClock(1000);
+    const limiter = new InMemoryRateLimiter(clock);
+    const stale = reserve(limiter);
+    clock.advance(MINUTE);
+    reserve(limiter);
+    reserve(limiter);
+
+    limiter.refund(stale);
+    assert.equal(limiter.admit([{ key: 'k', limit }]).allowed, false, 'the new window keeps both');
+  });
+
   test('a refund touches only the buckets it names', () => {
     const limiter = new InMemoryRateLimiter(new ManualClock(1000));
     const one: RateLimit = { maxRequests: 1, windowMs: MINUTE };
-    limiter.admit([{ key: 'a', limit: one }, { key: 'b', limit: one }]);
-    limiter.refund([{ key: 'a', limit: one }]);
+    const reservations = limiter.admit([
+      { key: 'a', limit: one, refundable: true },
+      { key: 'b', limit: one, refundable: true },
+    ]).reservations ?? [];
+    limiter.refund(reservations.filter((r) => r.key === 'a'));
 
     assert.equal(limiter.admit([{ key: 'a', limit: one }]).allowed, true);
     assert.equal(limiter.admit([{ key: 'b', limit: one }]).allowed, false);
@@ -447,6 +483,7 @@ describe('InMemoryRateLimiter refund', () => {
 
   test('a key named twice in a refund is a programming error', () => {
     const limiter = new InMemoryRateLimiter(new ManualClock(1000));
-    assert.throws(() => limiter.refund([{ key: 'k', limit }, { key: 'k', limit }]), /duplicate bucket key/);
+    const [reservation] = reserve(limiter);
+    assert.throws(() => limiter.refund([reservation!, reservation!]), /duplicate bucket key/);
   });
 });

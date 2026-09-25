@@ -1,6 +1,19 @@
 import type { Pool, PoolClient } from 'pg';
 import { assertDistinctKeys } from './in-memory-rate-limiter';
-import type { RateLimit, RateLimiter, RateLimitRequest, RateLimitResult } from './rate-limiter';
+import type {
+  RateLimit,
+  RateLimiter,
+  RateLimitRequest,
+  RateLimitReservation,
+  RateLimitResult,
+} from './rate-limiter';
+
+/**
+ * A window's identity for a reservation: its start, in whole microseconds as text. A new window
+ * always starts after the old one expired, so two windows of one bucket never share it, and it
+ * round-trips exactly — a JavaScript `Date` would drop the microseconds.
+ */
+const WINDOW_ID = `(EXTRACT(EPOCH FROM window_started_at) * 1000000)::bigint::text`;
 
 /**
  * Admit one bucket, writing **only** if the request fits.
@@ -42,7 +55,7 @@ const ADMIT_ONE = `
       ELSE b.expires_at
     END
   WHERE b.expires_at <= now() OR b.request_count < $3::int
-  RETURNING 1`;
+  RETURNING ${WINDOW_ID} AS window_id`;
 
 /**
  * How long the caller must wait for a bucket that just refused them.
@@ -58,19 +71,25 @@ const RETRY_AFTER = `
    WHERE bucket_key = $1`;
 
 /**
- * Refund one unit: lock the live row, then decrement it — or delete it when it holds the last unit,
- * because the schema forbids a zero count and an absent row admits exactly like an empty window.
- * The `FOR UPDATE` holds the row from the read to the write, so a concurrent admission or refund
- * waits rather than acting on a count this one is about to change. A lapsed or absent row is left
- * alone: there is nothing live to refund.
+ * Refund one unit: lock the row if it is still the window the reservation charged and still live,
+ * then decrement it — or delete it when it holds the last unit, because the schema forbids a zero
+ * count and an absent row admits exactly like an empty window.
+ *
+ * Liveness is judged by `clock_timestamp()`, not `now()`: `now()` is fixed when the transaction
+ * starts, so a refund that waited on the row lock past the window's end would still see the window
+ * as live. The writes repeat the check for the instant between the lock and the write. The
+ * `FOR UPDATE` holds the row from the read to the write, so the window cannot be replaced between
+ * them, and a concurrent admission or refund waits rather than acting on a stale count.
  */
 const REFUND_LOCK = `
   SELECT request_count FROM rate_limit_buckets
-   WHERE bucket_key = $1 AND expires_at > now()
+   WHERE bucket_key = $1 AND ${WINDOW_ID} = $2 AND expires_at > clock_timestamp()
      FOR UPDATE`;
 const REFUND_DECREMENT = `
-  UPDATE rate_limit_buckets SET request_count = request_count - 1 WHERE bucket_key = $1`;
-const REFUND_LAST = `DELETE FROM rate_limit_buckets WHERE bucket_key = $1`;
+  UPDATE rate_limit_buckets SET request_count = request_count - 1
+   WHERE bucket_key = $1 AND expires_at > clock_timestamp()`;
+const REFUND_LAST = `
+  DELETE FROM rate_limit_buckets WHERE bucket_key = $1 AND expires_at > clock_timestamp()`;
 
 const ADMITTED: RateLimitResult = { allowed: true, retryAfterSeconds: 0 };
 
@@ -106,7 +125,8 @@ export class PgRateLimiter implements RateLimiter {
     // single-bucket, and `/v1/auth/refresh` is the hottest of them.
     if (requests.length === 1) {
       const request = requests[0]!;
-      if (await this.admitOne(this.pool, request)) return ADMITTED;
+      const window = await this.admitOne(this.pool, request);
+      if (window !== null) return admitted(reservationsOf([{ request, window }]));
       return { allowed: false, retryAfterSeconds: await this.retryAfter(this.pool, request) };
     }
 
@@ -123,10 +143,15 @@ export class PgRateLimiter implements RateLimiter {
     // concurrent transaction blocks on the locked row until this one ends and then re-reads it, so
     // two requests racing for one remaining slot cannot both see it free.
     const ordered = sortedByKey(requests);
-    return this.inBoundedTransaction(async (client) => {
+    return this.inBoundedTransaction<RateLimitResult>(async (client) => {
       let worstRetry = 0;
+      const charged: Array<{ request: RateLimitRequest; window: string }> = [];
       for (const request of ordered) {
-        if (await this.admitOne(client, request)) continue;
+        const window = await this.admitOne(client, request);
+        if (window !== null) {
+          charged.push({ request, window });
+          continue;
+        }
         // Read the wait before the rollback, and in its own statement so it sees the row that
         // actually refused this request rather than the snapshot the upsert started with.
         worstRetry = Math.max(worstRetry, await this.retryAfter(client, request));
@@ -136,7 +161,7 @@ export class PgRateLimiter implements RateLimiter {
       // of the refusals rather than whichever key happened to sort first.
       return worstRetry > 0
         ? { commit: false, value: { allowed: false, retryAfterSeconds: worstRetry } }
-        : { commit: true, value: ADMITTED };
+        : { commit: true, value: admitted(reservationsOf(charged)) };
     });
   }
 
@@ -146,13 +171,13 @@ export class PgRateLimiter implements RateLimiter {
    * over the same keys, and the lock and statement timeouts keep a contended row from holding a
    * pooled client indefinitely.
    */
-  async refund(requests: readonly RateLimitRequest[]): Promise<void> {
-    if (requests.length === 0) return;
-    assertDistinctKeys(requests);
-    const ordered = sortedByKey(requests);
+  async refund(reservations: readonly RateLimitReservation[]): Promise<void> {
+    if (reservations.length === 0) return;
+    assertDistinctKeys(reservations);
+    const ordered = sortedByKey(reservations);
     await this.inBoundedTransaction(async (client) => {
-      for (const { key } of ordered) {
-        const live = await client.query<{ request_count: number }>(REFUND_LOCK, [key]);
+      for (const { key, window } of ordered) {
+        const live = await client.query<{ request_count: number }>(REFUND_LOCK, [key, window]);
         const count = live.rows[0]?.request_count;
         if (count === undefined) continue;
         await client.query(count > 1 ? REFUND_DECREMENT : REFUND_LAST, [key]);
@@ -202,21 +227,24 @@ export class PgRateLimiter implements RateLimiter {
     await this.pool.query('DELETE FROM rate_limit_buckets WHERE bucket_key = $1', [key]);
   }
 
-  /** True when the bucket admitted and was charged; false when it refused and wrote nothing. */
+  /**
+   * The charged window's identity when the bucket admitted, or `null` when it refused and wrote
+   * nothing.
+   */
   private async admitOne(
     executor: Pool | PoolClient,
     request: RateLimitRequest,
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     // A limit of zero admits nothing, and the insert branch cannot say so: with no existing row
     // there is no conflict, so the `WHERE` never runs and a first request would be admitted
     // against a cap it already exceeds.
-    if (request.limit.maxRequests < 1) return false;
-    const result = await executor.query(ADMIT_ONE, [
+    if (request.limit.maxRequests < 1) return null;
+    const result = await executor.query<{ window_id: string }>(ADMIT_ONE, [
       request.key,
       request.limit.windowMs,
       request.limit.maxRequests,
     ]);
-    return (result.rowCount ?? 0) > 0;
+    return result.rows[0]?.window_id ?? null;
   }
 
   private async retryAfter(
@@ -245,8 +273,21 @@ export class PgRateLimiter implements RateLimiter {
  * transactions taking the same keys in opposite orders would deadlock; one order for everyone
  * removes the cycle.
  */
-function sortedByKey(requests: readonly RateLimitRequest[]): RateLimitRequest[] {
-  return [...requests].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+function sortedByKey<T extends { readonly key: string }>(items: readonly T[]): T[] {
+  return [...items].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+/** The reservations for the `refundable` buckets among those an admission charged. */
+function reservationsOf(
+  charged: ReadonlyArray<{ readonly request: RateLimitRequest; readonly window: string }>,
+): RateLimitReservation[] {
+  return charged
+    .filter(({ request }) => request.refundable === true)
+    .map(({ request, window }) => ({ key: request.key, window }));
+}
+
+function admitted(reservations: readonly RateLimitReservation[]): RateLimitResult {
+  return reservations.length > 0 ? { ...ADMITTED, reservations } : ADMITTED;
 }
 
 function fullWindowSeconds(limit: RateLimit): number {

@@ -67,12 +67,15 @@ function routes(): Route[] {
   return found;
 }
 
-/** Calls to the local `admit(...)` helper inside `node` — an identifier call, not a property one. */
+/**
+ * Calls to the local `admit(...)` or `reserve(...)` helpers inside `node` — identifier calls, not
+ * property ones. `admit` wraps `reserve`, so each is one admission decision.
+ */
 function admissions(node: ts.Node): ts.CallExpression[] {
   const calls: ts.CallExpression[] = [];
   walk(node, (n) => {
     if (!ts.isCallExpression(n)) return;
-    if (ts.isIdentifier(n.expression) && n.expression.text === 'admit') calls.push(n);
+    if (ts.isIdentifier(n.expression) && ['admit', 'reserve'].includes(n.expression.text)) calls.push(n);
   });
   return calls;
 }
@@ -134,7 +137,7 @@ test('no handler makes more than one admission decision', () => {
   assert.deepEqual(
     offenders,
     [],
-    'a handler calling `admit(...)` twice is two independent decisions, so the first can be ' +
+    'a handler calling `admit(...)` or `reserve(...)` twice is two independent decisions, so the first can be ' +
       'charged before the second refuses — hand every bucket to one call instead',
   );
 });
@@ -217,7 +220,7 @@ test('the expensive routes parse the body before they charge for it', () => {
 /**
  * Login's handle buckets are failure budgets (audit P1-1): reserved at admission and refunded once
  * the password is known to be right. Refunding before the check would make them free for an
- * attacker, and refunding the IP bucket would stop it counting every attempt.
+ * attacker, and marking the IP bucket refundable would stop it counting every attempt.
  */
 test('login refunds exactly its failure buckets, and only after the password check', () => {
   const route = routeNamed('/v1/auth/login');
@@ -240,8 +243,31 @@ test('login refunds exactly its failure buckets, and only after the password che
   assert.ok(check, 'login must call auth.login');
   assert.ok(refunds[0]!.getStart(SOURCE) > check.getStart(SOURCE), 'refund must follow auth.login');
 
-  const argument = refunds[0]!.arguments[0];
+  // What is refunded is exactly what the admission reserved: the value `reserve(...)` resolved to.
+  const [admission] = admissions(route.node);
+  assert.ok(admission && ts.isIdentifier(admission.expression));
+  assert.equal(admission.expression.text, 'reserve', 'login must use `reserve` to get reservations');
+  const declaration = admission.parent.parent;
+  assert.ok(
+    ts.isAwaitExpression(admission.parent) && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name),
+    'the reservations must be bound to a variable',
+  );
+  const refunded = refunds[0]!.arguments[1];
+  assert.ok(refunded && ts.isIdentifier(refunded) && refunded.text === declaration.name.text);
+
+  const argument = admission.arguments[0];
   assert.ok(argument !== undefined && ts.isArrayLiteralExpression(argument));
-  const keys = argument.elements.map((element) => bucketKey(element, '/v1/auth/login')).sort();
-  assert.deepEqual(keys, ['login:handle-ip:', 'login:handle:'].sort());
+  const refundable = argument.elements
+    .filter((element) =>
+      ts.isObjectLiteralExpression(element) &&
+      element.properties.some(
+        (p) =>
+          ts.isPropertyAssignment(p) &&
+          ts.isIdentifier(p.name) &&
+          p.name.text === 'refundable' &&
+          p.initializer.kind === ts.SyntaxKind.TrueKeyword,
+      ))
+    .map((element) => bucketKey(element, '/v1/auth/login'))
+    .sort();
+  assert.deepEqual(refundable, ['login:handle-ip:', 'login:handle:'].sort());
 });

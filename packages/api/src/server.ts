@@ -155,7 +155,6 @@ export function createApiServer(deps: ApiDependencies, options: ApiServerOptions
     gameLauncher: deps.gameLauncher,
     liveView: deps.liveView,
     metrics: deps.metrics,
-    logger: deps.logger,
     readiness: deps.readiness,
     antiCheatAnalysis: deps.antiCheatAnalysis,
     botTimingSource: deps.botTimingSource,
@@ -191,7 +190,6 @@ export function createApiServer(deps: ApiDependencies, options: ApiServerOptions
     // above the spread they would be overwritten by the `undefined` this defaults away, and the
     // compiler says so, because `RouteDeps` declares them required.
     metrics,
-    logger,
     readiness: deps.readiness ?? (() => Promise.resolve()),
     chess960Starts: deps.chess960Starts ?? cryptoChess960Start,
   });

@@ -31,7 +31,7 @@ import {
   REFRESH_COOKIE_NAME,
 } from './http/cookie';
 import { strictObject, oneOf, optBoolean, optInt, optString, parseLimit, reqBoolean, reqString } from './http/validate';
-import type { RateLimiter, RateLimitRequest } from './ports/rate-limiter';
+import type { RateLimiter, RateLimitRequest, RateLimitReservation } from './ports/rate-limiter';
 import type { Logger } from './ports/logger';
 import type { Metrics } from './ports/metrics';
 import type { ApiConfig } from './config';
@@ -158,7 +158,6 @@ export interface RouteDeps {
   readonly gameLauncher: GameLauncher;
   readonly liveView: TournamentLiveView;
   readonly metrics: Metrics;
-  readonly logger: Logger;
   readonly readiness: () => Promise<void>;
   readonly antiCheatAnalysis: AntiCheatAnalysisService | undefined;
   readonly botTimingSource: BotGameTimingSource | undefined;
@@ -233,7 +232,7 @@ const MAX_SEARCH_LIMIT = 100;
 /** Build the fully-wired router. */
 export function buildRouter(deps: RouteDeps): Router {
   const router = new Router();
-  const { auth, repos, clock, ids, chess960Starts, info, rateLimiter, config, logger } = deps;
+  const { auth, repos, clock, ids, chess960Starts, info, rateLimiter, config } = deps;
   const assistanceGuard = new LiveGameAssistanceGuard(repos.events);
   /** Capacity exhaustion is a temporary service refusal, not an internal HTTP 500. */
   const acquireAssistanceLock = async (userId: string): Promise<() => Promise<void>> => {
@@ -313,12 +312,14 @@ export function buildRouter(deps: RouteDeps): Router {
    * Admit a request against every bucket that guards it, or refuse it having charged none.
    *
    * This is the only caller of `rateLimiter.admit` in the file, and routes reach the limiter
-   * only through it. That is deliberate: the defect this replaced was six routes each calling
-   * the limiter twice in sequence, charging the first bucket before learning that the second
-   * refused. Handing every bucket over in one call is what lets the limiter decide before it
-   * commits; a second `await admit(...)` in the same handler would be two independent
-   * decisions again and would reintroduce exactly that bug. `rate-limit-structure.test.ts`
-   * fails if one appears.
+   * only through it or through `admit`, which wraps it. That is deliberate: the defect this
+   * replaced was six routes each calling the limiter twice in sequence, charging the first bucket
+   * before learning that the second refused. Handing every bucket over in one call is what lets
+   * the limiter decide before it commits; a second `admit(...)` or `reserve(...)` in the same
+   * handler would be two independent decisions again and would reintroduce exactly that bug.
+   * `rate-limit-structure.test.ts` fails if one appears.
+   *
+   * Resolves to the reservations for the buckets marked `refundable`, for `refund` to hand back.
    *
    * `retryAfterSeconds` is whatever the limiter reports, which for a multi-bucket refusal is
    * the longest wait among the buckets that refused rather than the first one it looked at.
@@ -331,30 +332,42 @@ export function buildRouter(deps: RouteDeps): Router {
    * `/v1/auth/refresh` keeps that single statement and its exposure is unchanged. Raised in the
    * CodeRabbit review of PR #137.
    */
-  const admit = async (buckets: readonly RateLimitRequest[]): Promise<void> => {
-    if (!config.rateLimit.enabled) return;
+  const reserve = async (
+    buckets: readonly RateLimitRequest[],
+  ): Promise<readonly RateLimitReservation[]> => {
+    if (!config.rateLimit.enabled) return [];
     const result = await rateLimiter.admit(buckets);
     if (!result.allowed) throw HttpError.rateLimited(result.retryAfterSeconds);
+    return result.reservations ?? [];
+  };
+
+  /** {@link reserve} for a route with no failure budget to refund later. */
+  const admit = async (buckets: readonly RateLimitRequest[]): Promise<void> => {
+    await reserve(buckets);
   };
 
   /**
-   * Return a slot `admit` reserved in a failure budget, once the request is known to have
-   * succeeded.
+   * Hand back the slots `reserve` took in failure budgets (the buckets it was given as
+   * `refundable`), once the request is known to have succeeded.
    *
    * Unlike `admit`, a fault here is logged, not thrown. The work the bucket guards has already
    * happened — for login, a session exists — so failing the response would discard a real success,
    * and a retry would spend more quota. A lost refund leaves the slot charged until the window ends,
    * which is the fail-closed direction anyway.
    */
-  const refund = async (buckets: readonly RateLimitRequest[]): Promise<void> => {
-    if (!config.rateLimit.enabled) return;
+  const refund = async (
+    log: Logger,
+    reservations: readonly RateLimitReservation[],
+  ): Promise<void> => {
+    if (reservations.length === 0) return;
     try {
-      await rateLimiter.refund(buckets);
+      await rateLimiter.refund(reservations);
     } catch (error: unknown) {
-      logger.warn('rate limit refund failed; slots stay charged until their window ends', {
+      log.warn('rate limit refund failed; slots stay charged until their window ends', {
         // Keys embed handles and addresses, so only their number is logged.
-        buckets: buckets.length,
+        buckets: reservations.length,
         error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? (error.stack ?? null) : null,
       });
     }
   };
@@ -490,17 +503,18 @@ export function buildRouter(deps: RouteDeps): Router {
       // and cannot refuse the owner; the account-wide one bounds guesses spread over many
       // addresses. Both are keyed by the submitted handle, never by whether it exists, so unknown
       // handles are throttled exactly like real ones.
-      await admit([
+      const reservations = await reserve([
         { key: `login:ip:${ip}`, limit: config.rateLimit.login.perIp },
-        { key: `login:handle-ip:${sourceKey}`, limit: config.rateLimit.login.perHandleIp },
-        { key: `login:handle:${handleKey}`, limit: config.rateLimit.login.perHandle },
+        {
+          key: `login:handle-ip:${sourceKey}`,
+          limit: config.rateLimit.login.perHandleIp,
+          refundable: true,
+        },
+        { key: `login:handle:${handleKey}`, limit: config.rateLimit.login.perHandle, refundable: true },
       ]);
 
       const result = await auth.login({ handle, password }, meta(ctx));
-      await refund([
-        { key: `login:handle-ip:${sourceKey}`, limit: config.rateLimit.login.perHandleIp },
-        { key: `login:handle:${handleKey}`, limit: config.rateLimit.login.perHandle },
-      ]);
+      await refund(ctx.logger, reservations);
       return json(200, {
         user: selfUser(result.user, result.roles),
         tokens: result.tokens,
