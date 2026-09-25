@@ -2,10 +2,12 @@
  * Real-Redis proof that the engine bot is safe on more than one gateway replica (ADR-0080,
  * ADR-0010). Gated behind REDIS_URL like redis-ownership.integration.test.ts.
  *
- * Two nodes share one event log (Postgres in production) and one pub/sub (Redis Pub/Sub), and run
- * the production RedisCommandRouter + OwnershipRegistry. Each node's GameAuthority is its own
- * cache: a non-owner's copy never sees the owner's moves, which is exactly what the mover must
- * not compute from.
+ * Two nodes run the production RedisCommandRouter + OwnershipRegistry and each has its own
+ * production Redis pub/sub (`createRedisPubSub`, as `serve.ts` wires it), so a broadcast reaches
+ * the other node asynchronously through Redis, exactly as between two pods. They share one event
+ * log; it is in memory here (Postgres in production), which does not change what is proven: the
+ * log is only read on takeover. Each node's GameAuthority is its own cache — a non-owner's copy
+ * never sees the owner's moves, which is exactly what the mover must not compute from.
  */
 
 import assert from 'node:assert/strict';
@@ -15,9 +17,10 @@ import { Redis } from 'ioredis';
 import {
   GameAuthority,
   InMemoryEventLog,
-  InMemoryPubSub,
   gameChannel,
   type Broadcast,
+  type PubSub,
+  type Unsubscribe,
 } from '@chess-platform/realtime-gateway';
 import type {
   AnalysisProvider,
@@ -30,6 +33,7 @@ import { BOT_ACCOUNTS } from '@chess-platform/api';
 import { OwnershipRegistry, ownerKey } from '../src/ownership.js';
 import { OwnerCommandConsumer, RedisCommandRouter } from '../src/command-forwarder.js';
 import { EngineBotMover } from '../src/engine-bot.js';
+import { createRedisPubSub } from '../src/redis-pubsub.js';
 
 const REDIS_URL = process.env['REDIS_URL'];
 const redisTest = REDIS_URL ? test : test.skip;
@@ -61,14 +65,39 @@ class ScriptedEngine implements AnalysisProvider {
   }
 }
 
-function makeNode(redis: Redis, store: InMemoryEventLog, pubsub: InMemoryPubSub, engine: ScriptedEngine) {
+/** A node's pub/sub, counting live subscriptions per channel so a test can see a mover let go. */
+class CountingPubSub implements PubSub {
+  private readonly live = new Map<string, number>();
+  constructor(private readonly inner: PubSub) {}
+  publish(channel: string, msg: Broadcast): void {
+    this.inner.publish(channel, msg);
+  }
+  subscribe(channel: string, handler: (msg: Broadcast) => void): Unsubscribe {
+    this.live.set(channel, this.active(channel) + 1);
+    const unsubscribe = this.inner.subscribe(channel, handler);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.live.set(channel, this.active(channel) - 1);
+      unsubscribe();
+    };
+  }
+  active(channel: string): number {
+    return this.live.get(channel) ?? 0;
+  }
+}
+
+function makeNode(redis: Redis, store: InMemoryEventLog, engine: ScriptedEngine) {
   const nodeId = `node-${randomUUID()}`;
+  const redisPubSub = createRedisPubSub({ url: REDIS_URL!, nodeId });
+  const pubsub = new CountingPubSub(redisPubSub.pubsub);
   const authority = new GameAuthority(pubsub, () => Date.now(), store);
   const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec: 30, renewalIntervalSec: 15 });
   const consumer = new OwnerCommandConsumer(authority, redis);
   const router = new RedisCommandRouter({ authority, registry, redis, nodeId, consumer, forwardTimeoutMs: 3000 });
   const mover = new EngineBotMover({ authority, router, pubsub, provider: engine, ownership: router });
-  return { nodeId, authority, registry, consumer, router, mover, engine };
+  return { nodeId, pubsub, closePubSub: redisPubSub.close, authority, registry, consumer, router, mover, engine };
 }
 type Node = ReturnType<typeof makeNode>;
 
@@ -77,23 +106,22 @@ interface Cluster {
   readonly b: Node;
   readonly redis: Redis;
   readonly store: InMemoryEventLog;
-  readonly pubsub: InMemoryPubSub;
 }
 
 async function withCluster(engines: [ScriptedEngine, ScriptedEngine], fn: (c: Cluster) => Promise<void>): Promise<void> {
   const redis = new Redis(REDIS_URL!, { maxRetriesPerRequest: null });
   const store = new InMemoryEventLog();
-  const pubsub = new InMemoryPubSub();
-  const a = makeNode(redis, store, pubsub, engines[0]);
-  const b = makeNode(redis, store, pubsub, engines[1]);
+  const a = makeNode(redis, store, engines[0]);
+  const b = makeNode(redis, store, engines[1]);
   try {
-    await fn({ a, b, redis, store, pubsub });
+    await fn({ a, b, redis, store });
   } finally {
     for (const node of [a, b]) {
       node.engine.release();
       node.mover.stop();
       node.consumer.stop();
       await node.registry.releaseAll();
+      await node.closePubSub().catch(() => undefined);
     }
     await redis.quit().catch(() => undefined);
   }
@@ -119,7 +147,12 @@ async function waitFor(what: string, predicate: () => boolean | Promise<boolean>
   }
 }
 
-const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 150));
+/**
+ * How long a negative check watches for something that must not happen. Everything it guards is a
+ * local engine answer followed by a local or Redis round trip, all well under this on a CI runner.
+ */
+const NEGATIVE_WINDOW_MS = 500;
+const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, NEGATIVE_WINDOW_MS));
 
 /** Moves as recorded in the shared durable log — the one history every node agrees on. */
 async function loggedMoves(store: InMemoryEventLog, gameId: string): Promise<string[]> {
@@ -131,7 +164,7 @@ async function loggedMoves(store: InMemoryEventLog, gameId: string): Promise<str
 }
 
 redisTest('two replicas observe one bot game: only the owner computes, even on duplicate broadcasts', async () => {
-  await withCluster([new ScriptedEngine(['e7e5', 'b8c6']), new ScriptedEngine(['c7c5'])], async ({ a, b, store, pubsub }) => {
+  await withCluster([new ScriptedEngine(['e7e5', 'b8c6']), new ScriptedEngine(['c7c5'])], async ({ a, b, store }) => {
     const gameId = await createBotGame(a, 'black');
     await a.router.route(gameId, HUMAN, { kind: 'move', uci: 'e2e4' }); // A claims ownership
     // B joins with the bot to move at ply 1. Its copy stays there, so if B computed from it, it
@@ -141,16 +174,18 @@ redisTest('two replicas observe one bot game: only the owner computes, even on d
     b.mover.registerGame(gameId);
     await waitFor('the owner to reply', async () => (await loggedMoves(store, gameId)).length === 2);
 
-    // The human moves through the non-owner, which forwards to A; capture the resulting broadcast.
+    // The human moves through the non-owner, which forwards to A; B hears the result via Redis.
     const seen: Broadcast[] = [];
-    const unsub = pubsub.subscribe(gameChannel(gameId), (msg) => seen.push(msg));
+    const unsub = b.pubsub.subscribe(gameChannel(gameId), (msg) => seen.push(msg));
     await b.router.route(gameId, HUMAN, { kind: 'move', uci: 'g1f3' });
-    unsub();
     await waitFor('the owner to reply again', async () => (await loggedMoves(store, gameId)).length === 4);
+    await waitFor('B to hear the move broadcast', () => seen.length > 0);
+    unsub();
 
-    // Duplicate delivery of an already-handled broadcast wakes both movers once more.
-    pubsub.publish(gameChannel(gameId), seen[0]!);
-    pubsub.publish(gameChannel(gameId), seen[0]!);
+    // Duplicate delivery of an already-handled broadcast wakes both movers once more: B locally,
+    // A through Redis.
+    b.pubsub.publish(gameChannel(gameId), seen[0]!);
+    b.pubsub.publish(gameChannel(gameId), seen[0]!);
     await settle();
 
     assert.equal(b.engine.fens.length, 0, 'the non-owner never invoked the engine');
@@ -273,7 +308,7 @@ redisTest('ownership lost and regained while the engine thinks: the untouched st
 });
 
 redisTest('a finished game stops bot work on every replica, including the non-owner', async () => {
-  await withCluster([new ScriptedEngine(['e7e5']), new ScriptedEngine(['c7c5'])], async ({ a, b, store, pubsub }) => {
+  await withCluster([new ScriptedEngine(['e7e5']), new ScriptedEngine(['c7c5'])], async ({ a, b, store }) => {
     const gameId = await createBotGame(a, 'black');
     await b.authority.ensureLoaded(gameId);
     await a.router.route(gameId, HUMAN, { kind: 'move', uci: 'e2e4' });
@@ -282,9 +317,9 @@ redisTest('a finished game stops bot work on every replica, including the non-ow
     await waitFor('the owner to reply', async () => (await loggedMoves(store, gameId)).length === 2);
 
     await b.router.route(gameId, HUMAN, { kind: 'resign' }); // forwarded to the owner
-    await settle();
+    await waitFor('both movers to let go', () =>
+      a.pubsub.active(gameChannel(gameId)) === 0 && b.pubsub.active(gameChannel(gameId)) === 0);
 
-    assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 0, 'both movers unsubscribed');
     assert.equal(b.authority.getState(gameId).status.over, false, "B's copy never saw the end — the broadcast did");
     assert.equal(a.engine.fens.length, 1);
     assert.equal(b.engine.fens.length, 0);

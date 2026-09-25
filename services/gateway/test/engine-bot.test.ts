@@ -392,7 +392,7 @@ test('EngineBotMover: a non-owner never calls the engine, however many broadcast
   await flush();
 
   assert.equal(provider.playCalls.length, 0, 'non-owner must not compute from its cached copy');
-  assert.ok(ownership.prepareCalls >= 3, 'ownership is asked before every would-be computation');
+  assert.equal(ownership.prepareCalls, 3, 'ownership is asked once per wake-up: registration + two broadcasts');
   assert.equal(authority.getState(gameId).ply, 1, 'no command submitted');
   mover.stop();
 });
@@ -461,7 +461,7 @@ test('EngineBotMover: a result that arrives after the game ended is dropped and 
   mover.stop();
 });
 
-test('EngineBotMover: a non-owner stops on the terminal broadcast its stale copy cannot see', async () => {
+test('EngineBotMover: the terminal broadcast stops bot work even when the local copy never saw the end', async () => {
   const gameId = '00000000-0000-7000-8000-000000000024';
   const { pubsub, authority, router } = await botBlackAfterE4(gameId);
   const provider = new FakeAnalysisProvider();

@@ -526,6 +526,7 @@ check "Canary: canary-weight matches rollout.canary.weight" "$([ "$CANARY_WEIGHT
 CANARY_HEADER_OFF=$(doc_by_name "$TMPDIR/canary.yaml" Ingress release-name-gambit-web-canary | grep -c 'canary-by-header' || true)
 check "Canary: canary-by-header is absent unless configured" "$([ "$CANARY_HEADER_OFF" = "0" ] && echo 0 || echo 1)"
 
+# default.yaml is the rolling render; the loop below adds the other two strategies.
 # 9. The exclusions hold. The gateway is never versioned by this mechanism (long-
 # lived connections + Redis-coordinated game ownership), and the search indexer
 # must stay a single process however the HTTP tier is being rolled out.
