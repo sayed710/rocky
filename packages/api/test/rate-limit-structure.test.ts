@@ -146,10 +146,9 @@ test('no handler makes more than one admission decision', () => {
  */
 test('every multi-bucket route hands both buckets to a single admission', () => {
   const expected: Record<string, readonly string[]> = {
-    '/v1/auth/login': ['login:ip:', 'login:handle:'],
+    '/v1/auth/login': ['login:ip:', 'login:handle-ip:', 'login:handle:'],
     '/v1/auth/password-reset/request': ['password-reset:ip:', 'password-reset:target:'],
     '/v1/auth/email/verification/request': ['email-verification:user:', 'email-verification:ip:'],
-    '/v1/auth/webauthn/login/options': ['webauthn-login:ip:', 'webauthn-login:handle:'],
     '/v1/analysis': ['analysis:user:', 'analysis:ip:'],
     '/v1/analysis/mistake-prediction': ['mistake-prediction:user:', 'mistake-prediction:ip:'],
     '/v1/ai/move-explanation': ['move-explanation:user:', 'move-explanation:ip:'],
@@ -213,4 +212,36 @@ test('the expensive routes parse the body before they charge for it', () => {
       `${path} must charge quota only after the body is known to be real`,
     );
   }
+});
+
+/**
+ * Login's handle buckets are failure budgets (audit P1-1): reserved at admission and refunded once
+ * the password is known to be right. Refunding before the check would make them free for an
+ * attacker, and refunding the IP bucket would stop it counting every attempt.
+ */
+test('login refunds exactly its failure buckets, and only after the password check', () => {
+  const route = routeNamed('/v1/auth/login');
+  const refunds: ts.CallExpression[] = [];
+  let check: ts.CallExpression | undefined;
+  walk(route.node, (n) => {
+    if (!ts.isCallExpression(n)) return;
+    if (ts.isIdentifier(n.expression) && n.expression.text === 'refund') refunds.push(n);
+    if (
+      ts.isPropertyAccessExpression(n.expression) &&
+      n.expression.name.text === 'login' &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === 'auth'
+    ) {
+      check = n;
+    }
+  });
+
+  assert.equal(refunds.length, 1, 'login must refund in exactly one place');
+  assert.ok(check, 'login must call auth.login');
+  assert.ok(refunds[0]!.getStart(SOURCE) > check.getStart(SOURCE), 'refund must follow auth.login');
+
+  const argument = refunds[0]!.arguments[0];
+  assert.ok(argument !== undefined && ts.isArrayLiteralExpression(argument));
+  const keys = argument.elements.map((element) => bucketKey(element, '/v1/auth/login')).sort();
+  assert.deepEqual(keys, ['login:handle-ip:', 'login:handle:'].sort());
 });

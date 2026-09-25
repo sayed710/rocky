@@ -418,3 +418,89 @@ test('WebAuthn registration and login', async (t) => {
 
   await harness.close();
 });
+
+/**
+ * Audit P1-1: login options used to charge a per-handle bucket, so anyone could request challenges
+ * for a victim's handle until the victim was refused theirs. With per-IP limiting only, a flood of
+ * options for the victim must neither refuse nor evict the victim's challenge, and the one-shot
+ * challenge must still refuse a replayed assertion.
+ */
+test('a flood of login options for a handle neither locks out nor weakens its passkey', async () => {
+  const rpId = 'localhost';
+  const origin = 'http://localhost';
+  const harness = await startHarness({ trustProxy: true, webauthn: { rpId, origins: [origin] } });
+  try {
+    const { userId, token } = await harness.makeUser('victim');
+    const authenticator = new FakeAuthenticator();
+    const regOptions = await harness.json('POST', '/v1/auth/webauthn/register/options', { token });
+    const regClientDataJSON = Buffer.from(JSON.stringify({
+      type: 'webauthn.create',
+      challenge: regOptions.body.challenge,
+      origin,
+    }));
+    const registered = await harness.json('POST', '/v1/auth/webauthn/register/verify', {
+      token,
+      body: {
+        id: authenticator.rawId,
+        rawId: authenticator.rawId,
+        type: 'public-key',
+        response: {
+          clientDataJSON: regClientDataJSON.toString('base64url'),
+          attestationObject: authenticator
+            .buildAttestationObject(authenticator.buildRegisterAuthData(rpId))
+            .toString('base64url'),
+        },
+      },
+    });
+    assert.strictEqual(registered.status, 200);
+
+    // The victim's challenge is issued first; the flood must not displace it.
+    const victimOptions = await harness.json('POST', '/v1/auth/webauthn/login/options', {
+      body: { handle: 'victim' },
+      headers: { 'x-forwarded-for': '198.51.100.10' },
+    });
+    assert.strictEqual(victimOptions.status, 200);
+
+    for (let i = 0; i < 20; i++) {
+      const flood = await harness.json('POST', '/v1/auth/webauthn/login/options', {
+        body: { handle: 'victim' },
+        headers: { 'x-forwarded-for': `203.0.113.${i}` },
+      });
+      assert.strictEqual(flood.status, 200, `flood request ${i}`);
+    }
+
+    const clientDataJSON = Buffer.from(JSON.stringify({
+      type: 'webauthn.get',
+      challenge: victimOptions.body.challenge,
+      origin,
+    }));
+    const authData = authenticator.buildLoginAuthData(rpId, 1);
+    const assertion = {
+      id: authenticator.rawId,
+      rawId: authenticator.rawId,
+      type: 'public-key',
+      response: {
+        clientDataJSON: clientDataJSON.toString('base64url'),
+        authenticatorData: authData.toString('base64url'),
+        signature: authenticator.sign(authData, clientDataJSON).toString('base64url'),
+        userHandle: userId,
+      },
+    };
+    const verifyHeaders = { 'x-forwarded-for': '198.51.100.10' };
+
+    const loggedIn = await harness.json('POST', '/v1/auth/webauthn/login/verify', {
+      body: assertion,
+      headers: verifyHeaders,
+    });
+    assert.strictEqual(loggedIn.status, 200, 'the victim signs in after the flood');
+    assert.strictEqual(loggedIn.body.user.handle, 'victim');
+
+    const replayed = await harness.json('POST', '/v1/auth/webauthn/login/verify', {
+      body: assertion,
+      headers: verifyHeaders,
+    });
+    assert.strictEqual(replayed.status, 401, 'the challenge is still single-use');
+  } finally {
+    await harness.close();
+  }
+});

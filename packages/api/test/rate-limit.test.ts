@@ -100,20 +100,20 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
   test('login endpoint is rate limited per IP and per handle independently', async () => {
     const h = await startHarness({ trustProxy: true });
     try {
-      // DEFAULT_RATE_LIMIT.login.perHandle is 5, perIp is 10.
+      // DEFAULT_RATE_LIMIT.login: perIp 10 attempts, perHandleIp 5 failures, perHandle 50 failures.
       await h.json('POST', '/v1/auth/register', { body: { handle: 'alice', password: 'password123' } });
 
-      // Hit handle limit (5)
+      // Hit the per-source handle limit (5) from one address.
       for (let i = 0; i < 5; i++) {
         await h.json('POST', '/v1/auth/login', {
           body: { handle: 'alice', password: 'wrong' },
-          headers: { 'x-forwarded-for': `192.168.1.${i}` }, // different IPs, same handle
+          headers: { 'x-forwarded-for': '192.168.1.1' },
         });
       }
 
       const blockedHandle = await h.json('POST', '/v1/auth/login', {
         body: { handle: 'alice', password: 'wrong' },
-        headers: { 'x-forwarded-for': '192.168.1.100' },
+        headers: { 'x-forwarded-for': '192.168.1.1' },
       });
       assert.equal(blockedHandle.status, 429, 'Blocked by handle limit');
       assert.equal(blockedHandle.headers.get('retry-after'), '900'); // 15 mins
@@ -138,15 +138,23 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
   });
 
   test('login handle limiting is case-insensitive like the identity store', async () => {
-    const h = await startHarness({ trustProxy: true });
+    const h = await startHarness({
+      trustProxy: true,
+      rateLimit: {
+        ...DEFAULT_RATE_LIMIT,
+        login: { ...DEFAULT_RATE_LIMIT.login, perHandle: { maxRequests: 5, windowMs: 15 * 60 * 1000 } },
+      },
+    });
     try {
       await h.json('POST', '/v1/auth/register', {
         body: { handle: 'CaseUser', password: 'password123' },
       });
-      for (const handle of ['caseuser', 'CASEUSER', 'CaseUser', 'cAsEuSeR', 'caseUser']) {
+      // Distinct addresses, so only the account-wide bucket can join the spellings together.
+      const spellings = ['caseuser', 'CASEUSER', 'CaseUser', 'cAsEuSeR', 'caseUser'];
+      for (const [i, handle] of spellings.entries()) {
         await h.json('POST', '/v1/auth/login', {
           body: { handle, password: 'wrong' },
-          headers: { 'x-forwarded-for': `198.51.100.${handle.length}` },
+          headers: { 'x-forwarded-for': `198.51.100.${i}` },
         });
       }
       const blocked = await h.json('POST', '/v1/auth/login', {

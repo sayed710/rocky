@@ -576,3 +576,157 @@ test('Postgres combined admission is deadlock-free and hands the last slot to ex
     assert.equal(remaining, 19);
   });
 });
+
+/**
+ * `refund` against the real schema (audit P1-1). `request_count` carries `CHECK (> 0)`, so the last
+ * unit has to leave as a delete; and a refund must never hand out capacity the bucket did not have.
+ */
+test('Postgres refund returns exactly the slots that were charged', { skip }, async () => {
+  const keys: string[] = [];
+  await withSharedDatabase({ cleanup: deleteBuckets(keys) }, async (pool) => {
+    await migrate(pool, MIGRATIONS);
+    const limiter = new PgRateLimiter(pool);
+    const bucket = { key: `integration:refund:${uuidv7()}`, limit: { maxRequests: 2, windowMs: 600_000 } };
+    keys.push(bucket.key);
+    const count = async () =>
+      (await pool.query<{ request_count: number }>(
+        'SELECT request_count FROM rate_limit_buckets WHERE bucket_key = $1',
+        [bucket.key],
+      )).rows[0]?.request_count ?? 0;
+
+    assert.equal((await limiter.admit([bucket])).allowed, true);
+    assert.equal((await limiter.admit([bucket])).allowed, true);
+    assert.equal((await limiter.admit([bucket])).allowed, false);
+
+    await limiter.refund([bucket]);
+    assert.equal(await count(), 1);
+    await limiter.refund([bucket]);
+    assert.equal(await count(), 0, 'the last unit is removed, not written as zero');
+    await limiter.refund([bucket]);
+    await limiter.refund([{ key: `integration:never-charged:${uuidv7()}`, limit: bucket.limit }]);
+
+    assert.equal((await limiter.admit([bucket])).allowed, true);
+    assert.equal((await limiter.admit([bucket])).allowed, true);
+    assert.equal((await limiter.admit([bucket])).allowed, false, 'surplus refunds minted nothing');
+  });
+});
+
+test('Postgres refund leaves a lapsed window alone', { skip }, async () => {
+  const keys: string[] = [];
+  await withSharedDatabase({ cleanup: deleteBuckets(keys) }, async (pool) => {
+    await migrate(pool, MIGRATIONS);
+    const limiter = new PgRateLimiter(pool);
+    const bucket = { key: `integration:refund-lapsed:${uuidv7()}`, limit: { maxRequests: 3, windowMs: 600_000 } };
+    keys.push(bucket.key);
+    await limiter.admit([bucket]);
+    await limiter.admit([bucket]);
+    // Lapse the window without waiting for it.
+    await pool.query(
+      `UPDATE rate_limit_buckets SET expires_at = now() - interval '1 second' WHERE bucket_key = $1`,
+      [bucket.key],
+    );
+
+    await limiter.refund([bucket]);
+    const row = await pool.query<{ request_count: number }>(
+      'SELECT request_count FROM rate_limit_buckets WHERE bucket_key = $1',
+      [bucket.key],
+    );
+    assert.equal(row.rows[0]?.request_count, 2, 'a stale row is not decremented');
+  });
+});
+
+/**
+ * Login's reservation across replicas: two limiter instances share one database, and twenty
+ * concurrent failed-login admissions from twenty addresses race for an account-wide budget of
+ * three. A check-then-charge design would let every one of them through; the reservation admits
+ * exactly three. A refund on one replica is then visible to the other.
+ */
+test('Postgres login reservations hold across replicas under concurrency', { skip }, async () => {
+  const keys: string[] = [];
+  await withSharedDatabase({ cleanup: deleteBuckets(keys) }, async (pool) => {
+    await migrate(pool, MIGRATIONS);
+    const a = new PgRateLimiter(pool);
+    const b = new PgRateLimiter(pool);
+    const run = uuidv7();
+    const handle = { key: `integration:login-handle:${run}`, limit: { maxRequests: 3, windowMs: 600_000 } };
+    keys.push(handle.key);
+    const attempt = (i: number) => {
+      const ip = { key: `integration:login-ip:${run}:${i}`, limit: { maxRequests: 10, windowMs: 600_000 } };
+      const source = { key: `integration:login-source:${run}:${i}`, limit: { maxRequests: 5, windowMs: 600_000 } };
+      keys.push(ip.key, source.key);
+      return [ip, source, handle];
+    };
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => (i % 2 === 0 ? a : b).admit(attempt(i))),
+    );
+    assert.equal(results.filter((r) => r.allowed).length, 3);
+
+    await b.refund([handle]);
+    assert.equal((await a.admit(attempt(100))).allowed, true, 'the refunded slot is shared');
+    assert.equal((await a.admit(attempt(101))).allowed, false);
+  });
+});
+
+/**
+ * Refunds racing admissions and each other must never violate `CHECK (request_count > 0)` or mint
+ * capacity. A refund that loses a race is skipped, which leaves the slot charged: fail closed.
+ */
+test('Postgres concurrent refunds never mint capacity', { skip }, async () => {
+  const keys: string[] = [];
+  await withSharedDatabase({ cleanup: deleteBuckets(keys) }, async (pool) => {
+    await migrate(pool, MIGRATIONS);
+    const a = new PgRateLimiter(pool);
+    const b = new PgRateLimiter(pool);
+    const bucket = { key: `integration:refund-race:${uuidv7()}`, limit: { maxRequests: 5, windowMs: 600_000 } };
+    keys.push(bucket.key);
+    for (let i = 0; i < 5; i += 1) assert.equal((await a.admit([bucket])).allowed, true);
+
+    await Promise.all([
+      ...Array.from({ length: 5 }, (_, i) => (i % 2 === 0 ? a : b).refund([bucket])),
+      ...Array.from({ length: 5 }, (_, i) => (i % 2 === 0 ? b : a).admit([bucket])),
+    ]);
+
+    const row = await pool.query<{ request_count: number }>(
+      'SELECT request_count FROM rate_limit_buckets WHERE bucket_key = $1',
+      [bucket.key],
+    );
+    const stored = row.rows[0]?.request_count ?? 0;
+    assert.ok(stored >= 0 && stored <= 5, `stored count ${stored} is within capacity`);
+    let admitted = 0;
+    for (let i = 0; i < 6; i += 1) if ((await a.admit([bucket])).allowed) admitted += 1;
+    assert.equal(admitted, 5 - stored, 'the bucket admits exactly what its stored count leaves');
+  });
+});
+
+/**
+ * A refund waiting on a contended row gives up at the lock timeout instead of holding a pooled
+ * client indefinitely — the same bound multi-bucket admission has. Raised in review of this change.
+ */
+test('Postgres refund is bounded by the lock timeout on a contended row', { skip }, async () => {
+  const keys: string[] = [];
+  await withSharedDatabase({ cleanup: deleteBuckets(keys) }, async (pool) => {
+    await migrate(pool, MIGRATIONS);
+    const limiter = new PgRateLimiter(pool);
+    const bucket = { key: `integration:refund-contended:${uuidv7()}`, limit: { maxRequests: 3, windowMs: 600_000 } };
+    keys.push(bucket.key);
+    await limiter.admit([bucket]);
+    await limiter.admit([bucket]);
+
+    const holder = await pool.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM rate_limit_buckets WHERE bucket_key = $1 FOR UPDATE', [bucket.key]);
+      await assert.rejects(limiter.refund([bucket]), /lock timeout/);
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+    }
+
+    const row = await pool.query<{ request_count: number }>(
+      'SELECT request_count FROM rate_limit_buckets WHERE bucket_key = $1',
+      [bucket.key],
+    );
+    assert.equal(row.rows[0]?.request_count, 2, 'the timed-out refund changed nothing');
+  });
+});

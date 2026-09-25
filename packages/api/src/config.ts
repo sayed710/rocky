@@ -70,7 +70,11 @@ export interface RateLimitEndpointConfig {
 export interface RateLimitConfig {
   readonly enabled: boolean;
   readonly login: {
+    /** Every attempt from one address, charged before the password is checked. */
     readonly perIp: RateLimitEndpointConfig;
+    /** Failed attempts against one handle from one address. */
+    readonly perHandleIp: RateLimitEndpointConfig;
+    /** Failed attempts against one handle from all addresses together. */
     readonly perHandle: RateLimitEndpointConfig;
   };
   readonly register: {
@@ -89,7 +93,6 @@ export interface RateLimitConfig {
   };
   readonly webauthnLogin: {
     readonly perIp: RateLimitEndpointConfig;
-    readonly perHandle: RateLimitEndpointConfig;
   };
   readonly webauthnRegister: {
     readonly perIp: RateLimitEndpointConfig;
@@ -147,7 +150,10 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   enabled: true,
   login: {
     perIp: { maxRequests: 10, windowMs: 5 * 60 * 1000 }, // 10 / 5 min
-    perHandle: { maxRequests: 5, windowMs: 15 * 60 * 1000 }, // 5 / 15 min
+    // One address gets the old per-handle budget of guesses. Locking the owner out now takes
+    // failures from at least perHandle / perHandleIp = 10 distinct addresses per window.
+    perHandleIp: { maxRequests: 5, windowMs: 15 * 60 * 1000 }, // 5 failures / 15 min
+    perHandle: { maxRequests: 50, windowMs: 15 * 60 * 1000 }, // 50 failures / 15 min
   },
   register: {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
@@ -163,9 +169,10 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
     perUser: { maxRequests: 3, windowMs: 60 * 60 * 1000 }, // 3 / 60 min
   },
+  // Per IP only. Asking for a challenge proves nothing and guessing a passkey signature is not
+  // feasible, so a per-handle bucket here protected nothing and only let anyone lock a handle out.
   webauthnLogin: {
     perIp: { maxRequests: 10, windowMs: 5 * 60 * 1000 }, // 10 / 5 min
-    perHandle: { maxRequests: 5, windowMs: 15 * 60 * 1000 }, // 5 / 15 min
   },
   webauthnRegister: {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min

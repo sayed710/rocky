@@ -57,6 +57,21 @@ const RETRY_AFTER = `
     FROM rate_limit_buckets
    WHERE bucket_key = $1`;
 
+/**
+ * Refund one unit: lock the live row, then decrement it — or delete it when it holds the last unit,
+ * because the schema forbids a zero count and an absent row admits exactly like an empty window.
+ * The `FOR UPDATE` holds the row from the read to the write, so a concurrent admission or refund
+ * waits rather than acting on a count this one is about to change. A lapsed or absent row is left
+ * alone: there is nothing live to refund.
+ */
+const REFUND_LOCK = `
+  SELECT request_count FROM rate_limit_buckets
+   WHERE bucket_key = $1 AND expires_at > now()
+     FOR UPDATE`;
+const REFUND_DECREMENT = `
+  UPDATE rate_limit_buckets SET request_count = request_count - 1 WHERE bucket_key = $1`;
+const REFUND_LAST = `DELETE FROM rate_limit_buckets WHERE bucket_key = $1`;
+
 const ADMITTED: RateLimitResult = { allowed: true, retryAfterSeconds: 0 };
 
 /**
@@ -107,7 +122,52 @@ export class PgRateLimiter implements RateLimiter {
     // Those same row locks are what make the count correct rather than merely all-or-nothing. A
     // concurrent transaction blocks on the locked row until this one ends and then re-reads it, so
     // two requests racing for one remaining slot cannot both see it free.
-    const ordered = [...requests].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const ordered = sortedByKey(requests);
+    return this.inBoundedTransaction(async (client) => {
+      let worstRetry = 0;
+      for (const request of ordered) {
+        if (await this.admitOne(client, request)) continue;
+        // Read the wait before the rollback, and in its own statement so it sees the row that
+        // actually refused this request rather than the snapshot the upsert started with.
+        worstRetry = Math.max(worstRetry, await this.retryAfter(client, request));
+      }
+
+      // Every bucket is measured before anything is decided, so `retryAfterSeconds` is the longest
+      // of the refusals rather than whichever key happened to sort first.
+      return worstRetry > 0
+        ? { commit: false, value: { allowed: false, retryAfterSeconds: worstRetry } }
+        : { commit: true, value: ADMITTED };
+    });
+  }
+
+  /**
+   * Refund inside the same bounded transaction as a multi-bucket admission, for the same reasons:
+   * the row locks are taken in sorted key order, so a refund cannot deadlock against an admission
+   * over the same keys, and the lock and statement timeouts keep a contended row from holding a
+   * pooled client indefinitely.
+   */
+  async refund(requests: readonly RateLimitRequest[]): Promise<void> {
+    if (requests.length === 0) return;
+    assertDistinctKeys(requests);
+    const ordered = sortedByKey(requests);
+    await this.inBoundedTransaction(async (client) => {
+      for (const { key } of ordered) {
+        const live = await client.query<{ request_count: number }>(REFUND_LOCK, [key]);
+        const count = live.rows[0]?.request_count;
+        if (count === undefined) continue;
+        await client.query(count > 1 ? REFUND_DECREMENT : REFUND_LAST, [key]);
+      }
+      return { commit: true, value: undefined };
+    });
+  }
+
+  /**
+   * Run `work` in one transaction bounded by {@link LOCK_TIMEOUT_MS} and {@link STATEMENT_TIMEOUT_MS},
+   * committing or rolling back as `work` decides. Any error rolls back and propagates.
+   */
+  private async inBoundedTransaction<T>(
+    work: (client: PoolClient) => Promise<{ readonly commit: boolean; readonly value: T }>,
+  ): Promise<T> {
     const client = await this.pool.connect();
     // Set while the connection may still be inside a transaction. Releasing such a client returns
     // it to the pool mid-transaction and the next borrower inherits it — its writes join a
@@ -119,20 +179,10 @@ export class PgRateLimiter implements RateLimiter {
       poisoned = true;
       await client.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
       await client.query(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
-
-      let worstRetry = 0;
-      for (const request of ordered) {
-        if (await this.admitOne(client, request)) continue;
-        // Read the wait before the rollback, and in its own statement so it sees the row that
-        // actually refused this request rather than the snapshot the upsert started with.
-        worstRetry = Math.max(worstRetry, await this.retryAfter(client, request));
-      }
-
-      // Every bucket is measured before anything is decided, so `retryAfterSeconds` is the longest
-      // of the refusals rather than whichever key happened to sort first.
-      await client.query(worstRetry > 0 ? 'ROLLBACK' : 'COMMIT');
+      const outcome = await work(client);
+      await client.query(outcome.commit ? 'COMMIT' : 'ROLLBACK');
       poisoned = false;
-      return worstRetry > 0 ? { allowed: false, retryAfterSeconds: worstRetry } : ADMITTED;
+      return outcome.value;
     } catch (err: unknown) {
       // A failed transaction must not leave a charged bucket behind. If the rollback itself fails
       // the connection is not known to be clean, so it is destroyed rather than reused.
@@ -188,6 +238,15 @@ export class PgRateLimiter implements RateLimiter {
       .query(`DELETE FROM rate_limit_buckets WHERE expires_at < now() - interval '1 hour'`)
       .catch(() => undefined);
   }
+}
+
+/**
+ * A total order over the keys. `ON CONFLICT DO UPDATE` and `FOR UPDATE` both lock rows, so two
+ * transactions taking the same keys in opposite orders would deadlock; one order for everyone
+ * removes the cycle.
+ */
+function sortedByKey(requests: readonly RateLimitRequest[]): RateLimitRequest[] {
+  return [...requests].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
 function fullWindowSeconds(limit: RateLimit): number {

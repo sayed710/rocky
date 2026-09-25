@@ -72,6 +72,20 @@ export interface RateLimiter {
    */
   admit(requests: readonly RateLimitRequest[]): RateLimitResult | Promise<RateLimitResult>;
   /**
+   * Hand back one unit that an earlier `admit` charged to each bucket, when the request turned out
+   * not to be the thing the bucket counts.
+   *
+   * This exists for failure budgets. Login reserves a slot in its per-handle buckets at admission —
+   * so concurrent guesses cannot all slip past a nearly full bucket — and refunds it when the
+   * password was right, so a successful login spends none of the budget an attacker would need.
+   *
+   * A refund never takes a bucket below zero and never touches a lapsed window. If the window has
+   * rolled over since the charge, the refund lands on the new window: at most one extra slot, and
+   * only for a request that genuinely succeeded. A refund that faults leaves its slots charged,
+   * which fails closed: the budget recovers when the window ends instead of at once.
+   */
+  refund(requests: readonly RateLimitRequest[]): void | Promise<void>;
+  /**
    * Reset the limit for a given key.
    * Useful for testing or administrative actions.
    */

@@ -32,6 +32,7 @@ import {
 } from './http/cookie';
 import { strictObject, oneOf, optBoolean, optInt, optString, parseLimit, reqBoolean, reqString } from './http/validate';
 import type { RateLimiter, RateLimitRequest } from './ports/rate-limiter';
+import type { Logger } from './ports/logger';
 import type { Metrics } from './ports/metrics';
 import type { ApiConfig } from './config';
 import type { Chess960StartSelector } from './ports/chess960';
@@ -157,6 +158,7 @@ export interface RouteDeps {
   readonly gameLauncher: GameLauncher;
   readonly liveView: TournamentLiveView;
   readonly metrics: Metrics;
+  readonly logger: Logger;
   readonly readiness: () => Promise<void>;
   readonly antiCheatAnalysis: AntiCheatAnalysisService | undefined;
   readonly botTimingSource: BotGameTimingSource | undefined;
@@ -231,7 +233,7 @@ const MAX_SEARCH_LIMIT = 100;
 /** Build the fully-wired router. */
 export function buildRouter(deps: RouteDeps): Router {
   const router = new Router();
-  const { auth, repos, clock, ids, chess960Starts, info, rateLimiter, config } = deps;
+  const { auth, repos, clock, ids, chess960Starts, info, rateLimiter, config, logger } = deps;
   const assistanceGuard = new LiveGameAssistanceGuard(repos.events);
   /** Capacity exhaustion is a temporary service refusal, not an internal HTTP 500. */
   const acquireAssistanceLock = async (userId: string): Promise<() => Promise<void>> => {
@@ -333,6 +335,28 @@ export function buildRouter(deps: RouteDeps): Router {
     if (!config.rateLimit.enabled) return;
     const result = await rateLimiter.admit(buckets);
     if (!result.allowed) throw HttpError.rateLimited(result.retryAfterSeconds);
+  };
+
+  /**
+   * Return a slot `admit` reserved in a failure budget, once the request is known to have
+   * succeeded.
+   *
+   * Unlike `admit`, a fault here is logged, not thrown. The work the bucket guards has already
+   * happened — for login, a session exists — so failing the response would discard a real success,
+   * and a retry would spend more quota. A lost refund leaves the slot charged until the window ends,
+   * which is the fail-closed direction anyway.
+   */
+  const refund = async (buckets: readonly RateLimitRequest[]): Promise<void> => {
+    if (!config.rateLimit.enabled) return;
+    try {
+      await rateLimiter.refund(buckets);
+    } catch (error: unknown) {
+      logger.warn('rate limit refund failed; slots stay charged until their window ends', {
+        // Keys embed handles and addresses, so only their number is logged.
+        buckets: buckets.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   };
 
   const cookieOpts = { secure: config.cookieSecure };
@@ -454,13 +478,29 @@ export function buildRouter(deps: RouteDeps): Router {
       const body = strictObject(ctx.body, ['handle', 'password']);
       const handle = reqString(body, 'handle', { trim: true });
       const password = reqString(body, 'password');
+      const ip = ctx.ip ?? 'unknown';
+      const handleKey = handle.toLowerCase();
+      // The IP is encoded so it cannot contain the `:` separating it from the handle (IPv6 does).
+      const sourceKey = `${encodeURIComponent(ip)}:${handleKey}`;
 
+      // Audit P1-1. The IP bucket counts every attempt. The two handle buckets are failure budgets:
+      // a slot is reserved here, before the password is checked, so concurrent guesses cannot all
+      // pass a nearly full bucket, and refunded below when the password is right. The per-source
+      // bucket is the tight one, so one address guessing at a handle exhausts only its own budget
+      // and cannot refuse the owner; the account-wide one bounds guesses spread over many
+      // addresses. Both are keyed by the submitted handle, never by whether it exists, so unknown
+      // handles are throttled exactly like real ones.
       await admit([
-        { key: `login:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.login.perIp },
-        { key: `login:handle:${handle.toLowerCase()}`, limit: config.rateLimit.login.perHandle },
+        { key: `login:ip:${ip}`, limit: config.rateLimit.login.perIp },
+        { key: `login:handle-ip:${sourceKey}`, limit: config.rateLimit.login.perHandleIp },
+        { key: `login:handle:${handleKey}`, limit: config.rateLimit.login.perHandle },
       ]);
 
       const result = await auth.login({ handle, password }, meta(ctx));
+      await refund([
+        { key: `login:handle-ip:${sourceKey}`, limit: config.rateLimit.login.perHandleIp },
+        { key: `login:handle:${handleKey}`, limit: config.rateLimit.login.perHandle },
+      ]);
       return json(200, {
         user: selfUser(result.user, result.roles),
         tokens: result.tokens,
@@ -768,12 +808,11 @@ export function buildRouter(deps: RouteDeps): Router {
       const body = strictObject(ctx.body, ['handle']);
       const handle = reqString(body, 'handle', { trim: true });
 
+      // Per IP only (audit P1-1). A per-handle bucket here counted challenge requests, which anyone
+      // can make for any handle, so it was a lockout lever. It guarded nothing: challenges are
+      // random, single-use, and bound server side, and a passkey signature cannot be guessed.
       await admit([
         { key: `webauthn-login:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.webauthnLogin.perIp },
-        {
-          key: `webauthn-login:handle:${handle.toLowerCase()}`,
-          limit: config.rateLimit.webauthnLogin.perHandle,
-        },
       ]);
 
       const options = await auth.generateWebAuthnLoginOptions(handle);

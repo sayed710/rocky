@@ -74,6 +74,15 @@ export class InMemoryRateLimiter implements RateLimiter {
     return ADMITTED;
   }
 
+  refund(requests: readonly RateLimitRequest[]): void {
+    assertDistinctKeys(requests);
+    const now = this.clock.now();
+    for (const { key } of requests) {
+      const bucket = this.buckets.get(key);
+      if (bucket && now < bucket.expiresAt && bucket.count > 0) bucket.count -= 1;
+    }
+  }
+
   reset(key: string): void {
     this.buckets.delete(key);
   }

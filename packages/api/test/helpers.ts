@@ -17,6 +17,7 @@ import type { Chess960StartSelector } from '../src/ports/chess960';
 import { ManualClock } from '../src/ports/clock';
 import { uuidv7Generator } from '../src/ports/ids';
 import { InMemoryRateLimiter } from '../src/ports/in-memory-rate-limiter';
+import type { RateLimiter } from '../src/ports/rate-limiter';
 import { createApiServer } from '../src/server';
 import type { ApiServer } from '../src/server';
 import { InMemoryGameLauncher } from '../src/tournament/launcher';
@@ -102,6 +103,8 @@ export interface HarnessOptions {
   readonly chess960Starts?: Chess960StartSelector;
   /** Readiness probe backing `/v1/ready`; default resolves (healthy). */
   readonly readiness?: () => Promise<void>;
+  /** Replace the in-memory rate limiter, e.g. with one that faults. */
+  readonly rateLimiter?: RateLimiter;
   /** Structured logger; inject a capturing one to assert on log output. */
   readonly logger?: Logger;
   /** Tracer; inject a capturing one to assert on span emission. */
@@ -201,7 +204,7 @@ export async function startHarness(
   const repos = createInMemoryRepositories(clock);
   const tournamentRepo = new InMemoryTournamentsRepository();
   const hasher = new ScryptPasswordHasher({ N: 1024 }); // low cost for test speed
-  const rateLimiter = new InMemoryRateLimiter(clock);
+  const rateLimiter = harnessOptions.rateLimiter ?? new InMemoryRateLimiter(clock);
   const gameLauncher = harnessOptions.gameLauncher ?? new InMemoryGameLauncher(ids);
   const liveView = { activeGames: () => [] };
   const emailSender = new InMemoryEmailSender();
