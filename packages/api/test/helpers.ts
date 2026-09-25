@@ -379,3 +379,17 @@ export async function startHarness(
     close: () => closeServer(http),
   };
 }
+
+/**
+ * Confirm the latest verification email sent to `email`, the way its owner would: through the
+ * public verify endpoint with the token from the message. Password sign-in requires a verified
+ * address (audit P1-1), so tests that log in with a password call this after registering.
+ */
+export async function verifyEmail(h: Harness, email: string): Promise<void> {
+  const message = [...h.emailSender.sent]
+    .reverse()
+    .find((m) => m.type === 'email_verify' && m.to === email);
+  if (!message) throw new Error(`no verification email was sent to ${email}`);
+  const res = await h.json('POST', '/v1/auth/email/verify', { body: { token: message.token } });
+  if (res.status !== 204) throw new Error(`verifying ${email} failed with ${res.status}`);
+}

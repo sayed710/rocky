@@ -73,7 +73,7 @@ test('M12 inc 2: login sends credentials:include', async () => {
 test('M12 inc 2: register sends credentials:include', async () => {
   const t = new FakeTransport(() => json(201, auth('tok-R')));
   const c = make(t);
-  await c.auth.register({ handle: 'newbie', password: 'password1' });
+  await c.auth.register({ handle: 'newbie', password: 'password1', email: 'newbie@example.test' });
   assert.equal(t.calls[0]!.credentials, 'include');
 });
 
@@ -277,7 +277,7 @@ test('M12 inc 2: logout without a session is a no-op', async () => {
 test('register adopts the session', async () => {
   const t = new FakeTransport(() => json(201, auth('tok-R')));
   const c = make(t);
-  const res = await c.auth.register({ handle: 'newbie', password: 'password1' });
+  const res = await c.auth.register({ handle: 'newbie', password: 'password1', email: 'newbie@example.test' });
   assert.equal(res.tokens.accessToken, 'tok-R');
   assert.equal(c.session.isAuthenticated, true);
 });
@@ -386,7 +386,7 @@ for (const operation of ['login', 'register', 'passkey'] as const) {
       const pending = operation === 'login'
         ? c.auth.login({ handle: 'alice', password: 'pw' })
         : operation === 'register'
-          ? c.auth.register({ handle: 'alice', password: 'password1' })
+          ? c.auth.register({ handle: 'alice', password: 'password1', email: 'alice@example.test' })
           : c.auth.verifyPasskeyLogin({
             id: 'credential-1',
             rawId: 'credential-1',

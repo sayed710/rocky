@@ -13,7 +13,7 @@ test('an awarded achievement renders as unlocked and moves the count', async ({ 
   const handle = `ach-${suffix}`;
 
   const registered = await request.post('/v1/auth/register', {
-    data: { handle, password: 'test-password-achievements-123' },
+    data: { handle, password: 'test-password-achievements-123', email: `${handle}@example.test` },
   });
   expect(registered.ok()).toBeTruthy();
   const { user } = await registered.json();
@@ -58,7 +58,7 @@ test('partial progress renders as a fraction, not as an unlock', async ({ page, 
   const handle = `achp-${suffix}`;
 
   const registered = await request.post('/v1/auth/register', {
-    data: { handle, password: 'test-password-achievements-123' },
+    data: { handle, password: 'test-password-achievements-123', email: `${handle}@example.test` },
   });
   expect(registered.ok()).toBeTruthy();
   const { user } = await registered.json();

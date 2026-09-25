@@ -43,6 +43,7 @@ import {
 import { withTestDatabase } from '@chess-platform/persistence/test-support';
 import type { Pool } from 'pg';
 import { createPgApiServer } from '../src/bootstrap';
+import { InMemoryEmailSender } from '../src/ports/email';
 import { JsonLogger } from '../src/ports/logger';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
@@ -53,6 +54,9 @@ const TEST_SECRET = 'test-access-token-secret-0123456789abcdef';
 
 /** The loopback address this suite binds; also the host in the `baseUrl` it hands to `run`. */
 const SERVER_HOST = '127.0.0.1';
+
+/** Captures what the composed server sends, so a test can confirm the account email like its owner. */
+const outbox = new InMemoryEmailSender();
 
 /**
  * A directory holding the first `count` migrations, copied byte-for-byte from the real ones.
@@ -110,7 +114,12 @@ async function withSchema(run: (fixture: Fixture) => Promise<void>): Promise<voi
       let caseFailed = false;
       let caseError: unknown;
       try {
-        const composed = createPgApiServer({ pool, logger, config: { accessTokenSecret: TEST_SECRET } });
+        const composed = createPgApiServer({
+          pool,
+          logger,
+          emailSender: outbox,
+          config: { accessTokenSecret: TEST_SECRET },
+        });
         shutdownAnalysis = composed.shutdownAnalysis;
 
         const listening = await listenOnFetchablePort(
@@ -281,9 +290,19 @@ test('a fully migrated database is ready, and signs in', { skip }, async () => {
     const registered = await fetch(`${baseUrl}/v1/auth/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ handle, password }),
+      body: JSON.stringify({ handle, password, email: `${handle}@example.test` }),
     });
     assert.equal(registered.status, 201);
+
+    // Password sign-in needs a verified email (audit P1-1): confirm it as the owner would.
+    const verification = [...outbox.sent].reverse().find((m) => m.to === `${handle}@example.test`);
+    assert.ok(verification, 'registration sent a verification email');
+    const verified = await fetch(`${baseUrl}/v1/auth/email/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: verification.token }),
+    });
+    assert.equal(verified.status, 204);
 
     assert.equal((await login(baseUrl, { handle, password })).status, 200);
 

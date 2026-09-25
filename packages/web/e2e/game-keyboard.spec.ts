@@ -9,10 +9,10 @@ test('the board supports roving focus, compatible Space activation, and keyboard
   const whiteHandle = `e2e-keyboard-w-${suffix}`;
   const blackHandle = `e2e-keyboard-b-${suffix}`;
   const whiteRegistration = await request.post('/v1/auth/register', {
-    data: { handle: whiteHandle, password },
+    data: { handle: whiteHandle, password, email: `${whiteHandle}@example.test` },
   });
   const blackRegistration = await request.post('/v1/auth/register', {
-    data: { handle: blackHandle, password },
+    data: { handle: blackHandle, password, email: `${blackHandle}@example.test` },
   });
   expect(whiteRegistration.ok()).toBeTruthy();
   expect(blackRegistration.ok()).toBeTruthy();

@@ -29,7 +29,7 @@ test('atomic matching flow: Player A creates a seek, Player B accepts', async ({
     const password = 'test-password-123';
 
     const reg1 = await page1.request.post('/v1/auth/register', {
-      data: { handle: handle1, password },
+      data: { handle: handle1, password, email: `${handle1}@example.test` },
     });
     if (!reg1.ok()) {
       console.error(`Registration 1 failed: ${await reg1.text()}`);
@@ -39,7 +39,7 @@ test('atomic matching flow: Player A creates a seek, Player B accepts', async ({
     const userId1 = auth1.user.id;
 
     const reg2 = await page2.request.post('/v1/auth/register', {
-      data: { handle: handle2, password },
+      data: { handle: handle2, password, email: `${handle2}@example.test` },
     });
     if (!reg2.ok()) {
       console.error(`Registration 2 failed: ${await reg2.text()}`);

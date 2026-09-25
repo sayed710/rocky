@@ -21,7 +21,7 @@ import { DEFAULT_RATE_LIMIT } from '../src/config';
 import { ManualClock } from '../src/ports/clock';
 import { InMemoryRateLimiter } from '../src/ports/in-memory-rate-limiter';
 import { JsonLogger } from '../src/ports/logger';
-import { startHarness, type Harness } from './helpers';
+import { startHarness, verifyEmail, type Harness } from './helpers';
 
 const MINUTE = 60_000;
 const PASSWORD = 'correct-horse-battery';
@@ -30,10 +30,11 @@ const ATTACKER_IP = '203.0.113.66';
 
 async function register(h: Harness, handle: string): Promise<void> {
   const res = await h.json('POST', '/v1/auth/register', {
-    body: { handle, password: PASSWORD },
+    body: { handle, password: PASSWORD, email: `${handle}@example.test` },
     headers: { 'x-forwarded-for': `192.0.2.${handle.length}` },
   });
   assert.equal(res.status, 201, `register ${handle}`);
+  await verifyEmail(h, `${handle}@example.test`);
 }
 
 function login(h: Harness, handle: string, password: string, ip: string) {
@@ -59,12 +60,13 @@ describe('password login throttling cannot lock an account out', () => {
   });
 
   /**
-   * The distributed form of the attack. Every source spends its whole per-handle budget, and each
-   * is then refused — but nothing account-wide fills up, so the owner's correct password from a
-   * clean address still works. An earlier revision of this fix kept an account-wide cap, and ten
-   * addresses were enough to refuse the owner for the rest of the window.
+   * The distributed form of the attack. Every source spends its whole per-handle budget and is then
+   * refused, and together they pass the account-wide threshold — which refuses no one. The owner,
+   * from a clean address, is asked for a second proof instead: the code emailed to their verified
+   * address, which no number of attacker addresses can read. Before this, a hard account-wide cap
+   * let ten addresses refuse the owner's correct password for the rest of the window.
    */
-  test('failures from many sources do not refuse the owner from a clean source', async () => {
+  test('failures from many sources never refuse the owner, who signs in with the emailed code', async () => {
     const h = await startHarness({ trustProxy: true });
     try {
       await register(h, 'alice');
@@ -72,11 +74,21 @@ describe('password login throttling cannot lock an account out', () => {
       const sources = Array.from({ length: 25 }, (_, i) => `203.0.113.${i + 1}`);
       for (const ip of sources) {
         for (let i = 0; i < perSource; i++) {
-          assert.equal((await login(h, 'alice', 'wrong', ip)).status, 401, `${ip} guess ${i}`);
+          assert.notEqual((await login(h, 'alice', 'wrong', ip)).status, 429, `${ip} guess ${i}`);
         }
         assert.equal((await login(h, 'alice', 'wrong', ip)).status, 429, `${ip} is stopped`);
       }
-      const owner = await login(h, 'alice', PASSWORD, VICTIM_IP);
+
+      const challenged = await login(h, 'alice', PASSWORD, VICTIM_IP);
+      assert.equal(challenged.status, 401);
+      assert.equal(challenged.body.error.details.reason, 'step_up_required');
+      const code = h.emailSender.sent.find((m) => m.type === 'login_step_up' && m.to === 'alice@example.test');
+      assert.ok(code, 'the correct password emailed a code to the verified address');
+
+      const owner = await h.json('POST', '/v1/auth/login', {
+        body: { handle: 'alice', password: PASSWORD, code: code.token },
+        headers: { 'x-forwarded-for': VICTIM_IP },
+      });
       assert.equal(owner.status, 200, `the owner gets in after ${sources.length * perSource} failures`);
       assert.equal(typeof owner.body.tokens.accessToken, 'string');
     } finally {
@@ -90,6 +102,7 @@ describe('password login throttling cannot lock an account out', () => {
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
+          ...DEFAULT_RATE_LIMIT.login,
           perIp: { maxRequests: 100, windowMs: MINUTE },
           perHandleIp: { maxRequests: 2, windowMs: MINUTE },
         },
@@ -170,7 +183,7 @@ describe('password login throttling cannot lock an account out', () => {
       const warning = records.find((r) => r.msg.startsWith('rate limit refund failed'));
       assert.ok(warning, 'the fault is logged');
       assert.equal(warning.level, 'warn');
-      assert.equal(warning.buckets, 1);
+      assert.equal(warning.buckets, 2, 'the source budget and the account-wide count');
     } finally {
       await h.close();
     }
@@ -207,6 +220,7 @@ describe('password login throttling cannot lock an account out', () => {
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
+          ...DEFAULT_RATE_LIMIT.login,
           perIp: { maxRequests: 100, windowMs: MINUTE },
           perHandleIp: { maxRequests: 3, windowMs: MINUTE },
         },

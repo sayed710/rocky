@@ -1112,7 +1112,7 @@ test('SPA re-bootstrap keeps one passkey sign-in action per click', async () => 
 test('SPA re-bootstrap keeps one registration action per click', async () => {
   const doc = makeDoc([
     'auth', 'auth-status', 'auth-logout', 'auth-submit', 'auth-register', 'auth-error',
-    'auth-form', 'auth-handle', 'auth-password', 'create-seek', 'theme-toggle',
+    'auth-form', 'auth-handle', 'auth-password', 'auth-email', 'create-seek', 'theme-toggle',
   ]);
   const transport = new FakeTransport().onEach((request) => {
     const path = new URL(request.url).pathname;
@@ -1127,6 +1127,7 @@ test('SPA re-bootstrap keeps one registration action per click', async () => {
   });
   (doc.getElementById('auth-handle') as unknown as { value: string }).value = 'alice';
   (doc.getElementById('auth-password') as unknown as { value: string }).value = 'password1';
+  (doc.getElementById('auth-email') as unknown as { value: string }).value = 'alice@example.test';
 
   bootstrap(doc, { ...makeDeps(), httpTransport: transport });
   bootstrap(doc, { ...makeDeps(), httpTransport: transport });
@@ -1464,4 +1465,63 @@ test('submitting the sign-in form with malformed email still calls login', async
   // field, it must never consult it. A future edit that validates the whole form on submit would
   // reintroduce the regression on a real browser, where the field's invalidity does block the form.
   assert.equal(emailValidityChecks, 0, 'sign-in must not consult the optional registration email');
+});
+
+/**
+ * Audit P1-1 step-up: after many failed sign-ins for a handle, the server asks for the code it
+ * emailed to the account. The code field must appear then — not before — and the next sign-in
+ * must carry what was typed into it.
+ */
+test('a step-up answer reveals the code field, and the next sign-in sends the code', async () => {
+  const doc = makeDoc([
+    'auth', 'auth-status', 'auth-logout', 'auth-submit', 'auth-error', 'auth-form',
+    'auth-handle', 'auth-password', 'auth-code-row', 'auth-code', 'create-seek', 'theme-toggle',
+  ]);
+  const codeRow = doc.getElementById('auth-code-row') as unknown as { hidden: boolean };
+  codeRow.hidden = true;
+  let logins = 0;
+  const transport = new FakeTransport().onEach((request) => {
+    const path = new URL(request.url).pathname;
+    if (path === '/v1/capabilities') return json(200, { capabilities: {} });
+    if (path === '/v1/auth/login') {
+      logins += 1;
+      if (logins === 1) {
+        return json(401, {
+          error: {
+            code: 'unauthorized',
+            message: 'additional verification required',
+            details: { reason: 'step_up_required' },
+            requestId: 'r1',
+          },
+        });
+      }
+      return json(200, {
+        user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
+        tokens: { accessToken: 'tok', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+      });
+    }
+    return json(404, {});
+  });
+  bootstrap(doc, { ...makeDeps(), httpTransport: transport });
+  (doc.getElementById('auth-handle') as unknown as { value: string }).value = 'alice';
+  (doc.getElementById('auth-password') as unknown as { value: string }).value = 'hunter2hunter2';
+  const form = doc.getElementById('auth-form') as unknown as { submit(): void };
+
+  form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(codeRow.hidden, false, 'the code field appears once the server asks for it');
+  assert.match(doc.getElementById('auth-error')!.textContent ?? '', /^Additional verification is required/);
+
+  (doc.getElementById('auth-code') as unknown as { value: string }).value = '12345678';
+  form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const bodies = transport.calls
+    .filter((call) => call.url.endsWith('/v1/auth/login'))
+    .map((call) => JSON.parse(call.body ?? '{}'));
+  assert.deepEqual(bodies, [
+    { handle: 'alice', password: 'hunter2hunter2' },
+    { handle: 'alice', password: 'hunter2hunter2', code: '12345678' },
+  ]);
+  assert.equal(codeRow.hidden, true, 'and goes away once signed in');
 });

@@ -47,6 +47,10 @@ export class ResendEmailSender implements EmailSender {
     return this.send('email_verify', to, token);
   }
 
+  sendLoginCode(to: string, code: string): Promise<EmailDeliveryResult> {
+    return this.send('login_step_up', to, code);
+  }
+
   private async send(purpose: EmailPurpose, to: string, token: string): Promise<EmailDeliveryResult> {
     const startedAt = Date.now();
     if (!EMAIL_ADDRESS_PATTERN.test(to)) return this.finish(purpose, 'provider_rejected', startedAt);

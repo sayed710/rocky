@@ -230,10 +230,18 @@
           <input id="auth-password" type="password" autocomplete="current-password" required />
         </div>
         <!-- `auth-field-full` spans the sign-in form's two columns: an address is the longest
-             value on the form, and it is the only optional one. -->
+             value on the form. It is required to register and ignored when signing in, so it
+             carries no `required` attribute; the register action checks it. -->
         <div class="auth-field auth-field-full">
-          <label for="auth-email">Recovery email (optional)</label>
+          <label for="auth-email">Email (required to register)</label>
           <input id="auth-email" type="email" autocomplete="email" maxlength="320" />
+        </div>
+        <!-- Shown only after the server answers `step_up_required`: many recent failed sign-ins
+             for this handle mean the password also needs the code emailed to the account. -->
+        <div id="auth-code-row" class="auth-field auth-field-full" hidden>
+          <label for="auth-code">Sign-in code</label>
+          <input id="auth-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+                 pattern="[0-9]{8}" maxlength="8" />
         </div>
         <div class="auth-actions">
           <button id="auth-submit" type="submit">Sign in</button>

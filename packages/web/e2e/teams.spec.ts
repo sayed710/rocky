@@ -24,11 +24,11 @@ test('a second player finds a public team, joins it, and appears in the member l
     const joinerHandle = `tm-j-${suffix}`;
     const password = 'test-password-teams-123';
 
-    const regOwner = await request.post('/v1/auth/register', { data: { handle: ownerHandle, password } });
+    const regOwner = await request.post('/v1/auth/register', { data: { handle: ownerHandle, password, email: `${ownerHandle}@example.test` } });
     expect(regOwner.ok()).toBeTruthy();
     const ownerAuth = await regOwner.json();
 
-    const regJoiner = await request.post('/v1/auth/register', { data: { handle: joinerHandle, password } });
+    const regJoiner = await request.post('/v1/auth/register', { data: { handle: joinerHandle, password, email: `${joinerHandle}@example.test` } });
     expect(regJoiner.ok()).toBeTruthy();
     const joinerAuth = await regJoiner.json();
 
@@ -102,11 +102,11 @@ test('private team owner sees pending join request, accepts it, and requester ap
     const reqHandle = `tm-mod-r-${suffix}`;
     const password = 'test-password-teams-456';
 
-    const regOwner = await request.post('/v1/auth/register', { data: { handle: ownerHandle, password } });
+    const regOwner = await request.post('/v1/auth/register', { data: { handle: ownerHandle, password, email: `${ownerHandle}@example.test` } });
     expect(regOwner.ok()).toBeTruthy();
     const ownerAuth = await regOwner.json();
 
-    const regReq = await request.post('/v1/auth/register', { data: { handle: reqHandle, password } });
+    const regReq = await request.post('/v1/auth/register', { data: { handle: reqHandle, password, email: `${reqHandle}@example.test` } });
     expect(regReq.ok()).toBeTruthy();
     const reqAuth = await regReq.json();
 
@@ -192,11 +192,11 @@ test('a rejected join-request response leaves the queue interactive', async ({ b
     const reqHandle = `tm-409-r-${suffix}`;
     const password = 'test-password-teams-456';
 
-    const regOwner = await request.post('/v1/auth/register', { data: { handle: ownerHandle, password } });
+    const regOwner = await request.post('/v1/auth/register', { data: { handle: ownerHandle, password, email: `${ownerHandle}@example.test` } });
     expect(regOwner.ok()).toBeTruthy();
     const ownerAuth = await regOwner.json();
 
-    const regReq = await request.post('/v1/auth/register', { data: { handle: reqHandle, password } });
+    const regReq = await request.post('/v1/auth/register', { data: { handle: reqHandle, password, email: `${reqHandle}@example.test` } });
     expect(regReq.ok()).toBeTruthy();
     const reqAuth = await regReq.json();
 

@@ -72,11 +72,14 @@ export interface RateLimitConfig {
   readonly login: {
     /** Every attempt from one address, charged before the password is checked. */
     readonly perIp: RateLimitEndpointConfig;
-    /**
-     * Failed attempts against one handle from one address. There is deliberately no account-wide
-     * counterpart: a bucket any remote party can fill would let them refuse the owner's password.
-     */
+    /** Failed attempts against one handle from one address. Exhausting it refuses that address. */
     readonly perHandleIp: RateLimitEndpointConfig;
+    /**
+     * Failed attempts against one handle from all addresses together, before a password alone
+     * stops being enough. It never refuses anyone: past it, sign-in also needs a passkey or a
+     * code sent to the account's verified email, which extra addresses do not supply.
+     */
+    readonly perHandleBeforeStepUp: RateLimitEndpointConfig;
   };
   readonly register: {
     readonly perIp: RateLimitEndpointConfig;
@@ -153,6 +156,7 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
     perIp: { maxRequests: 10, windowMs: 5 * 60 * 1000 }, // 10 / 5 min
     // One address gets the old per-handle budget of guesses against each handle.
     perHandleIp: { maxRequests: 5, windowMs: 15 * 60 * 1000 }, // 5 failures / 15 min
+    perHandleBeforeStepUp: { maxRequests: 10, windowMs: 15 * 60 * 1000 }, // 10 failures / 15 min
   },
   register: {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min

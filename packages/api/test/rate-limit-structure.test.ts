@@ -252,8 +252,33 @@ test('login refunds exactly its failure bucket, and only after the password chec
     ts.isAwaitExpression(admission.parent) && ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name),
     'the reservations must be bound to a variable',
   );
+  // The refund's argument is built from what `reserve` returned (plus the account-wide count's own
+  // reservation), never from a bucket list written out again at the refund.
   const refunded = refunds[0]!.arguments[1];
-  assert.ok(refunded && ts.isIdentifier(refunded) && refunded.text === declaration.name.text);
+  assert.ok(refunded && ts.isIdentifier(refunded), 'refund must take a named value');
+  let built: ts.VariableDeclaration | undefined;
+  walk(route.node, (n) => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === refunded.text) built = n;
+  });
+  const mentions = new Set<string>();
+  if (built?.initializer) walk(built.initializer, (n) => { if (ts.isIdentifier(n)) mentions.add(n.text); });
+  assert.ok(
+    refunded.text === declaration.name.text || mentions.has(declaration.name.text),
+    'refund must hand back the reservations `reserve` returned',
+  );
+
+  // The account-wide count is a tally — it signals step-up, it never refuses — and it is keyed by
+  // the handle alone.
+  const tallies: ts.CallExpression[] = [];
+  walk(route.node, (n) => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === 'tally') {
+      tallies.push(n);
+    }
+  });
+  assert.equal(tallies.length, 1, 'login must tally exactly once');
+  const tallied = tallies[0]!.arguments[0];
+  assert.ok(tallied !== undefined && ts.isObjectLiteralExpression(tallied));
+  assert.equal(bucketKey(tallied, '/v1/auth/login'), 'login:handle:');
 
   const argument = admission.arguments[0];
   assert.ok(argument !== undefined && ts.isArrayLiteralExpression(argument));

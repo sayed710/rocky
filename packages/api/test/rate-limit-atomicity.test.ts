@@ -274,6 +274,7 @@ describe('routes charge no quota for a request another bucket refuses', () => {
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
+          ...DEFAULT_RATE_LIMIT.login,
           perIp: { maxRequests: 1, windowMs: MINUTE },
           perHandleIp: { maxRequests: 2, windowMs: 10 * MINUTE },
         },
@@ -316,6 +317,7 @@ describe('routes charge no quota for a request another bucket refuses', () => {
       rateLimit: {
         ...DEFAULT_RATE_LIMIT,
         login: {
+          ...DEFAULT_RATE_LIMIT.login,
           perIp: { maxRequests: 3, windowMs: MINUTE },
           perHandleIp: { maxRequests: 1, windowMs: MINUTE },
         },

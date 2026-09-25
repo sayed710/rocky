@@ -63,7 +63,7 @@ export interface UsersRepository {
 
 // --- Identity Tokens -------------------------------------------------------
 
-export type IdentityTokenKind = 'password_reset' | 'email_verify' | 'webauthn_register';
+export type IdentityTokenKind = 'password_reset' | 'email_verify' | 'webauthn_register' | 'login_step_up';
 
 export interface IdentityTokenRow {
   readonly tokenHash: string;
@@ -94,6 +94,37 @@ export interface IdentityTokensRepository {
   consume(tokenHash: string, kind: IdentityTokenKind, at: Date): Promise<IdentityTokenRow | null>;
   /** Atomically consume an email token and mark its owning user verified. */
   consumeEmailVerification(tokenHash: string, at: Date): Promise<IdentityTokenRow | null>;
+  /**
+   * Issue a login step-up code, unless the account already has a live one. A code that has
+   * expired or used up its attempts is replaced.
+   *
+   * `eligible` is decided by the caller, which passes `false` whenever no code should be sent. The
+   * statement is issued either way, so the request costs about the same whichever it is. Resolves
+   * to whether a code was issued, which is the only case where the caller sends it.
+   */
+  issueLoginStepUp(code: LoginStepUpIssue, at: Date): Promise<boolean>;
+  /**
+   * Check a login step-up code. It deletes the account's live code if `tokenHash` matches;
+   * otherwise it counts a failed attempt. It does either only when `checked` is true, which the
+   * caller sets only once the password is known to be right; the statement is issued either way.
+   * Resolves to whether the code matched and was used up.
+   */
+  checkLoginStepUp(check: LoginStepUpCheck, at: Date): Promise<boolean>;
+}
+
+export interface LoginStepUpIssue {
+  readonly userId: string;
+  readonly tokenHash: string;
+  readonly expiresAt: Date;
+  readonly eligible: boolean;
+  readonly maxAttempts: number;
+}
+
+export interface LoginStepUpCheck {
+  readonly userId: string;
+  readonly tokenHash: string;
+  readonly checked: boolean;
+  readonly maxAttempts: number;
 }
 
 // --- WebAuthn Credentials ----------------------------------------------------

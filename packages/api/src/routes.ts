@@ -467,8 +467,9 @@ export function buildRouter(deps: RouteDeps): Router {
         throw HttpError.conflict('handle is reserved');
       }
       const password = reqString(body, 'password', { min: 8, max: 1024 });
-      const email = optString(body, 'email', { max: 320, trim: true, pattern: EMAIL_ADDRESS_PATTERN });
-      const result = await auth.register({ handle, password, email: email ?? null }, meta(ctx));
+      // Required (audit P1-1): a password account's verified email is its step-up proof.
+      const email = reqString(body, 'email', { max: 320, trim: true, pattern: EMAIL_ADDRESS_PATTERN });
+      const result = await auth.register({ handle, password, email }, meta(ctx));
       return json(201, {
         user: selfUser(result.user, result.roles),
         tokens: result.tokens,
@@ -484,13 +485,22 @@ export function buildRouter(deps: RouteDeps): Router {
       summary: 'Log in with a password',
       tags: ['auth'],
       requestSchema: 'LoginRequest',
-      responses: { 200: ['AuthResponse', 'Authenticated'], 401: ['Error', 'Invalid credentials'] },
+      responses: {
+        200: ['AuthResponse', 'Authenticated'],
+        401: [
+          'Error',
+          'Invalid credentials, or `details.reason` = `step_up_required`: a password alone is no ' +
+            'longer enough for this handle; resend with the emailed `code`, or use a passkey',
+        ],
+        403: ['Error', '`details.reason` = `email_unverified`: verify the email address first'],
+      },
     }),
     PUBLIC,
     async (ctx) => {
-      const body = strictObject(ctx.body, ['handle', 'password']);
+      const body = strictObject(ctx.body, ['handle', 'password', 'code']);
       const handle = reqString(body, 'handle', { trim: true });
       const password = reqString(body, 'password');
+      const code = optString(body, 'code', { trim: true, pattern: /^\d{8}$/ });
       const ip = ctx.ip ?? 'unknown';
       // The IP is encoded so it cannot contain the `:` separating it from the handle (IPv6 does).
       const sourceKey = `${encodeURIComponent(ip)}:${handle.toLowerCase()}`;
@@ -500,12 +510,12 @@ export function buildRouter(deps: RouteDeps): Router {
       // concurrent guesses cannot all pass a nearly full bucket, and refunded below when the
       // password is right. One address guessing at a handle exhausts only its own budget.
       //
-      // There is deliberately no account-wide bucket. Anything a remote party can fill before
-      // authentication — from any number of addresses — refuses the owner's correct password too.
-      // Guessing spread over many addresses is therefore limited per address, not globally;
-      // bounding it without a lockout lever needs a second proof (a challenge), which is separate
-      // work. The key uses the submitted handle, never whether it exists, so unknown handles are
-      // throttled exactly like real ones.
+      // There is deliberately no account-wide bucket that refuses. Anything a remote party can fill
+      // before authentication — from any number of addresses — would refuse the owner's correct
+      // password too. Instead the account-wide failure count below *signals*: past it, a password
+      // alone stops being enough and the owner adds a code from their verified email (or uses a
+      // passkey), which no number of extra addresses supplies. Keys use the submitted handle,
+      // never whether it exists, so unknown handles behave exactly like real ones.
       const reservations = await reserve([
         { key: `login:ip:${ip}`, limit: config.rateLimit.login.perIp },
         {
@@ -515,8 +525,18 @@ export function buildRouter(deps: RouteDeps): Router {
         },
       ]);
 
-      const result = await auth.login({ handle, password }, meta(ctx));
-      await refund(ctx.logger, reservations);
+      const counted = config.rateLimit.enabled
+        ? await rateLimiter.tally({
+            key: `login:handle:${handle.toLowerCase()}`,
+            limit: config.rateLimit.login.perHandleBeforeStepUp,
+          })
+        : null;
+      const stepUp = config.rateLimit.enabled && counted === null;
+      // A success hands back the source slot and the account-wide count; a failure keeps both.
+      const refundable = counted ? [...reservations, counted] : reservations;
+
+      const result = await auth.login({ handle, password, code }, meta(ctx), stepUp);
+      await refund(ctx.logger, refundable);
       return json(200, {
         user: selfUser(result.user, result.roles),
         tokens: result.tokens,

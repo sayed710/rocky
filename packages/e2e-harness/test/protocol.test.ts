@@ -125,6 +125,7 @@ describe('e2e harness protocol test', () => {
     const regResp = await httpReq(apiPort, 'POST', '/v1/auth/register', {
       handle,
       password: 'test-password-123',
+      email: `${handle}@example.test`,
     });
     strictEqual(regResp.status, 201, `register failed: ${JSON.stringify(regResp)}`);
     const accessToken = regResp.body.tokens.accessToken;

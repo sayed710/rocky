@@ -208,7 +208,7 @@ test('M4: register rejects unknown fields with 422', async () => {
   const h = await startHarness();
   try {
     const res = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'testuser', password: 'password123', extraField: true },
+      body: { handle: 'testuser', password: 'password123', extraField: true, email: 'testuser@example.test' },
     });
     assert.equal(res.status, 422);
     assert.ok(res.body.error, 'should have an error envelope');

@@ -83,8 +83,9 @@ for (const viewport of VIEWPORTS) {
     const password = await boxOf(page, '.auth-field:has(#auth-password)');
     expect(sameRow(handle, password)).toBe(viewport.pairsFields);
 
-    // The optional recovery email always takes the whole row, never half of one.
-    const email = await boxOf(page, '.auth-field-full');
+    // The email always takes the whole row, never half of one. (The sign-in code row shares the
+    // class but stays hidden until the server asks for a code, so it is not measured here.)
+    const email = await boxOf(page, '.auth-field-full:has(#auth-email)');
     const form = await boxOf(page, '#auth-form');
     expect(sameRow(email, handle)).toBe(false);
     expect(Math.abs(email.width - form.width)).toBeLessThan(1);

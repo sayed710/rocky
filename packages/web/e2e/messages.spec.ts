@@ -26,11 +26,11 @@ test('direct messaging flow: User A messages User B from profile and User B sees
     const handleB = `dm-b-${suffix}`;
     const password = 'test-password-dm-123';
 
-    const regA = await request.post('/v1/auth/register', { data: { handle: handleA, password } });
+    const regA = await request.post('/v1/auth/register', { data: { handle: handleA, password, email: `${handleA}@example.test` } });
     expect(regA.ok()).toBeTruthy();
     const authA = await regA.json();
 
-    const regB = await request.post('/v1/auth/register', { data: { handle: handleB, password } });
+    const regB = await request.post('/v1/auth/register', { data: { handle: handleB, password, email: `${handleB}@example.test` } });
     expect(regB.ok()).toBeTruthy();
     const authB = await regB.json();
 

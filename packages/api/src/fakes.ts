@@ -34,6 +34,8 @@ import type {
   IdentityTokenKind,
   IdentityTokenRow,
   NewIdentityToken,
+  LoginStepUpIssue,
+  LoginStepUpCheck,
   IdentityTokensRepository,
 } from '@chess-platform/persistence';
 import { DuplicateUserError, VersionConflictError, SEEK_TTL_MS } from '@chess-platform/persistence';
@@ -806,6 +808,29 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
     this.byHash.set(tokenHash, consumed);
     this.users.markEmailVerifiedNow(consumed.userId, at);
     return consumed;
+  }
+
+  /** Login step-up codes, one per user. Kept apart from `byHash` because a used code is deleted. */
+  private readonly stepUps = new Map<string, { tokenHash: string; expiresAt: Date; attempts: number }>();
+
+  async issueLoginStepUp(code: LoginStepUpIssue, at: Date): Promise<boolean> {
+    if (!code.eligible) return false;
+    const live = this.stepUps.get(code.userId);
+    if (live && live.expiresAt.getTime() > at.getTime() && live.attempts < code.maxAttempts) return false;
+    this.stepUps.set(code.userId, { tokenHash: code.tokenHash, expiresAt: code.expiresAt, attempts: 0 });
+    return true;
+  }
+
+  async checkLoginStepUp(check: LoginStepUpCheck, at: Date): Promise<boolean> {
+    const live = this.stepUps.get(check.userId);
+    if (!check.checked || !live) return false;
+    if (live.expiresAt.getTime() <= at.getTime() || live.attempts >= check.maxAttempts) return false;
+    if (live.tokenHash === check.tokenHash) {
+      this.stepUps.delete(check.userId);
+      return true;
+    }
+    this.stepUps.set(check.userId, { ...live, attempts: live.attempts + 1 });
+    return false;
   }
 }
 

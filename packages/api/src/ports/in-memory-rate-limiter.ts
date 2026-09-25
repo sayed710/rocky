@@ -98,6 +98,11 @@ export class InMemoryRateLimiter implements RateLimiter {
     }
   }
 
+  tally(request: RateLimitRequest): RateLimitReservation | null {
+    const result = this.admit([{ ...request, refundable: true }]);
+    return result.reservations?.[0] ?? null;
+  }
+
   reset(key: string): void {
     this.buckets.delete(key);
   }

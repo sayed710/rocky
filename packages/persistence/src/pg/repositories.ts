@@ -36,6 +36,8 @@ import type {
   IdentityTokenKind,
   IdentityTokenRow,
   NewIdentityToken,
+  LoginStepUpIssue,
+  LoginStepUpCheck,
   IdentityTokensRepository,
   WebAuthnCredentialRow,
   NewWebAuthnCredential,
@@ -1171,6 +1173,47 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
     } finally {
       client.release();
     }
+  }
+
+  async issueLoginStepUp(code: LoginStepUpIssue, at: Date): Promise<boolean> {
+    // One statement, atomic under the partial unique index: it inserts when the account has no code,
+    // replaces one that has expired or used up its attempts, and leaves a live one alone. An
+    // ineligible request selects no row to insert, but still runs the same statement.
+    const res = await this.pool.query(
+      `INSERT INTO identity_tokens (token_hash, user_id, kind, expires_at)
+       SELECT $1, $2, 'login_step_up', $3 WHERE $4::boolean
+       ON CONFLICT (user_id) WHERE kind = 'login_step_up'
+       DO UPDATE SET token_hash = EXCLUDED.token_hash,
+                     expires_at = EXCLUDED.expires_at,
+                     created_at = $5,
+                     attempts = 0
+        WHERE identity_tokens.expires_at <= $5 OR identity_tokens.attempts >= $6
+       RETURNING 1`,
+      [code.tokenHash, code.userId, code.expiresAt, code.eligible, at, code.maxAttempts],
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  async checkLoginStepUp(check: LoginStepUpCheck, at: Date): Promise<boolean> {
+    // The match and the miss are disjoint (`=` and `<>` on the same row), so at most one of them
+    // touches it. The delete makes a code single-use: a concurrent second check finds no row.
+    // Postgres runs a data-modifying CTE even when the outer query does not read it.
+    const res = await this.pool.query<{ consumed: boolean }>(
+      `WITH hit AS (
+         DELETE FROM identity_tokens
+          WHERE user_id = $1 AND kind = 'login_step_up' AND $3::boolean
+            AND token_hash = $2 AND expires_at > $4 AND attempts < $5
+         RETURNING 1
+       ), miss AS (
+         UPDATE identity_tokens SET attempts = attempts + 1
+          WHERE user_id = $1 AND kind = 'login_step_up' AND $3::boolean
+            AND token_hash <> $2 AND expires_at > $4 AND attempts < $5
+         RETURNING 1
+       )
+       SELECT EXISTS (SELECT 1 FROM hit) AS consumed`,
+      [check.userId, check.tokenHash, check.checked, at, check.maxAttempts],
+    );
+    return res.rows[0]?.consumed === true;
   }
 }
 

@@ -61,7 +61,7 @@ import {
   TournamentService,
   ArenaService,
   TournamentResultReporter,
-  ConsoleEmailSender,
+  InMemoryEmailSender,
   CorePositionReader,
   type ApiServer,
   type ApiDependencies,
@@ -203,7 +203,9 @@ export function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     ids,
   });
   const rateLimiter = new InMemoryRateLimiter(clock);
-  const emailSender = new ConsoleEmailSender();
+  // Recorded rather than printed, so a spec can read what a real user would find in their inbox
+  // (see `GET /e2e/outbox`). Password sign-in needs a verified email (audit P1-1).
+  const emailSender = new InMemoryEmailSender();
   // Messaging and the social graph are both OPTIONAL in `ApiDependencies`, and an absent one makes
   // its routes answer 503. The DM UI needs both: `/v1/messages/*` obviously, and `/v1/social/*`
   // because the profile page only renders its action row once a relationship loads — which is where
@@ -300,6 +302,18 @@ export function createHarness(options: HarnessOptions = {}): Promise<Harness> {
         }
         })();
       });
+      return;
+    }
+
+    // Test-only: the messages "delivered" to one address, newest last. A spec uses it to follow the
+    // verification link or type the sign-in code, as the account owner would.
+    if (req.method === 'GET' && req.url?.startsWith('/e2e/outbox?')) {
+      const to = new URL(req.url, 'http://harness.invalid').searchParams.get('to');
+      const messages = emailSender.sent
+        .filter((message) => message.to === to)
+        .map(({ type, token }) => ({ type, token }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(messages));
       return;
     }
 

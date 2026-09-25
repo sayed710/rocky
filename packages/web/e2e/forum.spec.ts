@@ -24,10 +24,10 @@ test('a member starts a thread and a second member replies to it', async ({ brow
     const joinerHandle = `fm-j-${suffix}`;
     const password = 'test-password-forum-123';
 
-    const regOwner = await request.post('/v1/auth/register', { data: { handle: ownerHandle, password } });
+    const regOwner = await request.post('/v1/auth/register', { data: { handle: ownerHandle, password, email: `${ownerHandle}@example.test` } });
     expect(regOwner.ok()).toBeTruthy();
     const ownerAuth = await regOwner.json();
-    const regJoiner = await request.post('/v1/auth/register', { data: { handle: joinerHandle, password } });
+    const regJoiner = await request.post('/v1/auth/register', { data: { handle: joinerHandle, password, email: `${joinerHandle}@example.test` } });
     expect(regJoiner.ok()).toBeTruthy();
     const joinerAuth = await regJoiner.json();
 

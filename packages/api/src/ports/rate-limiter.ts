@@ -108,6 +108,15 @@ export interface RateLimiter {
    */
   refund(reservations: readonly RateLimitReservation[]): void | Promise<void>;
   /**
+   * Count one unit against a bucket that signals rather than refuses: while there is room, charge
+   * it and return a refundable reservation; once it is full, charge nothing and return `null`.
+   *
+   * A full bucket here is information for the caller, never a refusal on its own. Login uses it
+   * to switch to step-up: past the account-wide failure threshold a password still works, but
+   * only together with a second proof.
+   */
+  tally(request: RateLimitRequest): RateLimitReservation | null | Promise<RateLimitReservation | null>;
+  /**
    * Reset the limit for a given key.
    * Useful for testing or administrative actions.
    */

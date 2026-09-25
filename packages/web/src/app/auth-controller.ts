@@ -23,6 +23,7 @@
 import type { GambitClient } from '../api/client.js';
 import type { RegisterRequest } from '../api/models.js';
 import type { KeyValueStorage } from '../net/session.js';
+import { HttpError } from '../net/errors.js';
 import { isTransientRefreshFailure, NoSessionError } from '../net/session.js';
 import { NativeWebAuthnAdapter } from '../ports/webauthn.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
@@ -35,6 +36,34 @@ export interface AuthCallbacks {
   onPending: (pending: boolean) => void;
   /** Called when an error occurs (for UI error display). */
   onError: (message: string) => void;
+  /**
+   * Called with `true` when sign-in needs the emailed code as well as the password, and with
+   * `false` once it is no longer needed. Optional: without it the error message still explains.
+   */
+  onStepUp?: (required: boolean) => void;
+}
+
+/** The server's `details.reason` on a refused sign-in, when it gives one. */
+function refusalReason(err: unknown): string | undefined {
+  if (!(err instanceof HttpError)) return undefined;
+  const reason = err.details?.['reason'];
+  return typeof reason === 'string' ? reason : undefined;
+}
+
+/**
+ * What to tell the person for a refused password sign-in. The step-up wording is the same whether
+ * or not the handle exists, because the server's answer is.
+ */
+function signInError(err: unknown): string {
+  switch (refusalReason(err)) {
+    case 'step_up_required':
+      return 'Additional verification is required. If this account has a verified email address, ' +
+        'a sign-in code has been sent to it. Enter the code, or sign in with a passkey.';
+    case 'email_unverified':
+      return 'Verify your email address before signing in. We sent a new verification link.';
+    default:
+      return err instanceof Error ? err.message : String(err);
+  }
 }
 
 /**
@@ -192,19 +221,26 @@ export class AuthController {
     return null;
   }
 
-  /** Log in with handle + password. Returns the session on success. */
-  async login(handle: string, password: string): Promise<AuthSession | null> {
+  /**
+   * Log in with handle + password, plus the emailed code when the server asked for one. Returns the
+   * session on success.
+   */
+  async login(handle: string, password: string, code?: string): Promise<AuthSession | null> {
     if (this.disposed) return null;
     const managerGeneration = this.client.session.captureGeneration();
     const generation = this.sessionGeneration;
     this.beginPendingOperation();
     try {
-      const result = await this.client.auth.login({ handle, password }, managerGeneration);
+      const trimmedCode = code?.trim() ?? '';
+      const body = trimmedCode ? { handle, password, code: trimmedCode } : { handle, password };
+      const result = await this.client.auth.login(body, managerGeneration);
       if (this.disposed || generation !== this.sessionGeneration) return null;
+      this.callbacks.onStepUp?.(false);
       return this.adoptSession(result.user);
     } catch (err) {
       if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
-      this.callbacks.onError(err instanceof Error ? err.message : String(err));
+      if (refusalReason(err) === 'step_up_required') this.callbacks.onStepUp?.(true);
+      this.callbacks.onError(signInError(err));
       return null;
     } finally {
       this.finishPendingOperation();
@@ -244,15 +280,24 @@ export class AuthController {
     }
   }
 
-  /** Register a new account. Returns the session on success. */
+  /**
+   * Register a new account. Returns the session on success.
+   *
+   * An email is required: the password can sign in only once it is verified, and it receives the
+   * sign-in code when the account is under attack. A blank one is refused here, before any request.
+   */
   async register(handle: string, password: string, email?: string): Promise<AuthSession | null> {
     if (this.disposed) return null;
+    const trimmed = email?.trim() ?? '';
+    if (!trimmed) {
+      this.callbacks.onError('An email address is required to create an account.');
+      return null;
+    }
     const managerGeneration = this.client.session.captureGeneration();
     const generation = this.sessionGeneration;
     this.beginPendingOperation();
     try {
-      const trimmed = email?.trim() ?? '';
-      const body: RegisterRequest = trimmed ? { handle, password, email: trimmed } : { handle, password };
+      const body: RegisterRequest = { handle, password, email: trimmed };
       const result = await this.client.auth.register(body, managerGeneration);
       if (this.disposed || generation !== this.sessionGeneration) return null;
       return this.adoptSession(result.user);

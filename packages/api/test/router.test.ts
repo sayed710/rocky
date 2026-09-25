@@ -203,7 +203,7 @@ test('oversized bodies are rejected with 413', async () => {
   const h = await startHarness({ maxBodyBytes: 32 });
   try {
     const res = await h.json('POST', '/v1/auth/register', {
-      body: { handle: 'x'.repeat(100), password: 'y'.repeat(100) },
+      body: { handle: 'x'.repeat(100), password: 'y'.repeat(100), email: `${'x'.repeat(100)}@example.test` },
     });
     assert.equal(res.status, 413);
   } finally {

@@ -15,7 +15,15 @@
  *   and is audited.
  */
 
-import { createHash, generateKeyPairSync, randomBytes, timingSafeEqual, type KeyObject } from 'node:crypto';
+import {
+  createHash,
+  generateKeyPairSync,
+  randomBytes,
+  randomInt,
+  randomUUID,
+  timingSafeEqual,
+  type KeyObject,
+} from 'node:crypto';
 import { DuplicateUserError } from '@chess-platform/persistence';
 import type { WebAuthnCredentialRow } from '@chess-platform/persistence';
 import { decodeFirst } from './cbor';
@@ -68,6 +76,29 @@ const DECOY_HASH =
 // Reused for unknown credentials so unauthenticated requests cannot force an
 // expensive synchronous key generation on the event loop.
 const DUMMY_WEBAUTHN_PUBLIC_KEY = generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).publicKey;
+
+/** Login step-up codes (audit P1-1): digits, lifetime, and wrong codes tolerated per code. */
+const STEP_UP_CODE_DIGITS = 8;
+const STEP_UP_CODE_TTL_MS = 10 * 60 * 1000;
+const STEP_UP_MAX_ATTEMPTS = 5;
+
+/**
+ * The stored form of a step-up code. The user id is mixed in so equal codes for two accounts never
+ * share a hash, and a code only ever matches the account it was issued to.
+ */
+function stepUpTokenHash(userId: string, code: string): string {
+  return createHash('sha256').update(`${userId}:${code}`).digest('hex');
+}
+
+/**
+ * The single answer to any sign-in attempt that needs a second proof. It is the same for a wrong
+ * password, a right one, an unknown handle, and a bad or missing code, so it reveals none of them.
+ */
+function stepUpRequired(): HttpError {
+  return new HttpError(401, 'unauthorized', 'additional verification required', {
+    reason: 'step_up_required',
+  });
+}
 
 function strictBase64UrlDecode(input: unknown, name: string): Buffer {
   if (typeof input !== 'string') throw HttpError.validation(`${name} must be a string`);
@@ -203,6 +234,8 @@ export class AuthService {
     input: { handle: string; password: string; email?: string | null },
     meta: RequestMeta,
   ): Promise<AuthResult> {
+    // Password accounts need an email they can verify: it is the second proof when step-up applies.
+    if (!input.email) throw HttpError.validation('email is required');
     const existing = await this.repos.users.findByHandle(input.handle);
     if (existing) {
       throw HttpError.conflict('handle is already taken', { handle: 'taken' });
@@ -233,23 +266,52 @@ export class AuthService {
     return { user, roles, tokens };
   }
 
-  /** Verify credentials and start a session. */
+  /**
+   * Verify credentials and start a session.
+   *
+   * With `stepUp` — decided by the caller, once a handle has had too many recent failures — a
+   * correct password is not enough: it must come with the code most recently emailed to the
+   * account's verified address. Without a code, a correct password on a verified account is what
+   * triggers sending one. Every failure in that mode is the same {@link stepUpRequired} answer.
+   *
+   * A password account whose email is not verified cannot sign in with its password; the correct
+   * password gets a fresh verification email and a `403` saying so. Registration requires an
+   * email, so this only affects accounts that have not confirmed theirs yet.
+   */
   async login(
-    input: { handle: string; password: string },
+    input: { handle: string; password: string; code?: string | undefined },
     meta: RequestMeta,
+    stepUp = false,
   ): Promise<AuthResult> {
     const user = await this.repos.users.findByHandle(input.handle);
-    if (!user) {
-      // Spend comparable time to a real verify so timing does not leak existence.
-      await this.hasher.verify(input.password, DECOY_HASH);
+    const stored = user ? await this.repos.users.getPasswordHash(user.id) : null;
+    // Always one real verify, against the decoy when there is nothing to compare with, so timing
+    // does not tell an unknown handle or a password-less account from a wrong password.
+    const matches = await this.hasher.verify(input.password, stored ?? DECOY_HASH);
+    const passwordOk = user !== null && stored !== null && matches;
+    const emailVerified = user !== null && user.email !== null && user.emailVerifiedAt !== null;
+
+    if (stepUp) {
+      const proven = await this.stepUp(user, input.code, passwordOk && emailVerified);
+      if (!proven) {
+        if (user) await this.audit(meta, user.id, 'auth.login.fail', user.id);
+        throw stepUpRequired();
+      }
+    } else if (!passwordOk) {
+      if (user) await this.audit(meta, user.id, 'auth.login.fail', user.id);
       throw HttpError.unauthorized('invalid credentials');
     }
-    const stored = await this.repos.users.getPasswordHash(user.id);
-    const ok = stored ? await this.hasher.verify(input.password, stored) : false;
-    if (!ok) {
+    // Both branches above leave only a correct password on an existing account.
+    if (!user) throw new Error('Unreachable: a verified password implies an account');
+
+    if (!emailVerified) {
+      if (user.email) await this.issueEmailVerification(user.id, user.email);
       await this.audit(meta, user.id, 'auth.login.fail', user.id);
-      throw HttpError.unauthorized('invalid credentials');
+      throw new HttpError(403, 'forbidden', 'verify your email address before signing in', {
+        reason: 'email_unverified',
+      });
     }
+
     const roles = await this.repos.users.rolesOf(user.id);
     const prepared = this.prepareSession(user, roles, meta);
     await this.repos.sessions.create(prepared.session);
@@ -817,6 +879,49 @@ export class AuthService {
     await this.audit(meta, user.id, 'auth.login', user.id);
 
     return { user, roles, tokens };
+  }
+
+  /**
+   * The step-up proof for {@link login}: resolves `true` only when `code` is the account's live
+   * code and `eligible` (a correct password on a verified account) holds.
+   *
+   * Without a code it issues one — to an eligible account only, and only when the account has no
+   * live code already, so an attacker cannot make codes pile up or keep replacing the owner's.
+   * The storage statement runs in every case, for a decoy id when the handle is unknown, so
+   * neither the handle nor the password's correctness changes what the request does.
+   */
+  private async stepUp(
+    user: UserRow | null,
+    code: string | undefined,
+    eligible: boolean,
+  ): Promise<boolean> {
+    const userId = user?.id ?? randomUUID();
+    const now = new Date(this.clock.now());
+    if (code !== undefined) {
+      return this.repos.identityTokens.checkLoginStepUp(
+        {
+          userId,
+          tokenHash: stepUpTokenHash(userId, code),
+          checked: eligible,
+          maxAttempts: STEP_UP_MAX_ATTEMPTS,
+        },
+        now,
+      );
+    }
+    const fresh = String(randomInt(0, 10 ** STEP_UP_CODE_DIGITS)).padStart(STEP_UP_CODE_DIGITS, '0');
+    const issued = await this.repos.identityTokens.issueLoginStepUp(
+      {
+        userId,
+        tokenHash: stepUpTokenHash(userId, fresh),
+        expiresAt: new Date(now.getTime() + STEP_UP_CODE_TTL_MS),
+        eligible,
+        maxAttempts: STEP_UP_MAX_ATTEMPTS,
+      },
+      now,
+    );
+    const email = user?.email;
+    if (issued && email) this.dispatchEmail(() => this.emailSender.sendLoginCode(email, fresh));
+    return false;
   }
 
   private async startSession(

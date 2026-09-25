@@ -228,6 +228,11 @@ export class PgRateLimiter implements RateLimiter {
     }
   }
 
+  async tally(request: RateLimitRequest): Promise<RateLimitReservation | null> {
+    const result = await this.admit([{ ...request, refundable: true }]);
+    return result.reservations?.[0] ?? null;
+  }
+
   async reset(key: string): Promise<void> {
     await this.pool.query('DELETE FROM rate_limit_buckets WHERE bucket_key = $1', [key]);
   }

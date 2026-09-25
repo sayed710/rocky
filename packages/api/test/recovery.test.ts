@@ -15,6 +15,10 @@ class FailingEmailSender implements EmailSender {
     return this.reject(to, token, '/email-verify');
   }
 
+  sendLoginCode(to: string, code: string): Promise<EmailDeliveryResult> {
+    return this.reject(to, code, '/');
+  }
+
   private reject(to: string, token: string, route: string): Promise<EmailDeliveryResult> {
     const values = [to, token, `https://chess.example.com${route}#token=${token}`, 'provider-key'];
     this.unsafeValues.push(...values);
@@ -28,6 +32,10 @@ class HangingResetSender implements EmailSender {
   }
 
   async sendEmailVerification(): Promise<EmailDeliveryResult> {
+    return { outcome: 'success' };
+  }
+
+  async sendLoginCode(): Promise<EmailDeliveryResult> {
     return { outcome: 'success' };
   }
 }
@@ -217,10 +225,13 @@ describe('Identity Recovery (API)', () => {
       });
       assert.equal(resend.status, 202);
 
+      // The address never got its verification email, so the password alone cannot sign in; the
+      // attempt re-sends verification, and that failed delivery must not leak into the logs either.
       const login = await env.json('POST', '/v1/auth/login', {
         body: { handle: 'deliveryfailure', password: 'password123' },
       });
-      assert.equal(login.status, 200);
+      assert.equal(login.status, 403);
+      assert.equal(login.body.error.details.reason, 'email_unverified');
       const rendered = logs.join('\n');
       for (const unsafe of sender.unsafeValues) assert.ok(!rendered.includes(unsafe));
     } finally {

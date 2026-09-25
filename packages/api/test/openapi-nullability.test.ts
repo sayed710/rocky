@@ -57,7 +57,7 @@ test('the served document is OpenAPI 3.1 and contains no `nullable` keyword anyw
 test('nullable scalars declare a type union including null, keeping their format', async () => {
   const { s, close } = await schemas();
   try {
-    // A bare string, and the three formats the document actually uses on nullable fields.
+    // A bare string, and the two formats the document actually uses on nullable fields.
     assert.deepEqual(s['PublicUser']!.properties!['country'], { type: ['string', 'null'] });
     assert.deepEqual(s['RatingView']!.properties!['updatedAt'], {
       type: ['string', 'null'],
@@ -66,10 +66,6 @@ test('nullable scalars declare a type union including null, keeping their format
     assert.deepEqual(s['GameSummary']!.properties!['whiteId'], {
       type: ['string', 'null'],
       format: 'uuid',
-    });
-    assert.deepEqual(s['RegisterRequest']!.properties!['email'], {
-      type: ['string', 'null'],
-      format: 'email',
     });
     // Integer, the only numeric kind the document uses nullably.
     assert.deepEqual(s['SeekView']!.properties!['minRating'], { type: ['integer', 'null'] });
@@ -148,8 +144,10 @@ test('optional and nullable are independent axes, and the migration moved only o
     assert.equal(mistake.required!.includes('bestMove'), true);
     assert.deepEqual(mistake.properties!['centipawnLoss'], { type: ['integer', 'null'] });
 
-    // `email` stayed out of `required` — widening a type must never add a field to it.
-    assert.deepEqual(s['RegisterRequest']!.required, ['handle', 'password']);
+    // `email` moved on both axes at once, and deliberately: a password account's verified email
+    // is its step-up proof (audit P1-1), so registration requires one and it can no longer be null.
+    assert.deepEqual(s['RegisterRequest']!.required, ['handle', 'password', 'email']);
+    assert.equal(s['RegisterRequest']!.properties!['email']!.type, 'string');
   } finally {
     await close();
   }
@@ -167,7 +165,7 @@ test('optional and nullable are independent axes, and the migration moved only o
  * field is added or removed, and that is the point: a migration that silently dropped nullability
  * from a field would otherwise leave every remaining field still well-formed.
  */
-test('every nullable schema in the document is well-formed, and there are 64 of them', async () => {
+test('every nullable schema in the document is well-formed, and there are 63 of them', async () => {
   const { doc, close } = await schemas();
   try {
     const nullables: { path: string; schema: JsonSchema }[] = [];
@@ -185,7 +183,8 @@ test('every nullable schema in the document is well-formed, and there are 64 of 
     };
     walk(doc, '$');
 
-    assert.equal(nullables.length, 64, `nullable field count changed: ${nullables.length}`);
+    // 63 since `RegisterRequest.email` became required and non-nullable (audit P1-1).
+    assert.equal(nullables.length, 63, `nullable field count changed: ${nullables.length}`);
 
     for (const { path, schema } of nullables) {
       const types = schema.type as readonly string[];
