@@ -788,7 +788,10 @@ export class InMemoryIdentityTokensRepository implements IdentityTokensRepositor
         }
       }
     }
-    const row = await this.replaceActive({ ...token, kind: 'email_verify' }, at);
+    // With a cutoff, earlier links stay valid (see the port); otherwise they are superseded.
+    const row = reissueCutoff
+      ? await this.create({ ...token, kind: 'email_verify' })
+      : await this.replaceActive({ ...token, kind: 'email_verify' }, at);
     // Stamped with the caller's clock, as the Postgres adapter does, so the cutoff compares alike.
     const stamped = { ...row, createdAt: at };
     this.byHash.set(row.tokenHash, stamped);

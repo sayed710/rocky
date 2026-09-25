@@ -1054,12 +1054,16 @@ export class PgIdentityTokensRepository implements IdentityTokensRepository {
           return null;
         }
       }
-      await client.query(
-        `UPDATE identity_tokens
-         SET used_at = $2
-         WHERE user_id = $1 AND kind = 'email_verify' AND used_at IS NULL`,
-        [token.userId, at],
-      );
+      // A cooldown-limited re-send adds a link and keeps the earlier ones valid: superseding them
+      // would let anyone who knows the handle invalidate the owner's link on demand.
+      if (!reissueCutoff) {
+        await client.query(
+          `UPDATE identity_tokens
+           SET used_at = $2
+           WHERE user_id = $1 AND kind = 'email_verify' AND used_at IS NULL`,
+          [token.userId, at],
+        );
+      }
       const res = await client.query<{
         token_hash: string;
         user_id: string;

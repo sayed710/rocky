@@ -1031,3 +1031,22 @@ test('resending verification sends the handle without a session and answers neut
     'If that account has an unverified email address, a new verification link is on its way.',
   ]);
 });
+
+// Every sign-in path (password, passkey, registration, restore) adopts the session through the
+// same step, and every sign-out clears it through one, so these two cover all of them.
+test('adopting or clearing a session withdraws a pending step-up', async () => {
+  const stepUps: boolean[] = [];
+  const controller = new AuthController({
+    client: makeFakeClient() as unknown as GambitClient,
+    callbacks: {
+      onSessionChange: () => {},
+      onPending: () => {},
+      onError: () => {},
+      onStepUp: (required) => { stepUps.push(required); },
+    },
+  });
+
+  assert.ok(await controller.login('alice', 'pw'));
+  await controller.logout();
+  assert.deepEqual(stepUps, [false, false], 'signing in and signing out each clear the code field');
+});

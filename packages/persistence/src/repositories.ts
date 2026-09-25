@@ -86,9 +86,12 @@ export interface IdentityTokensRepository {
   /** Atomically supersede every unused token of the same kind for this user. */
   replaceActive(token: NewIdentityToken, at: Date): Promise<IdentityTokenRow>;
   /**
-   * Atomically issue a replacement only while the owning user's email remains unverified. With
-   * `reissueCutoff`, also only when no unused verification token was issued after it, so repeated
-   * triggers cannot flood the inbox.
+   * Atomically issue a replacement only while the owning user's email remains unverified.
+   *
+   * With `reissueCutoff` — the path anyone can trigger — it issues only when no unused verification
+   * token was issued after the cutoff, so repeated triggers cannot flood the inbox, and it leaves
+   * earlier links valid rather than superseding them, so nobody can invalidate the owner's link by
+   * asking for another. Without it, earlier unused links are superseded as before.
    */
   replaceActiveEmailVerification(
     token: Omit<NewIdentityToken, 'kind'>,

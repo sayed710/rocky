@@ -235,7 +235,6 @@ export class AuthController {
       const body = trimmedCode ? { handle, password, code: trimmedCode } : { handle, password };
       const result = await this.client.auth.login(body, managerGeneration);
       if (this.disposed || generation !== this.sessionGeneration) return null;
-      this.callbacks.onStepUp?.(false);
       return this.adoptSession(result.user);
     } catch (err) {
       if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
@@ -382,6 +381,8 @@ export class AuthController {
     this.sessionGeneration++;
     this.session = null;
     this.clearPersisted();
+    // Any session change ends a pending step-up, so a later sign-in starts without a stale code.
+    this.callbacks.onStepUp?.(false);
     this.callbacks.onSessionChange(null);
   }
 
@@ -429,6 +430,8 @@ export class AuthController {
       userId: user.id,
     };
     this.persist();
+    // However the session arrived — password, passkey, registration, restore — step-up is over.
+    this.callbacks.onStepUp?.(false);
     this.callbacks.onSessionChange(this.session);
     return this.session;
   }

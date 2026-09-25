@@ -435,6 +435,25 @@ describe('password accounts require a verified email', () => {
     }
   });
 
+  test('asking for a new link never invalidates the earlier one', async () => {
+    const h = await harness();
+    try {
+      await register(h, 'alice', false);
+      const [original] = h.emailSender.sent.filter((m) => m.type === 'email_verify');
+      h.clock.advance(10 * MINUTE);
+      const resend = await h.json('POST', '/v1/auth/email/verification/resend', {
+        body: { handleOrEmail: 'alice' },
+      });
+      assert.equal(resend.status, 202);
+      assert.equal(h.emailSender.sent.filter((m) => m.type === 'email_verify').length, 2);
+
+      const verified = await h.json('POST', '/v1/auth/email/verify', { body: { token: original!.token } });
+      assert.equal(verified.status, 204, 'the original link still works');
+    } finally {
+      await h.close();
+    }
+  });
+
   /**
    * In step-up, a correct password on an unverified account gets only the uniform answer — saying
    * "verify your email" there would tell an attacker the guess was right. The owner's way back is

@@ -133,6 +133,10 @@ test('Postgres verification re-send honours its cutoff', { skip }, async () => {
       await repo.replaceActiveEmailVerification(token('v3'), later, at),
       'a token issued at or before the cutoff does not',
     );
+    assert.ok(
+      await repo.consumeEmailVerification('v1', later),
+      'and a cutoff-limited re-send left the earlier link valid',
+    );
   });
 });
 
@@ -238,14 +242,19 @@ test('Postgres step-up is shared between API replicas', { skip }, async () => {
       assert.equal(signedIn.status, 200);
       assert.equal(signedIn.body.user.handle, handle);
     } finally {
+      // Every step runs even if one before it fails: a replica left holding the pool would stall
+      // the test database's teardown, and the environment must be restored for the next test.
+      const failures: unknown[] = [];
+      const record = (error: unknown): void => { failures.push(error); };
       for (const replica of replicas) {
-        await closeServer(replica.http);
-        await replica.shutdown();
+        await closeServer(replica.http).catch(record);
+        await replica.shutdown().catch(record);
       }
       process.env['NODE_ENV'] = saved.NODE_ENV;
       process.env['EMAIL_PROVIDER'] = saved.EMAIL_PROVIDER;
       if (saved.NODE_ENV === undefined) delete process.env['NODE_ENV'];
       if (saved.EMAIL_PROVIDER === undefined) delete process.env['EMAIL_PROVIDER'];
+      if (failures.length > 0) throw failures[0];
     }
   });
 });
