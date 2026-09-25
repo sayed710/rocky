@@ -61,8 +61,15 @@ prints no recipient, token, or completed URL.
 `gateway.engineBot.enabled` (default `true`) sets `ENGINE_BOT=1` on the gateway, which starts the
 mover that plays the bot's moves (ADR-0080). The gateway image already ships the pinned Stockfish
 binary and sets `STOCKFISH_PATH`, so the chart adds nothing else. It runs on every gateway replica:
-only the replica that owns a game (ADR-0010) computes its bot moves. To turn Play vs Computer's
-opponent off:
+only the replica that owns a game (ADR-0010) computes its bot moves. The value must be a boolean;
+a quoted `"false"` fails the render rather than silently leaving the bot on.
+
+Each gateway pod then runs the engine pool's defaults: one Stockfish process when idle, up to four
+under load, each single-threaded with a 16 MB hash, and a 300 ms think per bot move. The chart's
+default gateway limits (500m CPU, 512Mi) leave room for that, but raise `gateway.resources` if bot
+games are a large share of traffic, since a throttled pod thinks more slowly.
+
+To turn Play vs Computer's opponent off:
 
 ```bash
 helm upgrade gambit deploy/helm/gambit --set gateway.engineBot.enabled=false

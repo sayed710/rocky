@@ -236,7 +236,7 @@ export class EngineBotMover {
       // node still owns the game and it is still the exact position the move was computed for.
       // Otherwise drop it and look again: a changed position has queued a re-run already, but a
       // lapsed lease announces nothing, and the bot may still be to move.
-      if (!this.stillCurrent(gameId, state, botAcc.userId)) {
+      if (!this.stillCurrent(gameId, state)) {
         this.pendingRerun.add(gameId);
         return;
       }
@@ -257,14 +257,18 @@ export class EngineBotMover {
   }
 
   /**
-   * Whether `computedFor` is still the live position on an owned, fresh copy with the bot to move.
+   * Whether `computedFor` is still the live position, on a copy this node owns with no reload debt.
    *
-   * Synchronous and immediately followed by `route()`, whose owner fast path applies without I/O
-   * in between: while the lease is valid no other node can own the game, and in `computedFor` only
-   * the bot has a legal move, so no other command can change the position before the apply. (A
-   * resignation can still end the game first; the authority then rejects the move as game over.)
+   * `computedFor` had the bot to move, and the FEN encodes the side to move, so the same ply and
+   * FEN mean the bot is still to move; no separate turn check is needed.
+   *
+   * Synchronous and immediately followed by `route()`. While the lease is valid no other node can
+   * own the game, and in `computedFor` only the bot has a legal move, so no other command can
+   * change the position. The apply can still queue on the game's command lock behind an earlier
+   * command's append — a resignation, say, which ends the game and gets the move rejected as game
+   * over. The last line of defence is the event log's expected-sequence check on every append.
    */
-  private stillCurrent(gameId: string, computedFor: StateView, botUserId: string): boolean {
+  private stillCurrent(gameId: string, computedFor: StateView): boolean {
     if (this.ownership && !this.ownership.holdsOwnership(gameId)) return false;
     let now: StateView;
     try {
@@ -272,8 +276,7 @@ export class EngineBotMover {
     } catch {
       return false;
     }
-    const botToMove = (now.turn === 'w' ? now.players.white : now.players.black) === botUserId;
-    return !now.status.over && botToMove && now.ply === computedFor.ply && now.fen === computedFor.fen;
+    return !now.status.over && now.ply === computedFor.ply && now.fen === computedFor.fen;
   }
 
   /**

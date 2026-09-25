@@ -157,12 +157,12 @@ class SlowReadLog implements EventLog {
   }
 }
 
-function makeNode(redis: Redis, store: EventLog, engine: ScriptedEngine, nonOwnerRecheckMs?: number) {
+function makeNode(redis: Redis, store: EventLog, engine: ScriptedEngine, nonOwnerRecheckMs?: number, leaseTtlSec = 30) {
   const nodeId = `node-${randomUUID()}`;
   const redisPubSub = createRedisPubSub({ url: REDIS_URL!, nodeId });
   const pubsub = new CountingPubSub(redisPubSub.pubsub);
   const authority = new GameAuthority(pubsub, () => Date.now(), store);
-  const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec: 30, renewalIntervalSec: 15 });
+  const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec, renewalIntervalSec: Math.max(1, Math.floor(leaseTtlSec / 2)) });
   const consumer = new OwnerCommandConsumer(authority, redis);
   const router = new RedisCommandRouter({ authority, registry, redis, nodeId, consumer, forwardTimeoutMs: 3000 });
   const mover = new EngineBotMover({ authority, router, pubsub, provider: engine, ownership: router, nonOwnerRecheckMs });
@@ -219,9 +219,11 @@ async function waitFor(what: string, predicate: () => boolean | Promise<boolean>
 
 /**
  * How long a negative check watches for something that must not happen. Everything it guards is a
- * local engine answer followed by a local or Redis round trip, all well under this on a CI runner.
+ * local engine answer followed by a local or Redis round trip — tens of milliseconds normally, so
+ * this leaves headroom for a throttled CI runner, where a short window could pass for the wrong
+ * reason.
  */
-const NEGATIVE_WINDOW_MS = 500;
+const NEGATIVE_WINDOW_MS = 1_500;
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, NEGATIVE_WINDOW_MS));
 
 /** Moves as recorded in the shared durable log — the one history every node agrees on. */
@@ -437,6 +439,35 @@ redisTest('an owner that dies mid-game is replaced without any further event', a
       b.consumer.stop();
       await b.registry.releaseAll();
       await b.closePubSub().catch(() => undefined);
+    }
+  });
+});
+
+redisTest("a claim after a lease lapsed unnoticed still reloads, though the game never left this node's books", async () => {
+  // A renewal that throws (Redis unreachable) keeps the game in the registry's owned set on
+  // purpose, while its local lease ages out and the key expires. Here no renewal runs at all, which
+  // leaves the same state. Another node then owns and advances the game; when this node claims it
+  // again, SET NX creating the key must count as a new claim, or nothing reloads.
+  await withCluster([new ScriptedEngine([]), new ScriptedEngine([])], async ({ a: creator, b, redis, store }) => {
+    const a = makeNode(redis, store, new ScriptedEngine([]), undefined, 2);
+    try {
+      const gameId = await createBotGame(creator, 'black');
+      await a.authority.ensureLoaded(gameId);
+      assert.equal(await a.router.prepareOwnership(gameId), true, 'A owns the game at ply 0');
+
+      await waitFor("A's lease to lapse locally and in Redis", async () =>
+        !a.registry.holdsValidLease(gameId) && (await redis.get(ownerKey(gameId))) === null);
+      assert.ok(a.registry.ownedGameIds.includes(gameId), 'A still lists the game as owned');
+
+      await b.router.route(gameId, HUMAN, { kind: 'move', uci: 'e2e4' }); // B claims and plays
+      await b.registry.release(gameId);
+
+      assert.equal(await a.router.prepareOwnership(gameId), true, 'A claims the game again');
+      assert.equal(a.authority.getState(gameId).ply, 1, "A's copy includes B's move");
+    } finally {
+      a.consumer.stop();
+      await a.registry.releaseAll();
+      await a.closePubSub().catch(() => undefined);
     }
   });
 });

@@ -595,6 +595,7 @@ reject "Fail-closed: canary without an Ingress is rejected" --set rollout.strate
 reject "Fail-closed: canary weight above 100 is rejected" "${CANARY_SET[@]}" --set rollout.canary.weight=150
 reject "Fail-closed: canary weight below 0 is rejected" "${CANARY_SET[@]}" --set rollout.canary.weight=-1
 reject "Fail-closed: invalid explicit TRUST_PROXY is rejected" --set-string config.trustProxy=1.5
+reject "Fail-closed: a string gateway.engineBot.enabled is rejected (\"false\" would be truthy)" --set-string gateway.engineBot.enabled=false
 reject "Fail-closed: empty ingress-controller namespace selector is rejected" --set networkPolicy.ingressController.namespaceLabels=null
 reject "Fail-closed: empty ingress-controller pod selector is rejected" --set networkPolicy.ingressController.podLabels=null
 

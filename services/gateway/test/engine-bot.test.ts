@@ -371,7 +371,7 @@ class HeldProvider extends FakeAnalysisProvider {
 
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
-async function waitUntil(what: string, predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+async function waitUntil(what: string, predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
