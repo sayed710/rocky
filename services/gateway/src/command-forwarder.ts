@@ -182,8 +182,16 @@ export class RedisCommandRouter implements CommandRouter {
   private readonly tracer: Tracer;
   /** Games newly claimed by this node whose cached aggregate has not been rehydrated yet. */
   private readonly staleAfterClaim = new Set<string>();
-  /** In-flight rehydrations, so concurrent commands for one game share a single log read. */
-  private readonly rehydrations = new Map<string, Promise<void>>();
+  /**
+   * The claim that recorded each game's outstanding reload debt. Reload debt belongs to that
+   * claim: a reload begun for an earlier claim read the log before the game moved on elsewhere, so
+   * it must not settle a later claim's debt. Numbers come from one process-wide counter and are
+   * never reused, so an entry can be dropped once its debt is settled.
+   */
+  private readonly claimGeneration = new Map<string, number>();
+  private claimSequence = 0;
+  /** In-flight rehydrations, so concurrent commands for one claim share a single log read. */
+  private readonly rehydrations = new Map<string, { readonly generation: number; readonly done: Promise<void> }>();
   private readonly forwardedCommandsCounter: Counter | undefined;
   private readonly forwardTimeoutsCounter: Counter | undefined;
   private readonly fastPathCommandsCounter: Counter | undefined;
@@ -224,6 +232,7 @@ export class RedisCommandRouter implements CommandRouter {
         // Evicting alone is worse than doing nothing, because apply() does not hydrate on a
         // cache miss — it answers `unknown_game`. So record the debt and settle it on the
         // async command path, in route().
+        this.claimGeneration.set(gameId, ++this.claimSequence);
         this.staleAfterClaim.add(gameId);
         this.consumer.startConsumer(gameId);
       },
@@ -240,26 +249,32 @@ export class RedisCommandRouter implements CommandRouter {
    * reaching `apply()` from there without this would validate against exactly the stale copy this
    * whole mechanism exists to discard.
    *
-   * Concurrent commands for the same game share one log read rather than each issuing their own.
-   * The stale mark is cleared only on success, so a failed reload is retried by the next command
-   * instead of being silently forgotten.
+   * Concurrent commands for the same claim share one log read rather than each issuing their own.
+   * The stale mark is cleared only on success, and only by a reload started for the current claim:
+   * if ownership was lost and re-claimed while an older reload was still reading, that reload's
+   * snapshot predates the other owner's moves, so this waits for it and then reads again. A failed
+   * reload is retried by the next command instead of being silently forgotten.
    */
   private async rehydrateIfStale(gameId: string): Promise<void> {
-    if (!this.staleAfterClaim.has(gameId)) return;
-
-    let inFlight = this.rehydrations.get(gameId);
-    if (!inFlight) {
-      inFlight = this.authority
-        .reloadFromLog(gameId)
-        .then(() => {
-          this.staleAfterClaim.delete(gameId);
-        })
-        .finally(() => {
-          this.rehydrations.delete(gameId);
-        });
-      this.rehydrations.set(gameId, inFlight);
+    while (this.staleAfterClaim.has(gameId)) {
+      const generation = this.claimGeneration.get(gameId) ?? 0;
+      let inFlight = this.rehydrations.get(gameId);
+      if (inFlight?.generation !== generation) {
+        const done: Promise<void> = this.authority
+          .reloadFromLog(gameId)
+          .then(() => {
+            if (this.claimGeneration.get(gameId) !== generation) return;
+            this.staleAfterClaim.delete(gameId);
+            this.claimGeneration.delete(gameId);
+          })
+          .finally(() => {
+            if (this.rehydrations.get(gameId)?.done === done) this.rehydrations.delete(gameId);
+          });
+        inFlight = { generation, done };
+        this.rehydrations.set(gameId, inFlight);
+      }
+      await inFlight.done;
     }
-    await inFlight;
   }
 
   /**
@@ -275,7 +290,8 @@ export class RedisCommandRouter implements CommandRouter {
       return false;
     }
     await this.rehydrateIfStale(gameId);
-    return true;
+    // The reload is I/O; the lease can lapse or change hands while it runs.
+    return this.holdsOwnership(gameId);
   }
 
   /**

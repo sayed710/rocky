@@ -19,6 +19,8 @@ import {
   InMemoryEventLog,
   gameChannel,
   type Broadcast,
+  type EventLog,
+  type LoggedEvent,
   type PubSub,
   type Unsubscribe,
 } from '@chess-platform/realtime-gateway';
@@ -36,9 +38,47 @@ import { EngineBotMover } from '../src/engine-bot.js';
 import { createRedisPubSub } from '../src/redis-pubsub.js';
 
 const REDIS_URL = process.env['REDIS_URL'];
-const redisTest = REDIS_URL ? test : test.skip;
+/**
+ * A per-test ceiling. The clients below retry forever (as in production), so without it a Redis
+ * that disappears mid-run turns into a hang that only the outer CI timeout ends.
+ */
+const REDIS_TEST_TIMEOUT_MS = 30_000;
+const redisTest = (name: string, fn: () => Promise<void>): void => {
+  (REDIS_URL ? test : test.skip)(name, { timeout: REDIS_TEST_TIMEOUT_MS }, fn);
+};
+
+/**
+ * Fail a run promptly and by name when Redis is not there. Test-only: a single probe connection
+ * with a short connect timeout and no retries. The clients the tests exercise keep the production
+ * settings (retry forever), which is exactly why they cannot be the thing that notices.
+ */
+async function assertRedisReachable(url: string, connectTimeoutMs = 2_000): Promise<void> {
+  const probe = new Redis(url, {
+    lazyConnect: true,
+    connectTimeout: connectTimeoutMs,
+    maxRetriesPerRequest: 0,
+    enableOfflineQueue: false,
+    retryStrategy: () => null,
+  });
+  probe.on('error', () => undefined); // reported through the rejection below
+  try {
+    await probe.connect();
+    await probe.ping();
+  } catch (err) {
+    throw new Error(`Redis at ${url} is unreachable: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    probe.disconnect();
+  }
+}
 const BOT = BOT_ACCOUNTS[0]!;
 const HUMAN = 'human-1';
+
+// Runs with or without REDIS_URL: nothing listens on port 1.
+test('the Redis preflight fails promptly and by name when Redis is unreachable', async () => {
+  const started = Date.now();
+  await assert.rejects(assertRedisReachable('redis://127.0.0.1:1', 1_000), /Redis at redis:\/\/127\.0\.0\.1:1 is unreachable/);
+  assert.ok(Date.now() - started < 5_000, 'no retry loop');
+});
 
 /**
  * Engine that answers its scripted moves in order and records every FEN it was asked about.
@@ -58,6 +98,7 @@ class ScriptedEngine implements AnalysisProvider {
     const move = this.moves[this.fens.length] ?? 'a7a6';
     this.fens.push(request.fen);
     if (this.hold) await new Promise<void>((resolve) => this.pending.push(resolve));
+    await new Promise((resolve) => setImmediate(resolve)); // a real engine answers over a pipe
     return { move };
   }
   release(): void {
@@ -88,7 +129,35 @@ class CountingPubSub implements PubSub {
   }
 }
 
-function makeNode(redis: Redis, store: InMemoryEventLog, engine: ScriptedEngine) {
+/**
+ * An event log whose reads can be made slow: `load` takes its snapshot at once but hands it back
+ * only when released — a read that started before the game moved on and finishes after.
+ */
+class SlowReadLog implements EventLog {
+  private gate: Promise<void> | undefined;
+  private open: (() => void) | undefined;
+  constructor(private readonly inner: InMemoryEventLog) {}
+  holdReads(): void {
+    this.gate = new Promise<void>((resolve) => (this.open = resolve));
+  }
+  releaseReads(): void {
+    this.open?.();
+    this.gate = undefined;
+  }
+  append(gameId: string, expectedSeq: number, events: Parameters<EventLog['append']>[2]): Promise<number> {
+    return this.inner.append(gameId, expectedSeq, events);
+  }
+  async load(gameId: string): Promise<readonly LoggedEvent[]> {
+    const snapshot = await this.inner.load(gameId);
+    if (this.gate) await this.gate;
+    return snapshot;
+  }
+  exists(gameId: string): Promise<boolean> {
+    return this.inner.exists(gameId);
+  }
+}
+
+function makeNode(redis: Redis, store: EventLog, engine: ScriptedEngine, nonOwnerRecheckMs?: number) {
   const nodeId = `node-${randomUUID()}`;
   const redisPubSub = createRedisPubSub({ url: REDIS_URL!, nodeId });
   const pubsub = new CountingPubSub(redisPubSub.pubsub);
@@ -96,7 +165,7 @@ function makeNode(redis: Redis, store: InMemoryEventLog, engine: ScriptedEngine)
   const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec: 30, renewalIntervalSec: 15 });
   const consumer = new OwnerCommandConsumer(authority, redis);
   const router = new RedisCommandRouter({ authority, registry, redis, nodeId, consumer, forwardTimeoutMs: 3000 });
-  const mover = new EngineBotMover({ authority, router, pubsub, provider: engine, ownership: router });
+  const mover = new EngineBotMover({ authority, router, pubsub, provider: engine, ownership: router, nonOwnerRecheckMs });
   return { nodeId, pubsub, closePubSub: redisPubSub.close, authority, registry, consumer, router, mover, engine };
 }
 type Node = ReturnType<typeof makeNode>;
@@ -109,6 +178,7 @@ interface Cluster {
 }
 
 async function withCluster(engines: [ScriptedEngine, ScriptedEngine], fn: (c: Cluster) => Promise<void>): Promise<void> {
+  await assertRedisReachable(REDIS_URL!);
   const redis = new Redis(REDIS_URL!, { maxRetriesPerRequest: null });
   const store = new InMemoryEventLog();
   const a = makeNode(redis, store, engines[0]);
@@ -304,6 +374,70 @@ redisTest('ownership lost and regained while the engine thinks: the untouched st
     await settle();
     assert.deepEqual(await loggedMoves(store, gameId), ['e2e4', 'b8c6', 'g1f3', 'd7d5']);
     assert.equal(await redis.get(ownerKey(gameId)), a.nodeId);
+  });
+});
+
+redisTest('a reload begun for an earlier claim does not settle a later claim', async () => {
+  // A claims, and its takeover reload reads the log slowly. Meanwhile A loses the game, B plays
+  // 1.e4 through it, and A claims again. The old read finishes after that second claim, with a
+  // pre-e4 snapshot; it must not settle the reload debt the second claim recorded.
+  await withCluster([new ScriptedEngine([]), new ScriptedEngine([])], async ({ a: creator, b, redis, store }) => {
+    const slowLog = new SlowReadLog(store);
+    const a = makeNode(redis, slowLog, new ScriptedEngine([]));
+    try {
+      const gameId = await createBotGame(creator, 'black');
+      await a.authority.ensureLoaded(gameId);
+
+      slowLog.holdReads();
+      const firstClaim = a.router.prepareOwnership(gameId); // reload #1 reads ply 0, then waits
+      await waitFor('A to own the game', async () => (await redis.get(ownerKey(gameId))) === a.nodeId);
+      await a.registry.release(gameId);
+      await b.router.route(gameId, HUMAN, { kind: 'move', uci: 'e2e4' }); // B claims and plays
+      await b.registry.release(gameId);
+
+      // Claim #2 records its reload debt; its own reload has not started when the old read lands.
+      assert.ok((await a.registry.claim(gameId)).owned, 'A owns the game again');
+      slowLog.releaseReads();
+      await firstClaim.catch(() => undefined);
+      assert.equal(await a.router.prepareOwnership(gameId), true);
+
+      assert.equal(a.authority.getState(gameId).ply, 1, "A's copy includes B's move, not the earlier read");
+      assert.equal(a.router.holdsOwnership(gameId), true);
+    } finally {
+      a.consumer.stop();
+      await a.registry.releaseAll();
+      await a.closePubSub().catch(() => undefined);
+    }
+  });
+});
+
+redisTest('an owner that dies mid-game is replaced without any further event', async () => {
+  // Nothing is broadcast when a dead pod's lease runs out, and nobody else acts in the game: B's
+  // own re-check has to notice, claim, rehydrate and move.
+  await withCluster([new ScriptedEngine([]), new ScriptedEngine([])], async ({ a, redis, store }) => {
+    const b = makeNode(redis, store, new ScriptedEngine(['e7e5']), 100);
+    try {
+      const gameId = await createBotGame(a, 'black');
+      await a.router.route(gameId, HUMAN, { kind: 'move', uci: 'e2e4' }); // A owns; bot to move
+      await b.authority.ensureLoaded(gameId);
+      b.mover.registerGame(gameId);
+      await settle();
+      assert.equal(b.engine.fens.length, 0, 'B does not compute while A owns the game');
+
+      // A dies before moving: its consumer stops and its lease expires.
+      a.consumer.stop();
+      await redis.del(ownerKey(gameId));
+
+      await waitFor('B to take over and move', async () => (await loggedMoves(store, gameId)).length === 2);
+      assert.equal(await redis.get(ownerKey(gameId)), b.nodeId);
+      assert.deepEqual(await loggedMoves(store, gameId), ['e2e4', 'e7e5']);
+      assert.equal(b.engine.fens.length, 1, 'exactly one computation, from the rehydrated position');
+    } finally {
+      b.mover.stop();
+      b.consumer.stop();
+      await b.registry.releaseAll();
+      await b.closePubSub().catch(() => undefined);
+    }
   });
 });
 

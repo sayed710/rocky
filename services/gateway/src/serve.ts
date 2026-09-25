@@ -510,6 +510,7 @@ async function main(): Promise<void> {
         pubsub,
         provider: engine,
         ownership: botMoveOwnership,
+        nonOwnerRecheckMs: ownershipLeaseTtlSec * 1000,
         logger,
         movesCounter,
         failuresCounter,

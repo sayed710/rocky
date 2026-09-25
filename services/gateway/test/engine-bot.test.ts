@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   GameAuthority,
+  InMemoryEventLog,
   InMemoryPubSub,
   LocalCommandRouter,
   gameChannel,
@@ -19,6 +20,13 @@ import type { Counter, Histogram, Logger, LogFields } from '@chess-platform/api'
 import { BOT_ACCOUNTS } from '@chess-platform/api';
 import { EngineBotMover } from '../src/engine-bot.js';
 
+/**
+ * A real engine answers over a pipe, so the event loop turns before `play()` resolves. Fakes that
+ * answer on the microtask queue would let a re-run loop starve timers — including the test
+ * runner's own timeouts — and turn a failing assertion into a hung file.
+ */
+const engineTurn = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 class FakeAnalysisProvider implements AnalysisProvider {
   public playCalls: PlayRequest[] = [];
   public shouldFail = false;
@@ -30,6 +38,7 @@ class FakeAnalysisProvider implements AnalysisProvider {
 
   async play(request: PlayRequest): Promise<PlayResult> {
     this.playCalls.push(request);
+    await engineTurn();
     if (this.shouldFail) {
       throw new Error('Engine UCI subprocess crashed');
     }
@@ -262,6 +271,7 @@ test('EngineBotMover: engine failure increments failure counter, logs warning, a
 
   // Human plays 1. e4 — pub/sub broadcast triggers move attempt
   await authority.apply(gameId, humanId, { kind: 'move', uci: 'e2e4' });
+  await waitUntil('the engine failure', () => failuresCounter.count > 0);
 
   assert.equal(failuresCounter.count, 1, 'failure counter must be incremented');
   assert.equal(movesCounter.count, 0, 'moves counter must not be incremented');
@@ -329,12 +339,18 @@ test('EngineBotMover: unregisters when the bot\'s own move ends the game', async
 /** Ownership gate whose answers the test controls. */
 class ScriptedOwnership {
   public owns = true;
+  /** Make the next post-engine check see a lapsed lease once, as after a missed renewal. */
+  public lapseNextCheck = false;
   public prepareCalls = 0;
   async prepareOwnership(_gameId: string): Promise<boolean> {
     this.prepareCalls++;
     return this.owns;
   }
   holdsOwnership(_gameId: string): boolean {
+    if (this.lapseNextCheck) {
+      this.lapseNextCheck = false;
+      return false;
+    }
     return this.owns;
   }
 }
@@ -345,6 +361,7 @@ class HeldProvider extends FakeAnalysisProvider {
   override async play(request: PlayRequest): Promise<PlayResult> {
     this.playCalls.push(request);
     await new Promise<void>((resolve) => this.releases.push(resolve));
+    await engineTurn();
     return { move: this.responseMove };
   }
   release(): void {
@@ -353,6 +370,14 @@ class HeldProvider extends FakeAnalysisProvider {
 }
 
 const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+async function waitUntil(what: string, predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 /** A regression that leaves a held engine call unreleased must fail, not hang the suite. */
 const HELD_TEST_TIMEOUT_MS = 5_000;
 
@@ -431,7 +456,7 @@ test('EngineBotMover: a result for a position the game has left is dropped, and 
   await authority.apply(gameId, bot.userId, { kind: 'move', uci: 'b8c6' });
   await authority.apply(gameId, human, { kind: 'move', uci: 'g1f3' });
   provider.release(); // the ply-1 answer (…Nf6) arrives: legal now, but computed for ply 1
-  await flush();
+  await waitUntil('a fresh computation', () => provider.playCalls.length === 2);
 
   assert.equal(authority.getState(gameId).ply, 3, 'the ply-1 answer must not be applied at ply 3');
   assert.equal(provider.playCalls.length, 2, 'the change queued a fresh computation');
@@ -478,5 +503,90 @@ test('EngineBotMover: the terminal broadcast stops bot work even when the local 
 
   assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 0, 'unsubscribed on ended');
   assert.equal(provider.playCalls.length, 0);
+  mover.stop();
+});
+
+test('EngineBotMover: a lease that lapses mid-think does not strand the turn', { timeout: HELD_TEST_TIMEOUT_MS }, async () => {
+  const gameId = '00000000-0000-7000-8000-000000000025';
+  const { pubsub, authority, router } = await botBlackAfterE4(gameId);
+  const provider = new HeldProvider();
+  const ownership = new ScriptedOwnership();
+  const mover = new EngineBotMover({ authority, router, pubsub, provider, ownership });
+
+  mover.registerGame(gameId);
+  await flush();
+  ownership.lapseNextCheck = true; // the answer arrives just after a missed renewal
+  provider.release();
+  // No broadcast follows a lapse; the mover must look again on its own.
+  await waitUntil('a second computation', () => provider.playCalls.length === 2);
+  assert.equal(authority.getState(gameId).ply, 1, 'the first answer was dropped');
+  provider.release();
+  await waitUntil('the bot to move', () => authority.getState(gameId).ply === 2);
+  mover.stop();
+});
+
+test('EngineBotMover: a non-owner re-checks, so a game orphaned by its owner still gets its move', async () => {
+  const gameId = '00000000-0000-7000-8000-000000000026';
+  const { pubsub, authority, router } = await botBlackAfterE4(gameId);
+  const provider = new FakeAnalysisProvider();
+  const ownership = new ScriptedOwnership();
+  ownership.owns = false; // another pod owns it...
+  const mover = new EngineBotMover({ authority, router, pubsub, provider, ownership, nonOwnerRecheckMs: 20 });
+
+  mover.registerGame(gameId);
+  await flush();
+  assert.equal(provider.playCalls.length, 0);
+  ownership.owns = true; // ...until its lease expires. Nothing is broadcast when that happens.
+  await waitUntil('the bot to move', () => authority.getState(gameId).ply === 2);
+  mover.stop();
+});
+
+test('EngineBotMover: a non-owner that missed the ended broadcast unregisters on re-check', async () => {
+  const gameId = '00000000-0000-7000-8000-000000000027';
+  const log = new InMemoryEventLog();
+  const bot = BOT_ACCOUNTS[0]!;
+  const human = 'human-player-1';
+  // The owner and this replica share the durable log but not the broadcast, which is lost.
+  const owner = new GameAuthority(new InMemoryPubSub(), () => Date.now(), log);
+  await owner.createGame({
+    gameId,
+    variant: 'standard',
+    timeControl: { kind: 'unlimited', initialMs: 0, incrementMs: 0, delayMs: 0 },
+    players: { white: human, black: bot.userId },
+    rated: false,
+  });
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => Date.now(), log);
+  await authority.ensureLoaded(gameId);
+  const ownership = new ScriptedOwnership();
+  ownership.owns = false;
+  const provider = new FakeAnalysisProvider();
+  const mover = new EngineBotMover({
+    authority, router: new LocalCommandRouter(authority), pubsub, provider, ownership, nonOwnerRecheckMs: 20,
+  });
+
+  mover.registerGame(gameId);
+  await flush();
+  await owner.apply(gameId, human, { kind: 'resign' });
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 1, 'nothing reached this replica');
+
+  await waitUntil('the mover to let go', () => pubsub.subscriberCount(gameChannel(gameId)) === 0);
+  assert.equal(provider.playCalls.length, 0);
+  mover.stop();
+});
+
+test('EngineBotMover: joining an already-finished game on a non-owner does not keep it registered', async () => {
+  const gameId = '00000000-0000-7000-8000-000000000028';
+  const { pubsub, authority, router, human } = await botBlackAfterE4(gameId);
+  await authority.apply(gameId, human, { kind: 'resign' });
+  const ownership = new ScriptedOwnership();
+  ownership.owns = false; // the owner keeps its lease on finished games
+  const mover = new EngineBotMover({ authority, router, pubsub, provider: new FakeAnalysisProvider(), ownership });
+
+  mover.registerGame(gameId);
+  await flush();
+
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 0, 'unregistered from its own finished copy');
+  assert.equal(ownership.prepareCalls, 0, 'no ownership traffic for a finished game');
   mover.stop();
 });
