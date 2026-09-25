@@ -247,7 +247,7 @@ function createIngressForwarder(nginxPort) {
 
 /** Send one registration request from a chosen loopback client identity. */
 async function registerFromClient(port, handle, { localAddress, forwardedFor } = {}) {
-  const payload = JSON.stringify({ handle, password: 'password123' });
+  const payload = JSON.stringify({ handle, password: 'password123', email: `${handle}@example.test` });
 
   return new Promise((resolveResponse, reject) => {
     const headers = {
@@ -489,7 +489,7 @@ describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAva
           'content-type': 'application/json',
           'x-forwarded-for': `198.51.100.${i}`,
         },
-        body: JSON.stringify({ handle: `realnginx${i}`, password: 'password123' }),
+        body: JSON.stringify({ handle: `realnginx${i}`, password: 'password123', email: `realnginx${i}@example.test` }),
       });
       assert.equal(res.status, 201, `Request ${i} should succeed with 201, got ${res.status}`);
     }
@@ -501,7 +501,7 @@ describe('Real Nginx Path Acceptance: Trusted Edge Contract', { skip: !dockerAva
         'content-type': 'application/json',
         'x-forwarded-for': '198.51.100.99',
       },
-      body: JSON.stringify({ handle: 'realnginx6', password: 'password123' }),
+      body: JSON.stringify({ handle: 'realnginx6', password: 'password123', email: 'realnginx6@example.test' }),
     });
 
     assert.equal(res6.status, 429, `Expected request 6 to be rate limited (429), got ${res6.status}`);
