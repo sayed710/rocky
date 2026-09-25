@@ -158,7 +158,7 @@ export class RealtimeGateway {
     // the `joined` frame is emitted in the same turn the client's message
     // arrives. Only a game evicted from the cache (or lost to a restart) takes
     // the async hydration path below.
-    if (this.authority.has(gameId)) {
+    if (this.authority.hasFresh(gameId)) {
       this.completeJoin(session, gameId, token);
       return;
     }
@@ -177,6 +177,7 @@ export class RealtimeGateway {
 
   /** Finish a join once the game is known to be resident in the authority. */
   private completeJoin(session: Session, gameId: string, token: string | undefined): void {
+    if (this.sessions.get(session.conn.id) !== session) return;
     // Derive identity from the token. No token → anonymous spectator.
     let userId: string;
     if (token !== undefined) {
@@ -272,6 +273,23 @@ export class RealtimeGateway {
       this.reject(session, gameId, null, 'not_joined', 'join before resuming');
       return;
     }
+    if (!this.authority.hasFresh(gameId)) {
+      void this.authority.ensureLoaded(gameId)
+        .then((loaded) => {
+          if (!loaded) {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+            return;
+          }
+          this.completeResume(session, gameId, lastPly);
+        })
+        .catch(() => this.reject(session, gameId, null, 'invalid_command', 'failed to load game'));
+      return;
+    }
+    this.completeResume(session, gameId, lastPly);
+  }
+
+  private completeResume(session: Session, gameId: string, lastPly: number): void {
+    if (this.sessions.get(session.conn.id) !== session || !session.games.has(gameId)) return;
     session.conn.send({
       t: 'resumed',
       gameId,

@@ -31,7 +31,7 @@ export class TournamentService {
 
   private async withRetry(
     id: string,
-    action: (tournament: Tournament) => Promise<void> | void
+    action: (tournament: Tournament) => Promise<void | false> | void | false
   ): Promise<Tournament> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       const stored = await this.repo.findById(id);
@@ -45,7 +45,8 @@ export class TournamentService {
       const tournament = Tournament.restore(stored.snapshot, strategy);
       
       try {
-        await action(tournament);
+        const changed = await action(tournament);
+        if (changed === false) return tournament;
         await this.repo.save(tournament.toSnapshot(), stored.version);
         return tournament;
       } catch (e: any) {
@@ -148,6 +149,30 @@ export class TournamentService {
     });
   }
 
+  /** Apply a committed game ending once, even when two reporters race or retry after a crash. */
+  async recordCommittedOutcome(id: string, gameId: string, result: GameResult | '*'): Promise<Tournament> {
+    return this.withRetry(id, async (tournament) => {
+      const pairing = tournament.pairingForGame(gameId);
+      if (!pairing) return false;
+      const prior = tournament.resultFor(pairing.roundIndex, pairing.pairingIndex);
+      if (prior !== undefined) {
+        if (prior === result) {
+          const corrected = tournament.correctWithdrawalForfeit(gameId, result);
+          const confirmed = tournament.confirmCommittedResult(gameId, result);
+          return corrected || confirmed ? undefined : false;
+        }
+        if (result !== '*' && tournament.correctWithdrawalForfeit(gameId, result)) return;
+        throw HttpError.conflict('Committed game outcome conflicts with tournament result');
+      }
+      if (result === '*') tournament.abandonGame(gameId);
+      else {
+        tournament.recordResultByGame(gameId, result);
+        tournament.confirmCommittedResult(gameId, result);
+      }
+      await this.reconcileLaunch(tournament);
+    });
+  }
+
   /**
    * Abandon an undecided game (e.g. it was aborted) and immediately reconcile,
    * which launches a fresh game for the same pairing so the round can proceed.
@@ -164,7 +189,7 @@ export class TournamentService {
     for (const round of rounds) {
       for (let pIndex = 0; pIndex < round.pairings.length; pIndex++) {
         const pairing = round.pairings[pIndex];
-        if (pairing.kind === 'game') {
+        if (pairing.kind === 'game' && tournament.resultFor(round.roundIndex, pIndex) === undefined) {
           if (!tournament.gameIdFor(round.roundIndex, pIndex)) {
             const result = await this.launcher.launch({
               tournamentId: tournament.config.id,

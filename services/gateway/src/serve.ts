@@ -281,7 +281,7 @@ async function main(): Promise<void> {
       const tournamentService = new api.TournamentService(tournamentsRepo, reportingLauncher);
       const arenaService = new api.ArenaService(tournamentsRepo, reportingLauncher, () => Date.now());
 
-      reporter = new api.TournamentResultReporter(pubsub, tournamentsRepo, tournamentService, arenaService, {
+      reporter = new api.TournamentResultReporter(pubsub, tournamentsRepo, tournamentService, arenaService, eventStore, {
         scanIntervalMs: positiveIntEnv('TOURNAMENT_REPORTER_SCAN_MS', 30_000),
       });
       reporter.start().catch((err: unknown) => {
@@ -297,16 +297,21 @@ async function main(): Promise<void> {
     if (!pgPool || !eventStore) {
       logger.warn('BOT_AUTO_ANALYZE requires DATABASE_URL to be set');
     } else {
-      const { PgBotBehaviorReportRepository } = await import('@chess-platform/persistence/pg');
+      const { PgBotBehaviorReportRepository, PgTerminalEventInbox } = await import('@chess-platform/persistence/pg');
       const api = await import('@chess-platform/api');
 
       const botRepo = new PgBotBehaviorReportRepository(pgPool);
       const source = new api.EventStoreBotTimingSource(eventStore);
       const analysis = new api.BotAnalysisService(source, botRepo);
 
-      // Start on the fully-typed instance, then hold only the stop() handle for shutdown.
-      const worker = new api.BotAutoAnalyzer(pubsub, analysis);
-      worker.start();
+      const worker = new api.TerminalEventReconciler(
+        pubsub, new PgTerminalEventInbox(pgPool), 'bot-analysis',
+        async (gameId, ending) => {
+          if (ending.result === '*') return;
+          if (!(await analysis.analyzeAndStore(gameId))) throw new Error(`no finished game for ${gameId}`);
+        },
+      );
+      void worker.start().catch((error: unknown) => logger.error('Bot terminal recovery failed', { error: String(error) }));
       botAutoAnalyzer = worker;
       logger.info('BotAutoAnalyzer is enabled');
     }
@@ -345,8 +350,15 @@ async function main(): Promise<void> {
         const source = new api.EventStoreGameSource(eventStore, logger);
         const repo = new PgAntiCheatReportRepository(pgPool);
         const service = api.createEngineBackedAnalysisService(source, engine, repo);
-        const worker = new api.AntiCheatAutoAnalyzer(pubsub, service);
-        worker.start();
+        const { PgTerminalEventInbox } = await import('@chess-platform/persistence/pg');
+        const worker = new api.TerminalEventReconciler(
+          pubsub, new PgTerminalEventInbox(pgPool), 'anti-cheat-analysis',
+          async (gameId, ending) => {
+            if (ending.result === '*') return;
+            if (!(await service.analyzeAndStore(gameId))) throw new Error(`no analyzable game for ${gameId}`);
+          },
+        );
+        void worker.start().catch((error: unknown) => logger.error('Anti-cheat terminal recovery failed', { error: String(error) }));
         antiCheatAutoAnalyzer = worker;
         logger.info('AntiCheatAutoAnalyzer is enabled');
       }

@@ -729,6 +729,18 @@ export class InMemoryTournamentsRepository implements TournamentsRepository {
     }
     return summaries;
   }
+
+  async listRecoverableIdsAfter(afterId: string | null, limit: number): Promise<string[]> {
+    return [...this.byId.entries()]
+      .filter(([id, stored]) => (
+        stored.snap.state === 'running' ||
+        (stored.snap.state === 'finished' &&
+          ('withdrawalForfeits' in stored.snap || 'unconfirmedResults' in stored.snap))
+      ) && (afterId === null || id > afterId))
+      .map(([id]) => id)
+      .sort()
+      .slice(0, limit);
+  }
 }
 
 export class InMemoryIdentityTokensRepository implements IdentityTokensRepository {

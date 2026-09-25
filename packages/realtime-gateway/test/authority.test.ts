@@ -3,9 +3,31 @@ import { test } from 'node:test';
 import type { TimeControl } from '@chess-platform/game';
 import { GameAuthority, AuthorityError } from '../src/authority';
 import { InMemoryPubSub, gameChannel, gamesEndedChannel } from '../src/pubsub';
+import { InMemoryEventLog } from '../src/event-log';
 import type { Broadcast } from '../src/protocol';
 
 const TC: TimeControl = { initialMs: 300_000, incrementMs: 3_000, delayMs: 0, kind: 'increment' };
+
+test('a stale owner reloads a committed ending after its append loses the sequence race', async () => {
+  const store = new InMemoryEventLog();
+  const owner = new GameAuthority(new InMemoryPubSub(), () => 1_000, store);
+  const stalePubsub = new InMemoryPubSub();
+  const stale = new GameAuthority(stalePubsub, () => 1_000, store);
+  await owner.createGame({ gameId: 'race', timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: true });
+  assert.equal(await stale.ensureLoaded('race'), true);
+  const staleBroadcasts: Broadcast[] = [];
+  stalePubsub.subscribe(gameChannel('race'), (message) => staleBroadcasts.push(message));
+
+  await owner.apply('race', 'bob', { kind: 'resign' });
+  await assert.rejects(stale.apply('race', 'alice', { kind: 'move', uci: 'e2e4' }), AuthorityError);
+
+  const status = stale.getState('race').status;
+  assert.equal(status.over, true);
+  if (!status.over) throw new Error('the committed resignation was not reloaded');
+  assert.equal(status.result, '1-0');
+  assert.deepEqual(staleBroadcasts, [], 'the losing writer must not publish an uncommitted move');
+  await assert.rejects(stale.apply('race', 'alice', { kind: 'move', uci: 'e2e4' }), AuthorityError);
+});
 
 async function setup() {
   let clock = 1_000;

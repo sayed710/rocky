@@ -935,6 +935,18 @@ export class PgTournamentsRepository implements TournamentsRepository {
       participantCount: r.participant_count,
     }));
   }
+
+  async listRecoverableIdsAfter(afterId: string | null, limit: number): Promise<string[]> {
+    const res = await this.pool.query<{ id: string }>(
+      `SELECT id FROM tournaments
+       WHERE (state = 'running' OR (state = 'finished' AND
+         (snapshot ? 'withdrawalForfeits' OR snapshot ? 'unconfirmedResults')))
+         AND ($1::text IS NULL OR id > $1)
+       ORDER BY id LIMIT $2`,
+      [afterId, limit],
+    );
+    return res.rows.map((row) => row.id);
+  }
 }
 
 export class PgIdentityTokensRepository implements IdentityTokensRepository {

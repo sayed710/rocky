@@ -24,6 +24,27 @@ export interface StoredEvent {
   readonly serverTs: number;
 }
 
+/** A corrupt row remains pending but must not block other committed endings. */
+export type TerminalEventWork =
+  | { readonly stored: StoredEvent }
+  | { readonly gameId: string; readonly seq: number; readonly decodeError: string };
+
+/** A restartable page of committed terminal work for one idempotent consumer. */
+export interface TerminalEventInbox {
+  pendingAfter(
+    consumer: string,
+    after: { readonly gameId: string; readonly seq: number } | null,
+    limit: number,
+  ): Promise<TerminalEventWork[]>;
+  /** Reverse keyset sweep catches endings committed below a busy forward cursor. */
+  pendingBefore(
+    consumer: string,
+    before: { readonly gameId: string; readonly seq: number },
+    limit: number,
+  ): Promise<TerminalEventWork[]>;
+  acknowledge(consumer: string, gameId: string, seq: number): Promise<void>;
+}
+
 /** A game whose durable stream has started and has not emitted `GameEnded`. */
 export interface ActiveGameRecord {
   readonly gameId: string;

@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-24 — M15 Increment 65: Transient-refresh session preservation._
+_Last updated: 2026-09-25 — M15 Increment 66: Committed terminal-event recovery and idempotent downstream processing._
+
+Prior: _Last updated: 2026-09-24 — M15 Increment 65: Transient-refresh session preservation._
 
 Prior: _Last updated: 2026-09-24 — M15 Increment 64: Account-wide live-human-game assistance containment._
 
@@ -4386,7 +4388,17 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Known limit: a timeout can land after the server rotated the refresh token. The retry then presents the old cookie, and reuse detection answers 401, which still invalidates the session. This PR deliberately keeps that security behavior.
 - Scope: `packages/web` session, API-client, and auth-controller code plus their tests only. This PR does not touch timed-game or terminal-event work, the realtime gateway, persistence, or tournaments, and it does not claim the wider auth subsystem is complete.
 
-## M15 Increment 66 — Login throttling cannot lock an account out (2026-09-25)
+## M15 Increment 66 — Committed terminal-event recovery (2026-09-25)
+
+- `GameEnded` in the PostgreSQL event log is authoritative. The tournament reporter scans all recoverable tournaments in keyset pages at startup and periodically, reads each linked game's committed terminal event, and uses broadcasts only as wake-ups. A failed startup scan retains its retry timer; a failed game remains eligible for later reconciliation. The reporter no longer loses an ending because a live message arrived before subscription or a callback failed after unsubscribing.
+- Round and arena terminal-result paths use version-CAS retries and no-op on already-applied outcomes, including aborted-game replacement. The deterministic launcher preserves one replacement identity across replicas. Authority append conflicts and uncertain persistence failures reload durable state before the cache serves it again, without publishing a losing move.
+- Bot-detection and anti-cheat automatic analysis replay committed endings through bounded, restartable scans with per-consumer PostgreSQL receipts after successful idempotent report upserts. Migration 0033 adds receipts; 0034 and 0035 add online scan indexes, and forward-only 0036 covers finished tournaments with pending provenance without altering the applied 0035. ADR-0144 records the contract and its at-least-once processing semantics.
+- Scan position rotates across bounded passes so a persistent failure prefix cannot starve later endings. A corrupt/unsupported ending is reported and left pending without blocking healthy rows. Decided round-based tournament links are excluded using durable result state, avoiding repeated event-log reads of historical games.
+- A descending catch-up page runs beside the forward terminal-event cursor, so an older game that commits after the cursor passed its ID remains recoverable even under continuous newer work. Already-decided future round-robin forfeits do not launch playable games, and delayed WebSocket joins/resumes check for a still-live session after authority reload.
+- Withdrawal-generated forfeits carry narrow durable provenance. If a linked game's committed ending was lost and withdrawal subsequently set a conflicting forfeit, recovery corrects only that proven automatic forfeit, including in a finished tournament; standings derive from the corrected result but already-published later pairings remain unchanged. Manual conflicting results fail closed and remain discoverable through a durable unconfirmed-result marker. Replay and restart are idempotent. Legacy snapshots without provenance cannot justify overwriting an old forfeit.
+- Search indexing and achievement awards remain pending: both depend on the unfinished durable games projection, and achievement increments additionally require atomic per-game deduplication. This increment does not implement a games projection, ratings, readiness, first-move clock start, no-show policy, or autonomous in-play flag expiry. Timed-game completion remains incomplete until later increments.
+
+## M15 Increment 67 — Login throttling cannot lock an account out (2026-09-25)
 
 - Audit P1-1. `/v1/auth/login` charged a per-handle bucket (5 per 15 minutes) on every attempt, before checking the password. Anyone who knew a handle could spend that bucket with wrong passwords from a single address and keep the owner out indefinitely. Reproduced on `main`: five wrong guesses from an attacker's address got the owner a 429 for the correct password from their own address.
 - The per-IP bucket still charges every attempt before credential verification. Failed attempts now count against one failure budget per handle **and source address** (5 per 15 minutes, the old per-handle rate). Its slot is reserved in the same atomic admission as the IP bucket, so concurrent guesses cannot overshoot, and `RateLimiter.refund` hands it back when the password is correct, so a successful login costs no failure budget. There is no account-wide pre-authentication bucket. An earlier revision of this PR kept one (50 per 15 minutes), and ten addresses could fill it and refuse the owner's correct password for the rest of the window. Any bucket a remote party can fill before authentication is such a lever, however many addresses filling it takes. A regression test now fails 25 sources against one handle and still logs the owner in from a clean address. Unknown and real handles go through identical buckets, so status, body, and `Retry-After` still match.

@@ -567,6 +567,53 @@ describe('Tournament Aggregate (round-by-round)', () => {
     assert.throws(() => t.withdraw('D'), /Cannot withdraw after tournament has finished/);
   });
 
+  test('withdrawal forfeit provenance survives restore and only its linked game can correct it', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.start();
+    t.linkGame(0, 0, 'committed-game');
+    const round = t.getRounds()[0]!;
+    const pairing = round.pairings[0]!;
+    assert.equal(pairing.kind, 'game');
+    if (pairing.kind !== 'game') throw new Error('Expected game pairing');
+    t.withdraw(pairing.white);
+    const snap = t.toSnapshot();
+    assert.deepEqual(snap.withdrawalForfeits, [['0-0', pairing.white]]);
+    const restored = Tournament.restore(snap, new RoundRobinPairing());
+    assert.equal(restored.correctWithdrawalForfeit('other-game', 'white_win'), false);
+    assert.equal(restored.correctWithdrawalForfeit('committed-game', 'white_win'), true);
+    assert.equal(restored.resultFor(0, 0), 'white_win');
+    assert.equal(restored.correctWithdrawalForfeit('committed-game', 'white_win'), false);
+    assert.deepEqual(restored.toSnapshot().rounds, snap.rounds);
+    assert.equal(restored.toSnapshot().withdrawalForfeits, undefined);
+
+    const legacy = { ...snap, withdrawalForfeits: undefined };
+    assert.equal(Tournament.restore(legacy, new RoundRobinPairing())
+      .correctWithdrawalForfeit('committed-game', 'white_win'), false);
+    assert.throws(() => Tournament.restore({ ...snap, withdrawalForfeits: [['0-0', 'unknown']] },
+      new RoundRobinPairing()), /Invalid withdrawalForfeits/);
+  });
+
+  test('manual linked result requires durable confirmation and cannot impersonate withdrawal provenance', () => {
+    const t = new Tournament(config, new RoundRobinPairing());
+    t.register('A');
+    t.register('B');
+    t.start();
+    t.linkGame(0, 0, 'manual-game');
+    t.recordResultByGame('manual-game', 'black_win');
+    assert.deepEqual(t.toSnapshot().unconfirmedResults, ['0-0']);
+    const restored = Tournament.restore(t.toSnapshot(), new RoundRobinPairing());
+    assert.equal(restored.correctWithdrawalForfeit('manual-game', 'white_win'), false);
+    assert.equal(restored.confirmCommittedResult('manual-game', 'white_win'), false);
+    assert.deepEqual(restored.toSnapshot().unconfirmedResults, ['0-0']);
+    assert.equal(restored.confirmCommittedResult('manual-game', 'black_win'), true);
+    assert.equal(restored.confirmCommittedResult('manual-game', 'black_win'), false);
+    assert.equal(restored.toSnapshot().unconfirmedResults, undefined);
+    assert.throws(() => Tournament.restore({ ...t.toSnapshot(), unconfirmedResults: ['0-0', '0-0'] },
+      new RoundRobinPairing()), /Invalid unconfirmedResults/);
+  });
+
   test('Swiss historical withdrawal remains truthful after pairing excludes the player', () => {
     const swissConfig: SwissConfig = { ...config, format: 'swiss', rounds: 3 };
     const t = new Tournament(swissConfig, new SwissPairing(3));
