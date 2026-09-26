@@ -41,7 +41,7 @@ import type { IdGenerator } from './ports/ids';
 import { aggregatePlayer, BotDetectionService } from '@chess-platform/anti-cheat';
 import { NoEngineForVariantError } from '@chess-platform/engine';
 import { SocialRuleError, type FriendRequestAction } from '@chess-platform/social';
-import { MessagingRuleError } from '@chess-platform/messaging';
+import { MessagingRuleError, MAX_MESSAGE_LENGTH } from '@chess-platform/messaging';
 import { CommunityRuleError } from '@chess-platform/community';
 import { AchievementRuleError } from '@chess-platform/achievements';
 import { StudyRuleError, MAX_PGN_BYTES } from '@chess-platform/studies';
@@ -3233,6 +3233,14 @@ export function buildRouter(deps: RouteDeps): Router {
       const actorId = requireAuth(ctx).userId;
       const body = strictObject(ctx.body, ['playerId']);
       const targetId = parseUuid(reqString(body, 'playerId'), 'playerId');
+      if (actorId === targetId) {
+        throw HttpError.validation(`Player '${actorId}' cannot have a conversation or send a message to themselves`,
+          { actor: 'self_conversation' });
+      }
+      await admit([
+        { key: `message-open:user:${actorId}`, limit: config.rateLimit.conversationCreation.perUser },
+        { key: `message-open:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.conversationCreation.perIp },
+      ]);
       // `parseUuid` proved the shape, not that anyone is behind it. The Postgres adapter would
       // catch this on the users foreign key, but the in-memory adapter has no users to key
       // against and would happily open a conversation with nobody — so the check belongs here,
@@ -3305,6 +3313,15 @@ export function buildRouter(deps: RouteDeps): Router {
       const convId = parseUuid(ctx.params['id']!, 'id');
       const body = strictObject(ctx.body, ['body']);
       const messageText = reqString(body, 'body');
+      const trimmed = messageText.trim();
+      if (trimmed.length === 0 || trimmed.length > MAX_MESSAGE_LENGTH) {
+        throw HttpError.validation(`Message body must be non-empty and at most ${MAX_MESSAGE_LENGTH} characters`,
+          { body: 'invalid' });
+      }
+      await admit([
+        { key: `message-send:user:${actorId}`, limit: config.rateLimit.messageSend.perUser },
+        { key: `message-send:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.messageSend.perIp },
+      ]);
       const msgId = ids.next();
       try {
         const msg = await repo.sendMessage(msgId, convId, actorId, messageText, new Date(clock.now()));
