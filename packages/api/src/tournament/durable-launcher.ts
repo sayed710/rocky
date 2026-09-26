@@ -3,6 +3,7 @@ import { CHESS960_POSITIONS, type Variant } from '@chess-platform/core';
 import { Game, type TimeControl } from '@chess-platform/game';
 import type { EventStore } from '@chess-platform/persistence';
 import type { Clock } from '../ports/clock';
+import { DEFAULT_NO_SHOW_DEADLINES } from '../config';
 import type { GameLauncher, LaunchInput } from './launcher';
 
 /**
@@ -14,6 +15,8 @@ export class DurableGameLauncher implements GameLauncher {
   constructor(
     private readonly events: EventStore,
     private readonly clock: Clock,
+    /** The tournament no-show deadline recorded on every game this launches (ADR-0148). */
+    private readonly noShowAfterMs: number = DEFAULT_NO_SHOW_DEADLINES.tournamentMs,
   ) {}
 
   async launch(input: LaunchInput): Promise<{ gameId: string }> {
@@ -28,6 +31,9 @@ export class DurableGameLauncher implements GameLauncher {
       players: { white: input.white, black: input.black },
       rated: true,
       at: this.clock.now(),
+      // Readiness, first-move clock start and the tournament no-show deadline (ADR-0148).
+      source: 'tournament',
+      noShowAfterMs: this.noShowAfterMs,
       ...(variant === 'chess960' ? { chess960StartId: launchChess960StartId(input) } : {}),
     });
 

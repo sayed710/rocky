@@ -100,6 +100,21 @@ export interface StateView {
    * that owns the fact; a summary column would be a second copy that could.
    */
   readonly chess960StartId: number | null;
+  /**
+   * Durable readiness per seat for a game with a pregame lifecycle (ADR-0148), or `null` for a game
+   * without one (bot and direct games, and games created before it existed).
+   *
+   * While it is non-null, the game is over or has a move played, or one seat is not ready, the first
+   * move is refused with `not_ready`. Both ready and no move played means the game waits for White's
+   * first move with neither clock running. Folded from the event log, never from connection presence.
+   */
+  readonly ready: ReadyView | null;
+}
+
+/** Durable readiness of both seats. */
+export interface ReadyView {
+  readonly w: boolean;
+  readonly b: boolean;
 }
 
 // ─── Client → Server ────────────────────────────────────────────────────────
@@ -216,8 +231,19 @@ export interface EndedBroadcast {
   readonly serverTs: number;
 }
 
-/** 
- * A minimal live snapshot of a single board within a tournament. 
+/**
+ * A seat's readiness became durable (ADR-0148). Fanned out through the game channel so a client on
+ * any gateway replica learns it; carries both seats so it is safe to apply in any order.
+ */
+export interface ReadyBroadcast {
+  readonly t: 'ready';
+  readonly gameId: string;
+  readonly ready: ReadyView;
+  readonly serverTs: number;
+}
+
+/**
+ * A minimal live snapshot of a single board within a tournament.
  * Sourced from the authority's `StateView`.
  */
 export interface LiveBoardView {
@@ -256,7 +282,7 @@ export interface ResumedMessage {
   readonly t: 'resumed';
   readonly gameId: string;
   readonly state: StateView;
-  readonly missed: readonly (MoveBroadcast | EndedBroadcast)[];
+  readonly missed: readonly GameBroadcast[];
 }
 
 /**
@@ -280,7 +306,9 @@ export type RejectCode =
   | 'unknown_game'
   | 'not_joined'
   | 'invalid_command'
-  | 'unauthorized';
+  | 'unauthorized'
+  /** The first move of a game with a pregame lifecycle, before both seats are durably ready. */
+  | 'not_ready';
 
 /** Echoed latency probe; carries the server timestamp for RTT estimation. */
 export interface PongMessage {
@@ -299,10 +327,14 @@ export type ServerMessage =
   | ResumedMessage
   | RejectMessage
   | PongMessage
-  | TournamentUpdateBroadcast;
+  | TournamentUpdateBroadcast
+  | ReadyBroadcast;
+
+/** What the authority publishes for one game's committed events. */
+export type GameBroadcast = MoveBroadcast | EndedBroadcast | ReadyBroadcast;
 
 /** Broadcasts fanned out to a whole room (as opposed to point-to-point replies). */
-export type Broadcast = MoveBroadcast | EndedBroadcast | TournamentUpdateBroadcast;
+export type Broadcast = GameBroadcast | TournamentUpdateBroadcast;
 
 // ─── Default JSON codec ─────────────────────────────────────────────────────
 

@@ -29,7 +29,9 @@ import {
 } from './clock';
 import type {
   GameCreatedEvent,
+  GameEndedEvent,
   GameEvent,
+  GameSource,
   MovePlayedEvent,
   Players,
   ResultString,
@@ -82,7 +84,30 @@ export interface GameState {
    * replays exactly but whose *identity* was never recorded and is therefore not knowable.
    */
   readonly chess960StartId: number | null;
+  /** The pregame lifecycle this game follows, or `null` for the original one (ADR-0148). */
+  readonly source: GameSource | null;
+  /**
+   * When the pregame no-show deadline falls (`GameCreated.at + noShowAfterMs`), or `null` for a game
+   * without a source. Durable, so every replica and every replay agrees on it.
+   */
+  readonly noShowAt: number | null;
+  /** Durable readiness per seat, recorded only before {@link noShowAt}. Only meaningful with a source. */
+  readonly ready: { readonly w: boolean; readonly b: boolean };
 }
+
+/**
+ * What the pregame no-show rule says about a game at a moment (ADR-0148).
+ *
+ * - `expire`: the deadline has passed with no move played; `ending` is the event to append.
+ * - `not_applicable`: the game has no source, is over, or has had its first move.
+ * - `not_due`: the deadline has not passed yet.
+ * - `both_ready`: a tournament game whose players are both ready; it waits for the first move.
+ */
+export type NoShowVerdict =
+  | { readonly kind: 'expire'; readonly ending: GameEndedEvent }
+  | { readonly kind: 'not_applicable' }
+  | { readonly kind: 'not_due' }
+  | { readonly kind: 'both_ready' };
 
 /** Parameters to create a new game. */
 export interface CreateGameParams {
@@ -101,7 +126,45 @@ export interface CreateGameParams {
    * it wants and a tournament derive one reproducibly.
    */
   readonly chess960StartId?: number;
+  /** The pregame lifecycle to follow; omitted for bot and direct games (ADR-0148). */
+  readonly source?: GameSource;
+  /** Required with `source` and refused without it: how long the game may wait for its first move. */
+  readonly noShowAfterMs?: number;
 }
+
+const GAME_SOURCES: readonly unknown[] = ['seek', 'tournament'] satisfies readonly GameSource[];
+
+/**
+ * A stored or requested pregame lifecycle. Both fields absent is the original lifecycle; a known
+ * source with a positive integer deadline and a finite creation time is a sourced game; anything else
+ * is refused rather than guessed, because a sourced game whose deadline cannot be computed could never
+ * be ended. This is the same rule the `pregame_deadlines` trigger applies (migration 0042), so a game
+ * the log can replay as sourced is always one the queue holds.
+ */
+function pregameOf(source: unknown, noShowAfterMs: unknown, at: unknown): { source: GameSource; noShowAfterMs: number } | null {
+  if (source === undefined && noShowAfterMs === undefined) return null;
+  if (typeof at !== 'number' || !Number.isSafeInteger(at) || at < 0) {
+    throw new GameError(`a sourced game needs a numeric creation time in epoch milliseconds; got ${JSON.stringify(at)}`);
+  }
+  if (!GAME_SOURCES.includes(source)) throw new GameError(`unknown game source ${JSON.stringify(source)}`);
+  if (typeof noShowAfterMs !== 'number' || !Number.isSafeInteger(noShowAfterMs) || noShowAfterMs <= 0) {
+    throw new GameError(`a ${String(source)} game needs a positive integer no-show deadline; got ${JSON.stringify(noShowAfterMs)}`);
+  }
+  if (at + noShowAfterMs > MAX_DEADLINE_MS) {
+    throw new GameError(`a no-show deadline must fall before the latest representable date; got ${at} + ${noShowAfterMs}`);
+  }
+  return { source: source as GameSource, noShowAfterMs };
+}
+
+/**
+ * The latest instant a no-show deadline may fall: ECMAScript's maximum `Date` (year 275760), which is
+ * also inside PostgreSQL's `timestamptz` range, so a deadline the domain accepts is always one the
+ * `pregame_deadlines` trigger can store. Migration 0042 applies the same bound.
+ */
+const MAX_DEADLINE_MS = 8_640_000_000_000_000;
+
+/** Why a first move is refused until both seats are durably ready. */
+export const NOT_READY_MESSAGE = 'Both players must be ready before the first move';
 
 /** Whether `id` is a usable Scharnagl starting-position id. */
 function isStartId(id: unknown): id is number {
@@ -171,6 +234,7 @@ export class Game {
       );
     }
 
+    const pregame = pregameOf(params.source, params.noShowAfterMs, params.at);
     const initialFen =
       chess960StartId !== null ? chess960Fen(chess960StartId) : params.initialFen ?? Position.initial(variant).fen();
     const event: GameEvent = {
@@ -183,6 +247,7 @@ export class Game {
       rated: params.rated ?? false,
       at: params.at,
       ...(chess960StartId !== null ? { chess960StartId } : {}),
+      ...(pregame !== null ? pregame : {}),
     };
     return { game: Game.fromEvents([event]), events: [event] };
   }
@@ -214,6 +279,12 @@ export class Game {
     return this.state.position.fen();
   }
 
+  /** True while a sourced game still needs a seat's readiness before its first move can be played. */
+  get awaitingReadiness(): boolean {
+    const s = this.state;
+    return s.source !== null && !s.status.over && s.ply === 0 && !(s.ready.w && s.ready.b);
+  }
+
   // --- Commands ----------------------------------------------------------
 
   /**
@@ -223,6 +294,10 @@ export class Game {
    */
   playMove(uci: string, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
+    // Like a move after a flag fall: once the no-show deadline has passed without a first move, the
+    // move does not count and the no-show ending is what gets recorded, however late the worker is.
+    if (this.noShowVerdict(at).kind === 'expire') return this.expireNoShow(at);
+    if (this.awaitingReadiness) throw new GameError(NOT_READY_MESSAGE);
     const s = this.state;
     const mover = s.position.turn;
 
@@ -348,6 +423,52 @@ export class Game {
     return { game: Game.applyAll(this, events), events };
   }
 
+  /**
+   * Record that `color` is ready. Emits `PlayerReady` only when it changes something: a sourced game,
+   * not over, no move played yet, and that seat not already ready. Every other call is a no-op, so
+   * duplicate joins, reconnects and racing replicas can neither duplicate nor fail readiness.
+   */
+  markReady(color: Color, at: number): { game: Game; events: GameEvent[] } {
+    const s = this.state;
+    // Readiness after the deadline does not count: it must not undo a no-show that was already due.
+    if (s.noShowAt === null || at >= s.noShowAt) return { game: this, events: [] };
+    if (s.status.over || s.ply > 0 || s.ready[color]) return { game: this, events: [] };
+    const events: GameEvent[] = [{ type: 'PlayerReady', by: color, at }];
+    return { game: Game.applyAll(this, events), events };
+  }
+
+  /**
+   * The pregame no-show verdict at `at`, from the durable deadline (ADR-0148). Readiness counts only
+   * if it was recorded before the deadline, which {@link markReady} guarantees.
+   *
+   * Seek: aborted with no result whoever was ready, because the deadline governs the whole wait for
+   * the first move. Tournament: a forfeit win for the one ready player, a double forfeit when
+   * neither is ready, and no ending at all when both are.
+   */
+  noShowVerdict(at: number): NoShowVerdict {
+    const s = this.state;
+    if (s.source === null || s.noShowAt === null || s.status.over || s.ply > 0) return { kind: 'not_applicable' };
+    if (at < s.noShowAt) return { kind: 'not_due' };
+    const end = (result: ResultString, winner: Color | null): NoShowVerdict => ({
+      kind: 'expire',
+      ending: { type: 'GameEnded', result, termination: 'no_show', winner, at },
+    });
+    if (s.source === 'seek') return end('*', null);
+    if (s.ready.w && s.ready.b) return { kind: 'both_ready' };
+    if (s.ready.w) return end('1-0', 'w');
+    if (s.ready.b) return end('0-1', 'b');
+    return end('*', null);
+  }
+
+  /** End the game by the pregame no-show rule. Throws unless {@link noShowVerdict} says `expire`. */
+  expireNoShow(at: number): { game: Game; events: GameEvent[] } {
+    this.assertOngoing();
+    const verdict = this.noShowVerdict(at);
+    if (verdict.kind !== 'expire') throw new GameError(`No-show expiry refused: ${verdict.kind}`);
+    const events: GameEvent[] = [verdict.ending];
+    return { game: Game.applyAll(this, events), events };
+  }
+
   // --- Internals ---------------------------------------------------------
 
   private assertOngoing(): void {
@@ -470,6 +591,8 @@ export class Game {
     switch (event.type) {
       case 'GameCreated': {
         const startId = Game.startIdOf(event);
+        const pregame = pregameOf(event.source, event.noShowAfterMs, event.at);
+        const source = pregame?.source ?? null;
         const position = Position.fromFen(event.initialFen, event.variant);
         // Seed the repetition history with the initial position (count = 1).
         const rep = new Map<string, number>();
@@ -482,14 +605,27 @@ export class Game {
           rated: event.rated,
           createdAt: event.at,
           position,
-          clock: initClock(event.timeControl, event.at),
+          // A sourced game's clock starts at its first move, so nothing is anchored at creation. A game
+          // without a source keeps the creation anchor it always had, so a game stored before ADR-0148
+          // and still in progress is not reinterpreted.
+          clock: initClock(event.timeControl, source === null ? event.at : null),
           ply: 0,
           moves: [],
           status: ONGOING,
           drawOffer: null,
           repetition: rep,
           chess960StartId: startId,
+          source,
+          noShowAt: pregame === null ? null : event.at + pregame.noShowAfterMs,
+          ready: { w: false, b: false },
         };
+      }
+      case 'PlayerReady': {
+        if (state === null) throw new GameError('PlayerReady before GameCreated');
+        if (event.by !== 'w' && event.by !== 'b') {
+          throw new GameError(`PlayerReady for unknown seat ${JSON.stringify(event.by)}`);
+        }
+        return { ...state, ready: { ...state.ready, [event.by]: true } };
       }
       case 'MovePlayed': {
         if (state === null) throw new GameError('MovePlayed before GameCreated');

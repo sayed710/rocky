@@ -423,8 +423,11 @@ test('a transient database error aborts the batch without recording the game; a 
 
 test('streams written before migration 0040 are projected by the first pass without an operator step', { skip }, async () => {
   const before = mkdtempSync(join(tmpdir(), 'pre-0040-'));
+  const through0041 = mkdtempSync(join(tmpdir(), 'through-0041-'));
   try {
     for (const file of readdirSync(MIGRATIONS).filter((f) => f < '0040')) cpSync(join(MIGRATIONS, file), join(before, file));
+    // The step under test is 0040/0041 alone; later migrations are covered by their own tests.
+    for (const file of readdirSync(MIGRATIONS).filter((f) => f < '0042')) cpSync(join(MIGRATIONS, file), join(through0041, file));
     await withTestDatabase(async ({ pool }) => {
       await migrate(pool, before);
       const [white, black] = await newUsers(pool, 2);
@@ -433,7 +436,8 @@ test('streams written before migration 0040 are projected by the first pass with
       await store.append(legacy, -1, creation(legacy, white!, black!));
       await play(store, legacy, FOOLS_MATE);
 
-      assert.equal(await migrate(pool, MIGRATIONS), 2, '0040 and the online index 0041');
+      assert.equal(await migrate(pool, through0041), 2, '0040 and the online index 0041');
+      await migrate(pool, MIGRATIONS); // the projector writes columns later migrations add
       await drain(new PgGamesProjector(pool), pool);
       const row = await gameRow(pool, legacy);
       assert.equal(row?.result, '0-1');
@@ -443,6 +447,7 @@ test('streams written before migration 0040 are projected by the first pass with
     });
   } finally {
     rmSync(before, { recursive: true, force: true });
+    rmSync(through0041, { recursive: true, force: true });
   }
 });
 

@@ -9,6 +9,7 @@ export * from './migrate';
 export * from './event-store';
 export * from './terminal-event-inbox';
 export * from './games-projector';
+export * from './no-show-candidates';
 export * from './repositories';
 export * from './anti-cheat';
 export * from './bot-reports';

@@ -87,8 +87,12 @@ const SERVICE_JOBS = [
   },
   {
     name: 'gateway service (build + Redis integration)',
-    needs: 'REDIS_URL',
-    available: Boolean(REDIS_URL),
+    // The readiness and no-show suite (ADR-0148) needs both; without either it would skip.
+    needs: 'REDIS_URL and DATABASE_URL',
+    available: Boolean(REDIS_URL) && Boolean(POSTGRES_URL) && disposableDatabase(POSTGRES_URL),
+    unavailableReason: REDIS_URL && POSTGRES_URL && !disposableDatabase(POSTGRES_URL)
+      ? 'DATABASE_URL does not name a database with "test" in it — this suite needs a disposable one'
+      : null,
     // `services/gateway` is not a workspace, so these run in its own directory — the same thing the
     // workflow expresses with `working-directory`.
     cwd: 'services/gateway',

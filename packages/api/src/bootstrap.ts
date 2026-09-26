@@ -245,7 +245,7 @@ export function createPgDependencies(options: PgBootstrapOptions = {}): {
   const logger = options.logger ?? new JsonLogger({ service: 'api' }, { level: resolveLogLevel() });
 
   const eventStore = new PostgresEventStore(pool);
-  const gameLauncher = options.gameLauncher ?? new DurableGameLauncher(eventStore, clock);
+  const gameLauncher = options.gameLauncher ?? new DurableGameLauncher(eventStore, clock, config.noShow.tournamentMs);
   const repos = createPgRepositories(pool, ids, eventStore);
   const antiCheatAnalysis = options.analysisProvider
     ? new AntiCheatAnalysisService(

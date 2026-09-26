@@ -21,7 +21,7 @@
 
 export * from './protocol';
 export * from './latency';
-export { GameAuthority, AuthorityError, fenHash } from './authority';
+export { GameAuthority, AuthorityError, NO_SHOW_ACTOR, fenHash } from './authority';
 export type { Command, AuthorityErrorCode, ApplyResult } from './authority';
 export { InMemoryPubSub, RedisPubSub, gameChannel, gamesEndedChannel, gamesProjectedEndedChannel, tournamentChannel } from './pubsub';
 export type { PubSub, Unsubscribe, RedisLike } from './pubsub';

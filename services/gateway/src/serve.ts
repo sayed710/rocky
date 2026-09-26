@@ -54,6 +54,11 @@
  *   (`/v1/traces` is appended).
  * - `OTEL_TRACES_SAMPLER_ARG` (optional) — sampling probability ratio in [0, 1];
  *   when absent, defaults to 1.0 (always-on).
+ * - `NO_SHOW_TOURNAMENT_MS` (default 300000) — the pregame no-show deadline recorded on tournament
+ *   games this process launches (ADR-0148); the API reads it and `NO_SHOW_SEEK_MS` for the games it
+ *   creates. Positive integers. Each game keeps the deadline it was created with.
+ * - `NO_SHOW_SCAN_MS` (default 5000) — how often the no-show worker looks for due games. Every
+ *   replica with `DATABASE_URL` runs the expiry.
  *
  * Durable event log: ADR-0007 (M14 inc 2).
  * Redis pub/sub: ADR-0008 (M14 inc 3).
@@ -155,6 +160,7 @@ async function main(): Promise<void> {
   const joinTimeoutMs = positiveIntEnv('WS_JOIN_TIMEOUT_MS', 10_000);
   const heartbeatIntervalMs = positiveIntEnv('WS_HEARTBEAT_INTERVAL_MS', 30_000);
   const maxRoomsPerConnection = positiveIntEnv('WS_MAX_ROOMS_PER_CONNECTION', 4);
+  const noShowScanMs = positiveIntEnv('NO_SHOW_SCAN_MS', 5_000);
   const trustProxy = resolveTrustProxyEnv(process.env['TRUST_PROXY']);
 
   const logger = new JsonLogger({ service: 'realtime-gateway', nodeId });
@@ -266,7 +272,7 @@ async function main(): Promise<void> {
       const api = await import('@chess-platform/api');
 
       const tournamentsRepo = new PgTournamentsRepository(pgPool);
-      const durableLauncher = new api.DurableGameLauncher(eventStore, systemClock);
+      const durableLauncher = new api.DurableGameLauncher(eventStore, systemClock, api.resolveNoShowDeadlines().tournamentMs);
 
       // Games launched by THIS process are watched immediately; games launched
       // by API replicas are picked up by the reporter's periodic scan.
@@ -472,7 +478,7 @@ async function main(): Promise<void> {
   // --- Command router: local (single-node) or Redis (multi-node) (M14 inc 5) ---
   let commandRouter: CommandRouter;
   let botMoveOwnership: import('./engine-bot.js').BotMoveOwnership | undefined;
-  let ownershipRegistry: { releaseAll: () => Promise<void>; startRenewal: () => void; stopRenewal: () => void; ownedCount: number } | undefined;
+  let ownershipRegistry: import('./ownership.js').OwnershipRegistry | undefined;
   let commandConsumer: { stop: () => void } | undefined;
   let closeCommandRedis: (() => Promise<void>) | undefined;
 
@@ -572,6 +578,32 @@ async function main(): Promise<void> {
     },
     (gameId) => engineBotMover?.localSessionsGone(gameId),
   );
+
+  // --- Pregame no-show expiry (ADR-0148) ---
+  // On every replica with a database, like the projection whose rows it scans: correctness comes from
+  // the owner's command lock and the event log's sequence check, not from running it in one place.
+  let noShowWorker: { stop(): Promise<void> } | undefined;
+  if (pgPool && store) {
+    const { PgNoShowCandidates } = await import('@chess-platform/persistence/pg');
+    const { NoShowExpiryWorker, routedNoShowExpiry } = await import('./no-show-expiry.js');
+    const worker = new NoShowExpiryWorker({
+      candidates: new PgNoShowCandidates(pgPool),
+      events: store,
+      expire: routedNoShowExpiry({
+        authority,
+        router: commandRouter,
+        ...(ownershipRegistry ? { ownership: ownershipRegistry } : {}),
+        hasLocalSessions: (gameId) => gateway.hasLocalSessions(gameId),
+      }),
+      pollMs: noShowScanMs,
+      logger,
+      expiredCounter: metrics.counter('gateway_no_show_expired_total'),
+      failuresCounter: metrics.counter('gateway_no_show_failures_total'),
+    });
+    worker.start();
+    noShowWorker = worker;
+    logger.info('No-show expiry is enabled');
+  }
 
   // --- HTTP health server ---
   const healthServer = createServer((req, res) => {
@@ -743,6 +775,9 @@ async function main(): Promise<void> {
     botAutoAnalyzer?.stop();
     antiCheatAutoAnalyzer?.stop();
     engineBotMover?.stop();
+    // No new no-show pass starts from here; an in-flight one may still be routing a command through
+    // Redis and the database, so it is awaited below before either closes.
+    const noShowStopped = noShowWorker?.stop();
     // No new projection batch starts from here. The in-flight one is awaited before the wake consumers
     // unsubscribe and before pub/sub and the pool close, so a wake it publishes still has listeners.
     const projectionStopped = gamesProjection?.stop();
@@ -758,6 +793,7 @@ async function main(): Promise<void> {
     wss.close(() => {
       healthServer.close(async () => {
         await engineShutdown; // ensure engine subprocesses are cleaned up before exit
+        await noShowStopped;
         if (commandConsumer) commandConsumer.stop();
         if (ownershipRegistry) {
           ownershipRegistry.stopRenewal();

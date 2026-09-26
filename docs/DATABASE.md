@@ -139,7 +139,7 @@ immutable log faithful while making query-side columns safe.
 ### 3.1 Ordering model — `seq`, not `ply`
 
 The domain's `GameEvent` union mixes move events (which carry a chess `ply`) with
-non-move events (`GameCreated`, `DrawOffered`, `DrawDeclined`, `GameEnded`, which
+non-move events (`GameCreated`, `PlayerReady`, `DrawOffered`, `DrawDeclined`, `GameEnded`, which
 have **no** `ply`). Therefore the durable log is ordered by a **monotonic
 per-game append sequence `seq`** (0-based), *not* by chess ply.
 
@@ -251,7 +251,8 @@ CREATE TABLE terminations (      -- evolving/annotated vocabulary
   code        TEXT PRIMARY KEY,  -- 'checkmate','resignation','timeout',...
   is_draw     BOOLEAN NOT NULL
 );
--- Seeded by migration 0001 from the domain's Variant / Termination unions.
+-- Seeded by migration 0001 from the domain's Variant / Termination unions;
+-- 0042 adds 'no_show' (a pregame no-show, never 'timeout' or 'aborted'; ADR-0148).
 ```
 
 Small fixed sets use `CHECK` (see §2.2): `speed`, `result`, `role`, credential
@@ -300,6 +301,29 @@ the row. It re-folds each touched game's complete committed stream and upserts i
 - **Rebuild.** `npm run games:rebuild` re-folds every stream independently of the checkpoint. It
   leaves to the live projector any game that projector has yet to reach, so live endings are still
   reported.
+- **Pregame lifecycle** ([ADR-0148](adr/0148-pregame-readiness-and-no-show.md)). `PlayerReady`
+  events advance `last_seq` but not `ply_count`, and a no-show `GameEnded` projects `result`,
+  `termination = 'no_show'` and `ended_at` like any other ending.
+
+### 4.2a Pending no-show deadlines (`0042_pregame_no_show.sql`, ADR-0148)
+
+```sql
+CREATE TABLE pregame_deadlines (
+  game_id UUID        PRIMARY KEY,
+  due_at  TIMESTAMPTZ NOT NULL                  -- GameCreated.at + GameCreated.noShowAfterMs
+);
+CREATE INDEX pregame_deadlines_due_idx ON pregame_deadlines (due_at, game_id);
+```
+
+A work queue, not a projection: the `pregame_deadlines_track` trigger on `game_events` inserts a row
+when a creation carries a numeric `noShowAfterMs` and deletes it on the first move or any ending, in
+the same transaction as the append. It therefore holds exactly the unstarted seek and tournament
+games, whichever release wrote them, and cannot lag the log. The no-show worker scans it by
+`due_at`, re-decides each game from the event log, and deletes a row the log shows will never
+expire. Only a creation the game aggregate would accept (a known source, a positive safe-integer
+deadline, a non-negative integer creation time, and a deadline no later than the latest ECMAScript date,
+which is inside `timestamptz`'s range) is queued; anything else is skipped, never raised, so the trigger cannot reject an append
+or queue a row the worker could never settle.
 
 ### 4.3 Identity & authZ
 

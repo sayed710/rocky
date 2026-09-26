@@ -1,14 +1,20 @@
 import type { GameResult } from '@chess-platform/tournament';
-import type { ResultString } from '@chess-platform/game';
+import type { GameEndedEvent } from '@chess-platform/game';
 import { type PubSub, gameChannel } from '@chess-platform/realtime-gateway';
 import type { EventStore, TournamentsRepository } from '@chess-platform/persistence';
 import { isArenaSnapshot } from '@chess-platform/persistence';
 import type { TournamentService } from './service';
 import type { ArenaService } from './arena.service';
 
-function tournamentOutcome(result: ResultString): GameResult | '*' {
+/**
+ * The tournament result a committed ending records. `'*'` is an abandoned game that the services
+ * relaunch; a no-show with no winner is a decided double forfeit instead, and must never reach that
+ * relaunch (ADR-0148). A no-show with a winner maps like any decisive result.
+ */
+export function tournamentOutcome(ending: Pick<GameEndedEvent, 'result' | 'termination'>): GameResult | '*' {
+  const { result } = ending;
   switch (result) {
-    case '*': return '*';
+    case '*': return ending.termination === 'no_show' ? 'double_forfeit' : '*';
     case '1-0': return 'white_win';
     case '0-1': return 'black_win';
     case '1/2-1/2': return 'draw';
@@ -151,7 +157,7 @@ export class TournamentResultReporter {
     const ending = (await this.events.load(gameId)).find(({ event }) => event.type === 'GameEnded')?.event;
     if (ending?.type !== 'GameEnded') return;
     const isArena = isArenaSnapshot(stored.snapshot);
-    const mapped = tournamentOutcome(ending.result);
+    const mapped = tournamentOutcome(ending);
     if (isArena) {
       await this.arenaService.recordCommittedOutcome(tournamentId, gameId, mapped);
     } else {

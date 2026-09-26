@@ -21,10 +21,15 @@ import { Game, type GameEvent } from '@chess-platform/game';
 import type { Color, Position } from '@chess-platform/core';
 import type { CreateGameParams } from '@chess-platform/game';
 import { InMemoryEventLog, type EventLog } from './event-log';
-import type { LegalMoves, StateView, MoveBroadcast, EndedBroadcast } from './protocol';
+import type { GameBroadcast, LegalMoves, ReadyView, StateView } from './protocol';
 import { gameChannel, gamesEndedChannel, type PubSub } from './pubsub';
 
-/** A command an authenticated player may issue against a game. */
+/**
+ * A command against a game. Every kind but the last two is issued by a seated player through the
+ * wire protocol. `ready` is issued by the gateway itself after a seated player's authenticated join,
+ * and `expireNoShow` only by the server's no-show worker as {@link NO_SHOW_ACTOR}; the protocol
+ * decoder produces neither (ADR-0148).
+ */
 export type Command =
   | { readonly kind: 'move'; readonly uci: string }
   | { readonly kind: 'resign' }
@@ -32,7 +37,15 @@ export type Command =
   | { readonly kind: 'acceptDraw' }
   | { readonly kind: 'declineDraw' }
   | { readonly kind: 'claimFlag' }
-  | { readonly kind: 'abort' };
+  | { readonly kind: 'abort' }
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'expireNoShow' };
+
+/**
+ * The actor that issues `expireNoShow`. Not an account id: player identities come only from verified
+ * tokens, and anonymous spectators are `anon-<connection>`, so no client can act as it.
+ */
+export const NO_SHOW_ACTOR = 'system:no-show';
 
 /** Reasons a command can be refused, aligned with the protocol reject codes. */
 export type AuthorityErrorCode =
@@ -40,7 +53,8 @@ export type AuthorityErrorCode =
   | 'not_your_turn'
   | 'not_a_player'
   | 'unknown_game'
-  | 'invalid_command';
+  | 'invalid_command'
+  | 'not_ready';
 
 /** A refused command. `code` maps directly onto a protocol `RejectCode`. */
 export class AuthorityError extends Error {
@@ -53,7 +67,7 @@ export class AuthorityError extends Error {
 interface BroadcastLogEntry {
   readonly seq: number;
   readonly ply: number | null;
-  readonly msg: MoveBroadcast | EndedBroadcast;
+  readonly msg: GameBroadcast;
 }
 
 interface GameRecord {
@@ -103,7 +117,7 @@ export function legalMovesOf(position: Position): LegalMoves {
 /** The result of applying a command. */
 export interface ApplyResult {
   readonly events: readonly GameEvent[];
-  readonly broadcasts: readonly (MoveBroadcast | EndedBroadcast)[];
+  readonly broadcasts: readonly GameBroadcast[];
   readonly state: StateView;
 }
 
@@ -266,12 +280,12 @@ export class GameAuthority {
     // live path computes them.
     for (let i = 0; i < events.length; i++) {
       const ev = events[i]!;
-      if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded') continue;
+      if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded' && ev.type !== 'PlayerReady') continue;
       const upto = Game.fromEvents(events.slice(0, i + 1));
       const snap = upto.snapshot();
       const fh = fenHash(upto.fen);
       const legal: LegalMoves = snap.status.over ? {} : legalMovesOf(snap.position);
-      const msg = this.toBroadcast(gameId, ev, fh, legal);
+      const msg = this.toBroadcast(gameId, ev, fh, legal, snap.ready);
       if (!msg) continue;
       const seq = ++broadcastSeq;
       broadcasts.push({ seq, ply: msg.t === 'move' ? msg.ply : null, msg });
@@ -298,7 +312,7 @@ export class GameAuthority {
    * Every broadcast a resuming client missed: all broadcasts recorded after the
    * move whose ply equals `lastPly`. `lastPly <= 0` returns the full history.
    */
-  getMissedSince(gameId: string, lastPly: number): (MoveBroadcast | EndedBroadcast)[] {
+  getMissedSince(gameId: string, lastPly: number): GameBroadcast[] {
     const rec = this.require(gameId);
     if (rec.stale) throw new AuthorityError('invalid_command', 'durable game reload is required');
     if (lastPly <= 0) return rec.broadcasts.map((e) => e.msg);
@@ -339,18 +353,33 @@ export class GameAuthority {
     if (rec.stale && !(await this.refreshRecord(gameId, rec))) {
       throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
     }
+    const at = this.now();
+    if (cmd.kind === 'expireNoShow') {
+      // Checked before anything else so a player can never issue it, and the worker never as a seat.
+      // The deadline is the game's own durable one; the caller supplies none.
+      if (userId !== NO_SHOW_ACTOR) throw new AuthorityError('not_a_player', 'only the server may expire a no-show');
+      return this.commit(gameId, rec, this.guard(() => rec.game.expireNoShow(at)));
+    }
     const players = rec.game.snapshot().players;
     const color = players.white === userId ? 'w' : players.black === userId ? 'b' : null;
     if (color === null) {
       throw new AuthorityError('not_a_player', 'only players may issue commands');
     }
-    const at = this.now();
+    // A player command arriving after a due no-show deadline records the no-show instead, as a move
+    // after a flag fall records the timeout. The outcome never depends on how late the worker runs.
+    if (rec.game.noShowVerdict(at).kind === 'expire') {
+      return this.commit(gameId, rec, rec.game.expireNoShow(at));
+    }
     let result: { game: Game; events: GameEvent[] };
 
     switch (cmd.kind) {
       case 'move': {
         if (rec.game.turn !== color) {
           throw new AuthorityError('not_your_turn', 'it is not your turn');
+        }
+        // The domain refuses this too; checked here only to give the precise reject code.
+        if (rec.game.awaitingReadiness) {
+          throw new AuthorityError('not_ready', 'both players must be ready before the first move');
         }
         try {
           result = rec.game.playMove(cmd.uci, at);
@@ -377,11 +406,25 @@ export class GameAuthority {
       case 'abort':
         result = this.guard(() => rec.game.abort(at));
         break;
+      case 'ready':
+        result = rec.game.markReady(color, at);
+        break;
       default: {
         const _exhaustive: never = cmd;
         throw new AuthorityError('invalid_command', `unknown command ${JSON.stringify(_exhaustive)}`);
       }
     }
+    return this.commit(gameId, rec, result);
+  }
+
+  /** Persist a command's events, then commit them to the hot record and publish their broadcasts. */
+  private async commit(
+    gameId: string,
+    rec: GameRecord,
+    result: { game: Game; events: GameEvent[] },
+  ): Promise<ApplyResult> {
+    // A no-op (a repeated readiness) changes nothing, so it neither touches the log nor broadcasts.
+    if (result.events.length === 0) return { events: [], broadcasts: [], state: this.viewOf(rec.game) };
 
     // Compute the resulting position's legal moves once per command.
     // For MovePlayed broadcasts this is the post-move position's side-to-move
@@ -395,7 +438,7 @@ export class GameAuthority {
     const pending: BroadcastLogEntry[] = [];
     let nextSeq = rec.broadcastSeq;
     for (const ev of result.events) {
-      const msg = this.toBroadcast(gameId, ev, resultingFenHash, resultingLegalMoves);
+      const msg = this.toBroadcast(gameId, ev, resultingFenHash, resultingLegalMoves, resultingSnap.ready);
       if (!msg) continue;
       pending.push({ seq: ++nextSeq, ply: msg.t === 'move' ? msg.ply : null, msg });
     }
@@ -440,8 +483,16 @@ export class GameAuthority {
     }
   }
 
-  private toBroadcast(gameId: string, ev: GameEvent, resultingFenHash: string, resultingLegalMoves: LegalMoves): MoveBroadcast | EndedBroadcast | null {
+  private toBroadcast(
+    gameId: string,
+    ev: GameEvent,
+    resultingFenHash: string,
+    resultingLegalMoves: LegalMoves,
+    resultingReady: ReadyView,
+  ): GameBroadcast | null {
     switch (ev.type) {
+      case 'PlayerReady':
+        return { t: 'ready', gameId, ready: { ...resultingReady }, serverTs: ev.at };
       case 'MovePlayed':
         return {
           t: 'move',
@@ -488,6 +539,7 @@ export class GameAuthority {
       moves: snap.moves.map((m) => ({ ply: m.ply, uci: m.uci, san: m.san, by: m.by })),
       legalMoves: snap.status.over ? {} : legalMovesOf(snap.position),
       chess960StartId: snap.chess960StartId,
+      ready: snap.source === null ? null : { ...snap.ready },
     };
   }
 

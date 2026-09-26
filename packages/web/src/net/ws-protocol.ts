@@ -64,7 +64,9 @@ export type Termination =
   | 'fifty_move'
   | 'threefold'
   | 'variant'
-  | 'aborted';
+  | 'aborted'
+  /** Pregame no-show (ADR-0148): no first move before the deadline. Never a chess timeout. */
+  | 'no_show';
 
 export type GameStatus =
   | { readonly over: false }
@@ -111,6 +113,19 @@ export interface StateView {
    * never becomes a second opinion on what position 348 looks like.
    */
   readonly chess960StartId: number | null;
+  /**
+   * Durable readiness per seat, or `null` for a game without a pregame lifecycle (ADR-0148). Folded
+   * from the server's event log; the client only displays it and gates its own board with it — the
+   * server refuses an early first move regardless. Absent from a gateway older than ADR-0148, which
+   * a rolling deploy makes normal; `GameSync` reads absence as `null`.
+   */
+  readonly ready?: ReadyView | null;
+}
+
+/** Durable readiness of both seats. */
+export interface ReadyView {
+  readonly w: boolean;
+  readonly b: boolean;
 }
 
 // ─── Client → Server ─────────────────────────────────────────────────────────
@@ -203,6 +218,14 @@ export interface EndedBroadcast {
   readonly serverTs: number;
 }
 
+/** A seat's readiness became durable; carries both seats (ADR-0148). */
+export interface ReadyBroadcast {
+  readonly t: 'ready';
+  readonly gameId: string;
+  readonly ready: ReadyView;
+  readonly serverTs: number;
+}
+
 export interface PresenceMessage {
   readonly t: 'presence';
   readonly gameId: string;
@@ -215,7 +238,7 @@ export interface ResumedMessage {
   readonly t: 'resumed';
   readonly gameId: string;
   readonly state: StateView;
-  readonly missed: readonly (MoveBroadcast | EndedBroadcast)[];
+  readonly missed: readonly (MoveBroadcast | EndedBroadcast | ReadyBroadcast)[];
 }
 
 export type RejectCode =
@@ -226,7 +249,8 @@ export type RejectCode =
   | 'unknown_game'
   | 'not_joined'
   | 'invalid_command'
-  | 'unauthorized';
+  | 'unauthorized'
+  | 'not_ready';
 
 export interface RejectMessage {
   readonly t: 'reject';
@@ -250,7 +274,8 @@ export type ServerMessage =
   | PresenceMessage
   | ResumedMessage
   | RejectMessage
-  | PongMessage;
+  | PongMessage
+  | ReadyBroadcast;
 
 // ─── Codec ───────────────────────────────────────────────────────────────────
 
@@ -263,6 +288,7 @@ const SERVER_TYPES: ReadonlySet<string> = new Set([
   'resumed',
   'reject',
   'pong',
+  'ready',
 ]);
 
 /** Serialize a client intent to a string frame (default JSON codec). */

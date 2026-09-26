@@ -60,6 +60,40 @@ export interface ApiConfig {
     readonly rpId: string;
     readonly origins: readonly string[];
   };
+  /**
+   * How long a seek or tournament game may wait for its first move (ADR-0148). Recorded on each
+   * game's `GameCreated` at creation, so a later change affects only games created after it.
+   */
+  readonly noShow: NoShowDeadlines;
+}
+
+/** Pregame no-show deadlines per game source, in milliseconds after creation. */
+export interface NoShowDeadlines {
+  readonly seekMs: number;
+  readonly tournamentMs: number;
+}
+
+/** Owner policy defaults: one minute for a seek, five for a tournament game. */
+export const DEFAULT_NO_SHOW_DEADLINES: NoShowDeadlines = { seekMs: 60_000, tournamentMs: 300_000 };
+
+/**
+ * Read `NO_SHOW_SEEK_MS` and `NO_SHOW_TOURNAMENT_MS`. Each must be a positive integer when set; an
+ * invalid value fails startup rather than silently creating games no one could ever end.
+ */
+export function resolveNoShowDeadlines(env: NodeJS.ProcessEnv = process.env): NoShowDeadlines {
+  const read = (name: string, fallback: number): number => {
+    const raw = env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const value = Number(raw);
+    if (!/^\d+$/.test(raw.trim()) || !Number.isSafeInteger(value) || value <= 0) {
+      throw new Error(`${name} must be a positive integer of milliseconds; got ${JSON.stringify(raw)}`);
+    }
+    return value;
+  };
+  return {
+    seekMs: read('NO_SHOW_SEEK_MS', DEFAULT_NO_SHOW_DEADLINES.seekMs),
+    tournamentMs: read('NO_SHOW_TOURNAMENT_MS', DEFAULT_NO_SHOW_DEADLINES.tournamentMs),
+  };
 }
 
 export interface RateLimitEndpointConfig {
@@ -365,5 +399,6 @@ export function resolveConfig(
       rpId: env['WEBAUTHN_RP_ID'] ?? 'localhost',
       origins: (env['WEBAUTHN_ORIGINS'] ?? 'http://localhost:3000').split(','),
     },
+    noShow: input.noShow ?? resolveNoShowDeadlines(env),
   };
 }
