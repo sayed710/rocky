@@ -38,6 +38,7 @@ const VERBS = new Set(['get', 'post', 'put', 'patch', 'delete']);
 
 interface Route {
   readonly path: string;
+  readonly verb: string;
   readonly line: number;
   readonly node: ts.CallExpression;
 }
@@ -62,7 +63,7 @@ function routes(): Route[] {
     if (!VERBS.has(callee.name.text)) return;
     const first = node.arguments[0];
     if (first === undefined || !ts.isStringLiteral(first)) return;
-    found.push({ path: first.text, line: lineOf(node), node });
+    found.push({ path: first.text, verb: callee.name.text, line: lineOf(node), node });
   });
   return found;
 }
@@ -104,9 +105,9 @@ function bucketKey(element: ts.Expression, path: string): string {
   assert.fail(`${path}: a bucket key must be a string or template literal, got ${ts.SyntaxKind[value.kind]}`);
 }
 
-function routeNamed(path: string): Route {
-  const match = routes().find((r) => r.path === path);
-  assert.ok(match, `route ${path} is no longer in the table`);
+function routeNamed(path: string, verb?: string): Route {
+  const match = routes().find((r) => r.path === path && (verb === undefined || r.verb === verb));
+  assert.ok(match, `route ${verb ?? ''} ${path} is no longer in the table`);
   return match;
 }
 
@@ -151,13 +152,14 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
   const expected: Record<string, readonly string[]> = {
     '/v1/auth/login': ['login:ip:', 'login:handle-ip:'],
     '/v1/auth/email/verification/request': ['email-verification:user:', 'email-verification:ip:'],
+    '/v1/seeks': ['seek-create:user:', 'seek-create:ip:'],
     '/v1/analysis': ['analysis:user:', 'analysis:ip:'],
     '/v1/analysis/mistake-prediction': ['mistake-prediction:user:', 'mistake-prediction:ip:'],
     '/v1/ai/move-explanation': ['move-explanation:user:', 'move-explanation:ip:'],
   };
 
   for (const [path, keys] of Object.entries(expected)) {
-    const calls = admissions(routeNamed(path).node);
+    const calls = admissions(routeNamed(path, 'post').node);
     assert.equal(calls.length, 1, `${path} must make exactly one admission decision`);
 
     // The bucket list has to be readable here, so it must be a literal at the call rather than a
@@ -197,15 +199,14 @@ test('public password reset has only a per-IP admission bucket', () => {
 });
 
 /**
- * `/v1/analysis`, `/v1/analysis/mistake-prediction` and `/v1/ai/move-explanation` each buy real
- * engine time, so a request rejected by validation must reach no bucket at all. The cheap way to
- * lose that is to move the charge back above the parsing, where it started. `/v1/auth/login` is
- * here for a different reason (audit P1-1): a malformed body, such as a code that is not eight
- * digits, must not spend a failure budget or count toward step-up.
+ * The analysis routes buy engine time, while seek creation is an authenticated write. A request
+ * rejected by cheap validation must reach no bucket at all. Moving the charge above parsing
+ * would lose that property. `/v1/auth/login` also protects its failure budget and step-up state
+ * from malformed bodies, such as a code that is not eight digits.
  */
-test('the expensive routes parse the body before they charge for it', () => {
-  for (const path of ['/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation', '/v1/auth/login']) {
-    const route = routeNamed(path);
+test('validated routes parse the body before they charge for it', () => {
+  for (const path of ['/v1/seeks', '/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation', '/v1/auth/login']) {
+    const route = routeNamed(path, 'post');
 
     let parse: ts.CallExpression | undefined;
     walk(route.node, (n) => {
