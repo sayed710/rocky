@@ -30,6 +30,55 @@ const __dirname = dirname(__filename);
 const PACKAGE_ROOT = resolve(__dirname, '..', '..');
 const HTML_TEMPLATE = readFileSync(resolve(PACKAGE_ROOT, 'index.html'), 'utf8');
 
+test('one persistent main landmark contains every application route', () => {
+  // Track section/main nesting, not just string positions: a sibling route or
+  // second landmark must fail even if every expected ID still appears in HTML.
+  const routeIds = new Set([
+    'game-main', 'lobby', 'auth', 'password-reset', 'email-verify', 'not-found',
+    'profile', 'leaderboard', 'tournaments', 'tournament', 'search', 'teams',
+    'team', 'forum', 'thread', 'messages', 'conversation', 'endgames', 'courses',
+    'course', 'lesson', 'studies', 'study', 'study-chapter',
+  ]);
+  const found = new Set<string>();
+  const stack: Array<'main' | 'section'> = [];
+  let mainCount = 0;
+
+  for (const match of HTML_TEMPLATE.matchAll(/<(\/)?(main|section)\b([^>]*)>/g)) {
+    const closing = match[1];
+    const tag = match[2]!;
+    const attributes = match[3] ?? '';
+    if (closing) {
+      assert.equal(stack.pop(), tag, `unbalanced </${tag}>`);
+      continue;
+    }
+    if (tag === 'main') {
+      mainCount++;
+      assert.equal(stack.includes('main'), false, 'main landmarks must not nest');
+    } else {
+      assert.equal(stack.includes('main'), true, 'every section must be inside the main landmark');
+    }
+    const id = attributes.match(/(?:^|\s)id="([^"]+)"/)?.[1];
+    if (tag === 'section' && stack.at(-1) === 'main') {
+      assert.ok(id, 'each route section must have an ID');
+      if (id !== 'game-main' && id !== 'auth') {
+        const unquotedAttributes = attributes.replace(/"[^"]*"|'[^']*'/g, '');
+        assert.match(unquotedAttributes, /(?:^|\s)hidden(?:\s|=|$)/, `route #${id} must start hidden`);
+      }
+    }
+    if (id && routeIds.has(id)) {
+      assert.equal(found.has(id), false, `duplicate route #${id}`);
+      assert.equal(stack.at(-1), 'main', `route #${id} must be a direct child of main`);
+      assert.equal(tag, 'section', `route #${id} must remain a section`);
+      found.add(id);
+    }
+    stack.push(tag as 'main' | 'section');
+  }
+
+  assert.equal(mainCount, 1, 'document must expose exactly one main landmark');
+  assert.deepEqual(stack, [], 'main and section tags must balance');
+  assert.deepEqual(found, routeIds, 'every application route must be inside main');
+});
+
 test('html has lang attribute', () => {
   assert.ok(HTML_TEMPLATE.includes('<html lang="en">'));
 });

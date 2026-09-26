@@ -151,6 +151,14 @@ body {
   font-weight: 700;
   color: var(--fg);
 }
+/* Keep the game grid's available-height flex layout after the main landmark
+   moves from the game route to the persistent application wrapper. */
+#app-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
 /* Takes the height the topbar leaves. `min-height: 0` because a flex item's default
    `min-height: auto` refuses to shrink below its content — without it the board's own size wins
    and the cap below never binds. */
