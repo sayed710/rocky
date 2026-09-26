@@ -256,6 +256,37 @@ async function main(): Promise<void> {
 
   const authority = new GameAuthority(pubsub, () => Date.now(), store);
 
+  // --- Games projection (ADR-0147) ---
+  // Always on with a database: `games` is only truthful while something folds the event log into it.
+  // Every replica runs one; a checkpoint row lock lets exactly one work at a time.
+  let gamesProjection: { stop(): Promise<void> } | undefined;
+  if (pgPool) {
+    const { PgGamesProjector, GamesProjectionWorker } = await import('@chess-platform/persistence/pg');
+    const { gamesProjectedEndedChannel } = await import('@chess-platform/realtime-gateway');
+    const worker = new GamesProjectionWorker(new PgGamesProjector(pgPool), {
+      onBatch: (batch) => {
+        if (batch.rewound) logger.warn('Games projection checkpoint was ahead of this database; replaying the event log from the start');
+        for (const failure of batch.failures) {
+          logger.error('Games projection failed for a game stream; it stays pending and is retried', { gameId: failure.gameId, error: failure.error });
+        }
+        for (const ending of batch.endings) {
+          pubsub.publish(gamesProjectedEndedChannel(), {
+            t: 'ended',
+            gameId: ending.gameId,
+            result: ending.result,
+            termination: ending.termination,
+            winner: ending.result === '1-0' ? 'w' : ending.result === '0-1' ? 'b' : null,
+            serverTs: ending.endedAt.getTime(),
+          });
+        }
+      },
+      onError: (error) => logger.error('Games projection batch failed; retrying with backoff', { error: String(error) }),
+    });
+    worker.start();
+    gamesProjection = worker;
+    logger.info('Games projection is enabled');
+  }
+
   // --- Tournament Result Reporter (M9 inc 13, ADR-0025) ---
   let reporter: TournamentResultReporter | undefined;
   if (process.env['TOURNAMENT_REPORTER'] === '1') {
@@ -374,7 +405,7 @@ async function main(): Promise<void> {
       logger.warn('SEARCH_INDEXER requires DATABASE_URL to be set');
     } else {
       const { PgSearchRepository, PgSearchBackfillSource, PgSemanticSearchRepository } = await import('@chess-platform/persistence/pg');
-      const { gamesEndedChannel } = await import('@chess-platform/realtime-gateway');
+      const { gamesProjectedEndedChannel } = await import('@chess-platform/realtime-gateway');
       const { HashingEmbeddingProvider, SEARCH_EMBEDDING_DIMENSIONS } = await import('@chess-platform/search');
       const api = await import('@chess-platform/api');
 
@@ -389,9 +420,10 @@ async function main(): Promise<void> {
           }
         : undefined;
 
+      // Woken after the `games` row it reads has committed, not by the authority's earlier broadcast.
       const worker = new api.SearchIndexWorker(
         pubsub,
-        gamesEndedChannel(),
+        gamesProjectedEndedChannel(),
         backfillSource,
         searchRepo,
         semantic ? { semantic } : {},
@@ -417,15 +449,16 @@ async function main(): Promise<void> {
       logger.warn('ACHIEVEMENTS_ENABLED requires DATABASE_URL to be set');
     } else {
       const { PgAchievementsRepository, PgAchievementsGameSource } = await import('@chess-platform/persistence/pg');
-      const { gamesEndedChannel } = await import('@chess-platform/realtime-gateway');
+      const { gamesProjectedEndedChannel } = await import('@chess-platform/realtime-gateway');
       const api = await import('@chess-platform/api');
 
       const achievementsRepo = new PgAchievementsRepository(pgPool);
       const gameSource = new PgAchievementsGameSource(pgPool);
 
+      // Woken after the `games` row it reads has committed, not by the authority's earlier broadcast.
       const worker = new api.AchievementsAwardWorker(
         pubsub,
-        gamesEndedChannel(),
+        gamesProjectedEndedChannel(),
         gameSource,
         achievementsRepo,
       );
@@ -711,6 +744,8 @@ async function main(): Promise<void> {
     searchIndexWorker?.stop();
     achievementsAwardWorker?.stop();
     engineBotMover?.stop();
+    // No new projection batch starts from here; an in-flight one is awaited before its pool and pub/sub close.
+    const projectionStopped = gamesProjection?.stop();
     // Start engine (subprocess) shutdown now so it runs concurrently with the
     // socket drain, but await it below before process.exit so cleanup can't be cut short.
     const engineShutdown = sharedEngineProvider?.shutdown().catch((err: unknown) =>
@@ -728,6 +763,7 @@ async function main(): Promise<void> {
           ownershipRegistry.stopRenewal();
           await ownershipRegistry.releaseAll();
         }
+        await projectionStopped;
         if (closePubSub) await closePubSub();
         if (closeCommandRedis) await closeCommandRedis();
         if (closeDatabase) await closeDatabase();

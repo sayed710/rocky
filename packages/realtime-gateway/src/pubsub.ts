@@ -43,6 +43,13 @@ export function gamesEndedChannel(): string {
   return 'games:ended';
 }
 
+/** Global channel carrying an `ended` broadcast once the `games` projection row for that ending
+ *  has committed (ADR-0147). Consumers that read `games` subscribe here, not to
+ *  {@link gamesEndedChannel}, which fires before the projection can have caught up. */
+export function gamesProjectedEndedChannel(): string {
+  return 'games:projected-ended';
+}
+
 /** In-process {@link PubSub}. Synchronous delivery, deterministic ordering. */
 export class InMemoryPubSub implements PubSub {
   private readonly channels = new Map<string, Set<(msg: Broadcast) => void>>();

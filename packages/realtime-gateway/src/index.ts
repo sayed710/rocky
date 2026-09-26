@@ -23,7 +23,7 @@ export * from './protocol';
 export * from './latency';
 export { GameAuthority, AuthorityError, fenHash } from './authority';
 export type { Command, AuthorityErrorCode, ApplyResult } from './authority';
-export { InMemoryPubSub, RedisPubSub, gameChannel, gamesEndedChannel, tournamentChannel } from './pubsub';
+export { InMemoryPubSub, RedisPubSub, gameChannel, gamesEndedChannel, gamesProjectedEndedChannel, tournamentChannel } from './pubsub';
 export type { PubSub, Unsubscribe, RedisLike } from './pubsub';
 export { InMemoryEventLog, EventLogConcurrencyError } from './event-log';
 export type { EventLog, LoggedEvent } from './event-log';
