@@ -333,4 +333,34 @@ describe('Seek Creation Rate Limiting Integration', () => {
       await h.close();
     }
   });
+
+  test('a seek rejected by field validation charges neither bucket', async () => {
+    const h = await startHarness({
+      trustProxy: true,
+      rateLimit: {
+        ...DEFAULT_RATE_LIMIT,
+        seekCreation: {
+          perUser: { maxRequests: 1, windowMs: 60_000 },
+          perIp: { maxRequests: 1, windowMs: 60_000 },
+        },
+      },
+    });
+    try {
+      const alice = await h.makeUser('seek-invalid-alice');
+      const headers = { 'x-forwarded-for': '192.0.2.43' };
+      const invalid = await h.json('POST', '/v1/seeks', {
+        token: alice.token,
+        headers,
+        body: { ...seekBody, minRating: 2000, maxRating: 1000 },
+      });
+      assert.equal(invalid.status, 422);
+      assert.equal((await h.json('POST', '/v1/seeks', {
+        token: alice.token,
+        headers,
+        body: seekBody,
+      })).status, 201, 'validation must not spend either one-request budget');
+    } finally {
+      await h.close();
+    }
+  });
 });
