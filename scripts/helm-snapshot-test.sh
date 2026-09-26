@@ -397,6 +397,41 @@ else
   check "Fail-closed: tracing.enabled=true with no endpoint is rejected" 0
 fi
 
+# --- Engine bot (ADR-0080) --------------------------------------------------
+# Play vs Computer needs ENGINE_BOT=1 on the gateway; the gateway image supplies
+# Stockfish and STOCKFISH_PATH. On by default, off only when asked, and never on
+# any other Deployment — the search indexer runs the same image.
+echo ""
+echo "Engine bot (ADR-0080):"
+
+gateway_env_names() {
+  yq 'select(.kind=="Deployment" and .metadata.labels."app.kubernetes.io/component"=="gateway") | .spec.template.spec.containers[] | select(.name=="gateway") | .env[].name' "$1" 2>/dev/null | grep -vx -- '---' | tr '
+' ' ' | sed 's/ $//'
+}
+gateway_env_value() {
+  yq "select(.kind==\"Deployment\" and .metadata.labels.\"app.kubernetes.io/component\"==\"gateway\") | .spec.template.spec.containers[] | select(.name==\"gateway\") | .env[] | select(.name==\"$2\") | .value" "$1" 2>/dev/null || echo ""
+}
+
+helm template "$CHART_DIR" "${HELM_SECRETS[@]}"   --set gateway.engineBot.enabled=false > "$TMPDIR/engine-bot-off.yaml" 2>/dev/null
+helm template "$CHART_DIR" "${HELM_SECRETS[@]}"   --set gateway.tournamentReporter.enabled=true > "$TMPDIR/reporter.yaml" 2>/dev/null
+
+check "Engine bot: ENGINE_BOT=\"1\" on the gateway by default" "$([ "$(gateway_env_value "$TMPDIR/default.yaml" ENGINE_BOT)" = "1" ] && echo 0 || echo 1)"
+check "Engine bot: ENGINE_BOT appears once in the default release (gateway only)" "$([ "$(grep -c 'name: ENGINE_BOT' "$TMPDIR/default.yaml" || true)" = "1" ] && echo 0 || echo 1)"
+check "Engine bot: ENGINE_BOT is absent when gateway.engineBot.enabled=false" "$([ "$(grep -c 'ENGINE_BOT' "$TMPDIR/engine-bot-off.yaml" || true)" = "0" ] && echo 0 || echo 1)"
+check "Engine bot: not set on the search-indexer Deployment" "$([ "$(deployment_doc "$TMPDIR/indexer.yaml" search-indexer | grep -c 'ENGINE_BOT' || true)" = "0" ] && echo 0 || echo 1)"
+check "Engine bot: the chart configures no engine of its own (no STOCKFISH_PATH env)" "$([ "$(grep -c 'name: STOCKFISH' "$TMPDIR/default.yaml" || true)" = "0" ] && echo 0 || echo 1)"
+
+# The rest of the gateway env contract is pinned, so the flag cannot ride in on
+# a change to anything else. Disabling the bot removes exactly ENGINE_BOT.
+GW_ENV_BASE="POSTGRES_PASSWORD DATABASE_URL ACCESS_TOKEN_SECRET ACCESS_TOKEN_TTL_SEC PORT HOST HEALTH_PORT NODE_ENV REDIS_URL NODE_ID CMD_FORWARD_TIMEOUT_MS OWNERSHIP_LEASE_TTL_SEC OWNERSHIP_RENEWAL_INTERVAL_SEC TRUST_PROXY"
+check "Gateway env contract: default render is the base contract plus ENGINE_BOT" "$([ "$(gateway_env_names "$TMPDIR/default.yaml")" = "$GW_ENV_BASE ENGINE_BOT" ] && echo 0 || echo 1)"
+check "Gateway env contract: engine bot disabled leaves exactly the base contract" "$([ "$(gateway_env_names "$TMPDIR/engine-bot-off.yaml")" = "$GW_ENV_BASE" ] && echo 0 || echo 1)"
+
+# Tournament reporter (ADR-0025) is independent of the bot: off by default,
+# and when on it renders its two variables next to ENGINE_BOT, not instead of it.
+check "Tournament reporter: absent by default" "$([ "$(grep -c 'TOURNAMENT_REPORTER' "$TMPDIR/default.yaml" || true)" = "0" ] && echo 0 || echo 1)"
+check "Tournament reporter: enabled renders TOURNAMENT_REPORTER=1 + scan interval alongside ENGINE_BOT" "$([ "$(gateway_env_names "$TMPDIR/reporter.yaml")" = "$GW_ENV_BASE TOURNAMENT_REPORTER TOURNAMENT_REPORTER_SCAN_MS ENGINE_BOT" ] && [ "$(gateway_env_value "$TMPDIR/reporter.yaml" TOURNAMENT_REPORTER)" = "1" ] && [ "$(gateway_env_value "$TMPDIR/reporter.yaml" TOURNAMENT_REPORTER_SCAN_MS)" = "30000" ] && echo 0 || echo 1)"
+
 # --- Progressive delivery (M14 inc 9, ADR-0075) -----------------------------
 # Three properties matter here and none of them are schema-checkable:
 #   1. `rolling` renders what the chart rendered before this existed.
@@ -491,12 +526,14 @@ check "Canary: canary-weight matches rollout.canary.weight" "$([ "$CANARY_WEIGHT
 CANARY_HEADER_OFF=$(doc_by_name "$TMPDIR/canary.yaml" Ingress release-name-gambit-web-canary | grep -c 'canary-by-header' || true)
 check "Canary: canary-by-header is absent unless configured" "$([ "$CANARY_HEADER_OFF" = "0" ] && echo 0 || echo 1)"
 
+# default.yaml is the rolling render; the loop below adds the other two strategies.
 # 9. The exclusions hold. The gateway is never versioned by this mechanism (long-
 # lived connections + Redis-coordinated game ownership), and the search indexer
 # must stay a single process however the HTTP tier is being rolled out.
 for f in bg-blue canary; do
   GW_DEPS=$(yq 'select(.kind=="Deployment" and .metadata.labels."app.kubernetes.io/component"=="gateway") | .metadata.name' "$TMPDIR/$f.yaml" 2>/dev/null | grep -c . || true)
   check "$f: exactly one gateway Deployment (gateway is excluded from rollouts)" "$([ "$GW_DEPS" = "1" ] && echo 0 || echo 1)"
+  check "$f: ENGINE_BOT=\"1\" still on the gateway" "$([ "$(gateway_env_value "$TMPDIR/$f.yaml" ENGINE_BOT)" = "1" ] && [ "$(grep -c 'name: ENGINE_BOT' "$TMPDIR/$f.yaml" || true)" = "1" ] && echo 0 || echo 1)"
 done
 
 helm template "$CHART_DIR" "${HELM_SECRETS[@]}" "${CANARY_SET[@]}" \
@@ -558,6 +595,7 @@ reject "Fail-closed: canary without an Ingress is rejected" --set rollout.strate
 reject "Fail-closed: canary weight above 100 is rejected" "${CANARY_SET[@]}" --set rollout.canary.weight=150
 reject "Fail-closed: canary weight below 0 is rejected" "${CANARY_SET[@]}" --set rollout.canary.weight=-1
 reject "Fail-closed: invalid explicit TRUST_PROXY is rejected" --set-string config.trustProxy=1.5
+reject "Fail-closed: a string gateway.engineBot.enabled is rejected (\"false\" would be truthy)" --set-string gateway.engineBot.enabled=false
 reject "Fail-closed: empty ingress-controller namespace selector is rejected" --set networkPolicy.ingressController.namespaceLabels=null
 reject "Fail-closed: empty ingress-controller pod selector is rejected" --set networkPolicy.ingressController.podLabels=null
 

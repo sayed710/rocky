@@ -136,6 +136,14 @@ gateway:
   tournamentReporter:
     enabled: false
     scanIntervalMs: 30000
+  # ADR-0080: the engine bot that makes Play vs Computer moves. On by default, as in Compose:
+  # without it the lobby still offers the mode and the bot never moves. Safe on every replica —
+  # only the replica that owns a game (ADR-0010) asks the engine for its move, and a move is
+  # submitted only if that replica still owns the game and it is still the position the move was
+  # computed for. The gateway image supplies Stockfish and STOCKFISH_PATH; nothing here installs
+  # or configures an engine. Set false to turn the bot off.
+  engineBot:
+    enabled: true
   # M14 inc 7 (ADR-0057): the live search indexer (ADR-0056) runs in its own
   # single-replica Deployment rather than on the scalable gateway replicas.
   # Its dedup set is process-local, so N replicas would each index every
