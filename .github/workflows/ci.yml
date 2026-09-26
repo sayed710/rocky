@@ -566,7 +566,8 @@ jobs:
   # Builds, typechecks, and tests the deployable gateway service. It is NOT a
   # root workspace, so the build-test job above never compiles it — this job is
   # its only CI coverage. The single-owner command-routing suite (ADR-0010)
-  # runs against a real Redis.
+  # runs against a real Redis; the readiness and no-show suite (ADR-0148) runs
+  # the routed replicas against a real Redis and a real PostgreSQL together.
   gateway-service:
     name: gateway service (build + Redis integration)
     runs-on: ubuntu-latest
@@ -581,8 +582,23 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # The same image `postgres-integration` uses, for the same reason: every migration runs, and
+      # 0014 needs the `vector` extension.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: chess
+          POSTGRES_PASSWORD: chess
+          POSTGRES_DB: chess_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U chess"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       REDIS_URL: redis://localhost:6379
+      DATABASE_URL: postgres://chess:chess@localhost:5432/chess_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4

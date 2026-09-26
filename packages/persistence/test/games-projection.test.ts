@@ -29,7 +29,7 @@ test('a creation-only stream projects the creation facts, zero plies and seq 0',
   const p = projectGameStream('g1', stored([created!]));
   assert.deepEqual(p, {
     id: 'g1', variant: 'standard', rated: true, speed: 'blitz', white: 'w-player', black: 'b-player',
-    startedAt: new Date(1_000), plyCount: 0, lastSeq: 0, result: null, termination: null, endedAt: null,
+    startedAt: new Date(1_000), source: null, plyCount: 0, lastSeq: 0, result: null, termination: null, endedAt: null,
   });
 });
 

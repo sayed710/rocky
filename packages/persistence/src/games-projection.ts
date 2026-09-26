@@ -5,7 +5,7 @@
  * {@link projectGameStream}, so a row is always exactly what its log prefix says.
  */
 
-import { classifySpeed, type ResultString, type Termination } from '@chess-platform/game';
+import { classifySpeed, type GameSource, type ResultString, type Termination } from '@chess-platform/game';
 import type { Variant } from '@chess-platform/core';
 import type { StoredEvent } from './event-store';
 import { PersistenceError } from './errors';
@@ -21,6 +21,8 @@ export interface GameProjection {
   readonly white: string;
   readonly black: string;
   readonly startedAt: Date;
+  /** The pregame lifecycle `GameCreated` recorded, or `null` for a game without one (ADR-0148). */
+  readonly source: GameSource | null;
   readonly plyCount: number;
   readonly lastSeq: number;
   readonly result: ResultString | null;
@@ -43,6 +45,10 @@ export function projectGameStream(gameId: string, stream: readonly StoredEvent[]
     throw corrupt(gameId, 'GameCreated has no readable players');
   }
   if (!Number.isFinite(created.at)) throw corrupt(gameId, 'GameCreated has no readable timestamp');
+  const source = created.source ?? null;
+  if (source !== null && source !== 'seek' && source !== 'tournament') {
+    throw corrupt(gameId, `GameCreated has an unknown source ${JSON.stringify(source)}`);
+  }
 
   let plyCount = 0;
   let ending: { result: ResultString; termination: Termination; at: number } | null = null;
@@ -68,6 +74,7 @@ export function projectGameStream(gameId: string, stream: readonly StoredEvent[]
     white: created.players.white,
     black: created.players.black,
     startedAt: new Date(created.at),
+    source,
     plyCount,
     lastSeq: stream.length - 1,
     result: ending?.result ?? null,

@@ -139,7 +139,7 @@ immutable log faithful while making query-side columns safe.
 ### 3.1 Ordering model — `seq`, not `ply`
 
 The domain's `GameEvent` union mixes move events (which carry a chess `ply`) with
-non-move events (`GameCreated`, `DrawOffered`, `DrawDeclined`, `GameEnded`, which
+non-move events (`GameCreated`, `PlayerReady`, `DrawOffered`, `DrawDeclined`, `GameEnded`, which
 have **no** `ply`). Therefore the durable log is ordered by a **monotonic
 per-game append sequence `seq`** (0-based), *not* by chess ply.
 
@@ -251,7 +251,8 @@ CREATE TABLE terminations (      -- evolving/annotated vocabulary
   code        TEXT PRIMARY KEY,  -- 'checkmate','resignation','timeout',...
   is_draw     BOOLEAN NOT NULL
 );
--- Seeded by migration 0001 from the domain's Variant / Termination unions.
+-- Seeded by migration 0001 from the domain's Variant / Termination unions;
+-- 0042 adds 'no_show' (a pregame no-show, never 'timeout' or 'aborted'; ADR-0148).
 ```
 
 Small fixed sets use `CHECK` (see §2.2): `speed`, `result`, `role`, credential
@@ -274,9 +275,11 @@ CREATE TABLE games (
   ply_count    INTEGER NOT NULL DEFAULT 0,
   last_seq     INTEGER NOT NULL DEFAULT 0,     -- mirrors the event-store head
   started_at   TIMESTAMPTZ NOT NULL,
-  ended_at     TIMESTAMPTZ
+  ended_at     TIMESTAMPTZ,
+  source       TEXT CHECK (source IN ('seek','tournament'))  -- 0042/0043; NULL = bot, direct or pre-0042
 ) PARTITION BY RANGE (started_at);             -- monthly partitions
--- BRIN(started_at); btree(white_id), btree(black_id).
+-- BRIN(started_at); btree(white_id), btree(black_id);
+-- games_pregame_pending_idx (started_at, id) WHERE source IS NOT NULL AND result IS NULL AND ply_count = 0 (0044).
 ```
 
 **How it is derived** (migration 0040, [ADR-0147](adr/0147-durable-games-projection.md)). Seek
@@ -300,6 +303,13 @@ the row. It re-folds each touched game's complete committed stream and upserts i
 - **Rebuild.** `npm run games:rebuild` re-folds every stream independently of the checkpoint. It
   leaves to the live projector any game that projector has yet to reach, so live endings are still
   reported.
+- **Pregame lifecycle** ([ADR-0148](adr/0148-pregame-readiness-and-no-show.md)). `source` is
+  projected from `GameCreated.source`. `PlayerReady` events advance `last_seq` but not `ply_count`,
+  and a no-show `GameEnded` projects `result`, `termination = 'no_show'` and `ended_at` like any
+  other ending. The no-show worker's candidate query reads only `games_pregame_pending_idx`, which
+  holds sourced games with no result and no move, so it shrinks as games start or end. The worker
+  re-decides every candidate from the event log, so projection lag delays an expiry but never
+  causes a wrong one.
 
 ### 4.3 Identity & authZ
 

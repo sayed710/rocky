@@ -21,6 +21,15 @@ import { interpolateRemaining } from '@chess-platform/realtime-gateway/latency';
 import { isHumanGamePlayers } from '@chess-platform/game';
 
 /**
+ * Whether the game is still waiting for a seat's durable readiness before its first move (ADR-0148).
+ * The server refuses an early first move on its own; this only keeps the board from offering one.
+ */
+function awaitingReadiness(state: GameSyncState): boolean {
+  const ready = state.ready;
+  return ready !== null && state.status?.over === false && state.ply === 0 && !(ready.w && ready.b);
+}
+
+/**
  * The unified UI state for game actions, projected from authoritative server state.
  */
 export interface GameActionState {
@@ -395,7 +404,8 @@ export class GameController {
     const myTurn = state.turn !== null
       && state.myColor !== null
       && state.turn === state.myColor
-      && state.pending === null;
+      && state.pending === null
+      && !awaitingReadiness(state);
     if (myTurn !== this.currentMyTurn) {
       this.currentMyTurn = myTurn;
       this.callbacks.onTurn(myTurn);
@@ -516,6 +526,7 @@ export class GameController {
     if (state.status === null) return 'Waiting…';
     if (!state.status.over) {
       if (state.turn === null) return 'Waiting…';
+      if (awaitingReadiness(state)) return this.readinessText(state);
       const turnLabel = state.turn === 'w' ? 'White' : 'Black';
       if (state.myColor === null) return `${turnLabel} to move`;
       const myTurn = state.turn === state.myColor;
@@ -534,6 +545,22 @@ export class GameController {
     if (termination === 'threefold') return `Draw — threefold repetition (${result})`;
     if (termination === 'variant') return `Variant end (${result})`;
     if (termination === 'aborted') return 'Game aborted';
+    if (termination === 'no_show') {
+      return winnerLabel
+        ? `${winnerLabel} wins — the opponent did not show up (${result})`
+        : 'Not started in time — no result';
+    }
     return `${result}`;
+  }
+
+  /** Who the game is waiting for, from the durable readiness the server reported. */
+  private readinessText(state: GameSyncState): string {
+    const ready = state.ready!;
+    if (state.myColor === null) {
+      if (!ready.w && !ready.b) return 'Waiting for both players to join';
+      return `Waiting for ${ready.w ? 'Black' : 'White'} to join`;
+    }
+    if (!ready[state.myColor]) return 'Joining…';
+    return 'Waiting for your opponent to join';
   }
 }

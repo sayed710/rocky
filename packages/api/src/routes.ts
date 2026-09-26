@@ -1550,6 +1550,9 @@ export function buildRouter(deps: RouteDeps): Router {
         players: { white: whiteId, black: blackId },
         rated: seek.rated,
         at: startedAt,
+        // Two humans: readiness before the first move, clock from the first move, and the seek
+        // no-show deadline (ADR-0148). The bot route below deliberately records no source.
+        source: 'seek',
         ...(seek.variant === 'chess960' ? { chess960StartId: chess960Starts.next() } : {}),
       });
 

@@ -22,6 +22,7 @@
  * it actually serves.
  */
 
+import type { Color } from '@chess-platform/core';
 import { GameAuthority, AuthorityError, type Command } from './authority';
 import { LocalCommandRouter, type CommandRouter } from './command-router';
 import { Room } from './room';
@@ -53,6 +54,9 @@ interface RoomEntry {
   readonly room: Room;
   readonly unsubscribe: Unsubscribe;
 }
+
+/** How many times a join's readiness is routed before the failure is reported to the client. */
+const READINESS_ATTEMPTS = 3;
 
 const SIMPLE_TO_COMMAND: Record<SimpleCommandMessage['t'], Command['kind']> = {
   resign: 'resign',
@@ -118,6 +122,11 @@ export class RealtimeGateway {
   /** Number of rooms this node currently serves (diagnostics/tests). */
   get roomCount(): number {
     return this.rooms.size;
+  }
+
+  /** Whether any connection on this node is in `gameId`'s room. */
+  hasLocalSessions(gameId: string): boolean {
+    return this.rooms.has(gameId);
   }
 
   private onMessage(session: Session, msg: ClientMessage): void {
@@ -210,11 +219,41 @@ export class RealtimeGateway {
     const state = this.authority.getState(gameId);
     session.conn.send({ t: 'joined', gameId, role, state });
     entry.room.broadcastPresence();
+    if (color !== null) this.commitReadiness(session, gameId, userId, color, state);
 
     if (!this.loadedGames.has(gameId)) {
       this.loadedGames.add(gameId);
       this.onGameLoaded?.(gameId, state);
     }
+  }
+
+  /**
+   * Make a seated player's authenticated join durable readiness (ADR-0148). Presence in a room is
+   * not readiness: it counts only once the owning authority has appended `PlayerReady`.
+   *
+   * Routed like any command, so it is applied by the game's single owner and serialized with moves.
+   * The domain makes it idempotent, which is what makes repeated joins, several tabs and replicas
+   * racing each other harmless. The local `state` may be stale on a non-owner; it can only lack
+   * readiness, never invent it, so at worst an unnecessary no-op is routed.
+   *
+   * A losing append (another seat's readiness or a move committed first) reloads the owner's copy and
+   * surfaces as `invalid_command`; re-routing then re-evaluates against the durable log, so a
+   * readiness is never lost to a concurrent write. A final failure is reported to the client; the
+   * next join tries again.
+   */
+  private commitReadiness(session: Session, gameId: string, userId: string, color: Color, state: StateView): void {
+    if (state.ready === null || state.status.over || state.ply > 0 || state.ready[color]) return;
+    void (async () => {
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await this.commandRouter.route(gameId, userId, { kind: 'ready' });
+          return;
+        } catch (err) {
+          const retryable = !(err instanceof AuthorityError) || err.code === 'invalid_command';
+          if (!retryable || attempt >= READINESS_ATTEMPTS) throw err;
+        }
+      }
+    })().catch((err: unknown) => this.reject(session, gameId, null, codeOf(err), messageOf(err)));
   }
 
   private onMove(session: Session, msg: MoveMessage): void {

@@ -22,6 +22,7 @@ import type {
   LegalMoves,
   MoveBroadcast,
   MoveView,
+  ReadyView,
   RejectMessage,
   Role,
   ServerMessage,
@@ -64,6 +65,11 @@ export interface GameSyncState {
   readonly fenHash: string | null;
   readonly presence: PresenceInfo | null;
   /**
+   * Durable readiness per seat, or `null` for a game without a pregame lifecycle (ADR-0148). From
+   * the snapshot and `ready` broadcasts; transient `presence` never changes it.
+   */
+  readonly ready: ReadyView | null;
+  /**
    * Authoritative legal-move map for the side to move (origin square → legal
    * destination squares), from the latest server snapshot or move broadcast.
    * Refreshed on every MoveBroadcast via the push-based `legalMoves` field;
@@ -101,6 +107,23 @@ function clockAnchor(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+/**
+ * Readiness as the client trusts it: `null` unless both seats are booleans. `decodeServer()` checks
+ * only `t`, and a gateway older than ADR-0148 sends no `ready` at all, which must read as "this game
+ * has no readiness" rather than as two unready seats that would lock the board.
+ */
+function readyView(value: unknown): ReadyView | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const { w, b } = value as { w?: unknown; b?: unknown };
+  return typeof w === 'boolean' && typeof b === 'boolean' ? { w, b } : null;
+}
+
+function mergeReady(current: ReadyView | null, next: ReadyView | null): ReadyView | null {
+  if (next === null) return current;
+  if (current === null) return next;
+  return { w: current.w || next.w, b: current.b || next.b };
+}
+
 function initialState(gameId: string): GameSyncState {
   return {
     gameId,
@@ -117,6 +140,7 @@ function initialState(gameId: string): GameSyncState {
     drawOffer: null,
     fenHash: null,
     presence: null,
+    ready: null,
     legalMoves: {},
     pending: null,
     lastReject: null,
@@ -291,6 +315,10 @@ export class GameSync {
       case 'presence':
         this.patch({ presence: { white: msg.white, black: msg.black, spectators: msg.spectators } });
         break;
+      case 'ready':
+        // Readiness only grows, so merging keeps a late or reordered broadcast from undoing a seat.
+        this.patch({ ready: mergeReady(this.state.ready, readyView(msg.ready)) });
+        break;
       case 'reject':
         this.applyReject(msg);
         break;
@@ -314,6 +342,7 @@ export class GameSync {
       status: view.status,
       drawOffer: view.drawOffer,
       fenHash: view.fenHash,
+      ready: readyView(view.ready),
       legalMoves: view.legalMoves,
       // A full authoritative snapshot supersedes any optimistic pending move.
       pending: null,

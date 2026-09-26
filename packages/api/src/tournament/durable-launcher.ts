@@ -28,6 +28,8 @@ export class DurableGameLauncher implements GameLauncher {
       players: { white: input.white, black: input.black },
       rated: true,
       at: this.clock.now(),
+      // Readiness, first-move clock start and the tournament no-show deadline (ADR-0148).
+      source: 'tournament',
       ...(variant === 'chess960' ? { chess960StartId: launchChess960StartId(input) } : {}),
     });
 

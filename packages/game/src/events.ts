@@ -19,7 +19,24 @@ export type Termination =
   | 'fifty_move'
   | 'threefold'
   | 'variant'
-  | 'aborted';
+  | 'aborted'
+  /**
+   * A pregame no-show (ADR-0148): the no-show deadline passed before the first move. Never a chess
+   * timeout. `'*'` with no winner is a seek abort or a tournament double forfeit; a tournament game
+   * with exactly one ready player is won by that player.
+   */
+  | 'no_show';
+
+/**
+ * Where a game came from, recorded only when that decides its pregame lifecycle (ADR-0148).
+ *
+ * A game with a source requires durable readiness from both seats before the first move, starts its
+ * chess clock at the first move, and is ended by the server if no move is played before that
+ * source's no-show deadline. A game without one (bot games, direct/test creation, and every game
+ * stored before this field existed) keeps the original lifecycle: clock anchored at creation, no
+ * readiness, no no-show.
+ */
+export type GameSource = 'seek' | 'tournament';
 
 /** Standard result string. */
 export type ResultString = '1-0' | '0-1' | '1/2-1/2' | '*';
@@ -59,6 +76,21 @@ export interface GameCreatedEvent {
    * unknown. It is never filled in with 518, which would be a guess wearing the shape of a fact.
    */
   readonly chess960StartId?: number;
+  /**
+   * See {@link GameSource}. Optional and unversioned for the same reason as `chess960StartId`: an
+   * absent field is how every earlier game is stored, and it keeps meaning exactly what it meant.
+   */
+  readonly source?: GameSource;
+}
+
+/**
+ * A seated player became ready (ADR-0148). Written once per seat, only for a game with a
+ * {@link GameCreatedEvent.source}, before its first move. Readiness never reverts.
+ */
+export interface PlayerReadyEvent {
+  readonly type: 'PlayerReady';
+  readonly by: Color;
+  readonly at: number;
 }
 
 export interface MovePlayedEvent {
@@ -97,6 +129,7 @@ export interface GameEndedEvent {
 /** The discriminated union of all persisted game events. */
 export type GameEvent =
   | GameCreatedEvent
+  | PlayerReadyEvent
   | MovePlayedEvent
   | DrawOfferedEvent
   | DrawDeclinedEvent

@@ -77,6 +77,7 @@ function makeCannedState(gameId: string, ply: number): StateView {
       b1: ['c3', 'a3'],
     },
     chess960StartId: null,
+    ready: null,
   };
 }
 
