@@ -43,7 +43,8 @@
       <button id="theme-toggle" type="button" aria-label="Toggle light/dark theme">🌙</button>
       <button id="flip" type="button" aria-label="Flip board" hidden>Flip</button>
     </header>
-    <main class="game" id="game-main">
+    <main id="app-main">
+    <section class="game" id="game-main">
       <section id="board" aria-label="Chess board"></section>
       <aside class="sidebar" aria-label="Game info">
         <p id="status" role="status" aria-live="polite" tabindex="-1">Your move.</p>
@@ -202,7 +203,7 @@
           </div>
         </section>
       </aside>
-    </main>
+    </section>
     <section id="lobby" class="lobby" aria-label="Lobby" hidden>
       <div class="lobby-hero">
         <h2 class="lobby-title">Play Chess</h2>
@@ -565,6 +566,7 @@
       </div>
       <p id="study-chapter-error" class="error" role="alert"></p>
     </section>
+    </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
