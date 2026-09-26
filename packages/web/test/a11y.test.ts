@@ -57,16 +57,17 @@ test('one persistent main landmark contains every application route', () => {
     } else {
       assert.equal(stack.includes('main'), true, 'every section must be inside the main landmark');
     }
-    const id = attributes.match(/\bid="([^"]+)"/)?.[1];
+    const id = attributes.match(/(?:^|\s)id="([^"]+)"/)?.[1];
     if (tag === 'section' && stack.at(-1) === 'main') {
       assert.ok(id, 'each route section must have an ID');
       if (id !== 'game-main' && id !== 'auth') {
-        assert.match(attributes, /\s+hidden(?:\s|$)/, `route #${id} must start hidden`);
+        const unquotedAttributes = attributes.replace(/"[^"]*"|'[^']*'/g, '');
+        assert.match(unquotedAttributes, /(?:^|\s)hidden(?:\s|=|$)/, `route #${id} must start hidden`);
       }
     }
     if (id && routeIds.has(id)) {
       assert.equal(found.has(id), false, `duplicate route #${id}`);
-      assert.equal(stack.includes('main'), true, `route #${id} is outside main`);
+      assert.equal(stack.at(-1), 'main', `route #${id} must be a direct child of main`);
       assert.equal(tag, 'section', `route #${id} must remain a section`);
       found.add(id);
     }
