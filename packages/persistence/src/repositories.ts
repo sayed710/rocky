@@ -319,10 +319,11 @@ export interface GameFinish {
   readonly endedAt: Date;
 }
 
+/**
+ * Read side of the `games` projection. Rows are written only by the creation transactions
+ * ({@link SeekAcceptor}, {@link GameStarter}) and the event-log projector (ADR-0147).
+ */
 export interface GamesRepository {
-  start(game: GameStart): Promise<void>;
-  updateProgress(id: string, plyCount: number, lastSeq: number): Promise<void>;
-  finish(id: string, finish: GameFinish): Promise<void>;
   findById(id: string): Promise<GameSummaryRow | null>;
   recentForUser(userId: string, limit: number): Promise<GameSummaryRow[]>;
 }

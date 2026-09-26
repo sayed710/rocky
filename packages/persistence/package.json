@@ -36,6 +36,7 @@
     "test": "npm run build:test && npm run test:unit",
     "lint": "tsc -p tsconfig.json --noEmit",
     "migrate": "node dist/pg/migrate-cli.js",
+    "games:rebuild": "node dist/pg/games-rebuild-cli.js",
     "clean": "rm -rf dist dist-test"
   },
   "keywords": [
