@@ -107,6 +107,10 @@ export interface RateLimitConfig {
   readonly webauthnRegister: {
     readonly perIp: RateLimitEndpointConfig;
   };
+  readonly seekCreation: {
+    readonly perUser: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
   readonly analysis: {
     readonly perUser: RateLimitEndpointConfig;
     readonly perIp: RateLimitEndpointConfig;
@@ -187,6 +191,12 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   },
   webauthnRegister: {
     perIp: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
+  },
+  // The account quota bounds create/cancel floods without penalizing ordinary lobby retries.
+  // The wider IP quota allows multiple players behind a shared NAT to seek independently.
+  seekCreation: {
+    perUser: { maxRequests: 20, windowMs: 5 * 60 * 1000 }, // 20 / 5 min
+    perIp: { maxRequests: 200, windowMs: 5 * 60 * 1000 }, // 200 / 5 min
   },
   // Analysis is a CPU-amplification surface, so it is limited more tightly than a read endpoint.
   analysis: {

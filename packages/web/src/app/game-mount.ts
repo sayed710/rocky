@@ -90,6 +90,7 @@ import { formatClock, formatTimeControl } from './render-helpers.js';
 import type { AuthSession } from './auth-controller.js';
 import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
+import { isEngineBotUserId } from '@chess-platform/game';
 
 /**
  * The line counts the panel offers. Every one is at or below the server's published MultiPV
@@ -1199,13 +1200,18 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           const isMe = state.myColor === 'w';
           metaWhiteNameEl.textContent = 'White' + (isMe ? ' (You)' : '');
 
-          const dot = metaWhiteEl.querySelector('.presence-dot');
+          const dot = metaWhiteEl.querySelector<HTMLElement>('.presence-dot');
           const txt = metaWhiteEl.querySelector('.presence-text');
           if (dot && txt) {
-            if (unknownPresence) {
+            if (state.players && isEngineBotUserId(state.players.white)) {
+              dot.hidden = true;
+              txt.textContent = 'Computer';
+            } else if (unknownPresence) {
+              dot.hidden = false;
               dot.className = 'presence-dot offline';
               txt.textContent = 'Unknown';
             } else {
+              dot.hidden = false;
               const online = state.presence!.white;
               dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
               const newTxt = online ? 'Online' : 'Offline';
@@ -1221,13 +1227,18 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           const isMe = state.myColor === 'b';
           metaBlackNameEl.textContent = 'Black' + (isMe ? ' (You)' : '');
 
-          const dot = metaBlackEl.querySelector('.presence-dot');
+          const dot = metaBlackEl.querySelector<HTMLElement>('.presence-dot');
           const txt = metaBlackEl.querySelector('.presence-text');
           if (dot && txt) {
-            if (unknownPresence) {
+            if (state.players && isEngineBotUserId(state.players.black)) {
+              dot.hidden = true;
+              txt.textContent = 'Computer';
+            } else if (unknownPresence) {
+              dot.hidden = false;
               dot.className = 'presence-dot offline';
               txt.textContent = 'Unknown';
             } else {
+              dot.hidden = false;
               const online = state.presence!.black;
               dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
               const newTxt = online ? 'Online' : 'Offline';

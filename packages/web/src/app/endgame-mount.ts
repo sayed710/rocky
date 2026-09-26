@@ -55,6 +55,7 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
   const rowsEl = doc.getElementById('endgame-rows');
   const positionRowsEl = doc.getElementById('endgame-position-rows');
   const boardEl = doc.getElementById('endgame-board');
+  const layoutEl = doc.querySelector('.endgame-layout') as HTMLElement | null;
 
   const unbinds: Array<() => void> = [];
   let hasPosition = false;
@@ -90,6 +91,7 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
   /** Bring the two controls into agreement with the session and whether a position is loaded. */
   const refresh = (): void => {
     const authed = deps.isAuthenticated();
+    if (layoutEl) layoutEl.hidden = !authed || !hasPosition;
     if (nextBtn) nextBtn.disabled = !authed || controller.isPending;
     if (submitBtn) submitBtn.disabled = !authed || !hasPosition || controller.isPending;
     if (moveInput) moveInput.disabled = !authed || !hasPosition;
