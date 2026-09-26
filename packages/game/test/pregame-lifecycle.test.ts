@@ -201,3 +201,14 @@ test('a first move after a due deadline records the no-show instead, however lat
   const t = bothReady('tournament').game.playMove('e2e4', CREATED_AT + 3_600_000);
   assert.equal(t.events[0]!.type, 'MovePlayed');
 });
+
+test('a sourced creation without a numeric creation time is refused, matching the deadline queue', () => {
+  const created = create('seek').events[0]!;
+  for (const at of [null, 'now', Number.NaN]) {
+    const forged = { ...created, at } as unknown as GameEvent;
+    assert.throws(() => Game.fromEvents([forged]), /numeric creation time/, JSON.stringify(at));
+  }
+  // A game without a source keeps replaying exactly as before, whatever it stored.
+  const legacy = { ...create().events[0]!, at: null } as unknown as GameEvent;
+  assert.doesNotThrow(() => Game.fromEvents([legacy]));
+});

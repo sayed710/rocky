@@ -130,6 +130,8 @@ test('only a deadline the game aggregate accepts is queued; anything malformed i
       { noShowAfterMs: 60000 },
       { source: 'lobby', noShowAfterMs: 60000 },
       { source: 'tournament' },
+      { source: 'seek', noShowAfterMs: 60000, at: null },
+      { source: 'seek', noShowAfterMs: 60000, at: 'now' },
     ];
     for (const fields of malformed) {
       const gameId = uuidv7();

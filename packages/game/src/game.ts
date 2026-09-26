@@ -136,11 +136,16 @@ const GAME_SOURCES: readonly unknown[] = ['seek', 'tournament'] satisfies readon
 
 /**
  * A stored or requested pregame lifecycle. Both fields absent is the original lifecycle; a known
- * source with a positive integer deadline is a sourced game; anything else is refused rather than
- * guessed, because a game with a source but no deadline could never be ended.
+ * source with a positive integer deadline and a finite creation time is a sourced game; anything else
+ * is refused rather than guessed, because a sourced game whose deadline cannot be computed could never
+ * be ended. This is the same rule the `pregame_deadlines` trigger applies (migration 0042), so a game
+ * the log can replay as sourced is always one the queue holds.
  */
-function pregameOf(source: unknown, noShowAfterMs: unknown): { source: GameSource; noShowAfterMs: number } | null {
+function pregameOf(source: unknown, noShowAfterMs: unknown, at: unknown): { source: GameSource; noShowAfterMs: number } | null {
   if (source === undefined && noShowAfterMs === undefined) return null;
+  if (typeof at !== 'number' || !Number.isFinite(at)) {
+    throw new GameError(`a sourced game needs a numeric creation time; got ${JSON.stringify(at)}`);
+  }
   if (!GAME_SOURCES.includes(source)) throw new GameError(`unknown game source ${JSON.stringify(source)}`);
   if (typeof noShowAfterMs !== 'number' || !Number.isSafeInteger(noShowAfterMs) || noShowAfterMs <= 0) {
     throw new GameError(`a ${String(source)} game needs a positive integer no-show deadline; got ${JSON.stringify(noShowAfterMs)}`);
@@ -219,7 +224,7 @@ export class Game {
       );
     }
 
-    const pregame = pregameOf(params.source, params.noShowAfterMs);
+    const pregame = pregameOf(params.source, params.noShowAfterMs, params.at);
     const initialFen =
       chess960StartId !== null ? chess960Fen(chess960StartId) : params.initialFen ?? Position.initial(variant).fen();
     const event: GameEvent = {
@@ -576,7 +581,7 @@ export class Game {
     switch (event.type) {
       case 'GameCreated': {
         const startId = Game.startIdOf(event);
-        const pregame = pregameOf(event.source, event.noShowAfterMs);
+        const pregame = pregameOf(event.source, event.noShowAfterMs, event.at);
         const source = pregame?.source ?? null;
         const position = Position.fromFen(event.initialFen, event.variant);
         // Seed the repetition history with the initial position (count = 1).
