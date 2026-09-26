@@ -304,3 +304,9 @@ as the pub/sub and event-log env gates.
   §3) is dedicated "Game Authority" shards separate from the realtime gateway. This
   increment's ownership registry is a stepping stone: the same `gameId → nodeId` map
   works whether the "node" is a gateway replica or a dedicated authority shard.
+
+> **Amended in M15 Increment 69 (ADR-0080).** A `SET NX` that creates the owner key is always a new
+> claim, even when a renewal that threw had left the game in this node's owned set: the lease had
+> lapsed, so another node may have owned and advanced the game, and `onClaimed` must fire so the
+> router reloads. The router's reload debt is also tied to the claim that recorded it. See the
+> ADR-0080 amendment.

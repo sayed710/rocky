@@ -38,6 +38,7 @@ export interface GameMetadataState {
   readonly connected: boolean;
   readonly role: Role | null;
   readonly myColor: WsColor | null;
+  readonly players: { readonly white: string; readonly black: string } | null;
   readonly variant: Variant | null;
   /**
    * The Chess960 starting-position id this game began from, or `null` — for every other variant, for
@@ -485,6 +486,8 @@ export class GameController {
       || this.currentMetadataState.connected !== state.connected
       || this.currentMetadataState.role !== state.role
       || this.currentMetadataState.myColor !== state.myColor
+      || this.currentMetadataState.players?.white !== state.snapshot?.players.white
+      || this.currentMetadataState.players?.black !== state.snapshot?.players.black
       || this.currentMetadataState.variant !== (state.snapshot?.variant ?? null)
       || this.currentMetadataState.chess960StartId !== (state.snapshot?.chess960StartId ?? null)
       || timeControlChanged
@@ -497,6 +500,7 @@ export class GameController {
         connected: state.connected,
         role: state.role,
         myColor: state.myColor,
+        players: state.snapshot?.players ?? null,
         variant: state.snapshot?.variant ?? null,
         chess960StartId: state.snapshot?.chess960StartId ?? null,
         timeControl: state.snapshot?.timeControl ?? null,

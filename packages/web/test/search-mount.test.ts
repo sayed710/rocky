@@ -105,6 +105,11 @@ function renderedModes(container: FakeElement): string[] {
   return container.children.map((control) => control.children[0]?.value ?? '');
 }
 
+/** The visible span text inside each radio label, which is also its accessible name. */
+function renderedModeLabels(container: FakeElement): string[] {
+  return container.children.map((control) => control.children[1]?.textContent ?? '');
+}
+
 /** The text of whatever empty-state occupies the results panel. */
 function resultsText(container: FakeElement): string {
   const walk = (node: FakeElement): string =>
@@ -182,6 +187,7 @@ test('keyword only: the mode it can serve, and a working search', async () => {
 
     await settle();
     assert.deepEqual(renderedModes(mode), ['keyword']);
+    assert.deepEqual(renderedModeLabels(mode), ['Keyword']);
     assert.equal(mode.hidden, false);
     assert.deepEqual(h.searches, [{ q: 'rook', mode: 'keyword' }]);
     controller.dispose();
@@ -199,6 +205,11 @@ test('both on: all three modes are offered', async () => {
     const mode = h.elements.get('search-mode');
     assert.ok(mode);
     assert.deepEqual(renderedModes(mode), ['keyword', 'semantic', 'hybrid']);
+    assert.deepEqual(renderedModeLabels(mode), [
+      'Keyword',
+      'Semantic (experimental)',
+      'Hybrid (experimental)',
+    ]);
     controller.dispose();
   } finally {
     h.restore();
