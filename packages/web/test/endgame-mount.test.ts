@@ -33,8 +33,12 @@ const ELEMENT_IDS = [
  * @param respond - answers each request; the route only ever calls the two endgame endpoints.
  * @returns the fake document, its element map, and the transport for assertions.
  */
-function setup(respond: (request: HttpRequest, index: number) => HttpResponse) {
+function setup(
+  respond: (request: HttpRequest, index: number) => HttpResponse,
+  isAuthenticated: () => boolean = () => true,
+) {
   const elements = new Map<string, FakeElement>();
+  const layout = new FakeElement('endgame-layout');
   for (const id of ELEMENT_IDS) {
     const el = new FakeElement(id);
     if (id === 'endgame-error' || id === 'endgame-result') el.hidden = true;
@@ -42,6 +46,7 @@ function setup(respond: (request: HttpRequest, index: number) => HttpResponse) {
   }
   const doc = {
     getElementById: (id: string) => elements.get(id) ?? null,
+    querySelector: (selector: string) => selector === '.endgame-layout' ? layout : null,
     createElement: () => new FakeElement(),
   } as unknown as Document;
 
@@ -56,8 +61,8 @@ function setup(respond: (request: HttpRequest, index: number) => HttpResponse) {
     user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
     tokens: { accessToken: 'token', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
   });
-  const mounted = mountEndgames({ doc, client, isAuthenticated: () => true });
-  return { elements, transport, mounted };
+  const mounted = mountEndgames({ doc, client, isAuthenticated });
+  return { elements, layout, transport, mounted };
 }
 
 /**
@@ -101,13 +106,30 @@ function labels(el: FakeElement): string[] {
   return el.children.map((row) => (row.children[0] as { textContent: string }).textContent);
 }
 
+test('signed-out and authenticated empty states hide the trainer layout', () => {
+  for (const authed of [false, true]) {
+    const { elements, layout, mounted } = setup(() => json(200, POSITION), () => authed);
+    try {
+      assert.equal(layout.hidden, true, 'no position means no board or move form');
+      assert.equal(elements.get('endgame-next')!.disabled, !authed);
+      assert.equal(
+        elements.get('endgame-note')!.textContent,
+        authed ? 'Pick a training endgame to begin.' : 'Sign in to train endgames.',
+      );
+    } finally {
+      mounted.dispose();
+    }
+  }
+});
+
 test('a loaded position shows the objective and never the solution', async () => {
-  const { elements, mounted } = setup((request) =>
+  const { elements, layout, mounted } = setup((request) =>
     request.url.endsWith('/v1/endgames/next') ? json(200, POSITION) : json(200, {}),
   );
   try {
     elements.get('endgame-next')!.click();
     await settled();
+    assert.equal(layout.hidden, false, 'the trainer appears only with a loaded position');
 
     const rows = labels(elements.get('endgame-position-rows')!);
     assert.deepEqual(rows, ['Endgame', 'Objective', 'To move', 'Level', 'Technique']);
@@ -243,35 +265,29 @@ test('disposal unbinds the controls so a second mount does not double-fire', asy
  * away, and a logout leaves the controls live. Raised in the Qodo review of PR #151.
  */
 test('authentication transitions reach the controls while the route stays mounted', async () => {
-  const elements = new Map<string, FakeElement>();
-  for (const id of ELEMENT_IDS) elements.set(id, new FakeElement(id));
-  const doc = {
-    getElementById: (id: string) => elements.get(id) ?? null,
-    createElement: () => new FakeElement(),
-  } as unknown as Document;
-  const transport = new FakeTransport().onEach(() => json(200, POSITION));
-  const client = new GambitClient({
-    baseUrl: 'https://api.test',
-    transport,
-    retry: { maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0, jitter: 'none' },
-    sleep: async () => undefined,
-  });
-
   let authed = false;
-  const mounted = mountEndgames({ doc, client, isAuthenticated: () => authed });
+  const { elements, layout, mounted } = setup(() => json(200, POSITION), () => authed);
   try {
     assert.equal(elements.get('endgame-next')!.disabled, true, 'signed out to begin with');
     assert.equal(elements.get('endgame-note')!.textContent, 'Sign in to train endgames.');
+    assert.equal(layout.hidden, true);
 
     authed = true;
     mounted.onSessionChange();
 
     assert.equal(elements.get('endgame-next')!.disabled, false);
     assert.equal(elements.get('endgame-note')!.textContent, 'Pick a training endgame to begin.');
+    assert.equal(layout.hidden, true, 'signing in does not invent a position');
+
+    elements.get('endgame-next')!.click();
+    await settled();
+    assert.equal(layout.hidden, false, 'the authenticated position is visible');
 
     authed = false;
     mounted.onSessionChange();
     assert.equal(elements.get('endgame-next')!.disabled, true, 'and a logout disables it again');
+    assert.equal(layout.hidden, true, 'logout hides the loaded position');
+    assert.equal(elements.get('endgame-note')!.textContent, 'Sign in to train endgames.');
   } finally {
     mounted.dispose();
   }
@@ -286,7 +302,7 @@ test('authentication transitions reach the controls while the route stays mounte
  */
 test('a failed reload clears the position rather than leaving a dead board', async () => {
   let calls = 0;
-  const { elements, transport, mounted } = setup(() => {
+  const { elements, layout, transport, mounted } = setup(() => {
     calls += 1;
     return calls === 1
       ? json(200, POSITION)
@@ -296,10 +312,14 @@ test('a failed reload clears the position rather than leaving a dead board', asy
     elements.get('endgame-next')!.click();
     await settled();
     assert.ok(elements.get('endgame-position-rows')!.children.length > 0, 'a position is loaded');
+    assert.equal(layout.hidden, false);
 
     elements.get('endgame-next')!.click();
+    assert.equal(layout.hidden, true, 'the old layout disappears as soon as its position is invalidated');
     await settled();
 
+    assert.equal(layout.hidden, true, 'failure leaves the empty layout hidden');
+    assert.equal(elements.get('endgame-note')!.textContent, 'Endgame training is unavailable right now.');
     assert.equal(elements.get('endgame-position-rows')!.children.length, 0, 'the board is gone');
     assert.equal(elements.get('endgame-submit')!.disabled, true, 'and so is submission');
 
