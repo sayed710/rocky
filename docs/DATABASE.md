@@ -160,6 +160,7 @@ CREATE TABLE game_events (
   event_version  SMALLINT    NOT NULL DEFAULT 1, -- payload schema version (see §3.4)
   payload        JSONB       NOT NULL,           -- the exact GameEvent object
   server_ts      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  xact_id        xid8        NOT NULL DEFAULT pg_current_xact_id(), -- writing transaction (0040, §4.2)
   PRIMARY KEY (game_id, seq),
   CONSTRAINT game_events_seq_nonneg CHECK (seq >= 0),
   CONSTRAINT game_events_version_pos CHECK (event_version >= 1)
@@ -277,6 +278,28 @@ CREATE TABLE games (
 ) PARTITION BY RANGE (started_at);             -- monthly partitions
 -- BRIN(started_at); btree(white_id), btree(black_id).
 ```
+
+**How it is derived** (migration 0040, [ADR-0147](adr/0147-durable-games-projection.md)). Seek
+acceptance and bot-game creation insert the creation-time row in the same transaction as
+`GameCreated`. After that, and for every other creation path, only the event-log projector writes
+the row. It re-folds each touched game's complete committed stream and upserts it
+`WHERE games.last_seq <= EXCLUDED.last_seq`, so the row never regresses:
+
+- **Work discovery.** `game_events.xact_id` records the writing transaction. A batch reads rows
+  after the `projection_checkpoints` position whose `xact_id` is below
+  `pg_snapshot_xmin(pg_current_snapshot())`, which means only finished transactions, ordered by
+  `(xact_id, game_id, seq)` (index `game_events_xact_order_idx`, built online by 0041). A transaction that commits late
+  sorts after the checkpoint, so it cannot be skipped. `server_ts` is never used as a cursor.
+- **Atomicity.** One transaction per batch holds the checkpoint row `FOR UPDATE SKIP LOCKED`, so
+  one replica works at a time, and it commits projection writes, failure records and the new
+  position together.
+- **Failures.** A stream that cannot be folded is rolled back to a per-game savepoint and recorded in
+  `games_projection_failures (game_id, attempts, last_error, first_failed_at, retry_at)`, then
+  retried with backoff until a re-fold succeeds. It never blocks other games and is never silently
+  passed.
+- **Rebuild.** `npm run games:rebuild` re-folds every stream independently of the checkpoint. It
+  leaves to the live projector any game that projector has yet to reach, so live endings are still
+  reported.
 
 ### 4.3 Identity & authZ
 
@@ -776,10 +799,12 @@ is a keyed hash (lookup without storing raw email). No credential is ever logged
 ## 6. Concurrency, consistency & scale
 
 - **Per-game correctness:** optimistic append on `(game_id, seq)` (see §3.2).
-- **Transactional projections:** event append + `games`/`ratings` projection
-  updates commit together.
-- **Ratings** recomputed with a verified Glicko-2 implementation (unit-tested
-  against the reference paper's worked example) inside the game-end transaction.
+- **Projections follow the log asynchronously:** creation-time `games` rows commit with
+  `GameCreated`; progress and endings are projected by the checkpointed event-log projector
+  (§4.2, ADR-0147), so a projection defect can never reject an authoritative append. Ratings are
+  not yet derived.
+- **Ratings** will be computed with the verified Glicko-2 implementation (unit-tested against
+  the reference paper's worked example) from projected endings; not implemented yet.
 - **Partitioning:** `games` and `game_events` by month on time; old partitions are
   cheap to archive to object storage (PGNs) later.
 - **Sharding path (future, no rewrite):** `game_id` is a UUIDv7; a hash-shard
