@@ -155,11 +155,6 @@ export class OwnershipRegistry {
   }
 
   /**
-   * Try to claim ownership of `gameId`. If successful, this node is the
-   * owner. If another node already owns it (and the lease hasn't expired),
-   * returns the owner's node ID.
-   */
-  /**
    * Extend this node's lease on `gameId` in Redis, compare-and-expire so another node's key is
    * never touched. Returns whether we still hold it afterwards.
    *
@@ -178,12 +173,17 @@ export class OwnershipRegistry {
     return !(renewed === 0 || renewed === '0');
   }
 
+  /**
+   * Try to claim ownership of `gameId`. If successful, this node is the
+   * owner. If another node already owns it (and the lease hasn't expired),
+   * returns the owner's node ID.
+   */
   async claim(gameId: string): Promise<ClaimResult> {
     const key = ownerKey(gameId);
     // SET NX EX — atomic claim with a real key-level TTL.
     const set = await this.redis.set(key, this.nodeId, 'EX', this.leaseTtlSec, 'NX');
     if (set === 'OK') {
-      this.markClaimed(gameId);
+      this.markClaimed(gameId, { keyWasFree: true });
       return { owned: true, nodeId: this.nodeId };
     }
 
@@ -206,7 +206,7 @@ export class OwnershipRegistry {
       // Race: key expired between SET NX and GET. Retry once.
       const retry = await this.redis.set(key, this.nodeId, 'EX', this.leaseTtlSec, 'NX');
       if (retry === 'OK') {
-        this.markClaimed(gameId);
+        this.markClaimed(gameId, { keyWasFree: true });
         return { owned: true, nodeId: this.nodeId };
       }
       const retryOwner = await this.redis.get(key);
@@ -224,8 +224,15 @@ export class OwnershipRegistry {
     return { owned: false, ownerNodeId };
   }
 
-  private markClaimed(gameId: string): void {
-    const wasNew = !this.ownedGames.has(gameId);
+  /**
+   * Record a lease this node now holds. `keyWasFree` means `SET NX` created the key: whatever this
+   * node believed, its previous lease had lapsed, and another node may have owned and advanced the
+   * game in between. That is a new claim even if the game never left `ownedGames` — a renewal that
+   * threw keeps it there on purpose (see `renewAll`) — so `onClaimed` must fire and the router must
+   * reload. Renewing a key this node still holds is continuous ownership and is not new.
+   */
+  private markClaimed(gameId: string, { keyWasFree = false }: { keyWasFree?: boolean } = {}): void {
+    const wasNew = keyWasFree || !this.ownedGames.has(gameId);
     this.ownedGames.add(gameId);
     // Record monotonic instant (performance.now()) when the lease expires in Redis.
     // performance.now() is monotonic and immune to NTP system clock adjustments.
