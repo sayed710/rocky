@@ -124,6 +124,30 @@ describe('messaging admission', () => {
     }
   });
 
+  it('rejects a differently cased self UUID before charging either conversation budget', async () => {
+    const h = await startHarness({
+      trustProxy: true,
+      rateLimit: { ...DEFAULT_RATE_LIMIT, conversationCreation: limits },
+    });
+    try {
+      const alice = await h.makeUser('admit-case-alice');
+      const bob = await h.makeUser('admit-case-bob');
+      const headers = ip('192.0.2.6');
+      const differentlyCasedId = alice.userId.toUpperCase();
+      assert.notEqual(differentlyCasedId, alice.userId);
+      const self = await h.json('POST', '/v1/messages/conversations', {
+        token: alice.token, headers, body: { playerId: differentlyCasedId },
+      });
+      assert.equal(self.status, 422);
+      assert.equal(self.body.error.details.actor, 'self_conversation');
+      assert.equal((await h.json('POST', '/v1/messages/conversations', {
+        token: alice.token, headers, body: { playerId: bob.userId },
+      })).status, 200, 'the self request spent neither the sender nor IP admission slot');
+    } finally {
+      await h.close();
+    }
+  });
+
   it('admits only one concurrent send at the last account slot', async () => {
     const h = await startHarness({ rateLimit: { ...DEFAULT_RATE_LIMIT, messageSend: {
       perUser: { maxRequests: 1, windowMs: 60_000 },

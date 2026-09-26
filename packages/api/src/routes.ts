@@ -3233,7 +3233,7 @@ export function buildRouter(deps: RouteDeps): Router {
       const actorId = requireAuth(ctx).userId;
       const body = strictObject(ctx.body, ['playerId']);
       const targetId = parseUuid(reqString(body, 'playerId'), 'playerId');
-      if (actorId === targetId) {
+      if (actorId.toLowerCase() === targetId.toLowerCase()) {
         throw HttpError.validation(`Player '${actorId}' cannot have a conversation or send a message to themselves`,
           { actor: 'self_conversation' });
       }
