@@ -503,7 +503,8 @@ redisTest('when local sessions leave, the non-owner lets go and the owner keeps 
     // Both replicas' last sessions leave (the player is reconnecting, say).
     b.mover.localSessionsGone(gameId);
     a.mover.localSessionsGone(gameId);
-    assert.equal(b.pubsub.active(gameChannel(gameId)), 0, 'the non-owner let go');
+    await waitFor('the non-owner to let go', () => b.pubsub.active(gameChannel(gameId)) === 0);
+    await settle();
     assert.equal(a.pubsub.active(gameChannel(gameId)), 1, 'the owner kept the game');
 
     // The player moves through B, with no session on A: A still answers for the bot.

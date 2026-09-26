@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   GameAuthority,
+  InMemoryEventLog,
   InMemoryPubSub,
   LocalCommandRouter,
   gameChannel,
@@ -341,8 +342,11 @@ class ScriptedOwnership {
   /** Make the next post-engine check see a lapsed lease once, as after a missed renewal. */
   public lapseNextCheck = false;
   public prepareCalls = 0;
+  /** When set, a claim stays in flight until the test resolves it — `owns` is read afterwards. */
+  public prepareGate: Promise<void> | undefined;
   async prepareOwnership(_gameId: string): Promise<boolean> {
     this.prepareCalls++;
+    if (this.prepareGate) await this.prepareGate;
     return this.owns;
   }
   holdsOwnership(_gameId: string): boolean {
@@ -350,9 +354,6 @@ class ScriptedOwnership {
       this.lapseNextCheck = false;
       return false;
     }
-    return this.owns;
-  }
-  claimedHere(_gameId: string): boolean {
     return this.owns;
   }
 }
@@ -544,7 +545,7 @@ test('EngineBotMover: a non-owner re-checks, so a game orphaned by its owner sti
 });
 
 test('EngineBotMover: when the last local session leaves, a non-owner lets go and the owner keeps the game', async () => {
-  const gameId = '00000000-0000-7000-8000-000000000027';
+  const gameId = '00000000-0000-7000-8000-000000000029';
   const { pubsub, authority, router } = await botBlackAfterE4(gameId);
   const provider = new FakeAnalysisProvider();
   const ownership = new ScriptedOwnership();
@@ -553,17 +554,110 @@ test('EngineBotMover: when the last local session leaves, a non-owner lets go an
 
   mover.registerGame(gameId);
   await flush();
-  // The spectator (or reconnected player) on this replica leaves. Registered only to take over for
-  // a local player, a non-owner has nothing left to do here — even if it missed the ended broadcast.
+  // The spectator (or reconnected player) on this replica leaves; the next claim fails, so it lets go.
   mover.localSessionsGone(gameId);
-  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 0, 'non-owner unsubscribed');
+  await waitUntil('the non-owner to let go', () => pubsub.subscriberCount(gameChannel(gameId)) === 0);
 
   // An owner keeps the game: its player may be on another replica, and this node holds the lease.
   ownership.owns = true;
   mover.registerGame(gameId);
   await waitUntil('the owner to move', () => authority.getState(gameId).ply === 2);
   mover.localSessionsGone(gameId);
+  await flush();
   assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 1, 'owner still subscribed');
+  assert.equal(provider.playCalls.length, 1);
+  mover.stop();
+});
+
+test('EngineBotMover: a claim still in flight when the last session leaves decides whether it lets go', { timeout: HELD_TEST_TIMEOUT_MS }, async () => {
+  const gameId = '00000000-0000-7000-8000-000000000030';
+  const { pubsub, authority, router } = await botBlackAfterE4(gameId);
+  const ownership = new ScriptedOwnership();
+  let releaseClaim!: () => void;
+  ownership.prepareGate = new Promise<void>((resolve) => (releaseClaim = resolve));
+  const mover = new EngineBotMover({ authority, router, pubsub, provider: new FakeAnalysisProvider(), ownership });
+
+  mover.registerGame(gameId); // the claim goes out...
+  await flush();
+  mover.localSessionsGone(gameId); // ...the last session leaves before it returns...
+  ownership.prepareGate = undefined;
+  releaseClaim(); // ...and it succeeds: this node is the owner, so it must keep moving for the bot.
+
+  await waitUntil('the new owner to move', () => authority.getState(gameId).ply === 2);
+  await flush();
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 1, 'the owner kept its registration');
+  mover.stop();
+});
+
+test('EngineBotMover: a former owner whose sessions left lets go on its first failed claim', async () => {
+  const gameId = '00000000-0000-7000-8000-000000000031';
+  const { pubsub, authority, router, e4Broadcast } = await botBlackAfterE4(gameId);
+  const ownership = new ScriptedOwnership();
+  const mover = new EngineBotMover({ authority, router, pubsub, provider: new FakeAnalysisProvider(), ownership });
+
+  mover.registerGame(gameId);
+  await waitUntil('the owner to move', () => authority.getState(gameId).ply === 2);
+  mover.localSessionsGone(gameId);
+  await flush();
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 1, 'kept while it owns the game');
+
+  ownership.owns = false; // later, another node takes the game over
+  pubsub.publish(gameChannel(gameId), e4Broadcast); // and the next wake-up finds it
+  await waitUntil('the former owner to let go', () => pubsub.subscriberCount(gameChannel(gameId)) === 0);
+  mover.stop();
+});
+
+test('EngineBotMover: a rejoin cancels the pending release', async () => {
+  const gameId = '00000000-0000-7000-8000-000000000032';
+  const { pubsub, authority, router, e4Broadcast } = await botBlackAfterE4(gameId);
+  const ownership = new ScriptedOwnership();
+  const mover = new EngineBotMover({ authority, router, pubsub, provider: new FakeAnalysisProvider(), ownership });
+
+  mover.registerGame(gameId);
+  await waitUntil('the owner to move', () => authority.getState(gameId).ply === 2);
+  mover.localSessionsGone(gameId); // kept: this node owns the game
+  await flush();
+  mover.registerGame(gameId); // the player comes back to this replica
+  await flush();
+
+  ownership.owns = false; // another node takes over; a local player is here, so this one stays
+  pubsub.publish(gameChannel(gameId), e4Broadcast);
+  await flush();
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 1, 'still registered for the local player');
+  mover.stop();
+});
+
+test('EngineBotMover: a non-owner that missed the ended broadcast unregisters on re-check', async () => {
+  const gameId = '00000000-0000-7000-8000-000000000027';
+  const log = new InMemoryEventLog();
+  const bot = BOT_ACCOUNTS[0]!;
+  const human = 'human-player-1';
+  // The owner and this replica share the durable log but not the broadcast, which is lost.
+  const owner = new GameAuthority(new InMemoryPubSub(), () => Date.now(), log);
+  await owner.createGame({
+    gameId,
+    variant: 'standard',
+    timeControl: { kind: 'unlimited', initialMs: 0, incrementMs: 0, delayMs: 0 },
+    players: { white: human, black: bot.userId },
+    rated: false,
+  });
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => Date.now(), log);
+  await authority.ensureLoaded(gameId);
+  const ownership = new ScriptedOwnership();
+  ownership.owns = false;
+  const provider = new FakeAnalysisProvider();
+  const mover = new EngineBotMover({
+    authority, router: new LocalCommandRouter(authority), pubsub, provider, ownership, nonOwnerRecheckMs: 20,
+  });
+
+  mover.registerGame(gameId);
+  await flush();
+  await owner.apply(gameId, human, { kind: 'resign' });
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 1, 'nothing reached this replica');
+
+  await waitUntil('the mover to let go', () => pubsub.subscriberCount(gameChannel(gameId)) === 0);
+  assert.equal(provider.playCalls.length, 0);
   mover.stop();
 });
 

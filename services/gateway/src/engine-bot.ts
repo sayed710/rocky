@@ -45,8 +45,6 @@ export interface BotMoveOwnership {
   prepareOwnership(gameId: string): Promise<boolean>;
   /** Whether this node still owns the game on a fresh copy — checked after the engine returns. */
   holdsOwnership(gameId: string): boolean;
-  /** Whether this node still counts the game as its own, even while its lease is lapsing. */
-  claimedHere(gameId: string): boolean;
 }
 
 export interface EngineBotMoverOptions {
@@ -88,6 +86,10 @@ export class EngineBotMover {
   private readonly pendingRerun = new Set<string>();
   /** Pending non-owner re-checks, one per game. */
   private readonly rechecks = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Games whose next pass must first reload this node's copy from the durable log. */
+  private readonly reloadBeforeNextPass = new Set<string>();
+  /** Registered games with no session left on this node (see `localSessionsGone`). */
+  private readonly withoutLocalPlayer = new Set<string>();
 
   constructor(opts: EngineBotMoverOptions) {
     this.authority = opts.authority;
@@ -107,6 +109,7 @@ export class EngineBotMover {
    * Safe to call multiple times for the same game (idempotent).
    */
   registerGame(gameId: string): void {
+    this.withoutLocalPlayer.delete(gameId); // a join: there is a local player again
     if (!this.subscriptions.has(gameId)) {
       const unsub = this.pubsub.subscribe(gameChannel(gameId), (msg) => {
         // A non-owner's cached copy never reaches `over`, so the terminal broadcast is the only
@@ -128,6 +131,8 @@ export class EngineBotMover {
   unregisterGame(gameId: string): void {
     clearTimeout(this.rechecks.get(gameId));
     this.rechecks.delete(gameId);
+    this.reloadBeforeNextPass.delete(gameId);
+    this.withoutLocalPlayer.delete(gameId);
     const unsub = this.subscriptions.get(gameId);
     if (unsub) {
       unsub();
@@ -174,13 +179,17 @@ export class EngineBotMover {
   private async doMove(gameId: string): Promise<void> {
     let state: StateView;
     try {
+      if (this.reloadBeforeNextPass.delete(gameId)) await this.authority.reloadFromLog(gameId);
       // A cached copy can be behind, but an ending is final, so a copy that says `over` is right.
       if (this.authority.hasFresh(gameId) && this.authority.getState(gameId).status.over) {
         this.unregisterGame(gameId);
         return;
       }
       if (this.ownership && !(await this.ownership.prepareOwnership(gameId))) {
-        this.scheduleRecheck(gameId);
+        // Another node owns the game. A non-owner stays registered only to take over for a local
+        // player; with none left it lets go here, after the claim has actually failed.
+        if (this.withoutLocalPlayer.has(gameId)) this.unregisterGame(gameId);
+        else this.scheduleRecheck(gameId);
         return;
       }
       state = this.authority.getState(gameId);
@@ -281,26 +290,34 @@ export class EngineBotMover {
    * The last session in `gameId` on this node has left.
    *
    * A non-owner is registered only so that it can take the game over for a local player, so with
-   * no local player it lets go — which also bounds what a missed `ended` broadcast can leak. The
-   * owner keeps its registration: the player may have reconnected through another replica, and
-   * this node goes on renewing the lease, so nobody else would move for the bot.
+   * no local player it should let go; the owner must not, because the player may have reconnected
+   * through another replica while this node keeps renewing the lease, and nobody else would move
+   * for the bot. Which one this node is cannot be read off a snapshot here — a claim may be in
+   * flight — so this only records that no local player is left and takes a pass: the game is
+   * dropped when, and only when, that pass (or a later one) fails to own it. A join clears the
+   * mark. A former owner that later loses the game lets go on its next failed claim.
    */
   localSessionsGone(gameId: string): void {
-    if (this.ownership && !this.ownership.claimedHere(gameId)) this.unregisterGame(gameId);
+    if (!this.ownership || !this.subscriptions.has(gameId)) return;
+    this.withoutLocalPlayer.add(gameId);
+    void this.attemptMove(gameId);
   }
 
   /**
-   * Check back on a game this node registered but does not own.
+   * Check back on a game this node registered but does not own, while a local player is here.
    *
-   * The subscription alone is not enough: nothing is broadcast when a dead owner's lease expires.
-   * So while a local player keeps a non-owner registered, it tries ownership again every
-   * `nonOwnerRecheckMs` — one ownership attempt, no log read. A successful claim goes through the
-   * router's takeover reload, which is what reveals an orphaned game's position, or its ending.
+   * The subscription alone is not enough: nothing is broadcast when a dead owner's lease expires,
+   * and a missed `ended` broadcast (Redis pub/sub is best-effort) leaves a game this node's stale
+   * copy will never see finish. So a non-owner looks again every `nonOwnerRecheckMs`, reloading its
+   * copy from the durable log first: a finished game unregisters, and an orphaned one is claimed.
+   * The reload is a full replay, which is why this runs only while someone on this replica is in
+   * the game (see `localSessionsGone`).
    */
   private scheduleRecheck(gameId: string): void {
     if (!this.ownership || this.rechecks.has(gameId) || !this.subscriptions.has(gameId)) return;
     const timer = setTimeout(() => {
       this.rechecks.delete(gameId);
+      this.reloadBeforeNextPass.add(gameId);
       void this.attemptMove(gameId);
     }, this.nonOwnerRecheckMs);
     timer.unref?.();
@@ -311,6 +328,8 @@ export class EngineBotMover {
   stop(): void {
     for (const timer of this.rechecks.values()) clearTimeout(timer);
     this.rechecks.clear();
+    this.reloadBeforeNextPass.clear();
+    this.withoutLocalPlayer.clear();
     for (const unsub of this.subscriptions.values()) {
       unsub();
     }

@@ -263,15 +263,6 @@ export class OwnershipRegistry {
   }
 
   /**
-   * Whether this node lists `gameId` as one of its games, lease valid or not. A game stays listed
-   * through renewal failures (see `renewAll`) and leaves only on release or on proof that another
-   * node took it, so this errs towards "ours".
-   */
-  listsAsOwned(gameId: string): boolean {
-    return this.ownedGames.has(gameId);
-  }
-
-  /**
    * Check who owns `gameId` without attempting to claim. Returns null if
    * no node owns it (or the lease has expired).
    */
