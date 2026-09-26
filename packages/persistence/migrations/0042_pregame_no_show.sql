@@ -18,25 +18,29 @@ CREATE INDEX pregame_deadlines_due_idx ON pregame_deadlines (due_at, game_id);
 -- A creation the game aggregate would accept as sourced enters the queue: a known source, a
 -- positive safe-integer deadline, a non-negative integer creation time, and a deadline no later
 -- than the latest ECMAScript date (8.64e15 ms, inside timestamptz's range), which is the same rule
--- `Game` applies. The first move or any ending leaves it. Anything else is skipped rather than
--- raised, so this can never reject an append or queue a row the worker could never settle. The
--- checks are nested because SQL does not promise to short-circuit AND, and a cast of a non-numeric
--- value would raise.
+-- `Game` applies. The values are compared as float8, the same nearest-double rounding JSON.parse
+-- applies when the game is replayed, so the two decisions agree for every stored number. The first
+-- move or any ending leaves it. Anything else is skipped rather than raised, so this can never
+-- reject an append or queue a row the worker could never settle. The checks are nested because SQL
+-- does not promise to short-circuit AND, and a cast of a non-numeric or out-of-range value would
+-- raise.
 CREATE FUNCTION pregame_deadlines_track() RETURNS trigger AS $$
 DECLARE
-  after_ms NUMERIC;
-  at_ms NUMERIC;
+  after_ms DOUBLE PRECISION;
+  at_ms DOUBLE PRECISION;
 BEGIN
   IF NEW.seq = 0 THEN
     IF NEW.payload->>'source' IN ('seek', 'tournament')
        AND jsonb_typeof(NEW.payload->'noShowAfterMs') = 'number'
        AND jsonb_typeof(NEW.payload->'at') = 'number' THEN
-      after_ms := (NEW.payload->>'noShowAfterMs')::numeric;
-      at_ms := (NEW.payload->>'at')::numeric;
-      IF after_ms > 0 AND after_ms = trunc(after_ms) AND after_ms <= 9007199254740991
-         AND at_ms >= 0 AND at_ms = trunc(at_ms) AND at_ms + after_ms <= 8640000000000000 THEN
-        INSERT INTO pregame_deadlines (game_id, due_at)
-        VALUES (NEW.game_id, to_timestamp((at_ms + after_ms) / 1000));
+      IF abs((NEW.payload->>'noShowAfterMs')::numeric) < 1e300 AND abs((NEW.payload->>'at')::numeric) < 1e300 THEN
+        after_ms := (NEW.payload->>'noShowAfterMs')::numeric::double precision;
+        at_ms := (NEW.payload->>'at')::numeric::double precision;
+        IF after_ms > 0 AND after_ms = trunc(after_ms) AND after_ms <= 9007199254740991
+           AND at_ms >= 0 AND at_ms = trunc(at_ms) AND at_ms + after_ms <= 8640000000000000 THEN
+          INSERT INTO pregame_deadlines (game_id, due_at)
+          VALUES (NEW.game_id, to_timestamp((at_ms + after_ms) / 1000));
+        END IF;
       END IF;
     END IF;
   ELSE

@@ -163,6 +163,40 @@ test('only a deadline the game aggregate accepts is queued; anything malformed i
   });
 });
 
+test('the queue and replay agree on every stored number, including values JSON.parse rounds', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const base = Game.create({ gameId: uuidv7(), timeControl: TC, players: { white: 'x', black: 'y' }, at: T0 }).events[0]!;
+    // Raw JSON literals, so JavaScript's own number formatting cannot hide the precision.
+    const literals: Array<[at: string, noShowAfterMs: string]> = [
+      [`${T0}.0000000000001`, '60000'],
+      [String(T0), '60000.00000000000001'],
+      [`${T0}.5`, '60000'],
+      [String(T0), '60000.5'],
+      ['1e3', '6e4'],
+      [String(T0), '-0.0000000000000000001'],
+      ['8639999999700000.0000001', '300000'],
+    ];
+    for (const [at, after] of literals) {
+      const gameId = uuidv7();
+      const template = JSON.stringify({ ...base, gameId, source: 'tournament', at: 0, noShowAfterMs: 0 });
+      const text = template.replace('"at":0', `"at":${at}`).replace('"noShowAfterMs":0', `"noShowAfterMs":${after}`);
+      await pool.query(
+        `INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, 'GameCreated', 1, $2::jsonb)`,
+        [gameId, text],
+      );
+      let replays = true;
+      try {
+        Game.fromEvents([JSON.parse(text) as GameEvent]);
+      } catch {
+        replays = false;
+      }
+      const queued = (await queue(pool)).some((r) => r.game_id === gameId);
+      assert.equal(queued, replays, `at ${at}, noShowAfterMs ${after}: queued ${queued}, replays ${replays}`);
+    }
+  });
+});
+
 test('due pages are keyset-ordered by deadline and a dismissed game leaves the queue', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);
