@@ -117,16 +117,36 @@ test('a sourced creation enters the queue at its own deadline; readiness keeps i
   });
 });
 
-test('a malformed deadline is skipped by the trigger instead of rejecting the append', { skip }, async () => {
+test('only a deadline the game aggregate accepts is queued; anything malformed is skipped without rejecting the append', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);
-    const gameId = uuidv7();
-    const event = { ...Game.create({ gameId, timeControl: TC, players: { white: 'x', black: 'y' }, at: T0 }).events[0]!, noShowAfterMs: 'soon' };
+    const base = Game.create({ gameId: uuidv7(), timeControl: TC, players: { white: 'x', black: 'y' }, at: T0 }).events[0]!;
+    const malformed: Array<Record<string, unknown>> = [
+      { source: 'seek', noShowAfterMs: 'soon' },
+      { source: 'seek', noShowAfterMs: 0 },
+      { source: 'seek', noShowAfterMs: -60000 },
+      { source: 'seek', noShowAfterMs: 1.5 },
+      { source: 'seek', noShowAfterMs: 2 ** 53 },
+      { noShowAfterMs: 60000 },
+      { source: 'lobby', noShowAfterMs: 60000 },
+      { source: 'tournament' },
+    ];
+    for (const fields of malformed) {
+      const gameId = uuidv7();
+      await pool.query(
+        `INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, 'GameCreated', 1, $2::jsonb)`,
+        [gameId, JSON.stringify({ ...base, gameId, ...fields })],
+      );
+      // The domain refuses each of these on replay, so queueing one would fail every worker pass.
+      assert.throws(() => Game.fromEvents([{ ...base, gameId, ...fields } as unknown as GameEvent]), JSON.stringify(fields));
+    }
+    assert.deepEqual(await queue(pool), [], 'no malformed creation entered the queue');
+    const valid = uuidv7();
     await pool.query(
       `INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, 'GameCreated', 1, $2::jsonb)`,
-      [gameId, JSON.stringify(event)],
+      [valid, JSON.stringify({ ...base, gameId: valid, source: 'tournament', noShowAfterMs: 300000 })],
     );
-    assert.deepEqual(await queue(pool), []);
+    assert.deepEqual(await queue(pool), [{ game_id: valid, due_at: new Date(T0 + 300_000) }]);
   });
 });
 
