@@ -484,7 +484,7 @@ async function main(): Promise<void> {
   let commandRouter: CommandRouter;
   let botMoveOwnership: import('./engine-bot.js').BotMoveOwnership | undefined;
   let ownershipRegistry: import('./ownership.js').OwnershipRegistry | undefined;
-  let commandConsumer: { stop: () => void } | undefined;
+  let commandConsumer: import('./command-forwarder.js').OwnerCommandConsumer | undefined;
   let closeCommandRedis: (() => Promise<void>) | undefined;
 
   if (redisUrl) {
@@ -583,6 +583,8 @@ async function main(): Promise<void> {
     },
     (gameId) => engineBotMover?.localSessionsGone(gameId),
   );
+  // A forwarded server expiry must not evict a game someone here is watching (ADR-0149).
+  commandConsumer?.watchLocalSessions((gameId) => gateway.hasLocalSessions(gameId));
 
   // --- Pregame no-show expiry (ADR-0148) ---
   // On every replica with a database, like the projection whose rows it scans: correctness comes from

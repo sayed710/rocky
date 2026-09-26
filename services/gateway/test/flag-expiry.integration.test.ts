@@ -66,6 +66,7 @@ function makeNode(redis: Redis, store: PostgresEventStore, pool: Pool, clock: Cl
   const consumer = new OwnerCommandConsumer(authority, redis);
   const router = new RedisCommandRouter({ authority, registry, redis, nodeId, consumer, forwardTimeoutMs: 3000 });
   const gateway = new RealtimeGateway(authority, pubsub, new Tokens(), () => clock.now, router);
+  consumer.watchLocalSessions((id) => gateway.hasLocalSessions(id)); // as serve.ts wires it
   const worker = new FlagExpiryWorker({
     candidates: new PgFlagCandidates(pool),
     events: store,
@@ -346,5 +347,12 @@ stackTest('an owner lets go of a copy it loaded only to answer a late forwarded 
     assert.equal(s.a.authority.has(gameId), false, 'evicted before the reply');
     await forward('alice'); // a player's forwarded command
     assert.equal(s.a.authority.has(gameId), true, 'a player command keeps what it loaded');
+
+    // Someone on the owner is watching (joined while the expiry was in flight): the copy stays.
+    const watcher = s.a.connect();
+    s.a.join(watcher, gameId, 'alice');
+    await waitFor('the watcher to join', () => watcher.last('joined') !== undefined);
+    await forward(FLAG_ACTOR_ID);
+    assert.equal(s.a.authority.has(gameId), true, 'a watched game is never evicted');
   });
 });

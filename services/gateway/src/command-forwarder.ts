@@ -486,10 +486,18 @@ export class OwnerCommandConsumer {
   /** Response key TTL (seconds) so abandoned responses don't leak. */
   private readonly responseTtlSec = 30;
 
+  /** Whether a player or spectator on this node is in the game's room; until wired, every game is watched. */
+  private hasLocalSessions: (gameId: string) => boolean = () => true;
+
   constructor(authority: GameAuthority, redis: Redis, tracer?: Tracer) {
     this.authority = authority;
     this.redis = redis;
     this.tracer = tracer ?? new NullTracer();
+  }
+
+  /** Wire the gateway's room check, which exists only after the gateway is built on this router. */
+  watchLocalSessions(hasLocalSessions: (gameId: string) => boolean): void {
+    this.hasLocalSessions = hasLocalSessions;
   }
 
   /**
@@ -578,13 +586,14 @@ export class OwnerCommandConsumer {
     // A server expiry forwarded by a replica that lost the race to decide it can arrive after this
     // owner already ended and evicted the game. A copy loaded only to answer it is let go again once
     // the game is over, as the expiry path itself does (ADR-0148/0149); a join that races this
-    // reloads. A copy that was already resident — a watched or active game — is never touched.
+    // reloads. A copy that was already resident, or one a local player joined meanwhile, is never touched.
     const loadedForExpiry =
       (envelope.userId === NO_SHOW_ACTOR || envelope.userId === FLAG_ACTOR) && !this.authority.has(envelope.gameId);
     // Before the response, so the forwarding replica never observes the reply ahead of the eviction.
     const releaseExpiryCopy = (): void => {
       const { gameId } = envelope;
-      if (loadedForExpiry && this.authority.hasFresh(gameId) && this.authority.getState(gameId).status.over) {
+      const unwatched = loadedForExpiry && !this.hasLocalSessions(gameId);
+      if (unwatched && this.authority.hasFresh(gameId) && this.authority.getState(gameId).status.over) {
         this.authority.evict(gameId);
       }
     };
