@@ -20,6 +20,8 @@ import type { Redis } from 'ioredis';
 import {
   GameAuthority,
   AuthorityError,
+  FLAG_ACTOR,
+  NO_SHOW_ACTOR,
   type ApplyResult,
   type AuthorityErrorCode,
   type Command,
@@ -573,6 +575,19 @@ export class OwnerCommandConsumer {
       },
     });
 
+    // A server expiry forwarded by a replica that lost the race to decide it can arrive after this
+    // owner already ended and evicted the game. A copy loaded only to answer it is let go again once
+    // the game is over, as the expiry path itself does (ADR-0148/0149); a join that races this
+    // reloads. A copy that was already resident — a watched or active game — is never touched.
+    const loadedForExpiry =
+      (envelope.userId === NO_SHOW_ACTOR || envelope.userId === FLAG_ACTOR) && !this.authority.has(envelope.gameId);
+    // Before the response, so the forwarding replica never observes the reply ahead of the eviction.
+    const releaseExpiryCopy = (): void => {
+      const { gameId } = envelope;
+      if (loadedForExpiry && this.authority.hasFresh(gameId) && this.authority.getState(gameId).status.over) {
+        this.authority.evict(gameId);
+      }
+    };
     try {
       await this.authority.ensureLoaded(envelope.gameId);
       const result = await this.authority.apply(
@@ -590,6 +605,7 @@ export class OwnerCommandConsumer {
         broadcasts: result.broadcasts,
         state: result.state,
       };
+      releaseExpiryCopy();
       // RPUSH then EXPIRE — do NOT DEL; the sender's BLPOP consumes the value.
       await this.redis.rpush(envelope.responseKey, JSON.stringify(response));
       await this.redis.expire(envelope.responseKey, this.responseTtlSec);
@@ -606,6 +622,7 @@ export class OwnerCommandConsumer {
           message: err instanceof Error ? err.message : String(err),
         },
       };
+      releaseExpiryCopy();
       await this.redis.rpush(envelope.responseKey, JSON.stringify(response));
       await this.redis.expire(envelope.responseKey, this.responseTtlSec);
     } finally {

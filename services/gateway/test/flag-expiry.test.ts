@@ -191,11 +191,19 @@ test('a failing scan backs off instead of spinning, and stop() waits for an expi
   // With the database down for good, passes are spaced by the growing backoff, not a tight loop.
   const down = rig();
   down.queue.failNext = Number.POSITIVE_INFINITY;
-  const failing = down.worker({ pollMs: 10, maxBackoffMs: 40 });
+  let failures = 0;
+  const logged: string[] = [];
+  const failing = down.worker({
+    pollMs: 10, maxBackoffMs: 40,
+    failuresCounter: { inc: () => { failures += 1; } } as never,
+    logger: { error: (_msg: string, ctx: { error: string }) => logged.push(ctx.error), info: () => {}, warn: () => {}, debug: () => {} } as never,
+  });
   failing.start();
   await new Promise((resolve) => setTimeout(resolve, 150));
   await failing.stop();
   assert.ok(down.queue.queries.length <= 7, `backed off (${down.queue.queries.length} scans in 150 ms)`);
+  assert.equal(failures, down.queue.queries.length, 'every failed scan is counted');
+  assert.match(logged[0]!, /database unreachable\n\s+at /, 'the log keeps the stack');
 });
 
 test('an unwatched expiry lets go of a claim and a copy made only for it, and routes as the flag actor', async () => {

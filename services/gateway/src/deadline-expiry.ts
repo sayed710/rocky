@@ -114,7 +114,7 @@ export class DeadlineExpiryWorker {
         this.options.failuresCounter?.inc();
         this.options.logger?.error(`${this.options.label} failed for a game; it is retried on a later pass`, {
           gameId: candidate.gameId,
-          error: error instanceof Error ? error.message : String(error),
+          error: describe(error),
         });
       }
     }
@@ -138,9 +138,8 @@ export class DeadlineExpiryWorker {
     } catch (error) {
       // The candidate query itself failed (database unreachable): back off instead of spinning.
       this.consecutiveErrors += 1;
-      this.options.logger?.error(`${this.options.label} pass failed; retrying with backoff`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
+      this.options.failuresCounter?.inc();
+      this.options.logger?.error(`${this.options.label} pass failed; retrying with backoff`, { error: describe(error) });
       this.schedule(Math.min(this.maxBackoffMs, this.pollMs * 2 ** this.consecutiveErrors));
       return;
     }
@@ -149,6 +148,11 @@ export class DeadlineExpiryWorker {
     const progressed = pass.expired + pass.dismissed > 0;
     this.schedule(pass.more && progressed ? 0 : this.pollMs);
   }
+}
+
+/** An error for the log, with its stack when it has one, so a failure can be located. */
+function describe(error: unknown): string {
+  return error instanceof Error ? (error.stack ?? error.message) : String(error);
 }
 
 /** Multi-node ownership, as `OwnershipRegistry` provides it. Absent on a single node. */

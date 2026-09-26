@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { ENGINE_BOT_USER_IDS, Game, type GameEvent, type TimeControl } from '@chess-platform/game';
 import {
+  FLAG_ACTOR as FLAG_ACTOR_ID,
   GameAuthority,
   InMemoryConnection,
   RealtimeGateway,
@@ -316,5 +317,34 @@ stackTest('a tournament timeout is recorded once by the reporter from the durabl
     } finally {
       reporter.stop();
     }
+  });
+});
+
+stackTest('an owner lets go of a copy it loaded only to answer a late forwarded expiry; a player command keeps its copy', async () => {
+  await withStack(async (s) => {
+    const { gameId, alice, bob } = await seekGameUnderway(s);
+    alice.close();
+    bob.close();
+    s.clock.now = DEADLINE;
+    await s.a.router.route(gameId, FLAG_ACTOR_ID, { kind: 'expireFlag' }); // A now owns the ended game
+    const forward = async (userId: string): Promise<void> => {
+      s.a.authority.evict(gameId); // as after an unwatched expiry
+      s.a.consumer.startConsumer(gameId);
+      const responseKey = `game:resp:test-${randomUUID()}`;
+      await s.redis.rpush(`game:cmd:${gameId}`, JSON.stringify({ requestId: randomUUID(), gameId, userId, cmd: { kind: 'expireFlag' }, responseKey }));
+      const blocking = s.redis.duplicate();
+      let reply: [string, string] | null;
+      try {
+        reply = await blocking.blpop(responseKey, 5);
+      } finally {
+        blocking.disconnect();
+      }
+      assert.ok(reply, 'the owner answered');
+      assert.equal(JSON.parse(reply[1]).ok, false, 'the game is already over');
+    };
+    await forward(FLAG_ACTOR_ID); // the losing replica's duplicate expiry
+    assert.equal(s.a.authority.has(gameId), false, 'evicted before the reply');
+    await forward('alice'); // a player's forwarded command
+    assert.equal(s.a.authority.has(gameId), true, 'a player command keeps what it loaded');
   });
 });
