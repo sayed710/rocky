@@ -159,21 +159,44 @@ export class PgGamesProjector {
         [after, pageSize],
       )).rows.map((r) => r.game_id);
       if (ids.length === 0) return total;
-      const page = await retrySerialization(() => this.inTransaction(async (client) => {
-        const live = await gamesAwaitingLiveBatch(client, ids);
-        const result = await this.projectAll(client, ids.filter((id) => !live.has(id)));
-        return { ...result, deferred: live.size };
-      }, 'REPEATABLE READ')).catch((error: unknown) => {
-        // A page that keeps colliding with live writes is reported, not fatal: later pages still run.
-        if (!isSerializationFailure(error)) throw error;
-        const message = `rebuild page kept conflicting with live projection: ${(error as Error).message}`;
-        return { projected: 0, deferred: 0, endings: [], failures: ids.map((gameId) => ({ gameId, error: message })) };
-      });
+      const page = await this.rebuildPage(ids);
       total.projected += page.projected;
       total.deferred += page.deferred;
       total.failures.push(...page.failures);
       total.endings.push(...page.endings);
       after = ids.at(-1)!;
+    }
+  }
+
+  /**
+   * One REPEATABLE READ transaction for the page. If it keeps colliding with live writes, each game is
+   * retried in its own transaction, so only a game that itself keeps conflicting is reported and
+   * the healthy games around it are still repaired.
+   */
+  private async rebuildPage(ids: readonly string[]): Promise<{
+    projected: number; deferred: number; failures: ProjectionFailure[]; endings: ProjectedEnding[];
+  }> {
+    try {
+      return await retrySerialization(() => this.inTransaction(async (client) => {
+        const live = await gamesAwaitingLiveBatch(client, ids);
+        const result = await this.projectAll(client, ids.filter((id) => !live.has(id)));
+        return { ...result, deferred: live.size };
+      }, 'REPEATABLE READ'));
+    } catch (error) {
+      if (!isSerializationFailure(error)) throw error;
+      if (ids.length === 1) {
+        const message = `rebuild kept conflicting with live projection: ${(error as Error).message}`;
+        return { projected: 0, deferred: 0, endings: [], failures: [{ gameId: ids[0]!, error: message }] };
+      }
+      const total = { projected: 0, deferred: 0, failures: [] as ProjectionFailure[], endings: [] as ProjectedEnding[] };
+      for (const id of ids) {
+        const one = await this.rebuildPage([id]);
+        total.projected += one.projected;
+        total.deferred += one.deferred;
+        total.failures.push(...one.failures);
+        total.endings.push(...one.endings);
+      }
+      return total;
     }
   }
 

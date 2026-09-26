@@ -362,7 +362,7 @@ test('after a logical restore the rebuild repairs every game itself, even with n
   });
 });
 
-test('a rebuild page that keeps conflicting is reported, and later pages are still repaired', { skip }, async () => {
+test('a game that keeps conflicting during a rebuild is reported alone; the healthy games on its page are repaired', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);
     const [white, black] = await newUsers(pool, 2);
@@ -378,10 +378,11 @@ test('a rebuild page that keeps conflicting is reported, and later pages are sti
       BEGIN IF NEW.id = '${stuck}' THEN RAISE EXCEPTION 'busy' USING ERRCODE = '40001'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql`);
     await pool.query('CREATE TRIGGER conflict BEFORE INSERT OR UPDATE ON games FOR EACH ROW EXECUTE FUNCTION conflict()');
 
-    const rebuilt = await new PgGamesProjector(pool).rebuildAll(1);
-    assert.deepEqual(rebuilt.failures.map((f) => f.gameId), [stuck]);
+    const rebuilt = await new PgGamesProjector(pool).rebuildAll();
+    assert.deepEqual(rebuilt.failures.map((f) => f.gameId), [stuck], 'only the conflicting game is reported');
     assert.match(rebuilt.failures[0]!.error, /kept conflicting/);
-    assert.equal((await gameRow(pool, fine))?.last_seq, 0, 'the next page still ran');
+    assert.equal(rebuilt.projected, 1);
+    assert.equal((await gameRow(pool, fine))?.last_seq, 0, 'the healthy game on the same page was repaired');
     assert.equal(await gameRow(pool, stuck), undefined);
   });
 });
