@@ -59,6 +59,10 @@
  *   creates. Positive integers. Each game keeps the deadline it was created with.
  * - `NO_SHOW_SCAN_MS` (default 5000) — how often the no-show worker looks for due games. Every
  *   replica with `DATABASE_URL` runs the expiry.
+ * - `FLAG_SCAN_MS` (default 1000) — how often the flag worker looks for games whose running clock
+ *   has run out (ADR-0149). Every replica with `DATABASE_URL` runs it. It bounds how long an
+ *   untouched flagged game stays open, never the outcome: any command reaching the owner after the
+ *   flag records the timeout itself.
  *
  * Durable event log: ADR-0007 (M14 inc 2).
  * Redis pub/sub: ADR-0008 (M14 inc 3).
@@ -161,6 +165,7 @@ async function main(): Promise<void> {
   const heartbeatIntervalMs = positiveIntEnv('WS_HEARTBEAT_INTERVAL_MS', 30_000);
   const maxRoomsPerConnection = positiveIntEnv('WS_MAX_ROOMS_PER_CONNECTION', 4);
   const noShowScanMs = positiveIntEnv('NO_SHOW_SCAN_MS', 5_000);
+  const flagScanMs = positiveIntEnv('FLAG_SCAN_MS', 1_000);
   const trustProxy = resolveTrustProxyEnv(process.env['TRUST_PROXY']);
 
   const logger = new JsonLogger({ service: 'realtime-gateway', nodeId });
@@ -605,6 +610,32 @@ async function main(): Promise<void> {
     logger.info('No-show expiry is enabled');
   }
 
+  // --- In-play flag expiry (ADR-0149) ---
+  // Same placement and the same reasons as the no-show worker: every replica with a database, with
+  // correctness from the owner's command lock and the log's sequence check.
+  let flagWorker: { stop(): Promise<void> } | undefined;
+  if (pgPool && store) {
+    const { PgFlagCandidates } = await import('@chess-platform/persistence/pg');
+    const { FlagExpiryWorker, routedFlagExpiry } = await import('./flag-expiry.js');
+    const worker = new FlagExpiryWorker({
+      candidates: new PgFlagCandidates(pgPool),
+      events: store,
+      expire: routedFlagExpiry({
+        authority,
+        router: commandRouter,
+        ...(ownershipRegistry ? { ownership: ownershipRegistry } : {}),
+        hasLocalSessions: (gameId) => gateway.hasLocalSessions(gameId),
+      }),
+      pollMs: flagScanMs,
+      logger,
+      expiredCounter: metrics.counter('gateway_flag_expired_total'),
+      failuresCounter: metrics.counter('gateway_flag_failures_total'),
+    });
+    worker.start();
+    flagWorker = worker;
+    logger.info('Flag expiry is enabled');
+  }
+
   // --- HTTP health server ---
   const healthServer = createServer((req, res) => {
     if (req.url === '/health') {
@@ -775,9 +806,10 @@ async function main(): Promise<void> {
     botAutoAnalyzer?.stop();
     antiCheatAutoAnalyzer?.stop();
     engineBotMover?.stop();
-    // No new no-show pass starts from here; an in-flight one may still be routing a command through
-    // Redis and the database, so it is awaited below before either closes.
+    // No new no-show or flag pass starts from here; an in-flight one may still be routing a command
+    // through Redis and the database, so it is awaited below before either closes.
     const noShowStopped = noShowWorker?.stop();
+    const flagStopped = flagWorker?.stop();
     // No new projection batch starts from here. The in-flight one is awaited before the wake consumers
     // unsubscribe and before pub/sub and the pool close, so a wake it publishes still has listeners.
     const projectionStopped = gamesProjection?.stop();
@@ -794,6 +826,7 @@ async function main(): Promise<void> {
       healthServer.close(async () => {
         await engineShutdown; // ensure engine subprocesses are cleaned up before exit
         await noShowStopped;
+        await flagStopped;
         if (commandConsumer) commandConsumer.stop();
         if (ownershipRegistry) {
           ownershipRegistry.stopRenewal();

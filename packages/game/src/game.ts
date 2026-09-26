@@ -22,6 +22,7 @@ import {
 } from '@chess-platform/core';
 import {
   charge,
+  flagDeadline,
   hasFlagged,
   initClock,
   type ClockState,
@@ -277,6 +278,28 @@ export class Game {
 
   get fen(): string {
     return this.state.position.fen();
+  }
+
+  /**
+   * When the side to move flags on the clock the first move started, or `null` when no in-play flag
+   * can fall: the game is over, unlimited, or has no move yet (a sourced game's clock is not running,
+   * and a game without a source is still governed by its original lifecycle). The durable
+   * `flag_deadlines` queue holds exactly this instant for every such game (ADR-0149).
+   */
+  get flagDeadline(): number | null {
+    const s = this.state;
+    if (s.status.over || s.ply === 0) return null;
+    return flagDeadline(s.clock, s.position.turn, s.timeControl);
+  }
+
+  /**
+   * Whether the side to move has flagged by `at` on a clock the first move started. Then any command
+   * the owner applies — a late move, a resignation, a draw acceptance, the server's expiry — records
+   * the timeout instead, so the outcome depends on the authoritative time, not on who arrives first.
+   */
+  timeoutDue(at: number): boolean {
+    const s = this.state;
+    return !s.status.over && s.ply > 0 && hasFlagged(s.clock, s.position.turn, at, s.timeControl);
   }
 
   /** True while a sourced game still needs a seat's readiness before its first move can be played. */
