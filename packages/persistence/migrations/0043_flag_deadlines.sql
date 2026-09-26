@@ -106,13 +106,17 @@ CREATE TRIGGER flag_deadlines_track
 -- CREATE TRIGGER above holds a lock that blocks concurrent appends until this transaction commits, so
 -- no move can fall between the backfill and the trigger. A game whose deadline passed while nothing
 -- watched it is due at once, which is the truth its log already states.
+-- The deadline is computed once per game, so the lock is held no longer than it must be.
 INSERT INTO flag_deadlines (game_id, seq, due_ms)
-SELECT latest.game_id, latest.seq, flag_deadline_ms(latest.game_id, latest.payload)
+SELECT game_id, seq, due
 FROM (
-  SELECT DISTINCT ON (game_id) game_id, seq, payload
-  FROM game_events
-  WHERE type = 'MovePlayed'
-  ORDER BY game_id, seq DESC
-) latest
-WHERE NOT EXISTS (SELECT 1 FROM game_events ended WHERE ended.game_id = latest.game_id AND ended.type = 'GameEnded')
-  AND flag_deadline_ms(latest.game_id, latest.payload) IS NOT NULL;
+  SELECT latest.game_id, latest.seq, flag_deadline_ms(latest.game_id, latest.payload) AS due
+  FROM (
+    SELECT DISTINCT ON (game_id) game_id, seq, payload
+    FROM game_events
+    WHERE type = 'MovePlayed'
+    ORDER BY game_id, seq DESC
+  ) latest
+  WHERE NOT EXISTS (SELECT 1 FROM game_events ended WHERE ended.game_id = latest.game_id AND ended.type = 'GameEnded')
+) computed
+WHERE due IS NOT NULL;
