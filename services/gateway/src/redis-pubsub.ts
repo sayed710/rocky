@@ -63,7 +63,13 @@ export function createRedisPubSub(opts: RedisPubSubOptions): {
 
   // Two connections: one for SUBSCRIBE (blocked), one for PUBLISH.
   const pub = new Redis(opts.url, baseOpts);
-  const sub = new Redis(opts.url, baseOpts);
+  // No ready check on the subscriber. ioredis writes SUBSCRIBE while the connection is still
+  // handshaking (the command is allowed while Redis loads), so a subscription made right after
+  // connecting — at startup, or while reconnecting — can switch the connection to subscriber mode
+  // before the ready check's INFO, which Redis then refuses; ioredis treats that as fatal, resets the
+  // connection, and anything published meanwhile is lost. The check only waits for Redis to finish
+  // loading its dataset, which pub/sub does not need.
+  const sub = new Redis(opts.url, { ...baseOpts, enableReadyCheck: false });
 
   const pubsub = new RedisPubSub(toRedisLike(pub), toRedisLike(sub), opts.nodeId);
 

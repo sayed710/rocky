@@ -311,7 +311,8 @@ export class EngineBotMover {
    * copy will never see finish. So a non-owner looks again every `nonOwnerRecheckMs`, reloading its
    * copy from the durable log first: a finished game unregisters, and an orphaned one is claimed.
    * The reload is a full replay, which is why this runs only while someone on this replica is in
-   * the game (see `localSessionsGone`).
+   * the game (see `localSessionsGone`) — or after a pass that failed outright (Redis or the event
+   * log unreachable), when retrying is the point and the next pass that succeeds settles the rest.
    */
   private scheduleRecheck(gameId: string): void {
     if (!this.ownership || this.rechecks.has(gameId) || !this.subscriptions.has(gameId)) return;

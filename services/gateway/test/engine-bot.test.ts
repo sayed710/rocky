@@ -589,6 +589,27 @@ test('EngineBotMover: a claim still in flight when the last session leaves decid
   mover.stop();
 });
 
+test('EngineBotMover: a claim still in flight when the last session leaves, and then fails, lets go', { timeout: HELD_TEST_TIMEOUT_MS }, async () => {
+  const gameId = '00000000-0000-7000-8000-000000000033';
+  const { pubsub, authority, router } = await botBlackAfterE4(gameId);
+  const provider = new FakeAnalysisProvider();
+  const ownership = new ScriptedOwnership();
+  ownership.owns = false; // another node will win this claim
+  let releaseClaim!: () => void;
+  ownership.prepareGate = new Promise<void>((resolve) => (releaseClaim = resolve));
+  const mover = new EngineBotMover({ authority, router, pubsub, provider, ownership });
+
+  mover.registerGame(gameId); // the claim goes out...
+  await flush();
+  mover.localSessionsGone(gameId); // ...the last session leaves before it returns...
+  ownership.prepareGate = undefined;
+  releaseClaim(); // ...and it fails: nobody here to take over for, so this node lets go.
+
+  await waitUntil('the non-owner to let go', () => pubsub.subscriberCount(gameChannel(gameId)) === 0);
+  assert.equal(provider.playCalls.length, 0);
+  mover.stop();
+});
+
 test('EngineBotMover: a former owner whose sessions left lets go on its first failed claim', async () => {
   const gameId = '00000000-0000-7000-8000-000000000031';
   const { pubsub, authority, router, e4Broadcast } = await botBlackAfterE4(gameId);

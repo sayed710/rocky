@@ -159,11 +159,7 @@ class SlowReadLog implements EventLog {
 
 function makeNode(redis: Redis, store: EventLog, engine: ScriptedEngine, nonOwnerRecheckMs?: number, leaseTtlSec = 30) {
   const nodeId = `node-${randomUUID()}`;
-  // A test node subscribes within milliseconds of connecting, unlike a gateway, whose rooms open
-  // long after startup. If SUBSCRIBE lands before ioredis's ready check, the check's INFO is refused
-  // ("Connection in subscriber mode") and the subscriber connection breaks — seen once in CI as a
-  // lost `ended` broadcast. The ready check guards nothing these tests exercise, so turn it off here.
-  const redisPubSub = createRedisPubSub({ url: REDIS_URL!, nodeId, redisOptions: { enableReadyCheck: false } });
+  const redisPubSub = createRedisPubSub({ url: REDIS_URL!, nodeId });
   const pubsub = new CountingPubSub(redisPubSub.pubsub);
   const authority = new GameAuthority(pubsub, () => Date.now(), store);
   const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec, renewalIntervalSec: Math.max(1, Math.floor(leaseTtlSec / 2)) });
