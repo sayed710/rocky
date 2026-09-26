@@ -163,7 +163,12 @@ export class PgGamesProjector {
         const live = await gamesAwaitingLiveBatch(client, ids);
         const result = await this.projectAll(client, ids.filter((id) => !live.has(id)));
         return { ...result, deferred: live.size };
-      }, 'REPEATABLE READ'));
+      }, 'REPEATABLE READ')).catch((error: unknown) => {
+        // A page that keeps colliding with live writes is reported, not fatal: later pages still run.
+        if (!isSerializationFailure(error)) throw error;
+        const message = `rebuild page kept conflicting with live projection: ${(error as Error).message}`;
+        return { projected: 0, deferred: 0, endings: [], failures: ids.map((gameId) => ({ gameId, error: message })) };
+      });
       total.projected += page.projected;
       total.deferred += page.deferred;
       total.failures.push(...page.failures);
@@ -285,17 +290,20 @@ function isStreamDataFailure(error: unknown): boolean {
   return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
 }
 
-const SERIALIZATION_FAILURE = '40001';
-const MAX_SERIALIZATION_ATTEMPTS = 5;
+const MAX_SERIALIZATION_ATTEMPTS = 10;
 
-/** Re-run a REPEATABLE READ page that collided with a concurrent write. */
+function isSerializationFailure(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '40001';
+}
+
+/** Re-run a REPEATABLE READ page that collided with a concurrent write, backing off so a busy live projector can finish. */
 async function retrySerialization<T>(run: () => Promise<T>): Promise<T> {
   for (let attempt = 1; ; attempt += 1) {
     try {
       return await run();
     } catch (error) {
-      const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
-      if (code !== SERIALIZATION_FAILURE || attempt >= MAX_SERIALIZATION_ATTEMPTS) throw error;
+      if (!isSerializationFailure(error) || attempt >= MAX_SERIALIZATION_ATTEMPTS) throw error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, 25 * 2 ** attempt) * (0.5 + Math.random())));
     }
   }
 }

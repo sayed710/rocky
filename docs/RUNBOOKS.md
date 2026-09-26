@@ -265,5 +265,5 @@ The gateway folds `game_events` into `games` continuously ([ADR-0147](adr/0147-d
 - **Rebuild** (after a logical restore into a different cluster, or to repair rows by hand): run it from any API container, beside running gateways.
   Compose: `docker compose exec api sh -c "cd packages/persistence && node dist/pg/games-rebuild-cli.js"`.
   Kubernetes: `kubectl exec <any-api-pod> -- npm run games:rebuild --workspace @chess-platform/persistence` (the same command the chart uses for `migrate`).
-  It prints the number of games projected and deferred to the live projector, and exits non-zero if any stream failed. Endings the rebuild itself makes terminal do not wake the search indexer or achievements; run `reindex-search` afterwards if needed.
+  It prints the number of games projected and deferred to the live projector, and exits non-zero if any stream failed or a page kept conflicting with live projection (rerun it). Endings the rebuild itself makes terminal do not wake the search indexer or achievements; run `reindex-search` afterwards if needed.
 

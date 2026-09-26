@@ -362,6 +362,30 @@ test('after a logical restore the rebuild repairs every game itself, even with n
   });
 });
 
+test('a rebuild page that keeps conflicting is reported, and later pages are still repaired', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await newUsers(pool, 2);
+    const store = new PostgresEventStore(pool);
+    const stuck = uuidv7();
+    const fine = uuidv7();
+    await store.append(stuck, -1, creation(stuck, white!, black!));
+    await store.append(fine, -1, creation(fine, white!, black!));
+    await drain(new PgGamesProjector(pool), pool);
+    await pool.query('DELETE FROM games WHERE id = ANY($1::uuid[])', [[stuck, fine]]);
+    // Stand-in for a live projector that keeps winning the race for one game's row.
+    await pool.query(`CREATE FUNCTION conflict() RETURNS trigger AS $$
+      BEGIN IF NEW.id = '${stuck}' THEN RAISE EXCEPTION 'busy' USING ERRCODE = '40001'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql`);
+    await pool.query('CREATE TRIGGER conflict BEFORE INSERT OR UPDATE ON games FOR EACH ROW EXECUTE FUNCTION conflict()');
+
+    const rebuilt = await new PgGamesProjector(pool).rebuildAll(1);
+    assert.deepEqual(rebuilt.failures.map((f) => f.gameId), [stuck]);
+    assert.match(rebuilt.failures[0]!.error, /kept conflicting/);
+    assert.equal((await gameRow(pool, fine))?.last_seq, 0, 'the next page still ran');
+    assert.equal(await gameRow(pool, stuck), undefined);
+  });
+});
+
 test('a transient database error aborts the batch without recording the game; a data error is recorded', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);

@@ -366,7 +366,7 @@ async function main(): Promise<void> {
   }
 
   // --- Search Index Worker (M11 inc 8, ADR-0056) ---
-  let searchIndexWorker: { stop(): void } | undefined;
+  let searchIndexWorker: { stop(): void; drain(): Promise<void> } | undefined;
   if (process.env['SEARCH_INDEXER'] === '1') {
     if (process.env['SEARCH_ENABLED'] === '0') {
       logger.info('SEARCH_INDEXER is suppressed because SEARCH_ENABLED=0');
@@ -408,7 +408,7 @@ async function main(): Promise<void> {
   }
 
   // --- Achievements Award Worker (M10 inc 5, ADR-0070) ---
-  let achievementsAwardWorker: { stop(): void } | undefined;
+  let achievementsAwardWorker: { stop(): void; drain(): Promise<void> } | undefined;
   // Opt-in, like SEARCH_INDEXER and BOT_AUTO_ANALYZE above, not opt-out. A worker that writes to
   // the database on every finished game should not appear in every deployment because a commit
   // landed; and defaulting it on means every gateway without a DATABASE_URL logs a warning about a
@@ -766,6 +766,8 @@ async function main(): Promise<void> {
         await projectionStopped;
         searchIndexWorker?.stop();
         achievementsAwardWorker?.stop();
+        // Indexing or awarding started by the last wake must finish before the pool closes.
+        await Promise.all([searchIndexWorker?.drain(), achievementsAwardWorker?.drain()]);
         if (closePubSub) await closePubSub();
         if (closeCommandRedis) await closeCommandRedis();
         if (closeDatabase) await closeDatabase();
