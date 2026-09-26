@@ -372,11 +372,7 @@ export class InMemoryGamesRepository implements GamesRepository {
     this.order.set(row.id, this.seq++);
   }
 
-  async updateProgress(id: string, plyCount: number, lastSeq: number): Promise<void> {
-    const row = this.byId.get(id);
-    if (row) this.byId.set(id, { ...row, plyCount, lastSeq });
-  }
-
+  /** In-memory stand-in for the PostgreSQL event-log projector's terminal write (ADR-0147). */
   async finish(id: string, finish: GameFinish): Promise<void> {
     const row = this.byId.get(id);
     if (row) {

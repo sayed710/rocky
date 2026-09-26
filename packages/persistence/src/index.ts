@@ -18,3 +18,4 @@ export * from './in-memory-study-partner';
 export * from './search-backfill';
 
 export * from './analysis-cache';
+export * from './games-projection';

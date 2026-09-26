@@ -9,7 +9,6 @@ import type { Pool, PoolClient } from 'pg';
 import type { Variant } from '@chess-platform/core';
 import type { ResultString, Termination, TimeControl, GameEvent } from '@chess-platform/game';
 import type {
-  GameFinish,
   GameStart,
   GameSummaryRow,
   GamesRepository,
@@ -568,31 +567,6 @@ export class PgRatingsRepository implements RatingsRepository {
 export class PgGamesRepository implements GamesRepository {
   constructor(private readonly pool: Pool) {}
 
-  async start(game: GameStart): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO games (id, variant, rated, speed, white_id, black_id, started_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (id) DO NOTHING`,
-      [game.id, game.variant, game.rated, game.speed, game.whiteId, game.blackId, game.startedAt],
-    );
-  }
-
-  async updateProgress(id: string, plyCount: number, lastSeq: number): Promise<void> {
-    await this.pool.query('UPDATE games SET ply_count = $2, last_seq = $3 WHERE id = $1', [
-      id,
-      plyCount,
-      lastSeq,
-    ]);
-  }
-
-  async finish(id: string, finish: GameFinish): Promise<void> {
-    await this.pool.query(
-      `UPDATE games SET result = $2, termination = $3, ply_count = $4, last_seq = $5, ended_at = $6
-       WHERE id = $1`,
-      [id, finish.result, finish.termination, finish.plyCount, finish.lastSeq, finish.endedAt],
-    );
-  }
-
   async findById(id: string): Promise<GameSummaryRow | null> {
     // PostgreSQL throws 22P02 when a text path parameter is compared with a
     // UUID column. Treat a malformed public id exactly like an unknown game so
@@ -618,7 +592,7 @@ export class PgGamesRepository implements GamesRepository {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Return whether a repository identifier is a canonical hyphenated UUID. */
-function isCanonicalUuid(value: string): boolean {
+export function isCanonicalUuid(value: string): boolean {
   return UUID_PATTERN.test(value);
 }
 

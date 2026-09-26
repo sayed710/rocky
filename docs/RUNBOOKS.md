@@ -254,4 +254,16 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml down -v
    - **Observability Signal**: `gateway_ownership_renewal_failures_total` counter spikes on owner nodes. `gateway_fast_path_commands_total` increments while in the valid lease window, then stops when the lease ages out. Non-owner nodes increment `gateway_forward_timeouts_total`. Logs report `[OwnershipRegistry] renewal failed`.
    - **Operator Action**: Restore Redis or repair network connectivity as quickly as possible. If Redis is restored before the lease window ages out (~22s), ongoing games on owner nodes suffer zero interruption. If Redis remains down past the lease window, ongoing games fail closed safely until Redis connectivity is restored and renewals/claims resume. Once Redis connectivity is restored, `pingRedis` health checks succeed, lease renewals resume, and command routing recovers automatically.
 
+## Games projection lagging, failing, or needing a rebuild
+
+The gateway folds `game_events` into `games` continuously ([ADR-0147](adr/0147-durable-games-projection.md)); nobody has to run anything for live games.
+
+- **Is it keeping up?** Compare the checkpoint with the log. `SELECT updated_at FROM projection_checkpoints WHERE projection = 'games'` should be recent while games are played, and
+  `SELECT count(*) FROM game_events e, projection_checkpoints c WHERE c.projection = 'games' AND (e.xact_id, e.game_id, e.seq) > (c.xact_id, c.game_id, c.seq)` should stay small.
+  A backlog that does not drain usually means a long-running or idle-in-transaction session anywhere on the PostgreSQL server holding back the transaction horizon: find it in `pg_stat_activity` (`xact_start`) and end it. Gateway logs `Games projection batch failed` mean the database itself is failing.
+- **Failed streams.** `SELECT game_id, attempts, last_error, retry_at FROM games_projection_failures`. Each row is also logged as `Games projection failed for a game stream`. They are retried automatically (at most hourly, and immediately on the game's next event); fix the cause (usually a missing upcaster in a deploy) rather than deleting rows. A failure row is removed by the first successful re-fold.
+- **Rebuild** (after a logical restore into a different cluster, or to repair rows by hand): run it from any API container, beside running gateways.
+  Compose: `docker compose exec api sh -c "cd packages/persistence && node dist/pg/games-rebuild-cli.js"`.
+  Kubernetes: `kubectl exec <any-api-pod> -- npm run games:rebuild --workspace @chess-platform/persistence` (the same command the chart uses for `migrate`).
+  It prints the number of games projected and deferred to the live projector, and exits non-zero if any stream failed or a page kept conflicting with live projection (rerun it). Endings the rebuild itself makes terminal do not wake the search indexer or achievements; run `reindex-search` afterwards if needed.
 
