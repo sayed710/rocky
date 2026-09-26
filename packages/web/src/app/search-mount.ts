@@ -49,8 +49,8 @@ interface SearchModeOption {
 
 const SEARCH_MODES: readonly SearchModeOption[] = [
   { value: 'keyword', label: 'Keyword', needsSemanticSearch: false },
-  { value: 'semantic', label: 'Semantic', needsSemanticSearch: true },
-  { value: 'hybrid', label: 'Hybrid', needsSemanticSearch: true },
+  { value: 'semantic', label: 'Semantic (experimental)', needsSemanticSearch: true },
+  { value: 'hybrid', label: 'Hybrid (experimental)', needsSemanticSearch: true },
 ];
 
 /** The modes this deployment can actually serve. */
