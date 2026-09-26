@@ -86,12 +86,13 @@ The gateway health endpoint listens on container port 4176 (the WebSocket port
 plus one) and is used by the Compose healthcheck. That port is not published to
 the host by the primary Compose file.
 
-**Play vs Computer** needs two things and fails quietly without either: `ENGINE_BOT=1`, and an
-engine binary at `STOCKFISH_PATH`. The gateway image ships a pinned Stockfish 16 at
-`/usr/local/bin/stockfish` and Compose sets `ENGINE_BOT` by default, so `docker compose up` gives
-you a working opponent. If neither is present the gateway logs
-`ENGINE_BOT requires an engine binary (set STOCKFISH_PATH)` and the lobby still offers the mode
-while the opponent never moves. Confirm with:
+**Play vs Computer** needs two things, and without either the lobby still offers the mode while the
+opponent never moves: `ENGINE_BOT=1`, and an engine binary at `STOCKFISH_PATH`. The gateway image
+ships a pinned Stockfish 16 at `/usr/local/bin/stockfish`, and both Compose and the Helm chart
+(`gateway.engineBot.enabled`, default `true`) set `ENGINE_BOT`, so either gives you a working
+opponent. With `ENGINE_BOT` unset nothing is logged; with it set but `STOCKFISH_PATH` unset the
+gateway logs `ENGINE_BOT requires an engine binary (set STOCKFISH_PATH)` at startup; with a path to
+a missing binary each bot move fails with `[EngineBotMover] Bot move failed`. Confirm with:
 
 ```bash
 docker compose logs gateway | grep "EngineBotMover is enabled"
@@ -165,7 +166,7 @@ The script:
 | `PORT` | `8080` | No | API host port in the explicit chaos/developer override; not published by the normal stack |
 | `GATEWAY_PORT` | `4175` | No | Gateway host port in the explicit chaos/developer override; not published by the normal stack |
 | `WEB_PORT` | `3000` | No | Web frontend host port |
-| `ENGINE_BOT` | `1` in Compose | No | Set to `"0"` to disable the autonomous engine bot mover in the gateway (ADR-0080) |
+| `ENGINE_BOT` | `1` in Compose and Helm (`gateway.engineBot.enabled`) | No | Set to `"0"` (Helm: `gateway.engineBot.enabled=false`) to disable the autonomous engine bot mover in the gateway (ADR-0080) |
 | `STOCKFISH_PATH` | `/usr/local/bin/stockfish` in the gateway image | Required if `ENGINE_BOT=1` outside the image | Path to the Stockfish UCI executable binary |
 | `EMAIL_PROVIDER` | `console` in Compose | Yes | `console` is explicit development-only; production requires `resend` |
 | `RESEND_API_KEY` | none | Production | Resend credential; inject through a secret manager and never log it |

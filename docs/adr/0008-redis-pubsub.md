@@ -98,3 +98,8 @@ The dependency enters only in `services/gateway` — the domain package
   requires no changes.
 - **Rate limiting**: the same Redis connection can be reused for per-account
   login rate limiting (M4 identity hardening), as noted in PROJECT_STATE §5.
+
+> **Amended in M15 Increment 69 (ADR-0080).** The subscriber connection runs without ioredis's
+> ready check (`pubSubConnectionOptions` in `services/gateway/src/redis-pubsub.ts`): a SUBSCRIBE
+> written during the handshake made the check's `INFO` fail, and ioredis reset the connection,
+> dropping publishes. The publisher keeps the check.

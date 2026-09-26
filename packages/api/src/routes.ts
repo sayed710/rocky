@@ -1407,6 +1407,10 @@ export function buildRouter(deps: RouteDeps): Router {
           minRating: 'must be <= maxRating',
         });
       }
+      await admit([
+        { key: `seek-create:user:${identity.userId}`, limit: config.rateLimit.seekCreation.perUser },
+        { key: `seek-create:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.seekCreation.perIp },
+      ]);
       const seek = await repos.seeks.create({
         id: ids.next(),
         creatorId: identity.userId,

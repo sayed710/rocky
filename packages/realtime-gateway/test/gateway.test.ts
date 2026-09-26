@@ -337,6 +337,38 @@ test('onGameLoaded callback is optional and invoked once when a join materialise
   assert.equal(loaded.length, 1, 'onGameLoaded is guarded against double-invocation');
 });
 
+test('onGameUnloaded fires once, when the last session in a game leaves', async () => {
+  let clock = 1_000;
+  const now = () => (clock += 10);
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, now);
+  const verifier = new FakeTokenVerifier().allow('token-alice', 'alice');
+
+  const unloaded: string[] = [];
+  const gateway = new RealtimeGateway(authority, pubsub, verifier, now, undefined, undefined, (gameId) => {
+    unloaded.push(gameId);
+  });
+
+  await authority.createGame({
+    gameId: 'g-unload',
+    timeControl: TC,
+    players: { white: 'alice', black: 'bob' },
+    rated: false,
+  });
+
+  const c1 = new InMemoryConnection('c1');
+  const c2 = new InMemoryConnection('c2');
+  gateway.handleConnection(c1);
+  gateway.handleConnection(c2);
+  c1.deliver({ t: 'join', gameId: 'g-unload', token: 'token-alice' });
+  c2.deliver({ t: 'join', gameId: 'g-unload' });
+
+  c1.close();
+  assert.deepEqual(unloaded, [], 'a spectator is still in the room');
+  c2.close();
+  assert.deepEqual(unloaded, ['g-unload'], 'the room emptied');
+});
+
 test('onGameLoaded fires again when a game room empties and is rejoined', async () => {
   let clock = 1_000;
   const now = () => (clock += 10);
