@@ -9,6 +9,7 @@ import { FakeSocketFactory } from './support/fake-socket.js';
 import type { HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { MemoryTokenStore } from '../src/net/session.js';
 import type { ServerMessage, StateView } from '../src/net/ws-protocol.js';
+import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
 import type { WebAuthnAdapter } from '../src/ports/webauthn.js';
 import type {
   WebAuthnLoginOptions,
@@ -735,23 +736,15 @@ test('self profile reloads only when the authenticated user changes and clears o
 
 // ── Action Panel DOM Regression Tests ────────────────────────────────────
 
-/** Valid joined message fixture: white player, ply 0, game in progress. */
-const JOINED_MSG = {
-  t: 'joined',
-  gameId: 'g1',
-  role: 'white',
-  state: BASE_STATE,
-} as const satisfies ServerMessage;
-
-function setupActionPanel() {
+function setupActionPanel(state: StateView = BASE_STATE, role: 'white' | 'black' | 'spectator' = 'white') {
   const doc = makeDoc();
   const sockets = new FakeSocketFactory();
   const result = bootstrap(doc, { ...makeDeps(sockets), gameId: 'g1', token: 'token-u1' });
   const socket = sockets.last;
 
-  // Connect and become a white player in an ongoing game.
+  // Connect and join an ongoing game (White by default for action-panel tests).
   socket.open();
-  socket.emit(JOINED_MSG);
+  socket.emit({ t: 'joined', gameId: 'g1', role, state });
 
   return { doc, sockets, result, socket };
 }
@@ -947,7 +940,7 @@ test('game metadata: populates elements correctly', () => {
   const metaVariantEl = doc.getElementById('meta-variant') as HTMLElement;
   const metaTimeEl = doc.getElementById('meta-time') as HTMLElement;
 
-  // Initial connection state after setup (which sends JOINED_MSG)
+  // Initial connection state after setup (which sends a joined snapshot)
   assert.equal(metaConnectionEl.textContent, 'Connected');
 
   // Test timeControl formatting
@@ -979,6 +972,71 @@ test('game metadata: populates elements correctly', () => {
   socket.serverClose();
   assert.equal(metaConnectionEl.textContent, 'Reconnecting…');
   assert.equal(metaWhiteTxt.textContent, 'Unknown');
+});
+
+test('human presence labels and live announcements remain online/offline for both colors', () => {
+  const { doc, socket } = setupActionPanel();
+  const white = doc.getElementById('meta-white')!.querySelector('.presence-text')!;
+  const black = doc.getElementById('meta-black')!.querySelector('.presence-text')!;
+  const live = doc.getElementById('meta-live-status')!;
+  const spectators = doc.getElementById('meta-spectators')!;
+
+  socket.emit({ t: 'presence', gameId: 'g1', white: true, black: false, spectators: 3 });
+  assert.equal(white.textContent, 'Online');
+  assert.equal(black.textContent, 'Offline');
+  assert.equal(spectators.textContent, '3');
+  assert.match(live.textContent, /White is Online/);
+  assert.match(live.textContent, /Black is Offline/);
+
+  socket.emit({ t: 'presence', gameId: 'g1', white: false, black: true, spectators: 4 });
+  assert.equal(white.textContent, 'Offline');
+  assert.equal(black.textContent, 'Online');
+  assert.equal(spectators.textContent, '4');
+  assert.match(live.textContent, /White is Offline/);
+  assert.match(live.textContent, /Black is Online/);
+});
+
+for (const botColor of ['white', 'black'] as const) {
+  test(`engine bot as ${botColor} is Computer regardless of WebSocket presence`, () => {
+    const state = { ...BASE_STATE, players: {
+      white: botColor === 'white' ? ENGINE_BOT_USER_IDS.club : 'u1',
+      black: botColor === 'black' ? ENGINE_BOT_USER_IDS.club : 'u2',
+    } };
+    const { doc, socket } = setupActionPanel(state, botColor === 'white' ? 'black' : 'white');
+    const bot = doc.getElementById(`meta-${botColor}`)!;
+    const botText = bot.querySelector('.presence-text')!;
+    const botDot = bot.querySelector<HTMLElement>('.presence-dot')!;
+    const humanColor = botColor === 'white' ? 'black' : 'white';
+    const humanText = doc.getElementById(`meta-${humanColor}`)!.querySelector('.presence-text')!;
+    const live = doc.getElementById('meta-live-status')!;
+    const spectators = doc.getElementById('meta-spectators')!;
+
+    assert.equal(botText.textContent, 'Computer', 'bot identity works before a presence frame');
+    assert.equal(botDot.hidden, true, 'no online/offline dot is shown for a bot');
+    for (const online of [false, true]) {
+      socket.emit({ t: 'presence', gameId: 'g1', white: online, black: online, spectators: online ? 2 : 1 });
+      assert.equal(botText.textContent, 'Computer');
+      assert.equal(botDot.hidden, true);
+      assert.equal(humanText.textContent, online ? 'Online' : 'Offline');
+      assert.equal(spectators.textContent, online ? '2' : '1');
+      assert.doesNotMatch(live.textContent, new RegExp(`${botColor === 'white' ? 'White' : 'Black'} is (Online|Offline)`));
+      assert.match(live.textContent, new RegExp(`${humanColor === 'white' ? 'White' : 'Black'} is ${online ? 'Online' : 'Offline'}`));
+    }
+
+    socket.serverClose();
+    assert.equal(botText.textContent, 'Computer');
+    assert.equal(humanText.textContent, 'Unknown');
+    assert.equal(spectators.textContent, '—');
+  });
+}
+
+test('spectator presence and count remain unchanged', () => {
+  const { doc, socket } = setupActionPanel(BASE_STATE, 'spectator');
+  socket.emit({ t: 'presence', gameId: 'g1', white: true, black: false, spectators: 5 });
+  assert.equal(doc.getElementById('meta-role')!.textContent, 'Spectating');
+  assert.equal(doc.getElementById('meta-spectators')!.textContent, '5');
+  assert.equal(doc.getElementById('meta-white')!.querySelector('.presence-text')!.textContent, 'Online');
+  assert.equal(doc.getElementById('meta-black')!.querySelector('.presence-text')!.textContent, 'Offline');
 });
 
 // ── Sign-in form ────────────────────────────────────────────────────────────
