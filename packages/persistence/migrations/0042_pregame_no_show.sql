@@ -15,23 +15,28 @@ CREATE TABLE pregame_deadlines (
 );
 CREATE INDEX pregame_deadlines_due_idx ON pregame_deadlines (due_at, game_id);
 
--- A creation the game aggregate would accept as sourced enters the queue: a known source and a
--- positive safe-integer deadline, the same rule `Game` applies on replay. The first move or any ending
--- leaves it. Anything else is skipped rather than raised, so this can never reject an append or
--- queue a row the worker could never settle. The checks are nested because SQL does not promise to
--- short-circuit AND, and a cast of a non-numeric value would raise.
+-- A creation the game aggregate would accept as sourced enters the queue: a known source, a
+-- positive safe-integer deadline, a non-negative integer creation time, and a deadline no later
+-- than the latest ECMAScript date (8.64e15 ms, inside timestamptz's range), which is the same rule
+-- `Game` applies. The first move or any ending leaves it. Anything else is skipped rather than
+-- raised, so this can never reject an append or queue a row the worker could never settle. The
+-- checks are nested because SQL does not promise to short-circuit AND, and a cast of a non-numeric
+-- value would raise.
 CREATE FUNCTION pregame_deadlines_track() RETURNS trigger AS $$
 DECLARE
   after_ms NUMERIC;
+  at_ms NUMERIC;
 BEGIN
   IF NEW.seq = 0 THEN
     IF NEW.payload->>'source' IN ('seek', 'tournament')
        AND jsonb_typeof(NEW.payload->'noShowAfterMs') = 'number'
        AND jsonb_typeof(NEW.payload->'at') = 'number' THEN
       after_ms := (NEW.payload->>'noShowAfterMs')::numeric;
-      IF after_ms > 0 AND after_ms = trunc(after_ms) AND after_ms <= 9007199254740991 THEN
+      at_ms := (NEW.payload->>'at')::numeric;
+      IF after_ms > 0 AND after_ms = trunc(after_ms) AND after_ms <= 9007199254740991
+         AND at_ms >= 0 AND at_ms = trunc(at_ms) AND at_ms + after_ms <= 8640000000000000 THEN
         INSERT INTO pregame_deadlines (game_id, due_at)
-        VALUES (NEW.game_id, to_timestamp(((NEW.payload->>'at')::numeric + after_ms) / 1000));
+        VALUES (NEW.game_id, to_timestamp((at_ms + after_ms) / 1000));
       END IF;
     END IF;
   ELSE

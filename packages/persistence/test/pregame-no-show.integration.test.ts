@@ -132,6 +132,10 @@ test('only a deadline the game aggregate accepts is queued; anything malformed i
       { source: 'tournament' },
       { source: 'seek', noShowAfterMs: 60000, at: null },
       { source: 'seek', noShowAfterMs: 60000, at: 'now' },
+      { source: 'seek', noShowAfterMs: 60000, at: -1 },
+      { source: 'seek', noShowAfterMs: 60000, at: 1.5 },
+      { source: 'seek', noShowAfterMs: 60000, at: 1e20 },
+      { source: 'tournament', noShowAfterMs: 300000, at: 8640000000000000 - 299999 },
     ];
     for (const fields of malformed) {
       const gameId = uuidv7();
@@ -149,6 +153,13 @@ test('only a deadline the game aggregate accepts is queued; anything malformed i
       [valid, JSON.stringify({ ...base, gameId: valid, source: 'tournament', noShowAfterMs: 300000 })],
     );
     assert.deepEqual(await queue(pool), [{ game_id: valid, due_at: new Date(T0 + 300_000) }]);
+    // The latest deadline the domain accepts is one the queue can store.
+    const latest = uuidv7();
+    await pool.query(
+      `INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, 'GameCreated', 1, $2::jsonb)`,
+      [latest, JSON.stringify({ ...base, gameId: latest, source: 'tournament', noShowAfterMs: 300000, at: 8640000000000000 - 300000 })],
+    );
+    assert.equal((await queue(pool)).find((r) => r.game_id === latest)?.due_at.getTime(), 8640000000000000);
   });
 });
 

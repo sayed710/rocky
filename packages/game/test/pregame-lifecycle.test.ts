@@ -212,3 +212,15 @@ test('a sourced creation without a numeric creation time is refused, matching th
   const legacy = { ...create().events[0]!, at: null } as unknown as GameEvent;
   assert.doesNotThrow(() => Game.fromEvents([legacy]));
 });
+
+test('a sourced creation time and deadline must fit the representable date range', () => {
+  const MAX = 8_640_000_000_000_000;
+  const make = (at: number, source: GameSource = 'tournament') => Game.create({
+    gameId: 'g', timeControl: TC, players: { white: 'a', black: 'b' }, at, source, noShowAfterMs: DEADLINE[source],
+  });
+  for (const at of [-1, 1.5, 2 ** 53, MAX, MAX - DEADLINE.tournament + 1]) {
+    assert.throws(() => make(at), GameError, `at ${at}`);
+  }
+  assert.equal(make(MAX - DEADLINE.tournament).game.snapshot().noShowAt, MAX, 'the latest deadline is accepted');
+  assert.equal(make(0).game.snapshot().noShowAt, DEADLINE.tournament);
+});

@@ -143,15 +143,25 @@ const GAME_SOURCES: readonly unknown[] = ['seek', 'tournament'] satisfies readon
  */
 function pregameOf(source: unknown, noShowAfterMs: unknown, at: unknown): { source: GameSource; noShowAfterMs: number } | null {
   if (source === undefined && noShowAfterMs === undefined) return null;
-  if (typeof at !== 'number' || !Number.isFinite(at)) {
-    throw new GameError(`a sourced game needs a numeric creation time; got ${JSON.stringify(at)}`);
+  if (typeof at !== 'number' || !Number.isSafeInteger(at) || at < 0) {
+    throw new GameError(`a sourced game needs a numeric creation time in epoch milliseconds; got ${JSON.stringify(at)}`);
   }
   if (!GAME_SOURCES.includes(source)) throw new GameError(`unknown game source ${JSON.stringify(source)}`);
   if (typeof noShowAfterMs !== 'number' || !Number.isSafeInteger(noShowAfterMs) || noShowAfterMs <= 0) {
     throw new GameError(`a ${String(source)} game needs a positive integer no-show deadline; got ${JSON.stringify(noShowAfterMs)}`);
   }
+  if (at + noShowAfterMs > MAX_DEADLINE_MS) {
+    throw new GameError(`a no-show deadline must fall before the latest representable date; got ${at} + ${noShowAfterMs}`);
+  }
   return { source: source as GameSource, noShowAfterMs };
 }
+
+/**
+ * The latest instant a no-show deadline may fall: ECMAScript's maximum `Date` (year 275760), which is
+ * also inside PostgreSQL's `timestamptz` range, so a deadline the domain accepts is always one the
+ * `pregame_deadlines` trigger can store. Migration 0042 applies the same bound.
+ */
+const MAX_DEADLINE_MS = 8_640_000_000_000_000;
 
 /** Why a first move is refused until both seats are durably ready. */
 export const NOT_READY_MESSAGE = 'Both players must be ready before the first move';

@@ -320,8 +320,9 @@ when a creation carries a numeric `noShowAfterMs` and deletes it on the first mo
 the same transaction as the append. It therefore holds exactly the unstarted seek and tournament
 games, whichever release wrote them, and cannot lag the log. The no-show worker scans it by
 `due_at`, re-decides each game from the event log, and deletes a row the log shows will never
-expire. Only a creation the game aggregate would accept (a known source and a positive safe-integer
-deadline) is queued; anything else is skipped, never raised, so the trigger cannot reject an append
+expire. Only a creation the game aggregate would accept (a known source, a positive safe-integer
+deadline, a non-negative integer creation time, and a deadline no later than the latest ECMAScript date,
+which is inside `timestamptz`'s range) is queued; anything else is skipped, never raised, so the trigger cannot reject an append
 or queue a row the worker could never settle.
 
 ### 4.3 Identity & authZ
