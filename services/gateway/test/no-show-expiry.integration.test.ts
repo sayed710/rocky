@@ -68,7 +68,6 @@ function makeNode(redis: Redis, store: PostgresEventStore, pool: Pool, clock: Cl
     candidates: new PgNoShowCandidates(pool),
     events: store,
     expire: routedNoShowExpiry({ authority, router, ownership: registry, hasLocalSessions: (id) => gateway.hasLocalSessions(id) }),
-    deadlines: { seek: SEEK_MS, tournament: TOURNAMENT_MS },
     now: () => clock.now,
     pollMs: 20,
   });
@@ -128,7 +127,10 @@ async function withStack(fn: (s: Stack) => Promise<void>): Promise<void> {
 
 async function createGame(node: Node, source: GameSource): Promise<string> {
   const gameId = randomUUID();
-  await node.authority.createGame({ gameId, timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: true, at: T0, source });
+  await node.authority.createGame({
+    gameId, timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: true, at: T0,
+    source, noShowAfterMs: source === 'seek' ? SEEK_MS : TOURNAMENT_MS,
+  });
   return gameId;
 }
 
@@ -275,7 +277,7 @@ stackTest('tournament players who are both ready wait with full clocks; the firs
   });
 });
 
-stackTest('the first move and the expiry racing on different replicas produce exactly one outcome', async () => {
+stackTest('a first move racing the expiry at the deadline on different replicas yields exactly one no-show', async () => {
   for (let round = 0; round < 3; round += 1) {
     await withStack(async ({ a, b, pool, store, clock }) => {
       const gameId = await createGame(a, 'seek');
@@ -295,12 +297,9 @@ stackTest('the first move and the expiry racing on different replicas produce ex
       });
       await new Promise((resolve) => setTimeout(resolve, 500));
       const types = (await logged(store, gameId)).map((e) => e.type);
-      const tail = types.slice(3);
-      assert.ok(
-        (tail.length === 1 && tail[0] === 'MovePlayed') || (tail.length === 1 && tail[0] === 'GameEnded'),
-        `exactly one of a first move or a no-show, got ${JSON.stringify(types)}`,
-      );
-      if (tail[0] === 'GameEnded') assert.ok(alice.last('reject') !== undefined, 'the losing move was refused');
+      // At the deadline the no-show wins in either order: the expiry, or White's move recording it.
+      assert.deepEqual(types.slice(3), ['GameEnded'], `exactly one no-show and no move, got ${JSON.stringify(types)}`);
+      await waitFor('White to learn the outcome', () => alice.last('ended') !== undefined);
     });
   }
 });
@@ -339,7 +338,7 @@ stackTest('a replica restarted while games are overdue expires them on its first
 stackTest('a tournament double forfeit is recorded by the reporter from the durable ending and never relaunched', async () => {
   await withStack(async ({ a, pool, store, clock }) => {
     const repo = new PgTournamentsRepository(pool);
-    const launcher = new DurableGameLauncher(store, { now: () => T0 });
+    const launcher = new DurableGameLauncher(store, { now: () => T0 }, TOURNAMENT_MS);
     const tournaments = new TournamentService(repo, launcher);
     const arenas = new ArenaService(repo, launcher, () => clock.now);
     const id = `rr-${randomUUID()}`;

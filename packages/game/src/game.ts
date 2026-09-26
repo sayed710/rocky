@@ -86,7 +86,12 @@ export interface GameState {
   readonly chess960StartId: number | null;
   /** The pregame lifecycle this game follows, or `null` for the original one (ADR-0148). */
   readonly source: GameSource | null;
-  /** Durable readiness per seat. Only meaningful when {@link source} is set. */
+  /**
+   * When the pregame no-show deadline falls (`GameCreated.at + noShowAfterMs`), or `null` for a game
+   * without a source. Durable, so every replica and every replay agrees on it.
+   */
+  readonly noShowAt: number | null;
+  /** Durable readiness per seat, recorded only before {@link noShowAt}. Only meaningful with a source. */
   readonly ready: { readonly w: boolean; readonly b: boolean };
 }
 
@@ -123,15 +128,24 @@ export interface CreateGameParams {
   readonly chess960StartId?: number;
   /** The pregame lifecycle to follow; omitted for bot and direct games (ADR-0148). */
   readonly source?: GameSource;
+  /** Required with `source` and refused without it: how long the game may wait for its first move. */
+  readonly noShowAfterMs?: number;
 }
 
 const GAME_SOURCES: readonly unknown[] = ['seek', 'tournament'] satisfies readonly GameSource[];
 
-/** A stored or requested source: absent means the original lifecycle; anything unknown is refused. */
-function sourceOf(source: unknown): GameSource | null {
-  if (source === undefined) return null;
-  if (GAME_SOURCES.includes(source)) return source as GameSource;
-  throw new GameError(`unknown game source ${JSON.stringify(source)}`);
+/**
+ * A stored or requested pregame lifecycle. Both fields absent is the original lifecycle; a known
+ * source with a positive integer deadline is a sourced game; anything else is refused rather than
+ * guessed, because a game with a source but no deadline could never be ended.
+ */
+function pregameOf(source: unknown, noShowAfterMs: unknown): { source: GameSource; noShowAfterMs: number } | null {
+  if (source === undefined && noShowAfterMs === undefined) return null;
+  if (!GAME_SOURCES.includes(source)) throw new GameError(`unknown game source ${JSON.stringify(source)}`);
+  if (typeof noShowAfterMs !== 'number' || !Number.isSafeInteger(noShowAfterMs) || noShowAfterMs <= 0) {
+    throw new GameError(`a ${String(source)} game needs a positive integer no-show deadline; got ${JSON.stringify(noShowAfterMs)}`);
+  }
+  return { source: source as GameSource, noShowAfterMs };
 }
 
 /** Why a first move is refused until both seats are durably ready. */
@@ -205,7 +219,7 @@ export class Game {
       );
     }
 
-    const source = sourceOf(params.source);
+    const pregame = pregameOf(params.source, params.noShowAfterMs);
     const initialFen =
       chess960StartId !== null ? chess960Fen(chess960StartId) : params.initialFen ?? Position.initial(variant).fen();
     const event: GameEvent = {
@@ -218,7 +232,7 @@ export class Game {
       rated: params.rated ?? false,
       at: params.at,
       ...(chess960StartId !== null ? { chess960StartId } : {}),
-      ...(source !== null ? { source } : {}),
+      ...(pregame !== null ? pregame : {}),
     };
     return { game: Game.fromEvents([event]), events: [event] };
   }
@@ -265,6 +279,9 @@ export class Game {
    */
   playMove(uci: string, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
+    // Like a move after a flag fall: once the no-show deadline has passed without a first move, the
+    // move does not count and the no-show ending is what gets recorded, however late the worker is.
+    if (this.noShowVerdict(at).kind === 'expire') return this.expireNoShow(at);
     if (this.awaitingReadiness) throw new GameError(NOT_READY_MESSAGE);
     const s = this.state;
     const mover = s.position.turn;
@@ -398,22 +415,25 @@ export class Game {
    */
   markReady(color: Color, at: number): { game: Game; events: GameEvent[] } {
     const s = this.state;
-    if (s.source === null || s.status.over || s.ply > 0 || s.ready[color]) return { game: this, events: [] };
+    // Readiness after the deadline does not count: it must not undo a no-show that was already due.
+    if (s.noShowAt === null || at >= s.noShowAt) return { game: this, events: [] };
+    if (s.status.over || s.ply > 0 || s.ready[color]) return { game: this, events: [] };
     const events: GameEvent[] = [{ type: 'PlayerReady', by: color, at }];
     return { game: Game.applyAll(this, events), events };
   }
 
   /**
-   * The pregame no-show verdict at `at` for a deadline `afterMs` after creation (ADR-0148).
+   * The pregame no-show verdict at `at`, from the durable deadline (ADR-0148). Readiness counts only
+   * if it was recorded before the deadline, which {@link markReady} guarantees.
    *
    * Seek: aborted with no result whoever was ready, because the deadline governs the whole wait for
    * the first move. Tournament: a forfeit win for the one ready player, a double forfeit when
    * neither is ready, and no ending at all when both are.
    */
-  noShowVerdict(afterMs: number, at: number): NoShowVerdict {
+  noShowVerdict(at: number): NoShowVerdict {
     const s = this.state;
-    if (s.source === null || s.status.over || s.ply > 0) return { kind: 'not_applicable' };
-    if (at < s.createdAt + afterMs) return { kind: 'not_due' };
+    if (s.source === null || s.noShowAt === null || s.status.over || s.ply > 0) return { kind: 'not_applicable' };
+    if (at < s.noShowAt) return { kind: 'not_due' };
     const end = (result: ResultString, winner: Color | null): NoShowVerdict => ({
       kind: 'expire',
       ending: { type: 'GameEnded', result, termination: 'no_show', winner, at },
@@ -426,9 +446,9 @@ export class Game {
   }
 
   /** End the game by the pregame no-show rule. Throws unless {@link noShowVerdict} says `expire`. */
-  expireNoShow(afterMs: number, at: number): { game: Game; events: GameEvent[] } {
+  expireNoShow(at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
-    const verdict = this.noShowVerdict(afterMs, at);
+    const verdict = this.noShowVerdict(at);
     if (verdict.kind !== 'expire') throw new GameError(`No-show expiry refused: ${verdict.kind}`);
     const events: GameEvent[] = [verdict.ending];
     return { game: Game.applyAll(this, events), events };
@@ -556,7 +576,8 @@ export class Game {
     switch (event.type) {
       case 'GameCreated': {
         const startId = Game.startIdOf(event);
-        const source = sourceOf(event.source);
+        const pregame = pregameOf(event.source, event.noShowAfterMs);
+        const source = pregame?.source ?? null;
         const position = Position.fromFen(event.initialFen, event.variant);
         // Seed the repetition history with the initial position (count = 1).
         const rep = new Map<string, number>();
@@ -580,6 +601,7 @@ export class Game {
           repetition: rep,
           chess960StartId: startId,
           source,
+          noShowAt: pregame === null ? null : event.at + pregame.noShowAfterMs,
           ready: { w: false, b: false },
         };
       }

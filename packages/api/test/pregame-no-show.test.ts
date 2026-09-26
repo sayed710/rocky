@@ -12,6 +12,7 @@ import { ArenaService } from '../src/tournament/arena.service';
 import { TournamentService } from '../src/tournament/service';
 import { DurableGameLauncher } from '../src/tournament/durable-launcher';
 import { TournamentResultReporter, tournamentOutcome } from '../src/tournament/reporter';
+import { DEFAULT_NO_SHOW_DEADLINES, resolveNoShowDeadlines } from '../src/config';
 import { startHarness } from './helpers';
 
 const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } as const;
@@ -48,7 +49,7 @@ async function noShow(r: Rig, gameId: string, ready: readonly ('w' | 'b')[]): Pr
     head = await r.events.append(gameId, head, step.events);
     game = step.game;
   }
-  const ended = game.expireNoShow(TOURNAMENT_DEADLINE_MS, 1_000 + TOURNAMENT_DEADLINE_MS);
+  const ended = game.expireNoShow(1_000 + TOURNAMENT_DEADLINE_MS);
   await r.events.append(gameId, head, ended.events);
   const ending = ended.events[0]!;
   if (ending.type !== 'GameEnded') throw new Error('unreachable');
@@ -82,6 +83,7 @@ describe('pregame no-show in tournaments', () => {
     const gameId = await roundRobin(r, 'source-rr');
     const created = (await r.events.load(gameId))[0]!.event;
     assert.ok(created.type === 'GameCreated' && created.source === 'tournament');
+    assert.equal(created.noShowAfterMs, TOURNAMENT_DEADLINE_MS, 'the deadline is recorded on the game');
     assert.equal(Game.fromEvents([created]).snapshot().clock.turnStartedAt, null);
   });
 
@@ -155,6 +157,7 @@ describe('pregame lifecycle by creation path', () => {
       assert.equal(accepted.status, 200);
       const seekCreated = (await h.repos.events.load(accepted.body.gameId))[0]!.event;
       assert.ok(seekCreated.type === 'GameCreated' && seekCreated.source === 'seek');
+      assert.equal(seekCreated.noShowAfterMs, 60_000);
 
       const bot = await h.json('POST', '/v1/games/bot', { token: creator.token, body: { level: 'novice', variant: 'standard', timeControl: tc } });
       assert.equal(bot.status, 200);
@@ -162,6 +165,17 @@ describe('pregame lifecycle by creation path', () => {
       assert.ok(botCreated.type === 'GameCreated' && !('source' in botCreated), 'no readiness or no-show for bot games');
     } finally {
       await h.close();
+    }
+  });
+});
+
+describe('no-show deadline configuration', () => {
+  it('defaults to one minute for seeks and five for tournaments, and refuses anything but a positive integer', () => {
+    assert.deepEqual(resolveNoShowDeadlines({}), DEFAULT_NO_SHOW_DEADLINES);
+    assert.deepEqual(resolveNoShowDeadlines({ NO_SHOW_SEEK_MS: '30000', NO_SHOW_TOURNAMENT_MS: '600000' }), { seekMs: 30_000, tournamentMs: 600_000 });
+    for (const bad of ['0', '-5', '1.5', 'abc', '1e3']) {
+      assert.throws(() => resolveNoShowDeadlines({ NO_SHOW_SEEK_MS: bad }), /NO_SHOW_SEEK_MS must be a positive integer/);
+      assert.throws(() => resolveNoShowDeadlines({ NO_SHOW_TOURNAMENT_MS: bad }), /NO_SHOW_TOURNAMENT_MS must be a positive integer/);
     }
   });
 });

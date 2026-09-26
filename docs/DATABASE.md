@@ -275,11 +275,9 @@ CREATE TABLE games (
   ply_count    INTEGER NOT NULL DEFAULT 0,
   last_seq     INTEGER NOT NULL DEFAULT 0,     -- mirrors the event-store head
   started_at   TIMESTAMPTZ NOT NULL,
-  ended_at     TIMESTAMPTZ,
-  source       TEXT CHECK (source IN ('seek','tournament'))  -- 0042/0043; NULL = bot, direct or pre-0042
+  ended_at     TIMESTAMPTZ
 ) PARTITION BY RANGE (started_at);             -- monthly partitions
--- BRIN(started_at); btree(white_id), btree(black_id);
--- games_pregame_pending_idx (started_at, id) WHERE source IS NOT NULL AND result IS NULL AND ply_count = 0 (0044).
+-- BRIN(started_at); btree(white_id), btree(black_id).
 ```
 
 **How it is derived** (migration 0040, [ADR-0147](adr/0147-durable-games-projection.md)). Seek
@@ -303,13 +301,26 @@ the row. It re-folds each touched game's complete committed stream and upserts i
 - **Rebuild.** `npm run games:rebuild` re-folds every stream independently of the checkpoint. It
   leaves to the live projector any game that projector has yet to reach, so live endings are still
   reported.
-- **Pregame lifecycle** ([ADR-0148](adr/0148-pregame-readiness-and-no-show.md)). `source` is
-  projected from `GameCreated.source`. `PlayerReady` events advance `last_seq` but not `ply_count`,
-  and a no-show `GameEnded` projects `result`, `termination = 'no_show'` and `ended_at` like any
-  other ending. The no-show worker's candidate query reads only `games_pregame_pending_idx`, which
-  holds sourced games with no result and no move, so it shrinks as games start or end. The worker
-  re-decides every candidate from the event log, so projection lag delays an expiry but never
-  causes a wrong one.
+- **Pregame lifecycle** ([ADR-0148](adr/0148-pregame-readiness-and-no-show.md)). `PlayerReady`
+  events advance `last_seq` but not `ply_count`, and a no-show `GameEnded` projects `result`,
+  `termination = 'no_show'` and `ended_at` like any other ending.
+
+### 4.2a Pending no-show deadlines (`0042_pregame_no_show.sql`, ADR-0148)
+
+```sql
+CREATE TABLE pregame_deadlines (
+  game_id UUID        PRIMARY KEY,
+  due_at  TIMESTAMPTZ NOT NULL                  -- GameCreated.at + GameCreated.noShowAfterMs
+);
+CREATE INDEX pregame_deadlines_due_idx ON pregame_deadlines (due_at, game_id);
+```
+
+A work queue, not a projection: the `pregame_deadlines_track` trigger on `game_events` inserts a row
+when a creation carries a numeric `noShowAfterMs` and deletes it on the first move or any ending, in
+the same transaction as the append. It therefore holds exactly the unstarted seek and tournament
+games, whichever release wrote them, and cannot lag the log. The no-show worker scans it by
+`due_at`, re-decides each game from the event log, and deletes a row the log shows will never
+expire. A malformed deadline is skipped, never raised, so the trigger cannot reject an append.
 
 ### 4.3 Identity & authZ
 

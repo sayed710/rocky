@@ -81,6 +81,12 @@ export interface GameCreatedEvent {
    * absent field is how every earlier game is stored, and it keeps meaning exactly what it meant.
    */
   readonly source?: GameSource;
+  /**
+   * Present exactly when `source` is: how long after `at` the game may wait for its first move before
+   * the pregame no-show rule ends it. Recorded at creation so the deadline is a durable fact of the
+   * game that every replica and every replay agrees on, not a setting each process reads for itself.
+   */
+  readonly noShowAfterMs?: number;
 }
 
 /**

@@ -39,7 +39,7 @@ export type Command =
   | { readonly kind: 'claimFlag' }
   | { readonly kind: 'abort' }
   | { readonly kind: 'ready' }
-  | { readonly kind: 'expireNoShow'; readonly afterMs: number };
+  | { readonly kind: 'expireNoShow' };
 
 /**
  * The actor that issues `expireNoShow`. Not an account id: player identities come only from verified
@@ -356,16 +356,19 @@ export class GameAuthority {
     const at = this.now();
     if (cmd.kind === 'expireNoShow') {
       // Checked before anything else so a player can never issue it, and the worker never as a seat.
+      // The deadline is the game's own durable one; the caller supplies none.
       if (userId !== NO_SHOW_ACTOR) throw new AuthorityError('not_a_player', 'only the server may expire a no-show');
-      if (!Number.isSafeInteger(cmd.afterMs) || cmd.afterMs <= 0) {
-        throw new AuthorityError('invalid_command', 'a no-show deadline must be a positive integer of milliseconds');
-      }
-      return this.commit(gameId, rec, this.guard(() => rec.game.expireNoShow(cmd.afterMs, at)));
+      return this.commit(gameId, rec, this.guard(() => rec.game.expireNoShow(at)));
     }
     const players = rec.game.snapshot().players;
     const color = players.white === userId ? 'w' : players.black === userId ? 'b' : null;
     if (color === null) {
       throw new AuthorityError('not_a_player', 'only players may issue commands');
+    }
+    // A player command arriving after a due no-show deadline records the no-show instead, as a move
+    // after a flag fall records the timeout. The outcome never depends on how late the worker runs.
+    if (rec.game.noShowVerdict(at).kind === 'expire') {
+      return this.commit(gameId, rec, rec.game.expireNoShow(at));
     }
     let result: { game: Game; events: GameEvent[] };
 

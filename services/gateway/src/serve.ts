@@ -54,10 +54,11 @@
  *   (`/v1/traces` is appended).
  * - `OTEL_TRACES_SAMPLER_ARG` (optional) — sampling probability ratio in [0, 1];
  *   when absent, defaults to 1.0 (always-on).
- * - `NO_SHOW_SEEK_MS` (default 60000) and `NO_SHOW_TOURNAMENT_MS` (default 300000) — how long after
- *   creation a seek or tournament game may wait for its first move before the server ends it as a
- *   pregame no-show (ADR-0148). Positive integers. Every replica with `DATABASE_URL` runs the expiry.
- * - `NO_SHOW_SCAN_MS` (default 5000) — how often the no-show worker looks for due games.
+ * - `NO_SHOW_TOURNAMENT_MS` (default 300000) — the pregame no-show deadline recorded on tournament
+ *   games this process launches (ADR-0148); the API reads it and `NO_SHOW_SEEK_MS` for the games it
+ *   creates. Positive integers. Each game keeps the deadline it was created with.
+ * - `NO_SHOW_SCAN_MS` (default 5000) — how often the no-show worker looks for due games. Every
+ *   replica with `DATABASE_URL` runs the expiry.
  *
  * Durable event log: ADR-0007 (M14 inc 2).
  * Redis pub/sub: ADR-0008 (M14 inc 3).
@@ -159,10 +160,6 @@ async function main(): Promise<void> {
   const joinTimeoutMs = positiveIntEnv('WS_JOIN_TIMEOUT_MS', 10_000);
   const heartbeatIntervalMs = positiveIntEnv('WS_HEARTBEAT_INTERVAL_MS', 30_000);
   const maxRoomsPerConnection = positiveIntEnv('WS_MAX_ROOMS_PER_CONNECTION', 4);
-  const noShowDeadlines = {
-    seek: positiveIntEnv('NO_SHOW_SEEK_MS', 60_000),
-    tournament: positiveIntEnv('NO_SHOW_TOURNAMENT_MS', 300_000),
-  };
   const noShowScanMs = positiveIntEnv('NO_SHOW_SCAN_MS', 5_000);
   const trustProxy = resolveTrustProxyEnv(process.env['TRUST_PROXY']);
 
@@ -275,7 +272,7 @@ async function main(): Promise<void> {
       const api = await import('@chess-platform/api');
 
       const tournamentsRepo = new PgTournamentsRepository(pgPool);
-      const durableLauncher = new api.DurableGameLauncher(eventStore, systemClock);
+      const durableLauncher = new api.DurableGameLauncher(eventStore, systemClock, api.resolveNoShowDeadlines().tournamentMs);
 
       // Games launched by THIS process are watched immediately; games launched
       // by API replicas are picked up by the reporter's periodic scan.
@@ -598,7 +595,6 @@ async function main(): Promise<void> {
         ...(ownershipRegistry ? { ownership: ownershipRegistry } : {}),
         hasLocalSessions: (gameId) => gateway.hasLocalSessions(gameId),
       }),
-      deadlines: noShowDeadlines,
       pollMs: noShowScanMs,
       logger,
       expiredCounter: metrics.counter('gateway_no_show_expired_total'),
@@ -606,7 +602,7 @@ async function main(): Promise<void> {
     });
     worker.start();
     noShowWorker = worker;
-    logger.info(`No-show expiry is enabled (seek ${noShowDeadlines.seek} ms, tournament ${noShowDeadlines.tournament} ms)`);
+    logger.info('No-show expiry is enabled');
   }
 
   // --- HTTP health server ---

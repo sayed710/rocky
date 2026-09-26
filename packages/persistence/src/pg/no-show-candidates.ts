@@ -1,35 +1,30 @@
 /**
  * @packageDocumentation
- * Finds games that may have passed their pregame no-show deadline (ADR-0148).
+ * The queue of games waiting for their first move, by no-show deadline (ADR-0148).
  *
- * Reads the `games` projection (ADR-0147), not the event log: `games_pregame_pending_idx` holds only
- * sourced games with no result and no move, so a scan stays proportional to the games actually
- * waiting rather than to history. The projection may lag the log, which is safe in both directions:
- * a game it still lists may already have moved or ended, and the caller re-decides every candidate
- * from the durable event log before acting. A game it has not listed yet is found on a later scan.
+ * `pregame_deadlines` is maintained by a `game_events` trigger in the same transaction as every
+ * append (migration 0042): a sourced creation enters it with `at + noShowAfterMs`, the first move or
+ * any ending leaves it. It is therefore exactly as current as the log. The caller still re-decides
+ * each candidate from the log before acting, and dismisses one the rule says will never expire.
  */
 
 import type { Pool } from 'pg';
-import type { GameSource } from '@chess-platform/game';
 
 export interface NoShowCandidate {
   readonly gameId: string;
-  readonly source: GameSource;
-  readonly startedAt: Date;
+  readonly dueAt: Date;
 }
 
-/** A keyset position in `(started_at, id)` order. */
+/** A keyset position in `(due_at, game_id)` order. */
 export interface NoShowCursor {
-  readonly startedAt: Date;
+  readonly dueAt: Date;
   readonly gameId: string;
 }
 
 export interface NoShowCandidateQuery {
-  /** Seek games created at or before this instant are due. */
-  readonly seekDueBy: Date;
-  /** Tournament games created at or before this instant are due. */
-  readonly tournamentDueBy: Date;
-  /** Resume strictly after this position; `null` starts from the oldest. */
+  /** Games whose deadline is at or before this instant are due. */
+  readonly dueBy: Date;
+  /** Resume strictly after this position; `null` starts from the earliest deadline. */
   readonly after: NoShowCursor | null;
   readonly limit: number;
 }
@@ -37,19 +32,24 @@ export interface NoShowCandidateQuery {
 export class PgNoShowCandidates {
   constructor(private readonly pool: Pool) {}
 
-  /** One page of possibly-due pregame games, oldest first. */
+  /** One page of due games, earliest deadline first. */
   async due(query: NoShowCandidateQuery): Promise<NoShowCandidate[]> {
-    const after = query.after ?? { startedAt: new Date(0), gameId: '00000000-0000-0000-0000-000000000000' };
-    const res = await this.pool.query<{ id: string; source: GameSource; started_at: Date }>(
-      `SELECT id, source, started_at FROM games
-       WHERE source IS NOT NULL AND result IS NULL AND ply_count = 0
-         AND started_at <= GREATEST($1::timestamptz, $2::timestamptz)
-         AND ((source = 'seek' AND started_at <= $1) OR (source = 'tournament' AND started_at <= $2))
-         AND (started_at, id) > ($3::timestamptz, $4::uuid)
-       ORDER BY started_at, id
-       LIMIT $5`,
-      [query.seekDueBy, query.tournamentDueBy, after.startedAt, after.gameId, query.limit],
+    const after = query.after ?? { dueAt: new Date(0), gameId: '00000000-0000-0000-0000-000000000000' };
+    const res = await this.pool.query<{ game_id: string; due_at: Date }>(
+      `SELECT game_id, due_at FROM pregame_deadlines
+       WHERE due_at <= $1 AND (due_at, game_id) > ($2::timestamptz, $3::uuid)
+       ORDER BY due_at, game_id
+       LIMIT $4`,
+      [query.dueBy, after.dueAt, after.gameId, query.limit],
     );
-    return res.rows.map((row) => ({ gameId: row.id, source: row.source, startedAt: row.started_at }));
+    return res.rows.map((row) => ({ gameId: row.game_id, dueAt: row.due_at }));
+  }
+
+  /**
+   * Remove a game the log shows will never expire: a tournament game whose players were both ready
+   * before the deadline (readiness never reverts), or one that has already started or ended.
+   */
+  async dismiss(gameId: string): Promise<void> {
+    await this.pool.query('DELETE FROM pregame_deadlines WHERE game_id = $1', [gameId]);
   }
 }

@@ -348,21 +348,21 @@ async function loadStream(client: PoolClient, gameId: string): Promise<StoredEve
 /** Seats that are not registered accounts project as NULL rather than violating `games`' user FKs. */
 async function upsertProjection(client: PoolClient, p: GameProjection): Promise<void> {
   await client.query(
-    `INSERT INTO games (id, variant, rated, speed, white_id, black_id, result, termination, ply_count, last_seq, started_at, ended_at, source)
+    `INSERT INTO games (id, variant, rated, speed, white_id, black_id, result, termination, ply_count, last_seq, started_at, ended_at)
      VALUES ($1, $2, $3, $4,
              (SELECT id FROM users WHERE id = $5::uuid), (SELECT id FROM users WHERE id = $6::uuid),
-             $7, $8, $9, $10, $11, $12, $13)
+             $7, $8, $9, $10, $11, $12)
      ON CONFLICT (id) DO UPDATE SET
        variant = EXCLUDED.variant, rated = EXCLUDED.rated, speed = EXCLUDED.speed,
        white_id = EXCLUDED.white_id, black_id = EXCLUDED.black_id,
        result = EXCLUDED.result, termination = EXCLUDED.termination,
        ply_count = EXCLUDED.ply_count, last_seq = EXCLUDED.last_seq,
-       started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at, source = EXCLUDED.source
+       started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at
      WHERE games.last_seq <= EXCLUDED.last_seq`,
     [
       p.id, p.variant, p.rated, p.speed,
       isCanonicalUuid(p.white) ? p.white : null, isCanonicalUuid(p.black) ? p.black : null,
-      p.result, p.termination, p.plyCount, p.lastSeq, p.startedAt, p.endedAt, p.source,
+      p.result, p.termination, p.plyCount, p.lastSeq, p.startedAt, p.endedAt,
     ],
   );
 }

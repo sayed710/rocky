@@ -46,7 +46,7 @@ function node(options: NodeOptions = {}) {
 async function create(authority: GameAuthority, gameId = 'g', source: GameSource | null = 'seek'): Promise<void> {
   await authority.createGame({
     gameId, timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: true, at: CREATED_AT,
-    ...(source !== null ? { source } : {}),
+    ...(source !== null ? { source, noShowAfterMs: source === 'seek' ? 60_000 : 300_000 } : {}),
   });
 }
 
@@ -177,14 +177,13 @@ test('a game without a source records no readiness and admits the first move at 
 
 test('clients can issue neither readiness nor expiry over the wire; only the server actor expires', async () => {
   assert.equal(decode(JSON.stringify({ t: 'ready', gameId: 'g' })), null);
-  assert.equal(decode(JSON.stringify({ t: 'expireNoShow', gameId: 'g', afterMs: 1 })), null);
+  assert.equal(decode(JSON.stringify({ t: 'expireNoShow', gameId: 'g' })), null);
   const n = node();
   await create(n.authority);
-  const expire: Command = { kind: 'expireNoShow', afterMs: 60_000 };
+  const expire: Command = { kind: 'expireNoShow' };
   n.clock.now = CREATED_AT + 60_000;
   await assert.rejects(n.authority.apply('g', 'alice', expire), (e: unknown) => e instanceof AuthorityError && e.code === 'not_a_player');
   await assert.rejects(n.authority.apply('g', NO_SHOW_ACTOR, { kind: 'resign' }), (e: unknown) => e instanceof AuthorityError && e.code === 'not_a_player');
-  await assert.rejects(n.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow', afterMs: 0 }), /positive integer/);
   n.clock.now = CREATED_AT + 59_999;
   await assert.rejects(n.authority.apply('g', NO_SHOW_ACTOR, expire), /not_due/);
 });
@@ -198,8 +197,8 @@ test('no-show expiry ends the game once, fans out, and refuses every later comma
   n.pubsub.subscribe('games:ended', (m) => ended.push(m));
   n.clock.now = CREATED_AT + 60_000;
   const [first, second] = await Promise.allSettled([
-    n.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow', afterMs: 60_000 }),
-    n.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow', afterMs: 60_000 }),
+    n.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow' }),
+    n.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow' }),
   ]);
   assert.equal(first.status, 'fulfilled');
   assert.equal(second.status, 'rejected', 'a second expiry finds the game over');
@@ -211,19 +210,22 @@ test('no-show expiry ends the game once, fans out, and refuses every later comma
   assert.deepEqual(types, ['GameCreated', 'GameEnded']);
 });
 
-test('expiry racing the first move on one owner: exactly one of them wins', async () => {
-  for (const order of ['move-first', 'expiry-first'] as const) {
-    const n = node();
-    await create(n.authority);
-    await n.authority.apply('g', 'alice', { kind: 'ready' });
-    await n.authority.apply('g', 'bob', { kind: 'ready' });
-    n.clock.now = CREATED_AT + 60_000;
-    const move = (): Promise<unknown> => n.authority.apply('g', 'alice', { kind: 'move', uci: 'e2e4' });
-    const expire = (): Promise<unknown> => n.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow', afterMs: 60_000 });
-    const results = await Promise.allSettled(order === 'move-first' ? [move(), expire()] : [expire(), move()]);
-    assert.deepEqual(results.map((r) => r.status), ['fulfilled', 'rejected'], order);
-    const types = (await n.store.load('g')).map(({ event }) => event.type);
-    assert.deepEqual(types.slice(3), [order === 'move-first' ? 'MovePlayed' : 'GameEnded'], order);
+test('expiry racing the first move on one owner: exactly one outcome, decided by the deadline', async () => {
+  // Before the deadline the move wins and the expiry is refused as not due; at or after it the
+  // no-show wins in either order, because a late move records the no-show itself.
+  for (const [now, expected] of [[CREATED_AT + 59_999, 'MovePlayed'], [CREATED_AT + 60_000, 'GameEnded']] as const) {
+    for (const order of ['move-first', 'expiry-first'] as const) {
+      const n = node();
+      await create(n.authority);
+      await n.authority.apply('g', 'alice', { kind: 'ready' });
+      await n.authority.apply('g', 'bob', { kind: 'ready' });
+      n.clock.now = now;
+      const move = (): Promise<unknown> => n.authority.apply('g', 'alice', { kind: 'move', uci: 'e2e4' });
+      const expire = (): Promise<unknown> => n.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow' });
+      await Promise.allSettled(order === 'move-first' ? [move(), expire()] : [expire(), move()]);
+      const types = (await n.store.load('g')).map(({ event }) => event.type);
+      assert.deepEqual(types.slice(3), [expected], `${order} at ${now - CREATED_AT} ms`);
+    }
   }
 });
 
@@ -236,7 +238,7 @@ test('a stale owner cannot append a first move after another owner committed the
   await stale.authority.apply('g', 'bob', { kind: 'ready' });
   await fresh.authority.ensureLoaded('g');
   fresh.clock.now = CREATED_AT + 60_000;
-  await fresh.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow', afterMs: 60_000 });
+  await fresh.authority.apply('g', NO_SHOW_ACTOR, { kind: 'expireNoShow' });
 
   // The stale copy still thinks the game is waiting for White's first move.
   await assert.rejects(stale.authority.apply('g', 'alice', { kind: 'move', uci: 'e2e4' }), /failed to persist/);
@@ -254,4 +256,28 @@ test('a resume after restart replays readiness broadcasts from the durable log',
   assert.deepEqual(restarted.authority.getMissedSince('g', 0), [
     { t: 'ready', gameId: 'g', ready: { w: true, b: false }, serverTs: CREATED_AT },
   ]);
+});
+
+test('a player command reaching the owner after the deadline records the no-show, not the command', async () => {
+  const n = node();
+  await create(n.authority);
+  await n.authority.apply('g', 'alice', { kind: 'ready' });
+  await n.authority.apply('g', 'bob', { kind: 'ready' });
+  n.clock.now = CREATED_AT + 60_000; // the worker has not run yet
+  const result = await n.authority.apply('g', 'alice', { kind: 'move', uci: 'e2e4' });
+  assert.deepEqual(result.broadcasts.map((b) => b.t), ['ended']);
+  const types = (await n.store.load('g')).map(({ event }) => event.type);
+  assert.deepEqual(types, ['GameCreated', 'PlayerReady', 'PlayerReady', 'GameEnded']);
+  // A late join after the deadline likewise records the no-show instead of readiness.
+  const late = node();
+  await create(late.authority, 'late', 'tournament');
+  await late.authority.apply('late', 'alice', { kind: 'ready' });
+  late.clock.now = CREATED_AT + 300_000;
+  const bob = late.connect('b');
+  bob.deliver({ t: 'join', gameId: 'late', token: 'token-bob' });
+  await flush();
+  assert.deepEqual(bob.last('ended'), {
+    t: 'ended', gameId: 'late', result: '1-0', termination: 'no_show', winner: 'w', serverTs: CREATED_AT + 300_000,
+  });
+  assert.deepEqual(await readyEvents(late.store, 'late'), ['w'], 'the late seat never became ready');
 });

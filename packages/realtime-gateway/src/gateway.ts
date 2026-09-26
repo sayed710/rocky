@@ -174,7 +174,10 @@ export class RealtimeGateway {
       return;
     }
     void this.authority.ensureLoaded(gameId)
-      .then((loaded) => {
+      .then(async (loaded) => {
+        // A copy loaded for background work (the no-show worker) can be evicted between the load
+        // and this continuation; load once more rather than failing a valid join.
+        if (loaded && !this.authority.has(gameId)) loaded = await this.authority.ensureLoaded(gameId);
         if (!loaded) {
           this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
           return;

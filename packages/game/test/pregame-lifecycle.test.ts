@@ -7,6 +7,7 @@ import type { TimeControl } from '../src/clock';
 
 const TC: TimeControl = { initialMs: 300_000, incrementMs: 3_000, delayMs: 0, kind: 'increment' };
 const CREATED_AT = 1_000_000;
+const DEADLINE: Record<GameSource, number> = { seek: 60_000, tournament: 300_000 };
 
 function create(source?: GameSource, timeControl: TimeControl = TC) {
   return Game.create({
@@ -15,7 +16,7 @@ function create(source?: GameSource, timeControl: TimeControl = TC) {
     players: { white: 'alice', black: 'bob' },
     rated: true,
     at: CREATED_AT,
-    ...(source !== undefined ? { source } : {}),
+    ...(source !== undefined ? { source, noShowAfterMs: DEADLINE[source] } : {}),
   });
 }
 
@@ -33,8 +34,15 @@ test('the source is recorded on GameCreated only when given, and unknown sources
   const legacy = create().events[0]!;
   assert.ok(legacy.type === 'GameCreated' && !('source' in legacy), 'a bot/direct game stores no source');
   assert.throws(() => Game.create({
-    gameId: 'g', timeControl: TC, players: { white: 'a', black: 'b' }, at: 0, source: 'lobby' as GameSource,
+    gameId: 'g', timeControl: TC, players: { white: 'a', black: 'b' }, at: 0, source: 'lobby' as GameSource, noShowAfterMs: 1,
   }), GameError);
+  for (const noShowAfterMs of [undefined, 0, -1, 1.5]) {
+    assert.throws(() => Game.create({
+      gameId: 'g', timeControl: TC, players: { white: 'a', black: 'b' }, at: 0, source: 'seek', ...(noShowAfterMs === undefined ? {} : { noShowAfterMs }),
+    }), /no-show deadline/, 'a sourced game must carry a usable deadline');
+  }
+  assert.throws(() => Game.create({ gameId: 'g', timeControl: TC, players: { white: 'a', black: 'b' }, at: 0, noShowAfterMs: 1 }), /unknown game source/);
+  assert.equal(seek.noShowAfterMs, 60_000, 'the deadline is recorded on the event');
   const forged = { ...seek, source: 'lobby' } as unknown as GameEvent;
   assert.throws(() => Game.fromEvents([forged]), /unknown game source/);
 });
@@ -133,10 +141,10 @@ test('seek no-show: aborted with no result at the deadline whoever was ready, ne
   for (const ready of [[], ['w'], ['b'], ['w', 'b']] as const) {
     let game = create('seek').game;
     for (const color of ready) game = game.markReady(color, CREATED_AT + 1).game;
-    assert.deepEqual(game.noShowVerdict(60_000, CREATED_AT + 59_999), { kind: 'not_due' });
-    const verdict = game.noShowVerdict(60_000, CREATED_AT + 60_000);
+    assert.deepEqual(game.noShowVerdict(CREATED_AT + 59_999), { kind: 'not_due' });
+    const verdict = game.noShowVerdict(CREATED_AT + 60_000);
     assert.equal(verdict.kind, 'expire', `ready: ${ready.join(',') || 'none'}`);
-    const ended = game.expireNoShow(60_000, CREATED_AT + 60_000);
+    const ended = game.expireNoShow(CREATED_AT + 60_000);
     assert.deepEqual(ended.events, [
       { type: 'GameEnded', result: '*', termination: 'no_show', winner: null, at: CREATED_AT + 60_000 },
     ]);
@@ -146,28 +154,50 @@ test('seek no-show: aborted with no result at the deadline whoever was ready, ne
 test('tournament no-show: one ready player wins, neither ready is a double forfeit, both ready waits', () => {
   const at = CREATED_AT + 300_000;
   const whiteReady = create('tournament').game.markReady('w', CREATED_AT + 1).game;
-  assert.deepEqual(whiteReady.expireNoShow(300_000, at).events[0], {
+  assert.deepEqual(whiteReady.expireNoShow(at).events[0], {
     type: 'GameEnded', result: '1-0', termination: 'no_show', winner: 'w', at,
   });
   const blackReady = create('tournament').game.markReady('b', CREATED_AT + 1).game;
-  assert.deepEqual(blackReady.expireNoShow(300_000, at).events[0], {
+  assert.deepEqual(blackReady.expireNoShow(at).events[0], {
     type: 'GameEnded', result: '0-1', termination: 'no_show', winner: 'b', at,
   });
-  assert.deepEqual(create('tournament').game.expireNoShow(300_000, at).events[0], {
+  assert.deepEqual(create('tournament').game.expireNoShow(at).events[0], {
     type: 'GameEnded', result: '*', termination: 'no_show', winner: null, at,
   });
   const { game } = bothReady('tournament');
-  assert.deepEqual(game.noShowVerdict(300_000, at + 86_400_000), { kind: 'both_ready' });
-  assert.throws(() => game.expireNoShow(300_000, at), /both_ready/);
+  assert.deepEqual(game.noShowVerdict(at + 86_400_000), { kind: 'both_ready' });
+  assert.throws(() => game.expireNoShow(at), /both_ready/);
 });
 
 test('no-show never applies after the first move, to a finished game, or to a game without a source', () => {
   const { game } = bothReady('seek');
   const moved = game.playMove('e2e4', CREATED_AT + 10_000).game;
-  assert.deepEqual(moved.noShowVerdict(60_000, CREATED_AT + 3_600_000), { kind: 'not_applicable' });
-  assert.throws(() => moved.expireNoShow(60_000, CREATED_AT + 3_600_000), /not_applicable/);
-  assert.deepEqual(create().game.noShowVerdict(60_000, CREATED_AT + 3_600_000), { kind: 'not_applicable' });
-  const expired = create('seek').game.expireNoShow(60_000, CREATED_AT + 60_000).game;
-  assert.throws(() => expired.expireNoShow(60_000, CREATED_AT + 60_001), /already over/);
+  assert.deepEqual(moved.noShowVerdict(CREATED_AT + 3_600_000), { kind: 'not_applicable' });
+  assert.throws(() => moved.expireNoShow(CREATED_AT + 3_600_000), /not_applicable/);
+  assert.deepEqual(create().game.noShowVerdict(CREATED_AT + 3_600_000), { kind: 'not_applicable' });
+  const expired = create('seek').game.expireNoShow(CREATED_AT + 60_000).game;
+  assert.throws(() => expired.expireNoShow(CREATED_AT + 60_001), /already over/);
   assert.throws(() => expired.playMove('e2e4', CREATED_AT + 60_001), /already over/);
+});
+
+test('readiness recorded after the deadline does not count, so a due forfeit is never erased', () => {
+  const late = CREATED_AT + 300_000;
+  const created = create('tournament').game.markReady('w', CREATED_AT + 1).game;
+  const bothLate = created.markReady('b', late);
+  assert.equal(bothLate.events.length, 0, 'a join at or after the deadline records nothing');
+  assert.deepEqual(bothLate.game.noShowVerdict(late).kind, 'expire');
+  assert.deepEqual(bothLate.game.expireNoShow(late).events[0], {
+    type: 'GameEnded', result: '1-0', termination: 'no_show', winner: 'w', at: late,
+  });
+});
+
+test('a first move after a due deadline records the no-show instead, however late the worker is', () => {
+  const { game } = bothReady('seek');
+  const moved = game.playMove('e2e4', CREATED_AT + 60_000);
+  assert.deepEqual(moved.events, [
+    { type: 'GameEnded', result: '*', termination: 'no_show', winner: null, at: CREATED_AT + 60_000 },
+  ]);
+  // A tournament game both players readied in time is not due, so its late first move plays.
+  const t = bothReady('tournament').game.playMove('e2e4', CREATED_AT + 3_600_000);
+  assert.equal(t.events[0]!.type, 'MovePlayed');
 });

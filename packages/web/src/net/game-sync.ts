@@ -342,7 +342,9 @@ export class GameSync {
       status: view.status,
       drawOffer: view.drawOffer,
       fenHash: view.fenHash,
-      ready: readyView(view.ready),
+      // A snapshot from a gateway older than ADR-0148 has no field at all: keep what is known rather
+      // than reopening the board. An explicit `null` means the game has no readiness.
+      ready: view.ready === undefined ? this.state.ready : readyView(view.ready),
       legalMoves: view.legalMoves,
       // A full authoritative snapshot supersedes any optimistic pending move.
       pending: null,

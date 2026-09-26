@@ -131,3 +131,12 @@ test('pregame no-show endings are described as no-shows, never as time forfeits'
   live.factory.last.emit({ t: 'ended', gameId: 'g1', result: '*', termination: 'no_show', winner: null, serverTs: 60_000 });
   assert.equal(live.statuses.at(-1), 'Not started in time — no result');
 });
+
+test('a snapshot from an older gateway without the field keeps the readiness already known', () => {
+  const h = join('white', { w: true, b: false });
+  h.factory.last.emit({ t: 'state', gameId: 'g1', state: view(undefined) });
+  assert.deepEqual(h.sync.getState().ready, { w: true, b: false });
+  assert.equal(h.turns.at(-1), false, 'the board stays closed');
+  h.factory.last.emit({ t: 'state', gameId: 'g1', state: view(null) });
+  assert.equal(h.sync.getState().ready, null, 'an explicit null still means no readiness');
+});
