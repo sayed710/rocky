@@ -263,3 +263,104 @@ describe('Auth Endpoints Rate Limiting Integration', () => {
     }
   });
 });
+
+describe('Seek Creation Rate Limiting Integration', () => {
+  const seekBody = {
+    variant: 'standard',
+    timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+    rated: false,
+  };
+
+  test('allows normal creation, then limits the authenticated user without charging another user', async () => {
+    const h = await startHarness({
+      trustProxy: true,
+      rateLimit: {
+        ...DEFAULT_RATE_LIMIT,
+        seekCreation: {
+          perUser: { maxRequests: 2, windowMs: 60_000 },
+          perIp: { maxRequests: 4, windowMs: 60_000 },
+        },
+      },
+    });
+    try {
+      const alice = await h.makeUser('seek-budget-alice');
+      const bob = await h.makeUser('seek-budget-bob');
+      const headers = { 'x-forwarded-for': '192.0.2.40' };
+      const create = (token: string) => h.json('POST', '/v1/seeks', { token, headers, body: seekBody });
+
+      assert.equal((await create(alice.token)).status, 201);
+      assert.equal((await create(alice.token)).status, 201);
+      const blocked = await create(alice.token);
+      assert.equal(blocked.status, 429);
+      assert.equal(blocked.body.error.code, 'rate_limited');
+      assert.equal(blocked.headers.get('retry-after'), '60');
+      assert.equal((await create(bob.token)).status, 201, 'Alice cannot spend Bob’s user quota');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('IP refusal and user refusal each leave the other bucket uncharged', async () => {
+    const h = await startHarness({
+      trustProxy: true,
+      rateLimit: {
+        ...DEFAULT_RATE_LIMIT,
+        seekCreation: {
+          perUser: { maxRequests: 1, windowMs: 60_000 },
+          perIp: { maxRequests: 1, windowMs: 60_000 },
+        },
+      },
+    });
+    try {
+      const alice = await h.makeUser('seek-atomic-alice');
+      const bob = await h.makeUser('seek-atomic-bob');
+      const create = (token: string, ip: string) => h.json('POST', '/v1/seeks', {
+        token,
+        headers: { 'x-forwarded-for': ip },
+        body: seekBody,
+      });
+
+      assert.equal((await create(alice.token, '192.0.2.41')).status, 201);
+      const userBlocked = await create(alice.token, '192.0.2.42');
+      assert.equal(userBlocked.status, 429, 'the user bucket must apply across IPs');
+      assert.equal(userBlocked.headers.get('retry-after'), '60');
+      const ipBlocked = await create(bob.token, '192.0.2.41');
+      assert.equal(ipBlocked.status, 429, 'the IP bucket must apply across users');
+      assert.equal(ipBlocked.headers.get('retry-after'), '60');
+      assert.equal((await create(bob.token, '192.0.2.42')).status, 201,
+        'neither refusal may partially charge the other bucket');
+    } finally {
+      await h.close();
+    }
+  });
+
+  test('a seek rejected by field validation charges neither bucket', async () => {
+    const h = await startHarness({
+      trustProxy: true,
+      rateLimit: {
+        ...DEFAULT_RATE_LIMIT,
+        seekCreation: {
+          perUser: { maxRequests: 1, windowMs: 60_000 },
+          perIp: { maxRequests: 1, windowMs: 60_000 },
+        },
+      },
+    });
+    try {
+      const alice = await h.makeUser('seek-invalid-alice');
+      const headers = { 'x-forwarded-for': '192.0.2.43' };
+      const invalid = await h.json('POST', '/v1/seeks', {
+        token: alice.token,
+        headers,
+        body: { ...seekBody, minRating: 2000, maxRating: 1000 },
+      });
+      assert.equal(invalid.status, 422);
+      assert.equal((await h.json('POST', '/v1/seeks', {
+        token: alice.token,
+        headers,
+        body: seekBody,
+      })).status, 201, 'validation must not spend either one-request budget');
+    } finally {
+      await h.close();
+    }
+  });
+});
