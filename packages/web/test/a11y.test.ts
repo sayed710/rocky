@@ -39,10 +39,6 @@ test('one persistent main landmark contains every application route', () => {
     'team', 'forum', 'thread', 'messages', 'conversation', 'endgames', 'courses',
     'course', 'lesson', 'studies', 'study', 'study-chapter',
   ]);
-  const initiallyHidden = new Set([
-    'lobby', 'password-reset', 'email-verify', 'not-found', 'profile',
-    'messages', 'tournaments',
-  ]);
   const found = new Set<string>();
   const stack: Array<'main' | 'section'> = [];
   let mainCount = 0;
@@ -58,15 +54,20 @@ test('one persistent main landmark contains every application route', () => {
     if (tag === 'main') {
       mainCount++;
       assert.equal(stack.includes('main'), false, 'main landmarks must not nest');
+    } else {
+      assert.equal(stack.includes('main'), true, 'every section must be inside the main landmark');
     }
     const id = attributes.match(/\bid="([^"]+)"/)?.[1];
+    if (tag === 'section' && stack.at(-1) === 'main') {
+      assert.ok(id, 'each route section must have an ID');
+      if (id !== 'game-main' && id !== 'auth') {
+        assert.match(attributes, /\s+hidden(?:\s|$)/, `route #${id} must start hidden`);
+      }
+    }
     if (id && routeIds.has(id)) {
       assert.equal(found.has(id), false, `duplicate route #${id}`);
       assert.equal(stack.includes('main'), true, `route #${id} is outside main`);
       assert.equal(tag, 'section', `route #${id} must remain a section`);
-      if (initiallyHidden.has(id)) {
-        assert.match(attributes, /\s+hidden(?:\s|$)/, `route #${id} must start hidden`);
-      }
       found.add(id);
     }
     stack.push(tag as 'main' | 'section');
