@@ -48,6 +48,24 @@ export interface RedisPubSubOptions {
 }
 
 /**
+ * The options for the two connections {@link createRedisPubSub} opens.
+ *
+ * No ready check on the subscriber. ioredis writes SUBSCRIBE while the connection is still
+ * handshaking (the command is allowed while Redis loads), so a subscription made right after
+ * connecting — at startup, or while reconnecting — can switch the connection to subscriber mode
+ * before the ready check's INFO, which Redis then refuses; ioredis treats that as fatal, resets the
+ * connection, and anything published meanwhile is lost. The check only waits for Redis to finish
+ * loading its dataset, which pub/sub does not need. The publisher keeps it.
+ */
+export function pubSubConnectionOptions(redisOptions?: Record<string, unknown>): {
+  readonly pub: Record<string, unknown>;
+  readonly sub: Record<string, unknown>;
+} {
+  const base = { ...redisOptions, lazyConnect: false };
+  return { pub: base, sub: { ...base, enableReadyCheck: false } };
+}
+
+/**
  * Create a {@link PubSub} backed by Redis pub/sub.
  *
  * Returns the {@link RedisPubSub} instance (which implements {@link PubSub})
@@ -59,17 +77,10 @@ export function createRedisPubSub(opts: RedisPubSubOptions): {
   ping: () => Promise<void>;
   close: () => Promise<void>;
 } {
-  const baseOpts = { ...opts.redisOptions, lazyConnect: false };
-
   // Two connections: one for SUBSCRIBE (blocked), one for PUBLISH.
-  const pub = new Redis(opts.url, baseOpts);
-  // No ready check on the subscriber. ioredis writes SUBSCRIBE while the connection is still
-  // handshaking (the command is allowed while Redis loads), so a subscription made right after
-  // connecting — at startup, or while reconnecting — can switch the connection to subscriber mode
-  // before the ready check's INFO, which Redis then refuses; ioredis treats that as fatal, resets the
-  // connection, and anything published meanwhile is lost. The check only waits for Redis to finish
-  // loading its dataset, which pub/sub does not need.
-  const sub = new Redis(opts.url, { ...baseOpts, enableReadyCheck: false });
+  const options = pubSubConnectionOptions(opts.redisOptions);
+  const pub = new Redis(opts.url, options.pub);
+  const sub = new Redis(opts.url, options.sub);
 
   const pubsub = new RedisPubSub(toRedisLike(pub), toRedisLike(sub), opts.nodeId);
 
