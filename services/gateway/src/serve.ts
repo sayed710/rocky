@@ -256,37 +256,6 @@ async function main(): Promise<void> {
 
   const authority = new GameAuthority(pubsub, () => Date.now(), store);
 
-  // --- Games projection (ADR-0147) ---
-  // Always on with a database: `games` is only truthful while something folds the event log into it.
-  // Every replica runs one; a checkpoint row lock lets exactly one work at a time.
-  let gamesProjection: { stop(): Promise<void> } | undefined;
-  if (pgPool) {
-    const { PgGamesProjector, GamesProjectionWorker } = await import('@chess-platform/persistence/pg');
-    const { gamesProjectedEndedChannel } = await import('@chess-platform/realtime-gateway');
-    const worker = new GamesProjectionWorker(new PgGamesProjector(pgPool), {
-      onBatch: (batch) => {
-        if (batch.rewound) logger.warn('Games projection checkpoint was ahead of this database; replaying the event log from the start');
-        for (const failure of batch.failures) {
-          logger.error('Games projection failed for a game stream; it stays pending and is retried', { gameId: failure.gameId, error: failure.error });
-        }
-        for (const ending of batch.endings) {
-          pubsub.publish(gamesProjectedEndedChannel(), {
-            t: 'ended',
-            gameId: ending.gameId,
-            result: ending.result,
-            termination: ending.termination,
-            winner: ending.result === '1-0' ? 'w' : ending.result === '0-1' ? 'b' : null,
-            serverTs: ending.endedAt.getTime(),
-          });
-        }
-      },
-      onError: (error) => logger.error('Games projection batch failed; retrying with backoff', { error: String(error) }),
-    });
-    worker.start();
-    gamesProjection = worker;
-    logger.info('Games projection is enabled');
-  }
-
   // --- Tournament Result Reporter (M9 inc 13, ADR-0025) ---
   let reporter: TournamentResultReporter | undefined;
   if (process.env['TOURNAMENT_REPORTER'] === '1') {
@@ -466,6 +435,38 @@ async function main(): Promise<void> {
       achievementsAwardWorker = worker;
       logger.info('AchievementsAwardWorker is enabled');
     }
+  }
+
+  // --- Games projection (ADR-0147) ---
+  // Always on with a database: `games` is only truthful while something folds the event log into it.
+  // Every replica runs one; a checkpoint row lock lets exactly one work at a time. Started after the
+  // search and achievements workers above subscribe, so this process's first wakes have listeners.
+  let gamesProjection: { stop(): Promise<void> } | undefined;
+  if (pgPool) {
+    const { PgGamesProjector, GamesProjectionWorker } = await import('@chess-platform/persistence/pg');
+    const { gamesProjectedEndedChannel } = await import('@chess-platform/realtime-gateway');
+    const worker = new GamesProjectionWorker(new PgGamesProjector(pgPool), {
+      onBatch: (batch) => {
+        if (batch.rewound) logger.warn('Games projection checkpoint was ahead of this database; replaying the event log from the start');
+        for (const failure of batch.failures) {
+          logger.error('Games projection failed for a game stream; it stays pending and is retried', { gameId: failure.gameId, error: failure.error });
+        }
+        for (const ending of batch.endings) {
+          pubsub.publish(gamesProjectedEndedChannel(), {
+            t: 'ended',
+            gameId: ending.gameId,
+            result: ending.result,
+            termination: ending.termination,
+            winner: ending.result === '1-0' ? 'w' : ending.result === '0-1' ? 'b' : null,
+            serverTs: ending.endedAt.getTime(),
+          });
+        }
+      },
+      onError: (error) => logger.error('Games projection batch failed; retrying with backoff', { error: String(error) }),
+    });
+    worker.start();
+    gamesProjection = worker;
+    logger.info('Games projection is enabled');
   }
 
   // --- Command router: local (single-node) or Redis (multi-node) (M14 inc 5) ---
@@ -741,10 +742,9 @@ async function main(): Promise<void> {
     reporter?.stop();
     botAutoAnalyzer?.stop();
     antiCheatAutoAnalyzer?.stop();
-    searchIndexWorker?.stop();
-    achievementsAwardWorker?.stop();
     engineBotMover?.stop();
-    // No new projection batch starts from here; an in-flight one is awaited before its pool and pub/sub close.
+    // No new projection batch starts from here. The in-flight one is awaited before the wake consumers
+    // unsubscribe and before pub/sub and the pool close, so a wake it publishes still has listeners.
     const projectionStopped = gamesProjection?.stop();
     // Start engine (subprocess) shutdown now so it runs concurrently with the
     // socket drain, but await it below before process.exit so cleanup can't be cut short.
@@ -764,6 +764,8 @@ async function main(): Promise<void> {
           await ownershipRegistry.releaseAll();
         }
         await projectionStopped;
+        searchIndexWorker?.stop();
+        achievementsAwardWorker?.stop();
         if (closePubSub) await closePubSub();
         if (closeCommandRedis) await closeCommandRedis();
         if (closeDatabase) await closeDatabase();

@@ -21,6 +21,7 @@
 import type { Pool, PoolClient } from 'pg';
 import type { ResultString, Termination } from '@chess-platform/game';
 import { upcast, type StoredEvent } from '../event-store';
+import { PersistenceError } from '../errors';
 import { projectGameStream, type GameProjection } from '../games-projection';
 import { isCanonicalUuid } from './repositories';
 
@@ -142,8 +143,10 @@ export class PgGamesProjector {
    * receives events afterwards.
    *
    * A game the live projector has yet to reach is left to it (`deferred`), so its ending is reported
-   * by the batch that publishes wakes rather than absorbed silently here. Endings found here are
-   * returned, not broadcast.
+   * by the batch that publishes wakes rather than absorbed silently here. Each page runs under
+   * REPEATABLE READ so that decision and the folds it guards read one snapshot: an ending committed
+   * mid-page is invisible to both and reaches the live projector intact. A page that collides with a
+   * live write is retried. Endings found here are returned, not broadcast.
    */
   async rebuildAll(pageSize = 200): Promise<{
     projected: number; deferred: number; failures: ProjectionFailure[]; endings: ProjectedEnding[];
@@ -156,11 +159,11 @@ export class PgGamesProjector {
         [after, pageSize],
       )).rows.map((r) => r.game_id);
       if (ids.length === 0) return total;
-      const page = await this.inTransaction(async (client) => {
+      const page = await retrySerialization(() => this.inTransaction(async (client) => {
         const live = await gamesAwaitingLiveBatch(client, ids);
         const result = await this.projectAll(client, ids.filter((id) => !live.has(id)));
         return { ...result, deferred: live.size };
-      });
+      }, 'REPEATABLE READ'));
       total.projected += page.projected;
       total.deferred += page.deferred;
       total.failures.push(...page.failures);
@@ -204,7 +207,9 @@ export class PgGamesProjector {
       const becameTerminal = projection.endedAt !== null && before.rows[0]?.ended !== true;
       return { ok: true, ending: becameTerminal ? endingOf(projection) : null };
     } catch (error) {
-      // A broken connection fails here too, which aborts the whole batch before the checkpoint moves.
+      // Only the stream's own data is recorded against the game. A lost connection, timeout or
+      // conflict aborts the whole batch instead, so the checkpoint does not move past a healthy game.
+      if (!isStreamDataFailure(error)) throw error;
       await client.query('ROLLBACK TO SAVEPOINT project_game');
       await client.query('RELEASE SAVEPOINT project_game');
       const message = error instanceof Error ? error.message : String(error);
@@ -221,11 +226,14 @@ export class PgGamesProjector {
     }
   }
 
-  private async inTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+  private async inTransaction<T>(
+    work: (client: PoolClient) => Promise<T>,
+    isolation: 'READ COMMITTED' | 'REPEATABLE READ' = 'READ COMMITTED',
+  ): Promise<T> {
     const client = await this.pool.connect();
     let broken: Error | undefined;
     try {
-      await client.query('BEGIN');
+      await client.query(`BEGIN ISOLATION LEVEL ${isolation}`);
       const result = await work(client);
       await client.query('COMMIT');
       return result;
@@ -245,26 +253,51 @@ export class PgGamesProjector {
 
 /**
  * Games among `ids` with a committed event past the checkpoint that this cluster wrote (id below the
- * snapshot's xmax), i.e. events a live batch is certain to reach. Holding the checkpoint `FOR SHARE`
- * until commit keeps a live batch from moving it between this check and the caller's writes.
+ * snapshot's xmax), i.e. events a live batch is certain to reach. Read inside the caller's
+ * REPEATABLE READ snapshot, so the answer holds for every later statement of the page.
+ *
+ * A checkpoint from another cluster's ids (a logical restore) promises nothing about who will project
+ * what, so nothing is deferred: the rebuild must repair everything even with no gateway running.
  */
 async function gamesAwaitingLiveBatch(client: PoolClient, ids: readonly string[]): Promise<Set<string>> {
   const snapshot = (await client.query<{ xmin: string; xmax: string }>(
     `SELECT pg_snapshot_xmin(s)::text AS xmin, pg_snapshot_xmax(s)::text AS xmax FROM pg_current_snapshot() AS s`,
   )).rows[0]!;
-  const row = (await client.query<{ xact_id: string; game_id: string; seq: number }>(
-    `SELECT xact_id::text AS xact_id, game_id, seq FROM projection_checkpoints WHERE projection = $1 FOR SHARE`,
+  const cursor = (await client.query<{ xact_id: string; game_id: string; seq: number }>(
+    `SELECT xact_id::text AS xact_id, game_id, seq FROM projection_checkpoints WHERE projection = $1`,
     [PROJECTION],
   )).rows[0]!;
-  // Mirrors runBatch: a checkpoint from another cluster's ids will be replayed from the origin.
-  const cursor = BigInt(row.xact_id) >= BigInt(snapshot.xmin) ? ORIGIN : { xactId: row.xact_id, gameId: row.game_id, seq: row.seq };
+  if (BigInt(cursor.xact_id) >= BigInt(snapshot.xmin)) return new Set();
   const pending = await client.query<{ game_id: string }>(
     `SELECT DISTINCT game_id FROM game_events
      WHERE game_id = ANY($1::uuid[]) AND xact_id < $2::xid8
        AND (xact_id, game_id, seq) > ($3::xid8, $4::uuid, $5::integer)`,
-    [ids, snapshot.xmax, cursor.xactId, cursor.gameId, cursor.seq],
+    [ids, snapshot.xmax, cursor.xact_id, cursor.game_id, cursor.seq],
   );
   return new Set(pending.rows.map((r) => r.game_id));
+}
+
+/** Errors caused by a stream's own content, which retrying the same bytes cannot fix. */
+function isStreamDataFailure(error: unknown): boolean {
+  if (error instanceof PersistenceError || error instanceof TypeError || error instanceof RangeError) return true;
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  // SQLSTATE classes 22 (data exception) and 23 (integrity constraint violation).
+  return typeof code === 'string' && (code.startsWith('22') || code.startsWith('23'));
+}
+
+const SERIALIZATION_FAILURE = '40001';
+const MAX_SERIALIZATION_ATTEMPTS = 5;
+
+/** Re-run a REPEATABLE READ page that collided with a concurrent write. */
+async function retrySerialization<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await run();
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+      if (code !== SERIALIZATION_FAILURE || attempt >= MAX_SERIALIZATION_ATTEMPTS) throw error;
+    }
+  }
 }
 
 async function loadStream(client: PoolClient, gameId: string): Promise<StoredEvent[]> {

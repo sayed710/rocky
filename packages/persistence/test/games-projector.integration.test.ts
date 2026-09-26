@@ -309,6 +309,93 @@ test('a rebuild leaves a game the live projector has yet to reach, so its ending
   });
 });
 
+test('an ending committed while a rebuild page is running is left to the live batch that reports it', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await newUsers(pool, 2);
+    const store = new PostgresEventStore(pool);
+    const first = uuidv7();
+    const later = uuidv7();
+    await store.append(first, -1, creation(first, white!, black!));
+    await store.append(later, -1, creation(later, white!, black!));
+    await play(store, later, FOOLS_MATE.slice(0, 3));
+    const projector = new PgGamesProjector(pool);
+    await drain(projector, pool);
+
+    // Pause the rebuild on the first game's row lock, after its page has decided what to defer.
+    const holder = await pool.connect();
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM games WHERE id = $1 FOR UPDATE', [first]);
+      const rebuilding = projector.rebuildAll();
+      const deadline = Date.now() + 10_000;
+      while (!(await pool.query<{ waiting: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock') AS waiting`,
+      )).rows[0]!.waiting) {
+        assert.ok(Date.now() < deadline, 'the rebuild never reached the held row');
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      await play(store, later, FOOLS_MATE.slice(3), 9_000);
+      await holder.query('ROLLBACK');
+      await rebuilding;
+    } finally {
+      holder.release();
+    }
+
+    assert.equal((await gameRow(pool, later))?.ended_at, null, 'the rebuild folded its own snapshot, not the new ending');
+    assert.deepEqual(await drain(projector, pool), [later], 'the live batch reports the ending');
+  });
+});
+
+test('after a logical restore the rebuild repairs every game itself, even with no live projector', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await newUsers(pool, 2);
+    const gameId = uuidv7();
+    const store = new PostgresEventStore(pool);
+    await store.append(gameId, -1, creation(gameId, white!, black!));
+    await play(store, gameId, FOOLS_MATE);
+    await pool.query(`UPDATE projection_checkpoints SET xact_id = '9000000000000' WHERE projection = 'games'`);
+    const rebuilt = await new PgGamesProjector(pool).rebuildAll();
+    assert.equal(rebuilt.deferred, 0);
+    assert.equal((await gameRow(pool, gameId))?.result, '0-1');
+  });
+});
+
+test('a transient database error aborts the batch without recording the game; a data error is recorded', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await newUsers(pool, 2);
+    const gameId = uuidv7();
+    await new PostgresEventStore(pool).append(gameId, -1, creation(gameId, white!, black!));
+    await settle(pool);
+    const before = await checkpoint(pool);
+    const failWith = async (sqlstate: string) => {
+      await pool.query('DROP TRIGGER IF EXISTS fail_games ON games');
+      await pool.query(`CREATE OR REPLACE FUNCTION fail_games() RETURNS trigger AS $$
+        BEGIN RAISE EXCEPTION 'injected' USING ERRCODE = '${sqlstate}'; END $$ LANGUAGE plpgsql`);
+      await pool.query('CREATE TRIGGER fail_games BEFORE INSERT OR UPDATE ON games FOR EACH ROW EXECUTE FUNCTION fail_games()');
+    };
+    const projector = new PgGamesProjector(pool);
+    const failures = async () => (await pool.query('SELECT game_id FROM games_projection_failures')).rows.length;
+
+    await failWith('57014'); // query_canceled, e.g. a statement timeout
+    await assert.rejects(projector.runBatch(), /injected/);
+    assert.equal(await failures(), 0, 'a healthy game is not marked failed');
+    assert.deepEqual(await checkpoint(pool), before, 'the checkpoint does not pass it');
+
+    await failWith('23514'); // check_violation: the stream's data cannot be stored
+    assert.deepEqual((await projector.runBatch()).failures.map((f) => f.gameId), [gameId]);
+    assert.equal(await failures(), 1);
+
+    await pool.query('DROP TRIGGER fail_games ON games');
+    await pool.query(`UPDATE games_projection_failures SET retry_at = now() - interval '1 second'`);
+    await projector.runBatch();
+    assert.equal((await gameRow(pool, gameId))?.last_seq, 0);
+    assert.equal(await failures(), 0);
+  });
+});
+
 test('streams written before migration 0040 are projected by the first pass without an operator step', { skip }, async () => {
   const before = mkdtempSync(join(tmpdir(), 'pre-0040-'));
   try {
