@@ -95,7 +95,7 @@ async function rating(pool: Pool, userId: string, variant = 'standard', speed = 
   )).rows[0];
 }
 
-async function count(pool: Pool, table: 'ratings' | 'rating_applications' | 'rating_blocked_games'): Promise<number> {
+async function count(pool: Pool, table: 'ratings' | 'rating_applications' | 'rating_blocked_games' | 'rating_ineligible_games'): Promise<number> {
   return Number((await pool.query<{ n: string }>(`SELECT count(*) AS n FROM ${table}`)).rows[0]!.n);
 }
 
@@ -267,6 +267,23 @@ test('replaying every ending again changes nothing: the ledger applies each game
   });
 });
 
+test('an applied game stays applied when an account later becomes a bot', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await users(pool, 2);
+    await record(pool, params(white!, black!), [move('e2e4'), resign('b')]);
+    await drain(pool);
+    const before = (await pool.query('SELECT user_id, rating, rd, vol FROM ratings ORDER BY user_id')).rows;
+
+    await pool.query(`UPDATE users SET flags = '{"bot":true}'::jsonb WHERE id = $1`, [black]);
+    await pool.query(`UPDATE rating_checkpoint SET xact_id = '0', server_ts = '-infinity', game_id = '00000000-0000-0000-0000-000000000000'`);
+    const replay = await drain(pool);
+    assert.equal(total(replay, 'already_applied'), 1);
+    assert.equal(await count(pool, 'rating_ineligible_games'), 0);
+    assert.deepEqual((await pool.query('SELECT user_id, rating, rd, vol FROM ratings ORDER BY user_id')).rows, before);
+  });
+});
+
 test('a replica finds the checkpoint held and does nothing; the holder\'s work is not duplicated', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);
@@ -343,6 +360,22 @@ test('a failure after the first player\'s write rolls back both players, the led
     const retried = await drain(pool);
     assert.equal(total(retried, 'applied'), 1);
     assert.deepEqual(await rating(pool, black!), rateGame(initialRating(), initialRating(), 1).black);
+  });
+});
+
+test('a rating-table integrity failure aborts the batch instead of blaming and blocking a valid stream', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await users(pool, 2);
+    await record(pool, params(white!, black!), [move('e2e4'), resign('b')]);
+    await pool.query(`CREATE FUNCTION fail_rating_write() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'rating state invalid' USING ERRCODE = '23514'; END $$`);
+    await pool.query('CREATE TRIGGER fail_rating_write BEFORE UPDATE ON ratings FOR EACH ROW EXECUTE FUNCTION fail_rating_write()');
+    const checkpointBefore = (await pool.query('SELECT xact_id::text, server_ts::text, game_id FROM rating_checkpoint')).rows;
+    await assert.rejects(new PgRatingsApplier(pool).runBatch(), /rating state invalid/);
+    assert.equal(await count(pool, 'rating_blocked_games'), 0);
+    assert.equal(await count(pool, 'rating_applications'), 0);
+    assert.deepEqual((await pool.query('SELECT xact_id::text, server_ts::text, game_id FROM rating_checkpoint')).rows, checkpointBefore);
   });
 });
 
@@ -497,6 +530,50 @@ test('an ending whose transaction commits late is applied before later-started e
   });
 });
 
+test('backlog age exposes a committed ending held behind an older open transaction', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await users(pool, 2);
+    const holder = await inTx(pool);
+    try {
+      await holder.query('SELECT pg_current_xact_id()');
+      await record(pool, params(white!, black!), [move('e2e4'), resign('b')]);
+      const applier = new PgRatingsApplier(pool);
+      assert.equal(total([await applier.runBatch()], 'applied'), 0);
+      assert.ok(await applier.oldestPendingEndingAgeSeconds() > 0);
+      await holder.query('COMMIT');
+      await drain(pool, applier);
+      assert.equal(await applier.oldestPendingEndingAgeSeconds(), 0);
+    } finally {
+      await holder.query('ROLLBACK');
+      holder.release();
+    }
+  });
+});
+
+test('a lower-counter logical restore stops ratings before a new ending can pass imported pending work', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await users(pool, 2);
+    const create = params(white!, black!);
+    const started = Game.create(create);
+    const moved = started.game.playMove('e2e4', 2_000);
+    const ended = moved.game.resign('b', 3_000);
+    const events = [...started.events, ...moved.events, ...ended.events];
+    for (const [seq, event] of events.entries()) {
+      await pool.query(
+        `INSERT INTO game_events (game_id, seq, type, event_version, payload, xact_id)
+         VALUES ($1, $2, $3, 1, $4, '9000000000000'::xid8)`,
+        [create.gameId, seq, event.type, event],
+      );
+    }
+    const before = (await pool.query('SELECT xact_id::text, server_ts::text, game_id FROM rating_checkpoint')).rows;
+    await assert.rejects(new PgRatingsApplier(pool).runBatch(), /logical restore|transaction counter/i);
+    assert.deepEqual((await pool.query('SELECT xact_id::text, server_ts::text, game_id FROM rating_checkpoint')).rows, before);
+    assert.equal(await count(pool, 'rating_applications'), 0);
+  });
+});
+
 test('a stream that cannot be proven rateable is blocked, reported and never rated, and later games still are', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);
@@ -515,6 +592,120 @@ test('a stream that cannot be proven rateable is blocked, reported and never rat
     assert.match((await pool.query('SELECT error FROM rating_blocked_games')).rows[0]!.error, /unknown termination/);
     assert.equal(total(batches, 'applied'), 1);
     assert.deepEqual(await rating(pool, a!), rateGame(initialRating(), initialRating(), 1).white);
+  });
+});
+
+test('a recorded block remains sticky across checkpoint rewind and repeated batches', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await users(pool, 2);
+    const gameId = await record(pool, params(white!, black!), [move('e2e4'), resign('b')]);
+    await pool.query(
+      'INSERT INTO rating_blocked_games (game_id, error) VALUES ($1, $2)',
+      [gameId, 'operator retained earlier stream failure'],
+    );
+
+    const first = await drain(pool);
+    assert.equal(total(first, 'applied'), 0);
+    assert.equal(await count(pool, 'rating_applications'), 0);
+    assert.equal(await count(pool, 'ratings'), 0);
+
+    await pool.query(`UPDATE rating_checkpoint SET xact_id = '0', server_ts = '-infinity', game_id = '00000000-0000-0000-0000-000000000000'`);
+    const replay = await drain(pool);
+    assert.equal(total(replay, 'applied'), 0);
+    assert.equal(await count(pool, 'rating_applications'), 0);
+    assert.equal(await count(pool, 'rating_blocked_games'), 1);
+  });
+});
+
+test('a prior ineligible decision cannot turn into an out-of-order rating after account flags change and checkpoint rewinds', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await users(pool, 2);
+    await record(pool, params(white!, black!), [move('e2e4'), resign('b')]);
+    await pool.query(`UPDATE users SET flags = '{"bot":true}'::jsonb WHERE id = $1`, [black]);
+    const first = await drain(pool);
+    assert.equal(total(first, 'ineligible'), 1);
+    await pool.query(`UPDATE users SET flags = '{}'::jsonb WHERE id = $1`, [black]);
+    await record(pool, params(white!, black!), [move('e2e4'), resign('w')]);
+    await drain(pool);
+    assert.equal(await count(pool, 'rating_applications'), 1);
+    const live = (await pool.query('SELECT user_id, rating, rd, vol FROM ratings ORDER BY user_id')).rows;
+
+    await pool.query(`UPDATE rating_checkpoint SET xact_id = '0', server_ts = '-infinity', game_id = '00000000-0000-0000-0000-000000000000'`);
+    const replay = await drain(pool);
+    assert.equal(total(replay, 'applied'), 0);
+    assert.equal(await count(pool, 'rating_applications'), 1);
+    assert.deepEqual((await pool.query('SELECT user_id, rating, rd, vol FROM ratings ORDER BY user_id')).rows, live);
+  });
+});
+
+test('blocked records and rating applications cannot race into contradictory durable state', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const gameId = uuidv7();
+    await pool.query('INSERT INTO rating_blocked_games (game_id, error) VALUES ($1, $2)', [gameId, 'unprovable']);
+    await assert.rejects(pool.query(
+      `INSERT INTO rating_applications (game_id, variant, speed, white_id, black_id, white_score,
+         white_rating_before, white_rating_after, black_rating_before, black_rating_after)
+       VALUES ($1, 'standard', 'blitz', $2, $3, 1, 1500, 1500, 1500, 1500)`,
+      [gameId, uuidv7(), uuidv7()],
+    ));
+    assert.equal(await count(pool, 'rating_applications'), 0);
+  });
+});
+
+test('concurrent block and application inserts serialize and retain the first committed decision', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const gameId = uuidv7();
+    const blocker = await inTx(pool);
+    const applier = await inTx(pool);
+    try {
+      await blocker.query('INSERT INTO rating_blocked_games (game_id, error) VALUES ($1, $2)', [gameId, 'unprovable']);
+      const racing = applier.query(
+        `INSERT INTO rating_applications (game_id, variant, speed, white_id, black_id, white_score,
+           white_rating_before, white_rating_after, black_rating_before, black_rating_after)
+         VALUES ($1, 'standard', 'blitz', $2, $3, 1, 1500, 1500, 1500, 1500)`,
+        [gameId, uuidv7(), uuidv7()],
+      ).then(() => 'inserted', (error: Error) => error.message);
+      await waiters(pool, 1);
+      await blocker.query('COMMIT');
+      assert.match(await racing, /permanently blocked/);
+      await applier.query('ROLLBACK');
+    } finally {
+      await blocker.query('ROLLBACK');
+      await applier.query('ROLLBACK');
+      blocker.release();
+      applier.release();
+    }
+    assert.equal(await count(pool, 'rating_blocked_games'), 1);
+    assert.equal(await count(pool, 'rating_applications'), 0);
+  });
+});
+
+test('a valid game near former numeric bounds is applied instead of being misclassified as a corrupt stream', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [white, black] = await users(pool, 2);
+    const gameId = await record(pool, params(white!, black!), [move('e2e4'), resign('b')]);
+    const beforeWhite = { rating: 10000, rd: 1000, vol: 0.999 };
+    const beforeBlack = { rating: -10000, rd: 1000, vol: 0.999 };
+    for (const [userId, value] of [[white!, beforeWhite], [black!, beforeBlack]] as const) {
+      await pool.query(
+        'INSERT INTO ratings (user_id, variant, speed, rating, rd, vol) VALUES ($1, $2, $3, $4, $5, $6)',
+        [userId, 'standard', 'blitz', value.rating, value.rd, value.vol],
+      );
+    }
+
+    const expected = rateGame(beforeWhite, beforeBlack, 1);
+    assert.ok(Number.isFinite(expected.white.rating) && Number.isFinite(expected.white.rd) && Number.isFinite(expected.white.vol));
+    const batches = await drain(pool);
+    assert.equal(total(batches, 'applied'), 1);
+    assert.equal(await count(pool, 'rating_blocked_games'), 0);
+    assert.deepEqual(await rating(pool, white!), expected.white);
+    assert.deepEqual(await rating(pool, black!), expected.black);
+    assert.equal((await pool.query('SELECT game_id FROM rating_applications')).rows[0]!.game_id, gameId);
   });
 });
 

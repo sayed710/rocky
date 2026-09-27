@@ -64,13 +64,43 @@ export class PgRatingsApplier {
     this.batchSize = options.batchSize ?? 200;
   }
 
+  /** Age in seconds of the earliest visible ending still after the effective checkpoint. */
+  async oldestPendingEndingAgeSeconds(): Promise<number> {
+    const state = (await this.pool.query<{ xact_id: string; server_ts: string; game_id: string; horizon: string }>(
+      `SELECT xact_id::text AS xact_id, server_ts::text AS server_ts, game_id,
+              pg_snapshot_xmin(pg_current_snapshot())::text AS horizon FROM rating_checkpoint`,
+    )).rows[0];
+    if (!state) throw new Error('rating checkpoint is missing');
+    const cursor: Position = BigInt(state.xact_id) >= BigInt(state.horizon)
+      ? ORIGIN : { xactId: state.xact_id, serverTs: state.server_ts, gameId: state.game_id };
+    // A single ordered index probe sees committed endings even when a long transaction holds the
+    // apply horizon behind them. Count(*) would grow in cost with the very backlog being measured.
+    const oldest = await this.pool.query<{ age: number }>(
+      `SELECT GREATEST(0, EXTRACT(EPOCH FROM clock_timestamp() - server_ts))::float8 AS age
+       FROM game_events WHERE type = 'GameEnded'
+         AND (xact_id, server_ts, game_id) > ($1::xid8, $2::timestamptz, $3::uuid)
+       ORDER BY xact_id, server_ts, game_id LIMIT 1`,
+      [cursor.xactId, cursor.serverTs, cursor.gameId],
+    );
+    return oldest.rows[0]?.age ?? 0;
+  }
+
   /** Apply the next bounded page of committed endings, in order, in one transaction. */
   runBatch(): Promise<RatingsBatch> {
     return inTransaction(this.pool, async (client) => {
       // First statement, before this transaction owns an id, so the horizon is not capped by it.
-      const horizon = (await client.query<{ horizon: string }>(
-        'SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS horizon',
-      )).rows[0]!.horizon;
+      const snapshot = (await client.query<{ horizon: string; next_xid: string; max_ending_xid: string | null }>(
+        `SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS horizon,
+                pg_snapshot_xmax(pg_current_snapshot())::text AS next_xid,
+                (SELECT xact_id::text FROM game_events WHERE type = 'GameEnded'
+                 ORDER BY xact_id DESC LIMIT 1) AS max_ending_xid`,
+      )).rows[0]!;
+      const horizon = snapshot.horizon;
+      // A logical restore can preserve event xid8 values above the destination's counter. Such
+      // endings are invisible to the committed-prefix scan; continuing could rate new games first.
+      if (snapshot.max_ending_xid !== null && BigInt(snapshot.max_ending_xid) >= BigInt(snapshot.next_xid)) {
+        throw new Error('ratings stopped: logical restore has game endings beyond this cluster transaction counter; reconcile the restored event order before starting gateways');
+      }
       // server_ts travels as text: a JavaScript Date would drop its microseconds and park the cursor
       // just below the row it had passed.
       const locked = await client.query<{ xact_id: string; server_ts: string; game_id: string }>(
@@ -123,15 +153,23 @@ type OneOutcome =
 
 /** A savepoint confines one stream's data failure; the block is recorded in the same transaction. */
 async function rateOne(client: PoolClient, gameId: string): Promise<OneOutcome> {
+  const priorBlock = await client.query<{ error: string }>(
+    'SELECT error FROM rating_blocked_games WHERE game_id = $1', [gameId],
+  );
+  if (priorBlock.rows[0]) return { kind: 'blocked', error: priorBlock.rows[0].error };
+  const priorIneligible = await client.query('SELECT 1 FROM rating_ineligible_games WHERE game_id = $1', [gameId]);
+  if (priorIneligible.rowCount) return { kind: 'ineligible' };
+  // The ledger is also a sticky decision. Rechecking today's account flags before it would
+  // reclassify a previously rated game on rewind and collide with the durable application.
+  const priorApplication = await client.query('SELECT 1 FROM rating_applications WHERE game_id = $1', [gameId]);
+  if (priorApplication.rowCount) return { kind: 'already_applied' };
   await client.query('SAVEPOINT rate_game');
+  let decision: ReturnType<typeof decideRating>;
   try {
-    const decision = decideRating(gameId, await loadStream(client, gameId));
-    const applied = decision.kind === 'rate' ? await applyRatedGame(client, decision.game) : 'ineligible';
-    await client.query('RELEASE SAVEPOINT rate_game');
-    return { kind: applied === 'applied' || applied === 'already_applied' ? applied : 'ineligible' };
+    decision = decideRating(gameId, await loadStream(client, gameId));
   } catch (error) {
-    // Only the stream's own data blocks a game. A lost connection, timeout or conflict aborts the
-    // whole batch instead, so the checkpoint does not move past a game that was never decided.
+    // Only loading and validating the stream can make a sticky block. A rating-table constraint
+    // error is state corruption, not evidence that the event stream is bad; it aborts the batch.
     if (!isStreamDataFailure(error)) throw error;
     await client.query('ROLLBACK TO SAVEPOINT rate_game');
     await client.query('RELEASE SAVEPOINT rate_game');
@@ -142,6 +180,14 @@ async function rateOne(client: PoolClient, gameId: string): Promise<OneOutcome> 
     );
     return { kind: 'blocked', error: message };
   }
+  const applied = decision.kind === 'rate' ? await applyRatedGame(client, decision.game) : 'ineligible';
+  const reason = decision.kind === 'ineligible' ? decision.reason
+    : applied === 'missing_account' || applied === 'bot_account' ? applied : null;
+  if (reason !== null) {
+    await client.query('INSERT INTO rating_ineligible_games (game_id, reason) VALUES ($1, $2)', [gameId, reason]);
+  }
+  await client.query('RELEASE SAVEPOINT rate_game');
+  return { kind: applied === 'applied' || applied === 'already_applied' ? applied : 'ineligible' };
 }
 
 /** The result of {@link applyRatedGame}; the last two change nothing. */

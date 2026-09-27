@@ -490,7 +490,24 @@ async function main(): Promise<void> {
     const outcomes = ['applied', 'already_applied', 'ineligible', 'blocked'] as const;
     const outcomeCounters = new Map(outcomes.map((outcome) => [outcome, metrics.counter('ratings_games_total', { outcome })]));
     const batchFailures = metrics.counter('ratings_batch_failures_total');
-    const worker = new GamesProjectionWorker(new PgRatingsApplier(pgPool), {
+    const backlogAge = metrics.gauge('ratings_oldest_pending_ending_age_seconds');
+    const backlogSampleFailures = metrics.counter('ratings_backlog_sample_failures_total');
+    const applier = new PgRatingsApplier(pgPool);
+    let backlogSample: Promise<void> | undefined;
+    const sampleBacklog = (): void => {
+      if (backlogSample) return;
+      backlogSample = applier.oldestPendingEndingAgeSeconds()
+        .then((age) => backlogAge.set(age))
+        .catch((error: unknown) => {
+          backlogSampleFailures.inc();
+          logger.warn('Ratings backlog sample failed', { error: String(error) });
+        })
+        .finally(() => { backlogSample = undefined; });
+    };
+    const backlogTimer = setInterval(sampleBacklog, 10_000);
+    backlogTimer.unref();
+    sampleBacklog();
+    const worker = new GamesProjectionWorker(applier, {
       onBatch: (batch) => {
         if (batch.rewound) logger.warn('Ratings checkpoint was ahead of this database; replaying endings from the start (the ledger skips applied games)');
         for (const outcome of outcomes) {
@@ -508,7 +525,11 @@ async function main(): Promise<void> {
       },
     });
     worker.start();
-    ratingsApplier = worker;
+    ratingsApplier = { stop: async () => {
+      clearInterval(backlogTimer);
+      await worker.stop();
+      await backlogSample;
+    } };
     logger.info('Ratings applier is enabled');
   }
 

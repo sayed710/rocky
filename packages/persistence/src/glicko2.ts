@@ -44,7 +44,7 @@ function expectedScore(mu: number, muJ: number, phiJ: number): number {
 
 /** Solve for the new volatility via the Illinois algorithm (Glickman step 5). */
 function newVolatility(vol: number, delta: number, phi: number, v: number, tau: number): number {
-  const a = Math.log(vol * vol);
+  const a = 2 * Math.log(vol);
   const d2 = delta * delta;
   const pv = phi * phi + v;
 

@@ -46,3 +46,22 @@ test('rateGame scores a draw one half each way and is symmetric between equal pl
   assert.equal(rated.white.rating, 1500);
   assert.ok(rated.white.rd < 350);
 });
+
+test('a tiny positive stored volatility stays positive after a valid game', () => {
+  const next = updateRating(
+    { rating: 1500, rd: 100, vol: 1e-162 },
+    [{ rating: 1500, rd: 100, score: 1 }],
+  );
+  assert.ok(next.vol > 0 && Number.isFinite(next.vol));
+});
+
+test('repeated valid games can raise RD beyond the former database cap without losing finite state', () => {
+  let winner = initialRating();
+  const newOpponent = initialRating();
+  for (let i = 0; i < 100_000; i += 1) {
+    winner = rateGame(winner, newOpponent, 1).white;
+    assert.ok(Number.isFinite(winner.rating) && Number.isFinite(winner.rd) && Number.isFinite(winner.vol));
+    assert.ok(winner.rd > 0 && winner.vol > 0);
+  }
+  assert.ok(winner.rd > 1000);
+});

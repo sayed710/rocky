@@ -86,6 +86,20 @@ test.describe('Leaderboard view', () => {
     expect(requested.map((url) => new URL(url).pathname)).toEqual(['/v1/leaderboard/atomic/blitz']);
   });
 
+  test('each pool label stays with a touch-sized selector at 320px', async ({ page }) => {
+    await page.goto('/leaderboard');
+    for (const id of ['leaderboard-variant-select', 'leaderboard-speed-select']) {
+      const control = page.locator(`#${id}`);
+      const label = page.locator(`label[for="${id}"]`);
+      const [controlBox, labelBox] = await Promise.all([control.boundingBox(), label.boundingBox()]);
+      expect(controlBox).not.toBeNull();
+      expect(labelBox).not.toBeNull();
+      expect(controlBox!.height).toBeGreaterThanOrEqual(44);
+      expect(Math.abs((controlBox!.y + controlBox!.height / 2) - (labelBox!.y + labelBox!.height / 2))).toBeLessThan(16);
+      expect(controlBox!.x + controlBox!.width).toBeLessThanOrEqual(320);
+    }
+  });
+
   test('navigation loads standard blitz standings within a narrow viewport', async ({ page }) => {
     await page.goto('/');
     await page.locator('nav a[data-route="leaderboard"]').click();

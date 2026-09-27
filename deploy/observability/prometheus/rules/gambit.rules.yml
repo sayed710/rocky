@@ -161,6 +161,30 @@ groups:
   # Not SLO burn: conditions that mean a signal is being lost, or that something is being attacked.
   - name: gambit-operational
     rules:
+      - alert: GambitRatingsBacklogAging
+        expr: max(ratings_oldest_pending_ending_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "Ratings have an ending waiting more than five minutes"
+          description: >-
+            The oldest committed ending after the ratings checkpoint is {{ $value | humanizeDuration }} old.
+            Check the ratings runbook for a held transaction, failed worker, or restore mismatch.
+          runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-lag-or-blocked-games"
+
+      - alert: GambitRatingsBacklogSampleFailing
+        expr: sum(rate(ratings_backlog_sample_failures_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "Ratings backlog sampling is failing"
+          description: "The age gauge may be stale; inspect gateway logs and PostgreSQL connectivity."
+          runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-lag-or-blocked-games"
+
       - alert: GambitSpanExportFailing
         expr: gambit:span_export_loss:ratio_rate5m > 0.05
         for: 10m
