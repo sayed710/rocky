@@ -6,17 +6,16 @@
  * present the result. All collaborators arrive via {@link RouteDeps} — no globals.
  */
 
-import type { Variant } from '@chess-platform/core';
 import { FenError } from '@chess-platform/core';
 import { coreFenValidator } from './analysis/fen-validator.js';
 import type { TiebreakKey } from '@chess-platform/tournament';
-import { PlayerLockUnavailableError, type RatingRow, type TournamentsRepository } from '@chess-platform/persistence';
+import { DEFAULT_RATING, PlayerLockUnavailableError, type RatingRow, type TournamentsRepository } from '@chess-platform/persistence';
 import { AuthService } from './auth/service';
 import type { RequestMeta } from './auth/service';
 import { EMAIL_ADDRESS_PATTERN } from './email/address.js';
 import type { Repositories } from './deps';
 import { Game, classifySpeed } from '@chess-platform/game';
-import { parseRole, parseSeekColor, parseTimeControl, parseUuid, parseVariant, parseCreatableVariant, VARIANTS, CREATABLE_VARIANTS, HANDLE_PATTERN, UUID_PATTERN } from './domain';
+import { parseRole, parseSeekColor, parseSpeed, parseTimeControl, parseUuid, parseVariant, parseCreatableVariant, CREATABLE_VARIANTS, HANDLE_PATTERN, UUID_PATTERN } from './domain';
 import { BOT_ACCOUNTS, botAccountByLevel } from './bot/catalogue';
 import { LiveGameAssistanceGuard } from './fair-play/live-game-assistance-guard';
 import { HttpError } from './http/errors';
@@ -943,7 +942,7 @@ export function buildRouter(deps: RouteDeps): Router {
   router.get(
     '/v1/users/:handle/ratings',
     doc({
-      summary: "Get a user's ratings across variants",
+      summary: "Get a user's ratings in every rating pool (variant and speed) they have played",
       tags: ['users', 'ratings'],
       params: [pathParam('handle', 'User handle')],
       responses: { 200: ['RatingList', 'Ratings'], 404: ['Error', 'No such user'] },
@@ -1229,18 +1228,19 @@ export function buildRouter(deps: RouteDeps): Router {
   // --- Ratings / leaderboard ----------------------------------------------
 
   router.get(
-    '/v1/leaderboard/:variant',
+    '/v1/leaderboard/:variant/:speed',
     doc({
-      summary: 'Top players for a variant',
+      summary: 'Top players in one rating pool (a variant and a speed)',
       tags: ['ratings'],
-      params: [pathParam('variant', 'Variant code'), limitParam()],
-      responses: { 200: ['LeaderboardList', 'Leaderboard'], 422: ['Error', 'Bad variant'] },
+      params: [pathParam('variant', 'Variant code'), pathParam('speed', 'Speed class; each variant and speed is its own pool'), limitParam()],
+      responses: { 200: ['LeaderboardList', 'Leaderboard'], 422: ['Error', 'Bad variant or speed'] },
     }),
     PUBLIC,
     async (ctx) => {
       const variant = parseVariant(ctx.params['variant']!);
+      const speed = parseSpeed(ctx.params['speed']!);
       const limit = parseLimit(ctx.query, DEFAULT_LEADERBOARD_LIMIT, MAX_LEADERBOARD_LIMIT);
-      const rows = await repos.ratings.leaderboard(variant, limit);
+      const rows = await repos.ratings.leaderboard(variant, speed, limit);
       return json(200, rows.map(leaderboardEntry));
     },
   );
@@ -1502,8 +1502,10 @@ export function buildRouter(deps: RouteDeps): Router {
       }
 
       if (seek.minRating !== null || seek.maxRating !== null) {
-        const ratingRow = await repos.ratings.get(identity.userId, seek.variant);
-        const currentRating = ratingRow ? ratingRow.rating : 1500;
+        // The acceptor's rating in the pool this seek's game would be rated in. A player with no
+        // rating there yet stands at the Glicko-2 starting rating, never at another pool's.
+        const ratingRow = await repos.ratings.get(identity.userId, seek.variant, classifySpeed(seek.timeControl));
+        const currentRating = ratingRow ? ratingRow.rating : DEFAULT_RATING;
         if (seek.minRating !== null && currentRating < seek.minRating) {
           throw HttpError.forbidden('rating too low for this seek');
         }
@@ -6294,9 +6296,8 @@ async function findUserByHandle(repos: Repositories, handle: string) {
   return user;
 }
 
-async function allRatings(repos: Repositories, userId: string): Promise<RatingRow[]> {
-  const rows = await Promise.all(VARIANTS.map((v: Variant) => repos.ratings.get(userId, v)));
-  return rows.filter((r): r is RatingRow => r !== null);
+function allRatings(repos: Repositories, userId: string): Promise<RatingRow[]> {
+  return repos.ratings.listForUser(userId);
 }
 
 interface DocSpec {

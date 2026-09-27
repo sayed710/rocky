@@ -45,7 +45,7 @@ import type {
   NewWebAuthnLoginChallenge,
   WebAuthnLoginChallengesRepository,
 } from '../repositories';
-import { SEEK_TTL_MS } from '../repositories';
+import { SEEK_TTL_MS, SPEEDS } from '../repositories';
 import { CURRENT_EVENT_VERSION } from '../event-store.js';
 import { lockGameCreationPlayers, retryPlayerLockContention } from './event-store.js';
 import { DuplicateUserError, VersionConflictError } from '../errors';
@@ -83,6 +83,7 @@ interface SessionDbRow {
 interface RatingDbRow {
   user_id: string;
   variant: string;
+  speed: string;
   rating: number;
   rd: number;
   vol: number;
@@ -164,6 +165,7 @@ function toRating(r: RatingDbRow): RatingRow {
   return {
     userId: r.user_id,
     variant: r.variant as Variant,
+    speed: r.speed as Speed,
     rating: r.rating,
     rd: r.rd,
     vol: r.vol,
@@ -528,37 +530,33 @@ export class PgSessionsRepository implements SessionsRepository {
   }
 }
 
+const RATING_COLS = 'user_id, variant, speed, rating, rd, vol, updated_at';
+
 export class PgRatingsRepository implements RatingsRepository {
   constructor(private readonly pool: Pool) {}
 
-  async get(userId: string, variant: Variant): Promise<RatingRow | null> {
+  async get(userId: string, variant: Variant, speed: Speed): Promise<RatingRow | null> {
     const res = await this.pool.query<RatingDbRow>(
-      'SELECT user_id, variant, rating, rd, vol, updated_at FROM ratings WHERE user_id = $1 AND variant = $2',
-      [userId, variant],
+      `SELECT ${RATING_COLS} FROM ratings WHERE user_id = $1 AND variant = $2 AND speed = $3`,
+      [userId, variant, speed],
     );
     return res.rows[0] ? toRating(res.rows[0]) : null;
   }
 
-  async upsert(row: {
-    userId: string;
-    variant: Variant;
-    rating: number;
-    rd: number;
-    vol: number;
-  }): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO ratings (user_id, variant, rating, rd, vol) VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (user_id, variant)
-       DO UPDATE SET rating = EXCLUDED.rating, rd = EXCLUDED.rd, vol = EXCLUDED.vol, updated_at = now()`,
-      [row.userId, row.variant, row.rating, row.rd, row.vol],
+  async listForUser(userId: string): Promise<RatingRow[]> {
+    const res = await this.pool.query<RatingDbRow>(
+      `SELECT ${RATING_COLS} FROM ratings WHERE user_id = $1
+       ORDER BY variant, array_position($2::text[], speed)`,
+      [userId, SPEEDS],
     );
+    return res.rows.map(toRating);
   }
 
-  async leaderboard(variant: Variant, limit: number): Promise<RatingRow[]> {
+  async leaderboard(variant: Variant, speed: Speed, limit: number): Promise<RatingRow[]> {
     const res = await this.pool.query<RatingDbRow>(
-      `SELECT user_id, variant, rating, rd, vol, updated_at FROM ratings
-       WHERE variant = $1 ORDER BY rating DESC LIMIT $2`,
-      [variant, limit],
+      `SELECT ${RATING_COLS} FROM ratings
+       WHERE variant = $1 AND speed = $2 ORDER BY rating DESC, user_id LIMIT $3`,
+      [variant, speed, limit],
     );
     return res.rows.map(toRating);
   }

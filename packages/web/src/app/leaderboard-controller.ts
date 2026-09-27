@@ -1,7 +1,7 @@
 /**
  * Leaderboard controller — a pure, DOM-free orchestrator for the leaderboard lifecycle.
  *
- * Fetches top players for the selected variant from the REST client adapter and attempts
+ * Fetches top players in the selected rating pool (variant and speed) from the REST client adapter and attempts
  * optional handle resolution via GraphQL (`client.graphql.resolvePlayers`). If handle resolution
  * fails or is unavailable, it gracefully degrades to showing un-linked short IDs without failing
  * the page request.
@@ -11,13 +11,14 @@
  * loading state so persistent route markup cannot remain busy after teardown.
  */
 import type { GambitClient } from '../api/client.js';
-import type { LeaderboardEntry, Variant, SocialPlayer } from '../api/models.js';
+import type { LeaderboardEntry, Speed, Variant, SocialPlayer } from '../api/models.js';
 
 export interface LeaderboardCallbacks {
   onResults: (
     entries: readonly LeaderboardEntry[],
     names: ReadonlyMap<string, SocialPlayer>,
     variant: Variant,
+    speed: Speed,
   ) => void;
   onLoading: (loading: boolean) => void;
   onError: (message: string) => void;
@@ -43,14 +44,14 @@ export class LeaderboardController {
     this.limit = opts.limit ?? 100;
   }
 
-  /** Load leaderboard for a variant. */
-  async loadLeaderboard(variant: Variant): Promise<void> {
+  /** Load the leaderboard for one rating pool. */
+  async loadLeaderboard(variant: Variant, speed: Speed): Promise<void> {
     if (this.disposed) return;
     const generation = ++this.requestGeneration;
     this.callbacks.onLoading(true);
 
     try {
-      const entries = await this.client.leaderboard(variant, { limit: this.limit });
+      const entries = await this.client.leaderboard(variant, speed, { limit: this.limit });
       if (!this.isCurrent(generation)) return;
 
       let names: ReadonlyMap<string, SocialPlayer> = new Map();
@@ -65,7 +66,7 @@ export class LeaderboardController {
 
       if (!this.isCurrent(generation)) return;
 
-      this.callbacks.onResults(entries, names, variant);
+      this.callbacks.onResults(entries, names, variant, speed);
     } catch (err) {
       if (this.isCurrent(generation)) {
         this.callbacks.onError(err instanceof Error ? err.message : String(err));

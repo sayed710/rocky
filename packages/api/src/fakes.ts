@@ -21,6 +21,7 @@ import type {
   RatingsRepository,
   Role,
   SeekAcceptor,
+  Speed,
   GameStarter,
   SeekRow,
   SeeksRepository,
@@ -38,7 +39,7 @@ import type {
   LoginStepUpCheck,
   IdentityTokensRepository,
 } from '@chess-platform/persistence';
-import { DuplicateUserError, VersionConflictError, SEEK_TTL_MS } from '@chess-platform/persistence';
+import { DuplicateUserError, VersionConflictError, SEEK_TTL_MS, SPEEDS } from '@chess-platform/persistence';
 
 import { InMemoryLearningRepository } from '@chess-platform/learning';
 import type { AuditEntry, AuditRepository } from './ports/audit';
@@ -314,8 +315,8 @@ export class InMemorySessionsRepository implements SessionsRepository {
   }
 }
 
-function ratingKey(userId: string, variant: Variant): string {
-  return `${userId}:${variant}`;
+function ratingKey(userId: string, variant: Variant, speed: Speed): string {
+  return `${userId}:${variant}:${speed}`;
 }
 
 export class InMemoryRatingsRepository implements RatingsRepository {
@@ -323,28 +324,26 @@ export class InMemoryRatingsRepository implements RatingsRepository {
 
   constructor(private readonly clock: Clock = systemClock) {}
 
-  async get(userId: string, variant: Variant): Promise<RatingRow | null> {
-    return this.byKey.get(ratingKey(userId, variant)) ?? null;
+  async get(userId: string, variant: Variant, speed: Speed): Promise<RatingRow | null> {
+    return this.byKey.get(ratingKey(userId, variant, speed)) ?? null;
   }
 
-  async upsert(row: {
-    userId: string;
-    variant: Variant;
-    rating: number;
-    rd: number;
-    vol: number;
-  }): Promise<void> {
-    this.byKey.set(ratingKey(row.userId, row.variant), {
-      ...row,
-      updatedAt: new Date(this.clock.now()),
-    });
-  }
-
-  async leaderboard(variant: Variant, limit: number): Promise<RatingRow[]> {
+  async listForUser(userId: string): Promise<RatingRow[]> {
     return [...this.byKey.values()]
-      .filter((r) => r.variant === variant)
+      .filter((r) => r.userId === userId)
+      .sort((a, b) => a.variant.localeCompare(b.variant) || SPEEDS.indexOf(a.speed) - SPEEDS.indexOf(b.speed));
+  }
+
+  async leaderboard(variant: Variant, speed: Speed, limit: number): Promise<RatingRow[]> {
+    return [...this.byKey.values()]
+      .filter((r) => r.variant === variant && r.speed === speed)
       .sort((a, b) => b.rating - a.rating)
       .slice(0, limit);
+  }
+
+  /** Test seeding only: production ratings change solely through the event-log rating applier. */
+  async upsert(row: Omit<RatingRow, 'updatedAt'>): Promise<void> {
+    this.byKey.set(ratingKey(row.userId, row.variant, row.speed), { ...row, updatedAt: new Date(this.clock.now()) });
   }
 }
 

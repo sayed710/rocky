@@ -26,18 +26,18 @@ test.describe('Leaderboard view', () => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
     });
 
-    await page.route('**/v1/leaderboard/standard?limit=100', async (route) => {
+    await page.route('**/v1/leaderboard/standard/blitz?limit=100', async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify([
-          { userId: 'u1', variant: 'standard', rating: 1600, rd: 45 },
-          { userId: 'u2', variant: 'standard', rating: 1550, rd: 50 },
+          { userId: 'u1', variant: 'standard', speed: 'blitz', rating: 1600, rd: 45 },
+          { userId: 'u2', variant: 'standard', speed: 'blitz', rating: 1550, rd: 50 },
         ]),
       });
     });
 
-    await page.route('**/v1/leaderboard/atomic?limit=100', async (route) => {
+    await page.route('**/v1/leaderboard/atomic/blitz?limit=100', async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -45,7 +45,7 @@ test.describe('Leaderboard view', () => {
       });
     });
 
-    await page.route('**/v1/leaderboard/crazyhouse?limit=100', async (route) => {
+    await page.route('**/v1/leaderboard/crazyhouse/blitz?limit=100', async (route) => {
       await route.fulfill({
         status: 500,
         contentType: 'application/json',
@@ -67,10 +67,30 @@ test.describe('Leaderboard view', () => {
     });
   });
 
-  test('navigation loads standard standings within a narrow viewport', async ({ page }) => {
+  test('no pool is loaded until a time control is chosen', async ({ page }) => {
+    const requested: string[] = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/v1/leaderboard/')) requested.push(request.url());
+    });
+    await page.goto('/leaderboard');
+    const results = page.locator('#leaderboard-results');
+    await expect(results).toHaveAttribute('role', 'status');
+    await expect(results).toContainText('Choose a time control');
+    await expect(page.locator('#leaderboard-speed-select')).toHaveValue('');
+    await page.locator('#leaderboard-variant-select').selectOption('atomic');
+    await expect(results).toContainText('Choose a time control');
+    expect(requested).toEqual([]);
+
+    await page.locator('#leaderboard-speed-select').selectOption('blitz');
+    await expect(results).toContainText('No leaderboard entries');
+    expect(requested.map((url) => new URL(url).pathname)).toEqual(['/v1/leaderboard/atomic/blitz']);
+  });
+
+  test('navigation loads standard blitz standings within a narrow viewport', async ({ page }) => {
     await page.goto('/');
     await page.locator('nav a[data-route="leaderboard"]').click();
     await expect(page).toHaveURL(/\/leaderboard$/);
+    await page.locator('#leaderboard-speed-select').selectOption('blitz');
 
     // Selector defaults to standard
     const select = page.locator('#leaderboard-variant-select');
@@ -132,12 +152,13 @@ test.describe('Leaderboard view', () => {
   test('loading is announced outside the standings list', async ({ page }) => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    await page.route('**/v1/leaderboard/standard?limit=100', async (route) => {
+    await page.route('**/v1/leaderboard/standard/blitz?limit=100', async (route) => {
       await gate;
       await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
     });
 
     await page.goto('/leaderboard');
+    await page.locator('#leaderboard-speed-select').selectOption('blitz');
     const loading = page.locator('#leaderboard-loading');
     await expect(loading).toBeVisible();
     await expect(loading).toHaveText('Loading…');
@@ -150,6 +171,7 @@ test.describe('Leaderboard view', () => {
 
   test('in-place variant switch to empty state', async ({ page }) => {
     await page.goto('/leaderboard');
+    await page.locator('#leaderboard-speed-select').selectOption('blitz');
     await expect(page.locator('#leaderboard-results .panel-row')).toHaveCount(2);
 
     const select = page.locator('#leaderboard-variant-select');
@@ -165,6 +187,7 @@ test.describe('Leaderboard view', () => {
 
   test('error state handling', async ({ page }) => {
     await page.goto('/leaderboard');
+    await page.locator('#leaderboard-speed-select').selectOption('blitz');
     const select = page.locator('#leaderboard-variant-select');
     await select.selectOption('crazyhouse');
 

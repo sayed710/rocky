@@ -57,6 +57,15 @@ export const KNOWN_HISTORICAL_PROCEDURAL_MIGRATIONS = new Map([
       expectedDoCount: 1,
     },
   ],
+  [
+    // Reviewed for ADR-0150: its one DO block only counts `ratings` rows and raises when legacy
+    // variant-only rows exist; it creates, alters and drops nothing.
+    '0044_rating_pools.sql',
+    {
+      sha256: 'c411949ede62aacba512322847bd439687015ae0eac1a5a6da5b81331086de61',
+      expectedDoCount: 1,
+    },
+  ],
 ]);
 
 /**

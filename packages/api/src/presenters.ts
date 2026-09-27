@@ -56,9 +56,10 @@ export function selfUser(user: UserRow, roles: readonly Role[]): SelfUser {
   return { ...publicUser(user), roles: [...roles] };
 }
 
-/** A rating on the public 1500-centered scale. */
+/** A rating in one pool (a variant and a speed), on the public 1500-centered scale. */
 export interface RatingView {
   readonly variant: string;
+  readonly speed: string;
   readonly rating: number;
   readonly rd: number;
   readonly vol: number;
@@ -68,6 +69,7 @@ export interface RatingView {
 export function ratingView(row: RatingRow): RatingView {
   return {
     variant: row.variant,
+    speed: row.speed,
     rating: round2(row.rating),
     rd: round2(row.rd),
     vol: round4(row.vol),
@@ -75,16 +77,17 @@ export function ratingView(row: RatingRow): RatingView {
   };
 }
 
-/** A leaderboard entry pairs a user handle with a rating. */
+/** A leaderboard entry pairs a user with their rating in the requested pool. */
 export interface LeaderboardEntry {
   readonly userId: string;
   readonly variant: string;
+  readonly speed: string;
   readonly rating: number;
   readonly rd: number;
 }
 
 export function leaderboardEntry(row: RatingRow): LeaderboardEntry {
-  return { userId: row.userId, variant: row.variant, rating: round2(row.rating), rd: round2(row.rd) };
+  return { userId: row.userId, variant: row.variant, speed: row.speed, rating: round2(row.rating), rd: round2(row.rd) };
 }
 
 /** A session view for the account-security screen. */

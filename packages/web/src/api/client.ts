@@ -66,6 +66,7 @@ import type {
   TournamentStanding,
   TournamentSummary,
   UserProfile,
+  Speed,
   Variant,
   TeamList,
   TeamMemberList,
@@ -253,10 +254,11 @@ export class GambitClient {
     return this.execute<CapabilitiesResponse>({ method: 'GET', path: '/v1/capabilities' });
   }
 
-  leaderboard(variant: Variant, opts: { limit?: number } = {}): Promise<LeaderboardEntry[]> {
+  /** Standings in one rating pool; the speed is required, there is no default pool. */
+  leaderboard(variant: Variant, speed: Speed, opts: { limit?: number } = {}): Promise<LeaderboardEntry[]> {
     return this.execute<LeaderboardEntry[]>({
       method: 'GET',
-      path: `/v1/leaderboard/${encodeURIComponent(variant)}`,
+      path: `/v1/leaderboard/${encodeURIComponent(variant)}/${encodeURIComponent(speed)}`,
       ...(opts.limit !== undefined ? { query: { limit: opts.limit } } : {}),
     });
   }

@@ -36,6 +36,10 @@ export const VARIANTS = [
 ] as const;
 export type Variant = (typeof VARIANTS)[number];
 
+/** Speed classes, fastest first. With a variant, each names an independent rating pool (ADR-0150). */
+export const SPEEDS = ['ultrabullet', 'bullet', 'blitz', 'rapid', 'classical', 'correspondence'] as const;
+export type Speed = (typeof SPEEDS)[number];
+
 /**
  * The variants the lobby offers, which is deliberately kept a separate list from `VARIANTS`.
  *
@@ -172,9 +176,10 @@ export interface SessionView {
   readonly createdUserAgent: string | null;
 }
 
-/** A per-variant rating (Glicko-2 style fields). */
+/** A rating in one pool — a variant and a speed (Glicko-2 style fields). */
 export interface RatingView {
   readonly variant: Variant;
+  readonly speed: Speed;
   readonly rating: number;
   readonly rd: number;
   readonly vol: number;
@@ -189,6 +194,7 @@ export interface UserProfile {
 export interface LeaderboardEntry {
   readonly userId: string;
   readonly variant: Variant;
+  readonly speed: Speed;
   readonly rating: number;
   readonly rd: number;
 }

@@ -1,0 +1,218 @@
+/**
+ * @packageDocumentation
+ * Applies every rated result to both players' variant × speed ratings exactly once, from the event
+ * log (ADR-0150).
+ *
+ * Order: a rating depends on every earlier rating of both players, so a result must be applied in one
+ * order that live processing and any replay agree on. The applier walks committed `GameEnded` rows in
+ * `(xact_id, server_ts, game_id)` order and only below `pg_snapshot_xmin(pg_current_snapshot())`,
+ * ADR-0147's committed prefix: a transaction still running has an id at or above that horizon, so no
+ * ending can later appear before the position already passed. `server_ts` only separates endings
+ * that share a transaction id; the append path writes one game per transaction, so in practice that
+ * is the rows migration 0040 stamped with one id, which keep their original insert times.
+ *
+ * Exactly once: a game's two new ratings, its `rating_applications` row (primary key `game_id`) and
+ * the advanced checkpoint commit in one transaction. The checkpoint row is held `FOR UPDATE SKIP
+ * LOCKED`, so one applier works at a time and replicas see `busy`; the ledger additionally refuses a
+ * second application whatever replays it (a rewound checkpoint, a restore).
+ *
+ * Nothing here reads the `games` projection or trusts a caller: eligibility is folded from the stream.
+ */
+
+import type { Pool, PoolClient } from 'pg';
+import { rateGame, initialRating, type Glicko2Rating } from '../glicko2';
+import { projectGameStream } from '../games-projection';
+import { decideRating, type RateableGame } from '../rating-eligibility';
+import { inTransaction, isStreamDataFailure, loadStream } from './games-projector';
+
+const ORIGIN = { xactId: '0', serverTs: '-infinity', gameId: '00000000-0000-0000-0000-000000000000' } as const;
+
+/** What happened to one ending. */
+export type RatingOutcome = 'applied' | 'already_applied' | 'ineligible' | 'blocked';
+
+/** An ending whose eligibility could not be proven; it is recorded and never rated automatically. */
+export interface BlockedRating {
+  readonly gameId: string;
+  readonly error: string;
+}
+
+export interface RatingsBatch {
+  /** Another applier holds the checkpoint, so this call read and wrote nothing. */
+  readonly busy: boolean;
+  /** The page was full: more committed endings are probably waiting. */
+  readonly more: boolean;
+  /** The checkpoint was ahead of this cluster's transaction ids (e.g. a logical restore) and restarted from the origin. */
+  readonly rewound: boolean;
+  readonly outcomes: Readonly<Record<RatingOutcome, number>>;
+  readonly blocked: readonly BlockedRating[];
+}
+
+export interface RatingsApplierOptions {
+  /** Endings read per batch (default 200). */
+  readonly batchSize?: number;
+}
+
+interface Position {
+  readonly xactId: string;
+  readonly serverTs: string;
+  readonly gameId: string;
+}
+
+export class PgRatingsApplier {
+  private readonly batchSize: number;
+
+  constructor(private readonly pool: Pool, options: RatingsApplierOptions = {}) {
+    this.batchSize = options.batchSize ?? 200;
+  }
+
+  /** Apply the next bounded page of committed endings, in order, in one transaction. */
+  runBatch(): Promise<RatingsBatch> {
+    return inTransaction(this.pool, async (client) => {
+      // First statement, before this transaction owns an id, so the horizon is not capped by it.
+      const horizon = (await client.query<{ horizon: string }>(
+        'SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS horizon',
+      )).rows[0]!.horizon;
+      // server_ts travels as text: a JavaScript Date would drop its microseconds and park the cursor
+      // just below the row it had passed.
+      const locked = await client.query<{ xact_id: string; server_ts: string; game_id: string }>(
+        `SELECT xact_id::text AS xact_id, server_ts::text AS server_ts, game_id
+         FROM rating_checkpoint FOR UPDATE SKIP LOCKED`,
+      );
+      const row = locked.rows[0];
+      const outcomes: Record<RatingOutcome, number> = { applied: 0, already_applied: 0, ineligible: 0, blocked: 0 };
+      if (!row) return { busy: true, more: false, rewound: false, outcomes, blocked: [] };
+
+      // Within one cluster the checkpoint is always below the horizon. At or above it, the ids came
+      // from another cluster's counter; replaying from the origin is safe because the ledger refuses
+      // every game already applied.
+      const rewound = BigInt(row.xact_id) >= BigInt(horizon);
+      const cursor: Position = rewound ? ORIGIN : { xactId: row.xact_id, serverTs: row.server_ts, gameId: row.game_id };
+
+      const page = await client.query<{ xact_id: string; server_ts: string; game_id: string }>(
+        `SELECT xact_id::text AS xact_id, server_ts::text AS server_ts, game_id FROM game_events
+         WHERE type = 'GameEnded' AND xact_id < $1::xid8
+           AND (xact_id, server_ts, game_id) > ($2::xid8, $3::timestamptz, $4::uuid)
+         ORDER BY xact_id, server_ts, game_id LIMIT $5`,
+        [horizon, cursor.xactId, cursor.serverTs, cursor.gameId, this.batchSize],
+      );
+
+      const blocked: BlockedRating[] = [];
+      for (const ending of page.rows) {
+        const outcome = await rateOne(client, ending.game_id);
+        outcomes[outcome.kind] += 1;
+        if (outcome.kind === 'blocked') blocked.push({ gameId: ending.game_id, error: outcome.error });
+      }
+
+      const last = page.rows.at(-1);
+      const next: Position | null = last
+        ? { xactId: last.xact_id, serverTs: last.server_ts, gameId: last.game_id }
+        : rewound ? ORIGIN : null;
+      if (next) {
+        await client.query(
+          `UPDATE rating_checkpoint SET xact_id = $1::xid8, server_ts = $2::timestamptz, game_id = $3, updated_at = now()`,
+          [next.xactId, next.serverTs, next.gameId],
+        );
+      }
+      return { busy: false, more: page.rows.length === this.batchSize, rewound, outcomes, blocked };
+    });
+  }
+}
+
+type OneOutcome =
+  | { readonly kind: Exclude<RatingOutcome, 'blocked'> }
+  | { readonly kind: 'blocked'; readonly error: string };
+
+/** A savepoint confines one stream's data failure; the block is recorded in the same transaction. */
+async function rateOne(client: PoolClient, gameId: string): Promise<OneOutcome> {
+  await client.query('SAVEPOINT rate_game');
+  try {
+    const decision = decideRating(projectGameStream(gameId, await loadStream(client, gameId)));
+    const applied = decision.kind === 'rate' ? await applyRatedGame(client, decision.game) : 'ineligible';
+    await client.query('RELEASE SAVEPOINT rate_game');
+    return { kind: applied === 'applied' || applied === 'already_applied' ? applied : 'ineligible' };
+  } catch (error) {
+    // Only the stream's own data blocks a game. A lost connection, timeout or conflict aborts the
+    // whole batch instead, so the checkpoint does not move past a game that was never decided.
+    if (!isStreamDataFailure(error)) throw error;
+    await client.query('ROLLBACK TO SAVEPOINT rate_game');
+    await client.query('RELEASE SAVEPOINT rate_game');
+    const message = error instanceof Error ? error.message : String(error);
+    await client.query(
+      'INSERT INTO rating_blocked_games (game_id, error) VALUES ($1, $2) ON CONFLICT (game_id) DO NOTHING',
+      [gameId, message],
+    );
+    return { kind: 'blocked', error: message };
+  }
+}
+
+/** The result of {@link applyRatedGame}; the last two change nothing. */
+export type ApplyRatingResult = 'applied' | 'already_applied' | 'bot_account' | 'missing_account';
+
+/**
+ * Apply one rateable game inside the caller's transaction: both pre-game ratings are read and locked,
+ * both new ratings are computed from them, and the ledger row and both updates are written together.
+ *
+ * Rows are created (at the Glicko-2 defaults) and locked one at a time in player-id order, whatever
+ * the colours, so two transactions sharing a player always lock in the same order and cannot
+ * deadlock. The ledger insert is the exactly-once guard: a concurrent or repeated application of the
+ * same game waits for it, then finds it and changes nothing.
+ */
+export async function applyRatedGame(client: PoolClient, game: RateableGame): Promise<ApplyRatingResult> {
+  // KEY SHARE holds both accounts until commit, so a concurrent deletion waits instead of failing
+  // the rating insert's foreign key (which would wrongly block the game as bad data).
+  const accounts = await client.query<{ bot: boolean }>(
+    `SELECT COALESCE(flags->>'bot', 'false') = 'true' AS bot FROM users
+     WHERE id = ANY($1::uuid[]) ORDER BY id FOR KEY SHARE`,
+    [[game.white, game.black]],
+  );
+  if (accounts.rows.length < 2) return 'missing_account';
+  if (accounts.rows.some((a) => a.bot)) return 'bot_account';
+
+  await client.query('SAVEPOINT apply_rating');
+  const before = new Map<string, Glicko2Rating>();
+  for (const userId of [game.white, game.black].sort()) {
+    before.set(userId, await lockRating(client, userId, game));
+  }
+  const white = before.get(game.white)!;
+  const black = before.get(game.black)!;
+  const after = rateGame(white, black, game.whiteScore);
+
+  const claimed = await client.query(
+    `INSERT INTO rating_applications (game_id, variant, speed, white_id, black_id, white_score,
+       white_rating_before, white_rating_after, black_rating_before, black_rating_after)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (game_id) DO NOTHING`,
+    [game.gameId, game.variant, game.speed, game.white, game.black, game.whiteScore,
+      white.rating, after.white.rating, black.rating, after.black.rating],
+  );
+  if (claimed.rowCount === 0) {
+    // Undo any default row created above, so an already-applied game leaves no trace.
+    await client.query('ROLLBACK TO SAVEPOINT apply_rating');
+    await client.query('RELEASE SAVEPOINT apply_rating');
+    return 'already_applied';
+  }
+  await writeRating(client, game.white, game, after.white);
+  await writeRating(client, game.black, game, after.black);
+  await client.query('RELEASE SAVEPOINT apply_rating');
+  return 'applied';
+}
+
+async function lockRating(client: PoolClient, userId: string, pool: RateableGame): Promise<Glicko2Rating> {
+  const start = initialRating();
+  await client.query(
+    `INSERT INTO ratings (user_id, variant, speed, rating, rd, vol) VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (user_id, variant, speed) DO NOTHING`,
+    [userId, pool.variant, pool.speed, start.rating, start.rd, start.vol],
+  );
+  return (await client.query<Glicko2Rating>(
+    'SELECT rating, rd, vol FROM ratings WHERE user_id = $1 AND variant = $2 AND speed = $3 FOR UPDATE',
+    [userId, pool.variant, pool.speed],
+  )).rows[0]!;
+}
+
+async function writeRating(client: PoolClient, userId: string, pool: RateableGame, next: Glicko2Rating): Promise<void> {
+  await client.query(
+    `UPDATE ratings SET rating = $4, rd = $5, vol = $6, updated_at = now()
+     WHERE user_id = $1 AND variant = $2 AND speed = $3`,
+    [userId, pool.variant, pool.speed, next.rating, next.rd, next.vol],
+  );
+}

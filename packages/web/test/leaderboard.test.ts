@@ -4,10 +4,10 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseRoute, routeToPath } from '../src/app/router.js';
 import { LeaderboardController } from '../src/app/leaderboard-controller.js';
-import { bindVariantSelector, renderLeaderboard, renderVariantSelector } from '../src/app/leaderboard-view.js';
-import { OFFERED_VARIANTS } from '../src/api/models.js';
-import { VARIANT_LABELS } from '../src/app/variant-labels.js';
-import type { LeaderboardEntry, Variant, SocialPlayer } from '../src/api/models.js';
+import { bindSpeedSelector, bindVariantSelector, renderChooseSpeed, renderLeaderboard, renderSpeedSelector, renderVariantSelector } from '../src/app/leaderboard-view.js';
+import { OFFERED_VARIANTS, SPEEDS } from '../src/api/models.js';
+import { SPEED_LABELS, VARIANT_LABELS } from '../src/app/variant-labels.js';
+import type { LeaderboardEntry, Speed, Variant, SocialPlayer } from '../src/api/models.js';
 import type { GambitClient } from '../src/api/client.js';
 
 const HTML_TEMPLATE = readFileSync(
@@ -49,19 +49,19 @@ function makeFakeClient(opts: {
   leaderboardImpl?: (variant: Variant, limit?: number) => Promise<LeaderboardEntry[]>;
   resolvePlayersImpl?: (ids: readonly string[]) => Promise<Map<string, SocialPlayer>>;
 } = {}) {
-  const leaderboardCalls: Array<{ variant: Variant; limit?: number }> = [];
+  const leaderboardCalls: Array<{ variant: Variant; speed: Speed; limit?: number }> = [];
   const resolvePlayerCalls: Array<readonly string[]> = [];
 
   const client = {
-    leaderboard: async (variant: Variant, options: { limit?: number } = {}) => {
+    leaderboard: async (variant: Variant, speed: Speed, options: { limit?: number } = {}) => {
       const limit = options.limit;
-      leaderboardCalls.push(limit !== undefined ? { variant, limit } : { variant });
+      leaderboardCalls.push(limit !== undefined ? { variant, speed, limit } : { variant, speed });
       if (opts.leaderboardImpl) {
         return opts.leaderboardImpl(variant, options.limit);
       }
       return [
-        { userId: 'user_1', variant, rating: 1800, rd: 45 },
-        { userId: 'user_2', variant, rating: 1750, rd: 50 },
+        { userId: 'user_1', variant, speed, rating: 1800, rd: 45 },
+        { userId: 'user_2', variant, speed, rating: 1750, rd: 50 },
       ];
     },
     graphql: {
@@ -101,10 +101,11 @@ test('controller loads leaderboard with default limit 100 and resolves handles',
     },
   });
 
-  await controller.loadLeaderboard('standard');
+  await controller.loadLeaderboard('standard', 'blitz');
 
   assert.equal(leaderboardCalls.length, 1);
   assert.equal(leaderboardCalls[0]?.variant, 'standard');
+  assert.equal(leaderboardCalls[0]?.speed, 'blitz');
   assert.equal(leaderboardCalls[0]?.limit, 100);
 
   assert.equal(resolvePlayerCalls.length, 1);
@@ -145,7 +146,7 @@ test('controller gracefully degrades when GraphQL player resolution fails', asyn
     },
   });
 
-  await controller.loadLeaderboard('standard');
+  await controller.loadLeaderboard('standard', 'blitz');
 
   assert.equal(errorMsg, null, 'GraphQL error should not fail the leaderboard page');
   assert.ok(results !== null);
@@ -176,7 +177,7 @@ test('controller handles REST leaderboard fetch failure', async () => {
     },
   });
 
-  await controller.loadLeaderboard('standard');
+  await controller.loadLeaderboard('standard', 'blitz');
 
   assert.equal(errorMsg, 'Network request failed');
 });
@@ -207,18 +208,18 @@ test('deferred-promise race test: older request resolving after newer request ca
   });
 
   // Start Request A for standard
-  const pA = controller.loadLeaderboard('standard');
+  const pA = controller.loadLeaderboard('standard', 'blitz');
   // Start Request B for atomic
-  const pB = controller.loadLeaderboard('atomic');
+  const pB = controller.loadLeaderboard('atomic', 'blitz');
 
   // Resolve Request B first
-  reqB.resolve([{ userId: 'b1', variant: 'atomic', rating: 1900, rd: 30 }]);
+  reqB.resolve([{ userId: 'b1', variant: 'atomic', speed: 'blitz', rating: 1900, rd: 30 }]);
   await pB;
 
   assert.deepEqual(paintedVariants, ['atomic']);
 
   // Resolve Request A second (out-of-order completion)
-  reqA.resolve([{ userId: 'a1', variant: 'standard', rating: 1500, rd: 50 }]);
+  reqA.resolve([{ userId: 'a1', variant: 'standard', speed: 'blitz', rating: 1500, rd: 50 }]);
   await pA;
 
   assert.deepEqual(paintedVariants, ['atomic'], 'Request A must not overwrite Request B');
@@ -242,12 +243,12 @@ test('dispose-before-resolution clears loading without painting late results or 
     },
   });
 
-  const p = controller.loadLeaderboard('standard');
+  const p = controller.loadLeaderboard('standard', 'blitz');
   assert.deepEqual(callbacks, ['loading:true'], 'Initial loading state emitted');
 
   controller.dispose();
 
-  req.resolve([{ userId: 'u1', variant: 'standard', rating: 1600, rd: 40 }]);
+  req.resolve([{ userId: 'u1', variant: 'standard', speed: 'blitz', rating: 1600, rd: 40 }]);
   await p;
 
   assert.deepEqual(
@@ -410,8 +411,8 @@ test('renderLeaderboard renders rows with rank, player handle link, rating, and 
   const container = doc.createElement('div') as unknown as HTMLElement;
 
   const entries: LeaderboardEntry[] = [
-    { userId: 'user_1', variant: 'standard', rating: 2100, rd: 35 },
-    { userId: 'user_2', variant: 'standard', rating: 1950, rd: 42 },
+    { userId: 'user_1', variant: 'standard', speed: 'blitz', rating: 2100, rd: 35 },
+    { userId: 'user_2', variant: 'standard', speed: 'blitz', rating: 1950, rd: 42 },
   ];
   const names = new Map<string, SocialPlayer>([
     ['user_1', { id: 'user_1', handle: 'magnus' }],
@@ -542,4 +543,48 @@ test('bindVariantSelector fires onChange for valid variants and unbind removes l
   (selectEl as any).value = 'atomic';
   (selectEl as unknown as FakeElement).dispatchEvent({ type: 'change', target: selectEl });
   assert.equal(calls, 1, 'Change listener should not trigger after unbind');
+});
+
+test('renderSpeedSelector offers every speed and, with none chosen, selects only a prompt', () => {
+  const doc = createFakeDoc();
+  const select = doc.createElement('select') as unknown as HTMLSelectElement;
+  renderSpeedSelector(select, null);
+  const options = (select as unknown as FakeElement).querySelectorAll('option');
+  assert.deepEqual(options.map((o) => o.getAttribute('value')), ['', ...SPEEDS]);
+  assert.equal(options[0]?.getAttribute('disabled'), '', 'the prompt cannot itself be chosen');
+  assert.deepEqual(options.filter((o) => o.selected).map((o) => o.getAttribute('value')), ['']);
+
+  renderSpeedSelector(select, 'correspondence');
+  const again = (select as unknown as FakeElement).querySelectorAll('option');
+  const chosen = again.filter((o) => o.selected);
+  assert.deepEqual(chosen.map((o) => o.getAttribute('value')), ['correspondence']);
+  assert.equal(chosen[0]?.textContent, SPEED_LABELS.correspondence);
+});
+
+test('bindSpeedSelector reports only real speeds and stops after unbind', () => {
+  const doc = createFakeDoc();
+  const selectEl = doc.createElement('select') as unknown as HTMLSelectElement;
+  const seen: Speed[] = [];
+  const unbind = bindSpeedSelector(selectEl, (speed) => { seen.push(speed); });
+  for (const value of ['rapid', '', 'hyperbullet']) {
+    (selectEl as any).value = value;
+    (selectEl as unknown as FakeElement).dispatchEvent({ type: 'change', target: selectEl });
+  }
+  unbind();
+  (selectEl as any).value = 'bullet';
+  (selectEl as unknown as FakeElement).dispatchEvent({ type: 'change', target: selectEl });
+  assert.deepEqual(seen, ['rapid']);
+});
+
+test('renderChooseSpeed asks for a time control instead of showing a default pool', () => {
+  const doc = createFakeDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement;
+  renderChooseSpeed(container);
+  assert.equal(container.getAttribute('role'), 'status');
+  assert.ok((container as unknown as FakeElement).textContent.includes('Choose a time control'));
+});
+
+test('leaderboard speed select has an associated label', () => {
+  assert.match(HTML_TEMPLATE, /<label[^>]*for="leaderboard-speed-select"[^>]*>/);
+  assert.ok(HTML_TEMPLATE.includes('id="leaderboard-speed-select"'));
 });

@@ -24,7 +24,7 @@ testing approach. It refines and makes concrete the abbreviated model in
    packages**.
 2. Provide the relational foundation M4 needs: identity (argon2id + passkeys +
    sessions/refresh rotation), RBAC, users/profiles, seeks/lobby, **Glicko-2
-   ratings per variant**, and leaderboards.
+   ratings per variant × speed pool** (ADR-0150), and leaderboards.
 3. Keep the storage engine behind **narrow repository interfaces** so the domain
    and API never import a driver. This mirrors the existing `PubSub` / `Transport`
    seam pattern from M3.
@@ -371,8 +371,15 @@ roles(user_id UUID REF users,
       role TEXT CHECK (role IN ('user','coach','tournament_director','moderator','admin')),
       PRIMARY KEY(user_id, role))
 ratings(user_id UUID REF users, variant TEXT REFERENCES variants(code),
-      rating DOUBLE PRECISION, rd DOUBLE PRECISION, vol DOUBLE PRECISION,
-      updated_at, PRIMARY KEY(user_id, variant))   -- Glicko-2
+      speed TEXT CHECK (speed IN ('ultrabullet','bullet','blitz','rapid','classical','correspondence')),
+      rating DOUBLE PRECISION CHECK (-10000..10000), rd DOUBLE PRECISION CHECK (0 < rd <= 1000),
+      vol DOUBLE PRECISION CHECK (0 < vol < 1),
+      updated_at, PRIMARY KEY(user_id, variant, speed))   -- Glicko-2, one row per pool (0044)
+-- btree(variant, speed, rating DESC) for leaderboards.
+rating_checkpoint(xact_id xid8, server_ts, game_id)   -- single row: the applier's position
+rating_applications(game_id UUID PK, variant, speed, white_id, black_id, white_score,
+      white/black_rating_before, white/black_rating_after, applied_at)   -- exactly-once ledger
+rating_blocked_games(game_id UUID PK, error, blocked_at)   -- endings never rated automatically
 seeks(id UUID PK,                              -- UUIDv7
       creator_id UUID REF users, variant TEXT REFERENCES variants(code),
       time_control JSONB, rated BOOLEAN, min_rating INT, max_rating INT, created_at)
@@ -850,10 +857,18 @@ is a keyed hash (lookup without storing raw email). No credential is ever logged
 - **Per-game correctness:** optimistic append on `(game_id, seq)` (see §3.2).
 - **Projections follow the log asynchronously:** creation-time `games` rows commit with
   `GameCreated`; progress and endings are projected by the checkpointed event-log projector
-  (§4.2, ADR-0147), so a projection defect can never reject an authoritative append. Ratings are
-  not yet derived.
-- **Ratings** will be computed with the verified Glicko-2 implementation (unit-tested against
-  the reference paper's worked example) from projected endings; not implemented yet.
+  (§4.2, ADR-0147), so a projection defect can never reject an authoritative append.
+- **Ratings** ([ADR-0150](adr/0150-durable-ratings.md), migrations 0044–0045). A pool is a variant
+  and one of the six speed classes. `PgRatingsApplier`, on every gateway with a database, walks
+  committed `GameEnded` rows in `(xact_id, server_ts, game_id)` order below
+  `pg_snapshot_xmin(pg_current_snapshot())` (index `game_events_ended_order_idx`), the same
+  committed-prefix argument as the games projector, and reads the event stream, never the `games`
+  projection. Each eligible game is one Glicko-2 rating period: both players' pre-game rows are
+  created if missing and locked in player-id order, both new ratings are computed from them, and the
+  `rating_applications` row (primary key `game_id`, the exactly-once guard), both updates and the
+  advanced `rating_checkpoint` commit in one transaction. A stream whose eligibility cannot be proven
+  goes to `rating_blocked_games` and is never rated automatically. Migration 0044 fails closed if
+  legacy variant-only rows exist.
 - **Partitioning:** `games` and `game_events` by month on time; old partitions are
   cheap to archive to object storage (PGNs) later.
 - **Sharding path (future, no rewrite):** `game_id` is a UUIDv7; a hash-shard

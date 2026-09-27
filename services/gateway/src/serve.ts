@@ -480,6 +480,38 @@ async function main(): Promise<void> {
     logger.info('Games projection is enabled');
   }
 
+  // --- Ratings (ADR-0150) ---
+  // Always on with a database: every rated result must reach both players exactly once. Every replica
+  // runs one; the checkpoint row lock lets exactly one apply at a time, and each poll re-reads the
+  // committed log, so no wake is needed and none can be lost.
+  let ratingsApplier: { stop(): Promise<void> } | undefined;
+  if (pgPool) {
+    const { PgRatingsApplier, GamesProjectionWorker } = await import('@chess-platform/persistence/pg');
+    const outcomes = ['applied', 'already_applied', 'ineligible', 'blocked'] as const;
+    const outcomeCounters = new Map(outcomes.map((outcome) => [outcome, metrics.counter('ratings_games_total', { outcome })]));
+    const batchFailures = metrics.counter('ratings_batch_failures_total');
+    const worker = new GamesProjectionWorker(new PgRatingsApplier(pgPool), {
+      onBatch: (batch) => {
+        if (batch.rewound) logger.warn('Ratings checkpoint was ahead of this database; replaying endings from the start (the ledger skips applied games)');
+        for (const outcome of outcomes) {
+          if (batch.outcomes[outcome] > 0) outcomeCounters.get(outcome)!.inc(batch.outcomes[outcome]);
+        }
+        for (const blocked of batch.blocked) {
+          logger.error('A finished game could not be proven rateable; it is recorded in rating_blocked_games and will not be rated', { gameId: blocked.gameId, error: blocked.error });
+        }
+      },
+      onError: (error) => {
+        batchFailures.inc();
+        logger.error('Ratings batch failed; nothing was applied and it is retried with backoff', {
+          error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+        });
+      },
+    });
+    worker.start();
+    ratingsApplier = worker;
+    logger.info('Ratings applier is enabled');
+  }
+
   // --- Command router: local (single-node) or Redis (multi-node) (M14 inc 5) ---
   let commandRouter: CommandRouter;
   let botMoveOwnership: import('./engine-bot.js').BotMoveOwnership | undefined;
@@ -815,6 +847,8 @@ async function main(): Promise<void> {
     // No new projection batch starts from here. The in-flight one is awaited before the wake consumers
     // unsubscribe and before pub/sub and the pool close, so a wake it publishes still has listeners.
     const projectionStopped = gamesProjection?.stop();
+    // An in-flight rating batch commits or rolls back before the pool closes.
+    const ratingsStopped = ratingsApplier?.stop();
     // Start engine (subprocess) shutdown now so it runs concurrently with the
     // socket drain, but await it below before process.exit so cleanup can't be cut short.
     const engineShutdown = sharedEngineProvider?.shutdown().catch((err: unknown) =>
@@ -835,6 +869,7 @@ async function main(): Promise<void> {
           await ownershipRegistry.releaseAll();
         }
         await projectionStopped;
+        await ratingsStopped;
         searchIndexWorker?.stop();
         achievementsAwardWorker?.stop();
         // Indexing or awarding started by the last wake must finish before the pool closes.
