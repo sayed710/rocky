@@ -88,21 +88,51 @@ function bindComposer(
   elements: ConversationElements,
   controller: MessagesController,
   conversationId: string,
-): void {
-  if (!elements.composer || !elements.input) return;
+  sessionPresent: boolean,
+  restorePromise: Promise<unknown>,
+): () => void {
+  if (!elements.composer || !elements.input) return () => {};
+  const composer = elements.composer;
   const input = elements.input;
-  elements.composer.onsubmit = (event) => {
+  // This form is static markup reused across SPA mounts. A previous mount may have left a draft
+  // pending while its session restored; the new mount owns a fresh, editable composer.
+  input.disabled = false;
+  const onSubmit = (event: SubmitEvent): void => {
     event.preventDefault();
+    if (input.disabled) return;
     const text = input.value.trim();
     if (!text) return;
 
-    // Keep the text until the send lands so a failed request does not destroy the draft.
+    // A route can reveal this static form before the new app instance restores its access token.
+    // Hold the draft and send after restoration; an early authenticated request would fail locally
+    // with "no active session" before any POST. Ignore duplicate submits while it is pending.
     input.disabled = true;
-    void controller.send(conversationId, text).then((sent) => {
+    void (async () => {
+      if (!sessionPresent) {
+        // AuthController.restore normally settles with null on failure. If it rejects, let send()
+        // surface the missing session while retaining the draft, rather than stranding the input.
+        try { await restorePromise; } catch { /* send reports the auth state */ }
+      }
+      return controller.send(conversationId, text);
+    })().then((sent) => {
+      // A late result from an abandoned route must not clear, enable or focus the new mount's draft.
+      if (composer.onsubmit !== onSubmit) return;
       input.disabled = false;
       if (sent) input.value = '';
       input.focus();
+    }).catch((error: unknown) => {
+      if (composer.onsubmit !== onSubmit) return;
+      input.disabled = false;
+      if (elements.error) {
+        elements.error.textContent = error instanceof Error ? error.message : 'Message could not be sent';
+      }
     });
+  };
+  composer.onsubmit = onSubmit;
+  return () => {
+    if (composer.onsubmit !== onSubmit) return;
+    composer.onsubmit = null;
+    input.disabled = false;
   };
 }
 
@@ -139,15 +169,17 @@ export function mountConversation({
     composer: doc.getElementById('conversation-composer') as HTMLFormElement | null,
     input: doc.getElementById('composer-input') as HTMLInputElement | null,
   };
+  let unbindComposer = (): void => {};
   const controller = new MessagesController({
     client,
     callbacks: createConversationCallbacks(
       elements,
       () => client.session.current?.user.id ?? null,
     ),
+    onDispose: () => unbindComposer(),
   });
 
-  bindComposer(elements, controller, conversationId);
+  unbindComposer = bindComposer(elements, controller, conversationId, sessionPresent, restorePromise);
   loadAfterSessionRestore(sessionPresent, restorePromise, () => {
     void controller.loadThread(conversationId);
     controller.startPolling(conversationId);
