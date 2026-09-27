@@ -1292,7 +1292,14 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         refreshCoachControls();
         refreshExplainControls();
         refreshAssessControls();
-        if (actionsPanelEl) actionsPanelEl.hidden = !state.isPlayer;
+        if (actionsPanelEl) {
+          // The authoritative game status, not transport or request state, ends the live controls.
+          // Move focus before hiding a currently focused action or confirmation.
+          if (state.isOver && !actionsPanelEl.hidden && doc.activeElement && actionsPanelEl.contains(doc.activeElement)) {
+            statusEl?.focus();
+          }
+          actionsPanelEl.hidden = !state.isPlayer || state.isOver;
+        }
         if (!state.isPlayer) return;
 
         const disabled = !state.connected || state.isOver || state.pendingAction !== null;
@@ -1312,8 +1319,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           btnResign.disabled = disabled;
           if (disabled && confirmResignEl && !confirmResignEl.hidden) {
             confirmResignEl.hidden = true;
-            if (confirmResignYes instanceof HTMLButtonElement) confirmResignYes.disabled = true;
-            if (confirmResignNo instanceof HTMLButtonElement) confirmResignNo.disabled = true;
+            if (confirmResignYes) (confirmResignYes as HTMLButtonElement).disabled = true;
+            if (confirmResignNo) (confirmResignNo as HTMLButtonElement).disabled = true;
             btnResign.hidden = false;
             statusEl?.focus();
           }
@@ -1324,8 +1331,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           btnAbort.disabled = disabled;
           if ((disabled || !state.canAbort) && confirmAbortEl && !confirmAbortEl.hidden) {
             confirmAbortEl.hidden = true;
-            if (confirmAbortYes instanceof HTMLButtonElement) confirmAbortYes.disabled = true;
-            if (confirmAbortNo instanceof HTMLButtonElement) confirmAbortNo.disabled = true;
+            if (confirmAbortYes) (confirmAbortYes as HTMLButtonElement).disabled = true;
+            if (confirmAbortNo) (confirmAbortNo as HTMLButtonElement).disabled = true;
             btnAbort.hidden = !state.canAbort;
             statusEl?.focus();
           }
