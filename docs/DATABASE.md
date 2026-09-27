@@ -304,6 +304,9 @@ the row. It re-folds each touched game's complete committed stream and upserts i
 - **Pregame lifecycle** ([ADR-0148](adr/0148-pregame-readiness-and-no-show.md)). `PlayerReady`
   events advance `last_seq` but not `ply_count`, and a no-show `GameEnded` projects `result`,
   `termination = 'no_show'` and `ended_at` like any other ending.
+- **In-play flag expiry** ([ADR-0149](adr/0149-autonomous-flag-expiry.md)). An autonomous timeout is
+  an ordinary `GameEnded` (`timeout`, or `insufficient_material` when the winner could not mate) and
+  projects like any other ending.
 
 ### 4.2a Pending no-show deadlines (`0042_pregame_no_show.sql`, ADR-0148)
 
@@ -324,6 +327,28 @@ expire. Only a creation the game aggregate would accept (a known source, a posit
 deadline, a non-negative integer creation time, and a deadline no later than the latest ECMAScript date,
 which is inside `timestamptz`'s range) is queued; anything else is skipped, never raised, so the trigger cannot reject an append
 or queue a row the worker could never settle.
+
+### 4.2b Running-clock flag deadlines (`0043_flag_deadlines.sql`, ADR-0149)
+
+```sql
+CREATE TABLE flag_deadlines (
+  game_id UUID    PRIMARY KEY,
+  seq     INTEGER NOT NULL,                     -- the MovePlayed that set the row
+  due_ms  BIGINT  NOT NULL                      -- epoch ms at which the side to move flags
+);
+CREATE INDEX flag_deadlines_due_idx ON flag_deadlines (due_ms, game_id);
+```
+
+A work queue, not a projection: the `flag_deadlines_track` trigger on `game_events` upserts a row on
+every `MovePlayed` with the new side to move's deadline (`flag_deadline_ms`, the same arithmetic as
+`flagDeadline` in `packages/game/src/clock.ts`, rounded up to a whole millisecond) and deletes it on
+any `GameEnded`, in the same transaction as the append. It therefore holds exactly the ongoing timed
+games that have a move, whichever release wrote them. Unlimited games never enter it. `due_ms` is an
+integer so the deadline is exact; a `timestamptz` would round through microseconds. The flag worker
+scans it by `due_ms`, re-decides each game from the event log, and corrects or deletes a row the log
+disagrees with, guarded by `seq` so it never touches a row a newer move wrote. A malformed stored
+value never raises: it falls back to the move's time (a lower bound the worker corrects) or is
+skipped. The migration backfills games already running when it commits.
 
 ### 4.3 Identity & authZ
 

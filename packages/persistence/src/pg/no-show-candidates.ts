@@ -10,24 +10,29 @@
 
 import type { Pool } from 'pg';
 
-export interface NoShowCandidate {
+/** A due game in a deadline queue (this one, or `flag_deadlines` of ADR-0149). */
+export interface DeadlineCandidate {
   readonly gameId: string;
   readonly dueAt: Date;
 }
 
-/** A keyset position in `(due_at, game_id)` order. */
-export interface NoShowCursor {
+/** A keyset position in `(deadline, game_id)` order. */
+export interface DeadlineCursor {
   readonly dueAt: Date;
   readonly gameId: string;
 }
 
-export interface NoShowCandidateQuery {
+export interface DeadlineCandidateQuery {
   /** Games whose deadline is at or before this instant are due. */
   readonly dueBy: Date;
   /** Resume strictly after this position; `null` starts from the earliest deadline. */
-  readonly after: NoShowCursor | null;
+  readonly after: DeadlineCursor | null;
   readonly limit: number;
 }
+
+export type NoShowCandidate = DeadlineCandidate;
+export type NoShowCursor = DeadlineCursor;
+export type NoShowCandidateQuery = DeadlineCandidateQuery;
 
 export class PgNoShowCandidates {
   constructor(private readonly pool: Pool) {}

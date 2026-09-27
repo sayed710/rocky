@@ -241,7 +241,9 @@ test('games created before migration 0042 never enter the queue and replay exact
       const [w, b] = await users(pool, 2);
       const store = new PostgresEventStore(pool);
       const old = await create(store, w!, b!, T0);
-      assert.equal(await migrate(pool, MIGRATIONS), 1, 'only 0042');
+      // Upgrade to exactly 0042 (later migrations are the concern of their own suites).
+      for (const file of readdirSync(MIGRATIONS).filter((f) => f.startsWith('0042'))) cpSync(join(MIGRATIONS, file), join(before, file));
+      assert.equal(await migrate(pool, before), 1, 'only 0042');
       assert.deepEqual(await queue(pool), []);
       const replayed = Game.fromEvents((await store.load(old)).map((e) => e.event)).snapshot();
       assert.equal(replayed.clock.turnStartedAt, T0, 'the clock is still anchored at creation');

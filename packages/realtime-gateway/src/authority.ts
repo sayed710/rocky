@@ -25,10 +25,11 @@ import type { GameBroadcast, LegalMoves, ReadyView, StateView } from './protocol
 import { gameChannel, gamesEndedChannel, type PubSub } from './pubsub';
 
 /**
- * A command against a game. Every kind but the last two is issued by a seated player through the
+ * A command against a game. Every kind but the last three is issued by a seated player through the
  * wire protocol. `ready` is issued by the gateway itself after a seated player's authenticated join,
- * and `expireNoShow` only by the server's no-show worker as {@link NO_SHOW_ACTOR}; the protocol
- * decoder produces neither (ADR-0148).
+ * `expireNoShow` only by the server's no-show worker as {@link NO_SHOW_ACTOR} (ADR-0148), and
+ * `expireFlag` only by the server's flag worker as {@link FLAG_ACTOR} (ADR-0149); the protocol
+ * decoder produces none of them.
  */
 export type Command =
   | { readonly kind: 'move'; readonly uci: string }
@@ -39,13 +40,17 @@ export type Command =
   | { readonly kind: 'claimFlag' }
   | { readonly kind: 'abort' }
   | { readonly kind: 'ready' }
-  | { readonly kind: 'expireNoShow' };
+  | { readonly kind: 'expireNoShow' }
+  | { readonly kind: 'expireFlag' };
 
 /**
  * The actor that issues `expireNoShow`. Not an account id: player identities come only from verified
  * tokens, and anonymous spectators are `anon-<connection>`, so no client can act as it.
  */
 export const NO_SHOW_ACTOR = 'system:no-show';
+
+/** The actor that issues `expireFlag`; like {@link NO_SHOW_ACTOR}, no client can act as it. */
+export const FLAG_ACTOR = 'system:flag';
 
 /** Reasons a command can be refused, aligned with the protocol reject codes. */
 export type AuthorityErrorCode =
@@ -360,6 +365,13 @@ export class GameAuthority {
       if (userId !== NO_SHOW_ACTOR) throw new AuthorityError('not_a_player', 'only the server may expire a no-show');
       return this.commit(gameId, rec, this.guard(() => rec.game.expireNoShow(at)));
     }
+    if (cmd.kind === 'expireFlag') {
+      if (userId !== FLAG_ACTOR) throw new AuthorityError('not_a_player', 'only the server may expire a clock');
+      // Decided here, on the owner's clock and its freshest copy: refused unless the side to move has
+      // flagged on a clock the first move started, so a move that committed first always wins.
+      if (!rec.game.timeoutDue(at)) throw new AuthorityError('invalid_command', 'Flag expiry refused: not due');
+      return this.commit(gameId, rec, rec.game.claimFlag(at));
+    }
     const players = rec.game.snapshot().players;
     const color = players.white === userId ? 'w' : players.black === userId ? 'b' : null;
     if (color === null) {
@@ -369,6 +381,11 @@ export class GameAuthority {
     // after a flag fall records the timeout. The outcome never depends on how late the worker runs.
     if (rec.game.noShowVerdict(at).kind === 'expire') {
       return this.commit(gameId, rec, rec.game.expireNoShow(at));
+    }
+    // Likewise once the side to move has flagged: a late move cannot rescue them, and neither can a
+    // resignation or draw that reaches the owner before the flag worker does (ADR-0149).
+    if (rec.game.timeoutDue(at)) {
+      return this.commit(gameId, rec, rec.game.claimFlag(at));
     }
     let result: { game: Game; events: GameEvent[] };
 

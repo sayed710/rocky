@@ -106,6 +106,20 @@ export function charge(
 }
 
 /**
+ * The first instant at which {@link hasFlagged} holds for the side to move, or `null` while no clock
+ * runs (unlimited, or no anchor yet). For every `now` at or after the anchor,
+ * `hasFlagged(clock, side, now, tc) === (now >= flagDeadline(clock, side, tc))`: the side flags once
+ * the elapsed time, less any delay, uses up what remains. The `flag_deadlines` trigger (migration
+ * 0043) computes exactly this from the stored `MovePlayed`, and a parity test holds them together.
+ */
+export function flagDeadline(clock: ClockState, sideToMove: Color, tc: TimeControl): number | null {
+  if (tc.kind === 'unlimited' || clock.turnStartedAt === null) return null;
+  const remaining = clock.remaining[sideToMove];
+  if (remaining <= 0) return clock.turnStartedAt;
+  return clock.turnStartedAt + (tc.kind === 'delay' ? tc.delayMs : 0) + remaining;
+}
+
+/**
  * Would the side to move flag if they let time run until `now` without moving?
  * Used for opponent flag claims.
  */
