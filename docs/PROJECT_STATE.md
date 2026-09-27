@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-27 — M15 Increment 72: Autonomous server-authoritative in-play flag expiry._
+_Last updated: 2026-09-27 — M15 Increment 73: Autonomous server-authoritative in-play flag expiry._
+
+Prior: _Last updated: 2026-09-27 — M15 Increment 72: Direct-messaging abuse admission._
 
 Prior: _Last updated: 2026-09-26 — M15 Increment 71: Durable player readiness, first-move clock start and source-specific no-show._
 
@@ -4464,7 +4466,14 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Tests: domain (`pregame-lifecycle.test.ts`), authority and gateway (`readiness.test.ts`), web (`readiness.test.ts`), API including deadline configuration (`pregame-no-show.test.ts`), real-PostgreSQL migration, trigger-kept queue, index use, projection, pre-0042 upgrade and log race (`pregame-no-show.integration.test.ts`), the worker hermetically (`no-show-expiry.test.ts`), and two routed replicas on real Redis and PostgreSQL (`no-show-expiry.integration.test.ts`). Review rounds on PR #72 added the late-move and late-join rules, the durable deadline, the trigger-kept queue, dismissal, paced passes, eviction and the legacy-snapshot rule.
 - Limits (ADR-0148): an untouched game ends within about a scan interval after its deadline; the deadline is compared with the owner's clock; replicas of the previous release cannot fold streams containing `PlayerReady`, so 0042 runs first and every gateway replica is replaced in one rollout; a present player may still abort before the second move, which keeps the existing tournament relaunch. Autonomous in-play flag expiry is the next increment; ratings are untouched.
 
-## M15 Increment 72 — Autonomous server-authoritative in-play flag expiry (2026-09-27)
+## M15 Increment 72 — Direct-messaging abuse admission (2026-09-27)
+
+- Re-verified the historical audit against `5036d683`: `POST /v1/messages/conversations` and `POST /v1/messages/conversations/:id/messages` reached messaging persistence without abuse admission. Seek creation already had atomic user/IP admission. The other messaging mutations edit or delete an existing sender-owned message or advance the caller's own read marker; this increment protects the two paths that can create unbounded new conversations/messages and unsolicited recipient activity.
+- Each protected POST makes one atomic `admit` call with an authenticated sender-account bucket and a resolved source-IP bucket. No recipient, pair, or conversation-target bucket exists, so an attacker cannot spend another account's private quota by naming that account. The shared-IP allowance is ten times the account allowance, following the seek precedent for users behind a NAT. Conversation opens allow 20 per account and 200 per IP per five minutes; sends allow 30 per account and 300 per IP per minute. Both limits are explicit `ApiConfig.rateLimit` fields validated at startup as positive PostgreSQL-compatible integers. There is no new environment variable.
+- Inside each handler, authentication and syntactic/cheap semantic validation precede admission; target existence lookup, repository authorization and block checks, and persistence follow it. A malformed UUID or message body spends no quota; exhausted quota returns the standard 429 and `Retry-After` even before target existence or block checks. Under budget, get-or-create, authorization, and block semantics are unchanged. Failed repository work is not refunded, following the existing write-admission policy. A limiter fault fails closed.
+- The production `PgRateLimiter` uses a shared PostgreSQL bucket table, sorted row locks, and one transaction for both dimensions: concurrent replicas cannot admit the same final slot or leave a partial charge on refusal. The in-memory implementation provides deterministic test coverage. Focused API, structural guard, configuration, existing messaging lifecycle, PostgreSQL limiter concurrency, and PostgreSQL messaging repository tests cover this increment. Repeated edits and read-marker writes remain a separate write-flood policy question if their operational load warrants a budget.
+
+## M15 Increment 73 — Autonomous server-authoritative in-play flag expiry (2026-09-27)
 
 - Audit P0 "Timed-match lifecycle", clock-expiry part. Verified on `main` at `5036d68` (after PR #72): a timed game ended on time only through a late move or a player's `claimFlag`. No server process watched a running clock, so a game whose players both disconnected stayed ongoing in the log after its clock reached zero. A resignation or draw acceptance reaching the owner after the flag also beat the timeout if it arrived first. ADR-0149 records the design.
 - Scope, from the current architecture: every timed game once its first accepted move has started the clock. That covers seek, tournament, bot (the engine plays through the same owner path) and direct games, with sudden death, Fischer increment, delay and every variant. Unlimited games never expire. Before the first move nothing changes: sourced games follow the ADR-0148 no-show rule, and bot and direct games keep their original lifecycle.

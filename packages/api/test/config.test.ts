@@ -1,15 +1,44 @@
 /**
- * Tests for `resolveConfig` — focused on the CORS invariants enforced per
- * ADR-0011 and the cookieSecure default from ADR-0012. The middleware
- * reflects exact origins and never emits `*`, so an invalid CORS config
- * should fail fast at startup rather than silently misbehave.
+ * Tests for `resolveConfig`: messaging admission budgets, CORS invariants,
+ * refresh-cookie transport policy, and trusted proxy configuration.
  */
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveConfig } from '../src/config.js';
+import { DEFAULT_RATE_LIMIT, resolveConfig } from '../src/config.js';
 
 const SECRET = 'x'.repeat(32);
+
+describe('resolveConfig messaging admission', () => {
+  it('uses explicit sender and shared-IP budgets', () => {
+    const rateLimit = resolveConfig({ accessTokenSecret: SECRET }).rateLimit;
+    assert.deepEqual(rateLimit.conversationCreation.perUser, { maxRequests: 20, windowMs: 300_000 });
+    assert.deepEqual(rateLimit.conversationCreation.perIp, { maxRequests: 200, windowMs: 300_000 });
+    assert.deepEqual(rateLimit.messageSend.perUser, { maxRequests: 30, windowMs: 60_000 });
+    assert.deepEqual(rateLimit.messageSend.perIp, { maxRequests: 300, windowMs: 60_000 });
+  });
+
+  it('rejects missing, fractional, zero and oversized messaging budgets at startup', () => {
+    for (const bad of [undefined, 0, 1.5, Number.POSITIVE_INFINITY, 2_147_483_648]) {
+      const perUser = bad === undefined ? undefined : { maxRequests: bad, windowMs: 60_000 };
+      const rateLimit = {
+        ...DEFAULT_RATE_LIMIT,
+        messageSend: { ...DEFAULT_RATE_LIMIT.messageSend, perUser },
+      } as unknown as typeof DEFAULT_RATE_LIMIT;
+      assert.throws(() => resolveConfig({ accessTokenSecret: SECRET, rateLimit }),
+        /rateLimit.messageSend.perUser/);
+    }
+    const rateLimit = {
+      ...DEFAULT_RATE_LIMIT,
+      conversationCreation: {
+        ...DEFAULT_RATE_LIMIT.conversationCreation,
+        perIp: { maxRequests: 200, windowMs: Number.NaN },
+      },
+    };
+    assert.throws(() => resolveConfig({ accessTokenSecret: SECRET, rateLimit }),
+      /rateLimit.conversationCreation.perIp/);
+  });
+});
 
 describe('resolveConfig CORS validation', () => {
   it('rejects a wildcard "*" in allowedOrigins', () => {

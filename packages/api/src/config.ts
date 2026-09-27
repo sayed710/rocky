@@ -145,6 +145,16 @@ export interface RateLimitConfig {
     readonly perUser: RateLimitEndpointConfig;
     readonly perIp: RateLimitEndpointConfig;
   };
+  /** Opening a direct-message conversation, including fetching an existing one. */
+  readonly conversationCreation: {
+    readonly perUser: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
+  /** Sending a direct message. Neither dimension is keyed by the recipient or conversation. */
+  readonly messageSend: {
+    readonly perUser: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
   readonly analysis: {
     readonly perUser: RateLimitEndpointConfig;
     readonly perIp: RateLimitEndpointConfig;
@@ -231,6 +241,19 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   seekCreation: {
     perUser: { maxRequests: 20, windowMs: 5 * 60 * 1000 }, // 20 / 5 min
     perIp: { maxRequests: 200, windowMs: 5 * 60 * 1000 }, // 200 / 5 min
+  },
+  // Opening a conversation has the same authenticated-write cost and retry pattern as creating a
+  // seek. Both requests charge even if the pair already has a conversation, bounding repeated
+  // get-or-create calls. Ten users behind one IP can each use their full account allowance.
+  conversationCreation: {
+    perUser: { maxRequests: 20, windowMs: 5 * 60 * 1000 }, // 20 / 5 min
+    perIp: { maxRequests: 200, windowMs: 5 * 60 * 1000 }, // 200 / 5 min
+  },
+  // Messages are ordinary small writes, so the 30/min account budget matches the existing
+  // analysis request volume while the IP budget preserves the seek route's 10-account NAT margin.
+  messageSend: {
+    perUser: { maxRequests: 30, windowMs: 60 * 1000 }, // 30 / min
+    perIp: { maxRequests: 300, windowMs: 60 * 1000 }, // 300 / min
   },
   // Analysis is a CPU-amplification surface, so it is limited more tightly than a read endpoint.
   analysis: {
@@ -338,6 +361,23 @@ function validateCors(cors: CorsConfig): void {
   }
 }
 
+/** Fail startup on missing or unusable messaging budgets, including untyped runtime input. */
+function validateMessagingRateLimits(rateLimit: RateLimitConfig): void {
+  for (const name of ['conversationCreation', 'messageSend'] as const) {
+    const policy = rateLimit[name];
+    for (const dimension of ['perUser', 'perIp'] as const) {
+      const limit = policy?.[dimension];
+      if (
+        !limit ||
+        !Number.isSafeInteger(limit.maxRequests) || limit.maxRequests < 1 || limit.maxRequests > 2_147_483_647 ||
+        !Number.isSafeInteger(limit.windowMs) || limit.windowMs < 1 || limit.windowMs > 2_147_483_647
+      ) {
+        throw new Error(`resolveConfig: rateLimit.${name}.${dimension} must have positive 32-bit integer maxRequests and windowMs`);
+      }
+    }
+  }
+}
+
 /**
  * Resolve the runtime refresh-cookie transport policy.
  *
@@ -385,6 +425,8 @@ export function resolveConfig(
   validateCors(cors);
   const trustProxy = input.trustProxy ?? resolveTrustProxyEnv(env['TRUST_PROXY']);
   validateTrustProxy(trustProxy);
+  const rateLimit = input.rateLimit ?? DEFAULT_RATE_LIMIT;
+  validateMessagingRateLimits(rateLimit);
   return {
     accessTokenSecret,
     accessTokenTtlSec: input.accessTokenTtlSec ?? DEFAULT_ACCESS_TOKEN_TTL_SEC,
@@ -394,7 +436,7 @@ export function resolveConfig(
     cors,
     enableHsts: input.enableHsts ?? true,
     cookieSecure: resolveRefreshCookieSecure(input.cookieSecure, env),
-    rateLimit: input.rateLimit ?? DEFAULT_RATE_LIMIT,
+    rateLimit,
     webauthn: input.webauthn ?? {
       rpId: env['WEBAUTHN_RP_ID'] ?? 'localhost',
       origins: (env['WEBAUTHN_ORIGINS'] ?? 'http://localhost:3000').split(','),
