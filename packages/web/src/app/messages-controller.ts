@@ -39,6 +39,7 @@ export interface MessagesCallbacks {
 export interface MessagesControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: MessagesCallbacks;
+  readonly onDispose?: () => void;
   /** Live polling interval in milliseconds (default 5000ms). */
   readonly pollIntervalMs?: number;
   /** Injected timer (for tests). */
@@ -49,6 +50,7 @@ export interface MessagesControllerOptions {
 export class MessagesController {
   private readonly client: GambitClient;
   private readonly callbacks: MessagesCallbacks;
+  private readonly onDispose: (() => void) | undefined;
   private readonly pollIntervalMs: number;
   private readonly _setInterval: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
   private readonly _clearInterval: (id: ReturnType<typeof setInterval>) => void;
@@ -62,6 +64,7 @@ export class MessagesController {
   constructor(opts: MessagesControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.onDispose = opts.onDispose;
     this.pollIntervalMs = opts.pollIntervalMs ?? 5000;
     this._setInterval = opts.setInterval ?? ((fn, ms) => setInterval(fn, ms));
     this._clearInterval = opts.clearInterval ?? ((id) => clearInterval(id));
@@ -215,8 +218,10 @@ export class MessagesController {
 
   /** Permanently dispose the controller. */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
     this.stopPolling();
+    this.onDispose?.();
   }
 
   private isCurrent(generation: number): boolean {
