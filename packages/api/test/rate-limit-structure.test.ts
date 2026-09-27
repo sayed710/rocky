@@ -153,6 +153,8 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
     '/v1/auth/login': ['login:ip:', 'login:handle-ip:'],
     '/v1/auth/email/verification/request': ['email-verification:user:', 'email-verification:ip:'],
     '/v1/seeks': ['seek-create:user:', 'seek-create:ip:'],
+    '/v1/messages/conversations': ['message-open:user:', 'message-open:ip:'],
+    '/v1/messages/conversations/:id/messages': ['message-send:user:', 'message-send:ip:'],
     '/v1/analysis': ['analysis:user:', 'analysis:ip:'],
     '/v1/analysis/mistake-prediction': ['mistake-prediction:user:', 'mistake-prediction:ip:'],
     '/v1/ai/move-explanation': ['move-explanation:user:', 'move-explanation:ip:'],
@@ -205,7 +207,7 @@ test('public password reset has only a per-IP admission bucket', () => {
  * from malformed bodies, such as a code that is not eight digits.
  */
 test('validated routes parse the body before they charge for it', () => {
-  for (const path of ['/v1/seeks', '/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation', '/v1/auth/login']) {
+  for (const path of ['/v1/seeks', '/v1/messages/conversations', '/v1/messages/conversations/:id/messages', '/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation', '/v1/auth/login']) {
     const route = routeNamed(path, 'post');
 
     let parse: ts.CallExpression | undefined;
