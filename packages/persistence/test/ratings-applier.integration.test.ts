@@ -540,3 +540,49 @@ test('an account deleted while its game is being rated makes the game ineligible
     assert.equal(await count(pool, 'rating_applications'), 0);
   });
 });
+
+test('endings sharing one transaction id (as migration 0040 left history) apply in ending-time order, one page at a time', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [a, b, c] = await users(pool, 3);
+    // Game ids ascend g1 < g2 < g3, but the games ended in the opposite order: g3, then g2, then g1.
+    const games = [params(a!, b!), params(a!, c!), params(b!, a!)];
+    const endedAt = ['2026-01-01T00:00:03.000003Z', '2026-01-01T00:00:02.000002Z', '2026-01-01T00:00:01.000001Z'];
+    const writer = await inTx(pool);
+    try {
+      for (const [i, create] of games.entries()) {
+        const created = Game.create(create);
+        const moved = created.game.playMove('e2e4', 2_000);
+        const events = [...created.events, ...moved.events, ...moved.game.resign('b', 3_000).events];
+        for (const [seq, event] of events.entries()) {
+          await writer.query(
+            `INSERT INTO game_events (game_id, seq, type, event_version, payload, server_ts)
+             VALUES ($1, $2, $3, 1, $4, $5::timestamptz - ($6 * interval '1 millisecond'))`,
+            [create.gameId, seq, event.type, event, endedAt[i], events.length - 1 - seq],
+          );
+        }
+      }
+      await writer.query('COMMIT');
+    } finally {
+      writer.release();
+    }
+    assert.equal(Number((await pool.query<{ n: string }>(
+      `SELECT count(DISTINCT xact_id) AS n FROM game_events WHERE type = 'GameEnded'`,
+    )).rows[0]!.n), 1, 'all three endings share one transaction id');
+
+    await drain(pool, new PgRatingsApplier(pool, { batchSize: 1 }));
+    // White wins each game: g3 (b beats a), then g2 (a beats c), then g1 (a beats b).
+    let ra = initialRating(); let rb = initialRating(); let rc = initialRating();
+    let s = rateGame(rb, ra, 1); rb = s.white; ra = s.black;
+    s = rateGame(ra, rc, 1); ra = s.white; rc = s.black;
+    s = rateGame(ra, rb, 1); ra = s.white; rb = s.black;
+    assert.deepEqual([await rating(pool, a!), await rating(pool, b!), await rating(pool, c!)], [ra, rb, rc]);
+
+    // The same games in game-id order give different ratings, so this order was really decided by time.
+    let xa = initialRating(); let xb = initialRating(); let xc = initialRating();
+    s = rateGame(xa, xb, 1); xa = s.white; xb = s.black;
+    s = rateGame(xa, xc, 1); xa = s.white; xc = s.black;
+    s = rateGame(xb, xa, 1); xb = s.white; xa = s.black;
+    assert.notDeepEqual(xa, ra);
+  });
+});

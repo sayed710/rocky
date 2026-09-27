@@ -21,7 +21,6 @@
 
 import type { Pool, PoolClient } from 'pg';
 import { rateGame, initialRating, type Glicko2Rating } from '../glicko2';
-import { projectGameStream } from '../games-projection';
 import { decideRating, type RateableGame } from '../rating-eligibility';
 import { inTransaction, isStreamDataFailure, loadStream } from './games-projector';
 
@@ -126,7 +125,7 @@ type OneOutcome =
 async function rateOne(client: PoolClient, gameId: string): Promise<OneOutcome> {
   await client.query('SAVEPOINT rate_game');
   try {
-    const decision = decideRating(projectGameStream(gameId, await loadStream(client, gameId)));
+    const decision = decideRating(gameId, await loadStream(client, gameId));
     const applied = decision.kind === 'rate' ? await applyRatedGame(client, decision.game) : 'ineligible';
     await client.query('RELEASE SAVEPOINT rate_game');
     return { kind: applied === 'applied' || applied === 'already_applied' ? applied : 'ineligible' };

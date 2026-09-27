@@ -51,7 +51,7 @@ Tunables (all optional):
 
 They stress different resources, and mixing them would hide which one moved:
 
-- **`read`** — public GETs against Postgres (`/v1/health`, `/v1/leaderboard/:variant`, `/v1/search`,
+- **`read`** — public GETs against Postgres (`/v1/health`, `/v1/leaderboard/:variant/:speed`, `/v1/search`,
   `/v1/tournaments`, `/v1/seeks`). This is the path the API latency SLO describes.
 - **`auth`** — registration, which runs scrypt on purpose (ADR-0012). A handful of concurrent
   registrations saturates a core in a way no volume of read traffic does, so it is held to a
