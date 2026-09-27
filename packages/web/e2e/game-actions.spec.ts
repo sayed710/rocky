@@ -67,6 +67,10 @@ test.describe('Game actions flow', () => {
       await page1.locator('[data-square="e4"]').click();
       await expect(status2).toHaveText(/your move/i, { timeout: 10_000 });
 
+      // White leaves a live confirmation open while Black ends the game.
+      await page1.click('#action-resign');
+      await expect(page1.locator('#confirm-resign-yes')).toBeFocused();
+
       // Black resigns
       await page2.click('#action-resign');
       await expect(page2.locator('#confirm-resign')).toBeVisible();
@@ -77,9 +81,16 @@ test.describe('Game actions flow', () => {
       await expect(status1).toHaveText(/Checkmate — White wins \(resignation\)|White wins by resignation/i, { timeout: 5000 });
       await expect(status2).toHaveText(/Checkmate — White wins \(resignation\)|White wins by resignation/i, { timeout: 5000 });
 
-      // Actions are disabled
-      await expect(page1.locator('#action-resign')).toBeDisabled();
-      await expect(page2.locator('#action-resign')).toBeDisabled();
+      // The terminal view removes live actions while retaining the authoritative result.
+      await expect(page1.locator('#game-actions')).toBeHidden();
+      await expect(page2.locator('#game-actions')).toBeHidden();
+      await expect(page1.locator('#confirm-resign')).toBeHidden();
+      await expect(status1).toBeFocused();
+      await expect(page1.getByRole('group', { name: 'Game actions' })).toHaveCount(0);
+      await expect(page1.getByRole('button', { name: 'Resign' })).toHaveCount(0);
+      await page1.reload();
+      await expect(status1).toHaveText(/Checkmate — White wins \(resignation\)|White wins by resignation/i, { timeout: 15_000 });
+      await expect(page1.locator('#game-actions')).toBeHidden();
 
     } finally {
       await ctx1.close();
@@ -149,6 +160,8 @@ test.describe('Game actions flow', () => {
 
       // Banner is hidden
       await expect(banner2).toBeHidden();
+      await expect(page1.locator('#game-actions')).toBeHidden();
+      await expect(page2.locator('#game-actions')).toBeHidden();
 
     } finally {
       await ctx1.close();
