@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-27 — M15 Increment 74: Finished-game action cleanup._
+_Last updated: 2026-09-29 — M15 Increment 75: RTL layout reliability and chessboard orientation invariance._
+
+Prior: _Last updated: 2026-09-27 — M15 Increment 74: Finished-game action cleanup._
 
 Prior: _Last updated: 2026-09-27 — M15 Increment 73: Autonomous server-authoritative in-play flag expiry._
 
@@ -4491,3 +4493,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Re-verified the historical Fable + Astra P1 against `origin/main` at `6f141e1`: `game-mount.ts` showed `#game-actions` for every player even when the authoritative state was over, leaving a disabled cluster of live controls. The game-actions E2E only checked that Resign became disabled.
 - The route-scoped action presenter now hides `#game-actions` whenever `state.isOver` is true, independently of connection and pending-action state. Native `hidden` removes the controls from presentation, keyboard navigation and the accessibility tree. If focus is inside the panel when terminal state arrives, it moves to the existing perceivable game status before the panel is hidden. Existing confirmation cleanup closes and disables resign/abort confirmations; received draw UI is hidden. The authoritative result, board, navigation and separate capability-gated Game Review remain available.
 - Focused mount and accessibility tests cover live, disconnected, pending, multiple terminal causes, already-terminal join, both confirmation races, received draw, spectator and post-game review. The browser action journey covers resignation, agreement, a remote confirmation race, accessibility exposure and reload into a terminal game. The old visibility rule was temporarily restored and caused the new terminal tests to fail, then was removed. Web build, web tests, lint, repository guards, focused browser E2E and the 19-workspace hermetic zero-skip suite passed.
+
+## M15 Increment 75 — RTL layout reliability and chessboard orientation invariance (2026-09-29)
+- Re-verified the documented RTL layout failure on `origin/main` at `3c537ac23cddd0c6f788fa1b08fed3632f86296f`: forcing `dir="rtl"` caused `document.documentElement.scrollWidth` to blow out by 999px horizontally whenever `#skip-board` rendered on `/game/:id` due to `.skip-link { position: absolute; left: -999px; }`. In Blink/Chromium RTL coordinates, negative left values place off-screen elements in the negative inline coordinate space, forcing document overflow, horizontal scrolling, and off-canvas blank presentation across viewports (1440px, 1024px, 390px, 320px). Additionally, `.skip-link:focus` used physical `left: 8px;`, and `.cb-board` lacked explicit `direction: ltr;`, which caused flexbox `.cb-row` to reverse square order horizontally under RTL and invert chessboard orientation (placing file 'a' on the right).
+- Fixed `.skip-link` in `packages/web/src/style.css` using the standard accessible clip hiding technique (`clip: rect(0, 0, 0, 0); clip-path: inset(50%); height: 1px; width: 1px; margin: -1px; overflow: hidden; position: absolute; white-space: nowrap;`), restoring proper logical positioning on focus (`inset-inline-start: 8px; top: 8px;`).
+- Added `direction: ltr;` to `.cb-board` in `packages/web/src/style.css` to decouple chessboard rendering and rank/file coordinate systems from the document reading direction, preserving FIDE standard board orientation invariant across all document directions without altering game logic or board styling.
+- Added comprehensive Playwright end-to-end regression test suite `packages/web/e2e/rtl-layout-reliability.spec.ts` covering 36 tests across 4 viewports (1440px, 1024px, 390px, 320px) on home, analysis, and active game routes, verifying horizontal overflow absence (`scrollWidth <= clientWidth`), skip-link accessibility, and rank/file layout coordinate geometry. Added `rtl-layout-reliability.spec.ts` to `STATIC_SPECS` in `packages/web/test/e2e-backend-guard.test.ts`.
+- Falsification verified: mutating `.skip-link` back to `left: -999px;` reliably reproduced 8 test failures across all viewports.
+- Local verification: full CI equivalent passed cleanly (all 19 hermetic workspaces, 1200 unit tests in web, 156 static e2e tests, clean build and lint across every workspace).
