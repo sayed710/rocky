@@ -1,8 +1,9 @@
 /**
- * RTL Layout Reliability & Internationalization Regression Suite.
+ * RTL Layout Reliability & Internationalization Regression Suite (Static/Offline).
  *
  * Verifies that forcing document direction to RTL (`dir="rtl"`):
- * 1. Produces ZERO horizontal document overflow (document.scrollWidth <= window.innerWidth).
+ * 1. Produces ZERO horizontal document overflow (document.scrollWidth <= window.innerWidth)
+ *    across all key routes when asynchronously fetched route content has settled.
  * 2. Does not cause off-canvas blank views or positioning shifts outside the viewport.
  * 3. Keeps the accessible skip-link within viewport bounds at inline-start when focused,
  *    without off-screen coordinate overflow when unfocused.
@@ -10,6 +11,9 @@
  *    preserving standard chess geometry and navigation in both LTR and RTL.
  * 5. Maintains layout containment, visibility, and control reachability across all 4 key viewports:
  *    Desktop (1440px, 1024px) and Mobile (390px, 320px).
+ *
+ * Note: Authoritative active-game synchronized board layout and White/Black perspectives
+ * are exercised with the backend test harness in `game-responsive.spec.ts`.
  */
 import { expect, test, type Page } from '@playwright/test';
 
@@ -20,13 +24,92 @@ const VIEWPORTS = [
   { name: '320 small mobile', width: 320, height: 640 },
 ] as const;
 
-const ROUTES = [
-  { path: '/', name: 'lobby' },
-  { path: '/game/test-rtl-game', name: 'game' },
-  { path: '/profile', name: 'profile' },
-  { path: '/messages', name: 'messages' },
-  { path: '/leaderboard', name: 'leaderboard' },
-  { path: '/search', name: 'search' },
+interface RouteFixture {
+  name: string;
+  path: string;
+  setup?: (page: Page) => Promise<void>;
+  readySelector: string;
+  surfaceSelector: string;
+}
+
+const ROUTES: readonly RouteFixture[] = [
+  {
+    name: 'lobby',
+    path: '/',
+    setup: async (page: Page) => {
+      await page.route('**/v1/seeks', async (route) => {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+      });
+    },
+    readySelector: '#create-game',
+    surfaceSelector: '#lobby',
+  },
+  {
+    name: 'leaderboard',
+    path: '/leaderboard',
+    setup: async (page: Page) => {
+      await page.route('**/v1/leaderboard/**', async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify([
+            { userId: 'u1', variant: 'standard', rating: 1600, rd: 45 },
+            { userId: 'u2', variant: 'standard', rating: 1550, rd: 50 },
+            { userId: 'u3', variant: 'standard', rating: 1500, rd: 55 },
+          ]),
+        });
+      });
+    },
+    readySelector: '#leaderboard-results .panel-row',
+    surfaceSelector: '#leaderboard',
+  },
+  {
+    name: 'search',
+    path: '/search?q=chess',
+    setup: async (page: Page) => {
+      await page.route('**/v1/search**', async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            total: 2,
+            results: [
+              {
+                id: '1',
+                score: 1,
+                display: { type: 'player', title: 'Grandmaster Alice', subtitle: 'Rating 2400' },
+              },
+              {
+                id: '2',
+                score: 1,
+                display: { type: 'tournament', title: 'Grandmaster Openings', subtitle: 'Study by Bob' },
+              },
+            ],
+          }),
+        });
+      });
+    },
+    readySelector: '#search-results .panel-row',
+    surfaceSelector: '#search',
+  },
+  {
+    name: 'password-reset',
+    path: '/password-reset',
+    readySelector: '#password-reset-request-form',
+    surfaceSelector: '#password-reset',
+  },
+  {
+    name: 'email-verify',
+    path: '/email-verify',
+    readySelector: '#email-verify-back-link',
+    surfaceSelector: '#email-verify',
+  },
+  {
+    name: 'offline-board',
+    path: '/game/test-offline-board',
+    readySelector: '.cb-board',
+    surfaceSelector: '#game-main',
+  },
 ] as const;
 
 async function boxOf(page: Page, selector: string) {
@@ -35,18 +118,52 @@ async function boxOf(page: Page, selector: string) {
   return box;
 }
 
-test.describe('RTL Layout Reliability — Document Overflow & Structural Containment', () => {
+test.beforeEach(async ({ page }) => {
+  await page.route('**/v1/capabilities', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        capabilities: {
+          learning: true,
+          studies: true,
+          achievements: true,
+          search: true,
+          semanticSearch: false,
+          social: true,
+          messaging: true,
+          community: true,
+        },
+      }),
+    });
+  });
+  await page.route('**/v1/graphql', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: null }),
+    });
+  });
+});
+
+test.describe('RTL Layout Reliability — Settled Route Containment', () => {
   for (const viewport of VIEWPORTS) {
     for (const route of ROUTES) {
       test(`no horizontal overflow under dir="rtl" for ${route.name} at ${viewport.name} (${viewport.width}px)`, async ({ page }) => {
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
+        if (route.setup) {
+          await route.setup(page);
+        }
         await page.addInitScript(() => {
           document.addEventListener('DOMContentLoaded', () => {
             document.documentElement.setAttribute('dir', 'rtl');
           });
         });
         await page.goto(route.path);
-        await page.waitForLoadState('domcontentloaded');
+
+        // Wait for route-specific content/surface to settle asynchronously
+        const readyEl = page.locator(route.readySelector).first();
+        await expect(readyEl).toBeVisible();
 
         const metrics = await page.evaluate(() => ({
           scrollWidth: document.documentElement.scrollWidth,
@@ -66,6 +183,11 @@ test.describe('RTL Layout Reliability — Document Overflow & Structural Contain
         const main = await boxOf(page, '#app-main');
         expect(main.x).toBeGreaterThanOrEqual(0);
         expect(main.x + main.width).toBeLessThanOrEqual(viewport.width + 1);
+
+        // Route-specific surface container must be visible and contained
+        const surface = await boxOf(page, route.surfaceSelector);
+        expect(surface.x).toBeGreaterThanOrEqual(0);
+        expect(surface.x + surface.width).toBeLessThanOrEqual(viewport.width + 1);
       });
     }
   }
@@ -81,8 +203,8 @@ test.describe('RTL Layout Reliability — Accessible Skip Link', () => {
             document.documentElement.setAttribute('dir', direction);
           });
         }, dir);
-        await page.goto('/game/test-rtl-game');
-        await page.waitForLoadState('domcontentloaded');
+        await page.goto('/game/test-offline-board');
+        await expect(page.locator('.cb-board')).toBeVisible();
 
         // Unfocused skip link must NOT cause horizontal overflow
         const docWidth = await page.evaluate(() => document.documentElement.scrollWidth);
@@ -125,27 +247,20 @@ test.describe('RTL Layout Reliability — Accessible Skip Link', () => {
   }
 });
 
-test.describe('RTL Layout Reliability — Chessboard Geometry & Orientation Invariance', () => {
+test.describe('RTL Layout Reliability — Static/Offline Board Starting Geometry & Flip Invariance', () => {
   for (const dir of ['ltr', 'rtl'] as const) {
     for (const viewport of [VIEWPORTS[0], VIEWPORTS[2]]) {
-      test(`board orientation is decoupled from document direction (${dir} @ ${viewport.name})`, async ({ page }) => {
+      test(`static board starting position and flip orientation are invariant to document direction (${dir} @ ${viewport.name})`, async ({ page }) => {
         await page.setViewportSize({ width: viewport.width, height: viewport.height });
         await page.addInitScript((direction) => {
           document.addEventListener('DOMContentLoaded', () => {
             document.documentElement.setAttribute('dir', direction);
           });
         }, dir);
-        await page.goto('/game/test-rtl-game');
-        await page.waitForLoadState('domcontentloaded');
+        await page.goto('/game/test-offline-board');
+        await expect(page.locator('.cb-board')).toBeVisible();
 
-        const board = page.locator('#board');
-        await expect(board).toBeVisible();
-
-        // White perspective default:
-        // Square a8 is file 0, rank 7 (top-left)
-        // Square h8 is file 7, rank 7 (top-right)
-        // Square a1 is file 0, rank 0 (bottom-left)
-        // Square h1 is file 7, rank 0 (bottom-right)
+        // 1. Initial White perspective default
         const sqA8 = await boxOf(page, '.cb-sq[data-square="a8"]');
         const sqH8 = await boxOf(page, '.cb-sq[data-square="h8"]');
         const sqA1 = await boxOf(page, '.cb-sq[data-square="a1"]');
@@ -156,8 +271,8 @@ test.describe('RTL Layout Reliability — Chessboard Geometry & Orientation Inva
         expect(sqA1.x, `a1 must be to the left of h1 under ${dir}`).toBeLessThan(sqH1.x);
 
         // Rank 8 must be above Rank 1
-        expect(sqA8.y).toBeLessThan(sqA1.y);
-        expect(sqH8.y).toBeLessThan(sqH1.y);
+        expect(sqA8.y, `a8 must be above a1 under ${dir}`).toBeLessThan(sqA1.y);
+        expect(sqH8.y, `h8 must be above h1 under ${dir}`).toBeLessThan(sqH1.y);
 
         // Bottom-right square (h1) must be light square
         const h1Classes = await page.locator('.cb-sq[data-square="h1"]').getAttribute('class');
@@ -166,6 +281,31 @@ test.describe('RTL Layout Reliability — Chessboard Geometry & Orientation Inva
         // Bottom-left square (a1) must be dark square
         const a1Classes = await page.locator('.cb-sq[data-square="a1"]').getAttribute('class');
         expect(a1Classes).toContain('cb-dark');
+
+        // 2. Click #flip button: orientation becomes Black perspective
+        const flipBtn = page.locator('#flip');
+        await expect(flipBtn).toBeVisible();
+        await flipBtn.click();
+
+        const sqA8Flipped = await boxOf(page, '.cb-sq[data-square="a8"]');
+        const sqH8Flipped = await boxOf(page, '.cb-sq[data-square="h8"]');
+        const sqA1Flipped = await boxOf(page, '.cb-sq[data-square="a1"]');
+        const sqH1Flipped = await boxOf(page, '.cb-sq[data-square="h1"]');
+
+        // When flipped to Black: file 'h' must be left of file 'a'
+        expect(sqH8Flipped.x, `h8 must be to the left of a8 when flipped to Black under ${dir}`).toBeLessThan(sqA8Flipped.x);
+        expect(sqH1Flipped.x, `h1 must be to the left of a1 when flipped to Black under ${dir}`).toBeLessThan(sqA1Flipped.x);
+
+        // When flipped to Black: rank 1 must be above rank 8
+        expect(sqA1Flipped.y, `a1 must be above a8 when flipped to Black under ${dir}`).toBeLessThan(sqA8Flipped.y);
+        expect(sqH1Flipped.y, `h1 must be above h8 when flipped to Black under ${dir}`).toBeLessThan(sqH8Flipped.y);
+
+        // 3. Click #flip again: returns to White perspective
+        await flipBtn.click();
+        const sqA1Restored = await boxOf(page, '.cb-sq[data-square="a1"]');
+        const sqH1Restored = await boxOf(page, '.cb-sq[data-square="h1"]');
+        expect(sqA1Restored.x, `a1 must be left of h1 after flipping back to White under ${dir}`).toBeLessThan(sqH1Restored.x);
+        expect(sqA1Restored.y, `a1 must be below a8 after flipping back to White under ${dir}`).toBeGreaterThan(sqA8.y);
 
         // The board itself must be completely contained within the viewport
         const boardBox = await boxOf(page, '#board');
