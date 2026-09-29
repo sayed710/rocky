@@ -220,7 +220,7 @@ test('active game board preserves standard White and Black orientation and preve
         const sqA1Flipped = await squareBox(page, 'a1');
         const sqH1Flipped = await squareBox(page, 'h1');
 
-        expect(sqA8Flipped.x, 'Flipped to White: a8 must be left of h8 under RTL').toBeLessThan(sqA8Flipped.x);
+        expect(sqA8Flipped.x, 'Flipped to White: a8 must be left of h8 under RTL').toBeLessThan(sqH8Flipped.x);
         expect(sqA1Flipped.x, 'Flipped to White: a1 must be left of h1 under RTL').toBeLessThan(sqH1Flipped.x);
         expect(sqA8Flipped.y, 'Flipped to White: a8 must be above a1 under RTL').toBeLessThan(sqA1Flipped.y);
         expect(sqH8Flipped.y, 'Flipped to White: h8 must be above h1 under RTL').toBeLessThan(sqH1Flipped.y);
