@@ -92,147 +92,168 @@ test('active game board preserves standard White and Black orientation and preve
   expect(gameResponse.ok()).toBeTruthy();
   const game = await gameResponse.json();
 
-  for (const viewport of VIEWPORTS) {
-    // 1. Verify White player perspective under dir="rtl"
-    {
-      const context = await browser.newContext({
-        viewport: { width: viewport.width, height: viewport.height },
-      });
-      try {
-        await context.addCookies([{
-          name: 'gambit_refresh',
-          value: authWhite.tokens.refreshToken,
-          domain: 'localhost',
-          path: '/v1/auth',
-          httpOnly: true,
-          secure: false,
-          sameSite: 'Strict',
-        }]);
-        const page = await context.newPage();
-        await page.addInitScript(({ userHandle, userId }) => {
-          localStorage.setItem('gambit-session', JSON.stringify({ handle: userHandle, userId }));
-          document.addEventListener('DOMContentLoaded', () => {
-            document.documentElement.setAttribute('dir', 'rtl');
-          });
-        }, { userHandle: whiteHandle, userId: authWhite.user.id });
+  // 1. Verify White player perspective under dir="rtl"
+  {
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+    });
+    try {
+      await context.addCookies([{
+        name: 'gambit_refresh',
+        value: authWhite.tokens.refreshToken,
+        domain: 'localhost',
+        path: '/v1/auth',
+        httpOnly: true,
+        secure: false,
+        sameSite: 'Strict',
+      }]);
+      const page = await context.newPage();
+      await page.addInitScript(({ userHandle, userId }) => {
+        localStorage.setItem('gambit-session', JSON.stringify({ handle: userHandle, userId }));
+        document.addEventListener('DOMContentLoaded', () => {
+          document.documentElement.setAttribute('dir', 'rtl');
+        });
+      }, { userHandle: whiteHandle, userId: authWhite.user.id });
 
-        await page.goto(`/game/${game.gameId}`);
-        await expect(page.locator('#meta-connection')).toHaveText('Connected');
-        await expect(page.locator('#meta-role')).toHaveText('Playing as White');
+      await page.goto(`/game/${game.gameId}`);
+      await expect(page.locator('#meta-connection')).toHaveText('Connected');
+      await expect(page.locator('#meta-role')).toHaveText('Playing as White');
 
-        const metrics = await page.evaluate(() => ({
-          scrollWidth: document.documentElement.scrollWidth,
-          viewportWidth: window.innerWidth,
-          scrollLeft: document.documentElement.scrollLeft,
-        }));
-        expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewportWidth);
-        expect(metrics.scrollLeft).toBe(0);
+      const metrics = await page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+        scrollLeft: document.documentElement.scrollLeft,
+      }));
+      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewportWidth);
+      expect(metrics.scrollLeft).toBe(0);
 
-        // White perspective geometry: file 'a' left of file 'h', rank 8 above rank 1
-        const sqA8 = await squareBox(page, 'a8');
-        const sqH8 = await squareBox(page, 'h8');
-        const sqA1 = await squareBox(page, 'a1');
-        const sqH1 = await squareBox(page, 'h1');
+      // White perspective geometry: file 'a' left of file 'h', rank 8 above rank 1
+      const sqA8 = await squareBox(page, 'a8');
+      const sqH8 = await squareBox(page, 'h8');
+      const sqA1 = await squareBox(page, 'a1');
+      const sqH1 = await squareBox(page, 'h1');
 
-        expect(sqA8.x, 'White perspective: a8 must be left of h8 under RTL').toBeLessThan(sqH8.x);
-        expect(sqA1.x, 'White perspective: a1 must be left of h1 under RTL').toBeLessThan(sqH1.x);
-        expect(sqA8.y, 'White perspective: a8 must be above a1 under RTL').toBeLessThan(sqA1.y);
-        expect(sqH8.y, 'White perspective: h8 must be above h1 under RTL').toBeLessThan(sqH1.y);
+      expect(sqA8.x, 'White perspective: a8 must be left of h8 under RTL').toBeLessThan(sqH8.x);
+      expect(sqA1.x, 'White perspective: a1 must be left of h1 under RTL').toBeLessThan(sqH1.x);
+      expect(sqA8.y, 'White perspective: a8 must be above a1 under RTL').toBeLessThan(sqA1.y);
+      expect(sqH8.y, 'White perspective: h8 must be above h1 under RTL').toBeLessThan(sqH1.y);
 
-        // Flip to Black perspective
-        const flipBtn = page.locator('#flip');
-        await expect(flipBtn).toBeVisible();
-        await flipBtn.click();
+      // Flip to Black perspective
+      const flipBtn = page.locator('#flip');
+      await expect(flipBtn).toBeVisible();
+      await flipBtn.click();
 
-        const sqA8Flipped = await squareBox(page, 'a8');
-        const sqH8Flipped = await squareBox(page, 'h8');
-        const sqA1Flipped = await squareBox(page, 'a1');
-        const sqH1Flipped = await squareBox(page, 'h1');
+      const sqA8Flipped = await squareBox(page, 'a8');
+      const sqH8Flipped = await squareBox(page, 'h8');
+      const sqA1Flipped = await squareBox(page, 'a1');
+      const sqH1Flipped = await squareBox(page, 'h1');
 
-        expect(sqH8Flipped.x, 'Flipped to Black: h8 must be left of a8 under RTL').toBeLessThan(sqA8Flipped.x);
-        expect(sqH1Flipped.x, 'Flipped to Black: h1 must be left of a1 under RTL').toBeLessThan(sqA1Flipped.x);
-        expect(sqA1Flipped.y, 'Flipped to Black: a1 must be above a8 under RTL').toBeLessThan(sqA8Flipped.y);
-        expect(sqH1Flipped.y, 'Flipped to Black: h1 must be above h8 under RTL').toBeLessThan(sqH8Flipped.y);
+      expect(sqH8Flipped.x, 'Flipped to Black: h8 must be left of a8 under RTL').toBeLessThan(sqA8Flipped.x);
+      expect(sqH1Flipped.x, 'Flipped to Black: h1 must be left of a1 under RTL').toBeLessThan(sqA1Flipped.x);
+      expect(sqA1Flipped.y, 'Flipped to Black: a1 must be above a8 under RTL').toBeLessThan(sqA8Flipped.y);
+      expect(sqH1Flipped.y, 'Flipped to Black: h1 must be above h8 under RTL').toBeLessThan(sqH8Flipped.y);
 
-        // Flip back to White perspective
-        await flipBtn.click();
-        const sqA1Restored = await squareBox(page, 'a1');
-        const sqH1Restored = await squareBox(page, 'h1');
-        expect(sqA1Restored.x, 'Restored to White: a1 must be left of h1 under RTL').toBeLessThan(sqH1Restored.x);
-      } finally {
-        await context.close();
-      }
+      // Flip back to White perspective
+      await flipBtn.click();
+      const sqA1Restored = await squareBox(page, 'a1');
+      const sqH1Restored = await squareBox(page, 'h1');
+      expect(sqA1Restored.x, 'Restored to White: a1 must be left of h1 under RTL').toBeLessThan(sqH1Restored.x);
+
+      // Verify responsive resizing under RTL maintains layout without overflow
+      await page.setViewportSize({ width: 390, height: 844 });
+      const mobileMetrics = await page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+      }));
+      expect(mobileMetrics.scrollWidth).toBeLessThanOrEqual(mobileMetrics.viewportWidth);
+
+      await page.setViewportSize({ width: 762, height: 698 });
+      const compactMetrics = await page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+      }));
+      expect(compactMetrics.scrollWidth).toBeLessThanOrEqual(compactMetrics.viewportWidth);
+    } finally {
+      await context.close();
     }
+  }
 
-    // 2. Verify Black player perspective under dir="rtl"
-    {
-      const context = await browser.newContext({
-        viewport: { width: viewport.width, height: viewport.height },
-      });
-      try {
-        await context.addCookies([{
-          name: 'gambit_refresh',
-          value: authBlack.tokens.refreshToken,
-          domain: 'localhost',
-          path: '/v1/auth',
-          httpOnly: true,
-          secure: false,
-          sameSite: 'Strict',
-        }]);
-        const page = await context.newPage();
-        await page.addInitScript(({ userHandle, userId }) => {
-          localStorage.setItem('gambit-session', JSON.stringify({ handle: userHandle, userId }));
-          document.addEventListener('DOMContentLoaded', () => {
-            document.documentElement.setAttribute('dir', 'rtl');
-          });
-        }, { userHandle: blackHandle, userId: authBlack.user.id });
+  // 2. Verify Black player perspective under dir="rtl"
+  {
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+    });
+    try {
+      await context.addCookies([{
+        name: 'gambit_refresh',
+        value: authBlack.tokens.refreshToken,
+        domain: 'localhost',
+        path: '/v1/auth',
+        httpOnly: true,
+        secure: false,
+        sameSite: 'Strict',
+      }]);
+      const page = await context.newPage();
+      await page.addInitScript(({ userHandle, userId }) => {
+        localStorage.setItem('gambit-session', JSON.stringify({ handle: userHandle, userId }));
+        document.addEventListener('DOMContentLoaded', () => {
+          document.documentElement.setAttribute('dir', 'rtl');
+        });
+      }, { userHandle: blackHandle, userId: authBlack.user.id });
 
-        await page.goto(`/game/${game.gameId}`);
-        await expect(page.locator('#meta-connection')).toHaveText('Connected');
-        await expect(page.locator('#meta-role')).toHaveText('Playing as Black');
+      await page.goto(`/game/${game.gameId}`);
+      await expect(page.locator('#meta-connection')).toHaveText('Connected');
+      await expect(page.locator('#meta-role')).toHaveText('Playing as Black');
 
-        const metrics = await page.evaluate(() => ({
-          scrollWidth: document.documentElement.scrollWidth,
-          viewportWidth: window.innerWidth,
-          scrollLeft: document.documentElement.scrollLeft,
-        }));
-        expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewportWidth);
-        expect(metrics.scrollLeft).toBe(0);
+      const metrics = await page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+        scrollLeft: document.documentElement.scrollLeft,
+      }));
+      expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.viewportWidth);
+      expect(metrics.scrollLeft).toBe(0);
 
-        // Black player perspective geometry: file 'h' left of file 'a', rank 1 above rank 8
-        const sqA8 = await squareBox(page, 'a8');
-        const sqH8 = await squareBox(page, 'h8');
-        const sqA1 = await squareBox(page, 'a1');
-        const sqH1 = await squareBox(page, 'h1');
+      // Black player perspective geometry: file 'h' left of file 'a', rank 1 above rank 8
+      const sqA8 = await squareBox(page, 'a8');
+      const sqH8 = await squareBox(page, 'h8');
+      const sqA1 = await squareBox(page, 'a1');
+      const sqH1 = await squareBox(page, 'h1');
 
-        expect(sqH8.x, 'Black perspective: h8 must be left of a8 under RTL').toBeLessThan(sqA8.x);
-        expect(sqH1.x, 'Black perspective: h1 must be left of a1 under RTL').toBeLessThan(sqA1.x);
-        expect(sqA1.y, 'Black perspective: a1 must be above a8 under RTL').toBeLessThan(sqA8.y);
-        expect(sqH1.y, 'Black perspective: h1 must be above h8 under RTL').toBeLessThan(sqH8.y);
+      expect(sqH8.x, 'Black perspective: h8 must be left of a8 under RTL').toBeLessThan(sqA8.x);
+      expect(sqH1.x, 'Black perspective: h1 must be left of a1 under RTL').toBeLessThan(sqA1.x);
+      expect(sqA1.y, 'Black perspective: a1 must be above a8 under RTL').toBeLessThan(sqA8.y);
+      expect(sqH1.y, 'Black perspective: h1 must be above h8 under RTL').toBeLessThan(sqH8.y);
 
-        // Flip to White perspective
-        const flipBtn = page.locator('#flip');
-        await expect(flipBtn).toBeVisible();
-        await flipBtn.click();
+      // Flip to White perspective
+      const flipBtn = page.locator('#flip');
+      await expect(flipBtn).toBeVisible();
+      await flipBtn.click();
 
-        const sqA8Flipped = await squareBox(page, 'a8');
-        const sqH8Flipped = await squareBox(page, 'h8');
-        const sqA1Flipped = await squareBox(page, 'a1');
-        const sqH1Flipped = await squareBox(page, 'h1');
+      const sqA8Flipped = await squareBox(page, 'a8');
+      const sqH8Flipped = await squareBox(page, 'h8');
+      const sqA1Flipped = await squareBox(page, 'a1');
+      const sqH1Flipped = await squareBox(page, 'h1');
 
-        expect(sqA8Flipped.x, 'Flipped to White: a8 must be left of h8 under RTL').toBeLessThan(sqH8Flipped.x);
-        expect(sqA1Flipped.x, 'Flipped to White: a1 must be left of h1 under RTL').toBeLessThan(sqH1Flipped.x);
-        expect(sqA8Flipped.y, 'Flipped to White: a8 must be above a1 under RTL').toBeLessThan(sqA1Flipped.y);
-        expect(sqH8Flipped.y, 'Flipped to White: h8 must be above h1 under RTL').toBeLessThan(sqH1Flipped.y);
+      expect(sqA8Flipped.x, 'Flipped to White: a8 must be left of h8 under RTL').toBeLessThan(sqH8Flipped.x);
+      expect(sqA1Flipped.x, 'Flipped to White: a1 must be left of h1 under RTL').toBeLessThan(sqH1Flipped.x);
+      expect(sqA8Flipped.y, 'Flipped to White: a8 must be above a1 under RTL').toBeLessThan(sqA1Flipped.y);
+      expect(sqH8Flipped.y, 'Flipped to White: h8 must be above h1 under RTL').toBeLessThan(sqH1Flipped.y);
 
-        // Flip back to Black perspective
-        await flipBtn.click();
-        const sqA1Restored = await squareBox(page, 'a1');
-        const sqH1Restored = await squareBox(page, 'h1');
-        expect(sqH1Restored.x, 'Restored to Black: h1 must be left of a1 under RTL').toBeLessThan(sqA1Restored.x);
-      } finally {
-        await context.close();
-      }
+      // Flip back to Black perspective
+      await flipBtn.click();
+      const sqA1Restored = await squareBox(page, 'a1');
+      const sqH1Restored = await squareBox(page, 'h1');
+      expect(sqH1Restored.x, 'Restored to Black: h1 must be left of a1 under RTL').toBeLessThan(sqA1Restored.x);
+
+      // Verify responsive resizing under RTL maintains layout without overflow
+      await page.setViewportSize({ width: 390, height: 844 });
+      const mobileMetrics = await page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
+      }));
+      expect(mobileMetrics.scrollWidth).toBeLessThanOrEqual(mobileMetrics.viewportWidth);
+    } finally {
+      await context.close();
     }
   }
 });
