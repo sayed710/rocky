@@ -277,3 +277,23 @@ A game recorded in `rating_blocked_games` stays blocked across replay and checkp
 
 Do not retry one historical game after later games have been rated. Glicko-2 updates depend on prior ratings, so doing so would corrupt the downstream chain. If the owner approves recovering a blocked game's rating, first design and verify a rebuild of the entire affected variant × speed pool in the original ending order, with a privacy review where account deletion is involved. This PR supplies no single-game retry or unblock command.
 
+## Ratings batch failures
+
+`GambitRatingsBatchFailing` fires when `ratings_batch_failures_total` has kept increasing for ten minutes. A failed batch is one rolled-back transaction: it applies nothing and leaves the checkpoint where it was, and the gateway retries it with backoff capped at 30 seconds. This is not a blocked game. Only a stream the authority could not have written creates a `rating_blocked_games` row, and that batch continues. Any other error, such as a rating-table constraint, a decision-guard exception or a lost connection, fails the batch. One checkpoint orders every pool, so a failure that repeats on the same ending stops all ratings.
+
+1. Read the gateway log `Ratings batch failed` and its `error` stack. Connection, timeout, serialization and lock errors clear once PostgreSQL is healthy and need no data action.
+2. If the same error repeats, find the ending the applier is retrying. This query only reads:
+
+   ```sql
+   SELECT e.game_id, e.server_ts, e.xact_id
+   FROM game_events e CROSS JOIN rating_checkpoint c
+   WHERE e.type = 'GameEnded' AND (e.xact_id, e.server_ts, e.game_id) > (c.xact_id, c.server_ts, c.game_id)
+   ORDER BY e.xact_id, e.server_ts, e.game_id
+   LIMIT 1;
+   ```
+
+   Match it against the error, for example a constraint name such as `ratings_rating_sane` or a game id in a guard exception.
+3. Do not edit `ratings`, `rating_applications`, `rating_checkpoint` or the decision tables by hand, and do not insert a `rating_ineligible_games` or `rating_blocked_games` row to get past the game. Either one is a rating decision that changes every later rating in that pool.
+4. Fix the cause in code, configuration or capacity, and deploy it. The applier resumes from the unchanged checkpoint, and the ledger keeps each game applied exactly once. Confirm that the counter stops increasing and `ratings_oldest_pending_ending_age_seconds` falls back to zero.
+5. If no such fix exists, escalate to the owner with the game id, the error and the pool. Skipping or forcing a decision for that game needs an owner-approved, reviewed plan. The repository provides no command for it.
+
