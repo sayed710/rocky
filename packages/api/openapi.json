@@ -1099,7 +1099,7 @@
     },
     "/v1/users/{handle}/ratings": {
       "get": {
-        "summary": "Get a user's ratings across variants",
+        "summary": "Get a user's ratings in every rating pool (variant and speed) they have played",
         "tags": [
           "users",
           "ratings"
@@ -1832,13 +1832,13 @@
         ]
       }
     },
-    "/v1/leaderboard/{variant}": {
+    "/v1/leaderboard/{variant}/{speed}": {
       "get": {
-        "summary": "Top players for a variant",
+        "summary": "Top players in one rating pool (a variant and a speed)",
         "tags": [
           "ratings"
         ],
-        "operationId": "get_v1_leaderboard_by_variant",
+        "operationId": "get_v1_leaderboard_by_variant_by_speed",
         "responses": {
           "200": {
             "description": "Leaderboard",
@@ -1861,7 +1861,7 @@
             }
           },
           "422": {
-            "description": "Bad variant",
+            "description": "Bad variant or speed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1877,6 +1877,15 @@
             "in": "path",
             "required": true,
             "description": "Variant code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "speed",
+            "in": "path",
+            "required": true,
+            "description": "Speed class; each variant and speed is its own pool",
             "schema": {
               "type": "string"
             }
@@ -13365,6 +13374,7 @@
         "type": "object",
         "required": [
           "variant",
+          "speed",
           "rating",
           "rd",
           "vol",
@@ -13382,6 +13392,17 @@
               "threecheck",
               "horde",
               "racingkings"
+            ]
+          },
+          "speed": {
+            "type": "string",
+            "enum": [
+              "ultrabullet",
+              "bullet",
+              "blitz",
+              "rapid",
+              "classical",
+              "correspondence"
             ]
           },
           "rating": {
@@ -13407,6 +13428,7 @@
         "required": [
           "userId",
           "variant",
+          "speed",
           "rating",
           "rd"
         ],
@@ -13426,6 +13448,17 @@
               "threecheck",
               "horde",
               "racingkings"
+            ]
+          },
+          "speed": {
+            "type": "string",
+            "enum": [
+              "ultrabullet",
+              "bullet",
+              "blitz",
+              "rapid",
+              "classical",
+              "correspondence"
             ]
           },
           "rating": {

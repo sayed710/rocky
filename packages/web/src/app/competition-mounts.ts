@@ -1,10 +1,13 @@
 import type { GambitClient } from '../api/client.js';
-import type { TournamentDetail, TournamentRound, Variant } from '../api/models.js';
+import type { Speed, TournamentDetail, TournamentRound, Variant } from '../api/models.js';
 import { LeaderboardController } from './leaderboard-controller.js';
 import type { LeaderboardCallbacks } from './leaderboard-controller.js';
 import {
+  bindSpeedSelector,
   bindVariantSelector,
+  renderChooseSpeed,
   renderLeaderboard,
+  renderSpeedSelector,
   renderVariantSelector,
 } from './leaderboard-view.js';
 import { TournamentController } from './tournament-controller.js';
@@ -30,6 +33,7 @@ interface LeaderboardMount {
 
 interface LeaderboardElements {
   readonly select: HTMLSelectElement | null;
+  readonly speedSelect: HTMLSelectElement | null;
   readonly loading: HTMLElement | null;
   readonly results: HTMLElement | null;
   readonly error: HTMLElement | null;
@@ -76,28 +80,42 @@ function createLeaderboardCallbacks(elements: LeaderboardElements): LeaderboardC
 export function mountLeaderboard(doc: Document, client: GambitClient): LeaderboardMount {
   const elements: LeaderboardElements = {
     select: doc.getElementById('leaderboard-variant-select') as HTMLSelectElement | null,
+    speedSelect: doc.getElementById('leaderboard-speed-select') as HTMLSelectElement | null,
     loading: doc.getElementById('leaderboard-loading'),
     results: doc.getElementById('leaderboard-results'),
     error: doc.getElementById('leaderboard-error'),
   };
   let activeVariant: Variant = 'standard';
+  // No speed is chosen for the viewer: a pool is a variant and a speed, and there is no default pool.
+  let activeSpeed: Speed | null = null;
   if (elements.select) renderVariantSelector(elements.select, activeVariant);
+  if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed);
+  if (elements.results) renderChooseSpeed(elements.results);
 
   const controller = new LeaderboardController({
     client,
     callbacks: createLeaderboardCallbacks(elements),
   });
-  const unbind = elements.select
+  const load = (): void => {
+    if (activeSpeed !== null) void controller.loadLeaderboard(activeVariant, activeSpeed);
+  };
+  const unbindVariant = elements.select
     ? bindVariantSelector(elements.select, (variant) => {
         activeVariant = variant;
-        void controller.loadLeaderboard(activeVariant);
+        load();
+      })
+    : () => {};
+  const unbindSpeed = elements.speedSelect
+    ? bindSpeedSelector(elements.speedSelect, (speed) => {
+        activeSpeed = speed;
+        load();
       })
     : () => {};
 
-  void controller.loadLeaderboard(activeVariant);
   return {
     dispose: () => {
-      unbind();
+      unbindVariant();
+      unbindSpeed();
       controller.dispose();
     },
   };

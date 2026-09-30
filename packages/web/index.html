@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -368,8 +368,14 @@
       <header class="section-header">
         <h2 id="leaderboard-heading" data-i18n="leaderboard.title">Leaderboard</h2>
         <div class="leaderboard-controls">
-          <label for="leaderboard-variant-select" data-i18n="leaderboard.variant">Variant</label>
-          <select id="leaderboard-variant-select" class="cg-select"></select>
+          <div class="leaderboard-control">
+            <label for="leaderboard-variant-select" data-i18n="leaderboard.variant">Variant</label>
+            <select id="leaderboard-variant-select" class="cg-select"></select>
+          </div>
+          <div class="leaderboard-control">
+            <label for="leaderboard-speed-select" data-i18n="leaderboard.speed">Time control</label>
+            <select id="leaderboard-speed-select" class="cg-select"></select>
+          </div>
         </div>
       </header>
       <div id="leaderboard-loading" role="status" aria-live="polite" class="count" data-i18n="leaderboard.loading" hidden>Loading…</div>

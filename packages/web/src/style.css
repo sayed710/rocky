@@ -1622,12 +1622,24 @@ a.button.primary:active {
 }
 .leaderboard-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+.leaderboard-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.leaderboard-control .cg-select {
+  min-height: 44px;
+  max-width: 100%;
 }
 .leaderboard-controls label {
   font-size: 0.875rem;
   color: var(--muted);
+  white-space: nowrap;
 }
 .leaderboard-rank {
   color: var(--muted);

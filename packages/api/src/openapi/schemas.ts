@@ -5,6 +5,7 @@
  * emit exactly these shapes and the spec builder references them by name.
  */
 
+import { SPEEDS } from '@chess-platform/persistence';
 import { ROLES, SEEK_COLORS, TIME_CONTROL_KINDS, VARIANTS, CREATABLE_VARIANTS } from '../domain';
 import { DEFAULT_ANALYSIS_LIMITS } from '../analysis/limits';
 import { MAX_EXPLORED_PLIES } from '../openings/opening-exploration-service';
@@ -131,9 +132,10 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
 
   RatingView: {
     type: 'object',
-    required: ['variant', 'rating', 'rd', 'vol', 'updatedAt'],
+    required: ['variant', 'speed', 'rating', 'rd', 'vol', 'updatedAt'],
     properties: {
       variant: { type: 'string', enum: [...VARIANTS] },
+      speed: { type: 'string', enum: [...SPEEDS] },
       rating: { type: 'number' },
       rd: { type: 'number' },
       vol: { type: 'number' },
@@ -143,10 +145,11 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
 
   LeaderboardEntry: {
     type: 'object',
-    required: ['userId', 'variant', 'rating', 'rd'],
+    required: ['userId', 'variant', 'speed', 'rating', 'rd'],
     properties: {
       userId: { type: 'string', format: 'uuid' },
       variant: { type: 'string', enum: [...VARIANTS] },
+      speed: { type: 'string', enum: [...SPEEDS] },
       rating: { type: 'number' },
       rd: { type: 'number' },
     },

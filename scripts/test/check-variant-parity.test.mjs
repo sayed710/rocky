@@ -1926,6 +1926,15 @@ test('canonical 0021_engine_bots.sql migration matches allowlist fingerprint and
   }
 });
 
+test('canonical 0044_rating_pools.sql migration matches its allowlist fingerprint', () => {
+  const rawSql = readFileSync(join(MIGRATIONS_DIR, '0044_rating_pools.sql'), 'utf8');
+  const hash = createHash('sha256').update(rawSql.replace(/\r\n/g, '\n'), 'utf8').digest('hex');
+  const entry = KNOWN_HISTORICAL_PROCEDURAL_MIGRATIONS.get('0044_rating_pools.sql');
+  assert.ok(entry);
+  assert.equal(hash, entry.sha256);
+  assert.equal(entry.expectedDoCount, 1);
+});
+
 test('0021_engine_bots.sql with ONE modified byte is rejected', () => {
   const realFile = join(MIGRATIONS_DIR, '0021_engine_bots.sql');
   const rawSql = readFileSync(realFile, 'utf8');

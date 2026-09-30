@@ -267,3 +267,35 @@ The gateway folds `game_events` into `games` continuously ([ADR-0147](adr/0147-d
   Kubernetes: `kubectl exec <any-api-pod> -- npm run games:rebuild --workspace @chess-platform/persistence` (the same command the chart uses for `migrate`).
   It prints the number of games projected and deferred to the live projector, and exits non-zero if any stream failed or a page kept conflicting with live projection (rerun it). Endings the rebuild itself makes terminal do not wake the search indexer or achievements; run `reindex-search` afterwards if needed.
 
+## Ratings lag or blocked games
+
+`ratings_oldest_pending_ending_age_seconds` is sampled every 10 seconds on each gateway with PostgreSQL. It is zero when no committed `GameEnded` row remains after the effective checkpoint. It measures scan lag, including an ending that may prove ineligible or already applied during replay; it is not a count of eligible games. The sample is one indexed `ORDER BY ... LIMIT 1` probe. A long-running transaction can hold the safe application horizon back while the gauge still sees later committed endings. `GambitRatingsBacklogAging` warns after the oldest ending has exceeded five minutes for five minutes. `ratings_backlog_sample_failures_total` and its alert identify stale samples; sample failures do not stop the applier. Check `pg_stat_activity.xact_start` for old transactions and gateway logs for `Ratings batch failed`.
+
+For database recovery, only a physical restore preserving PostgreSQL transaction history may resume the ratings applier automatically. Before connecting gateways to any cross-cluster logical restore, stop and reconcile the original ending order under an operator-approved plan. The applier detects some lower-counter restores and stops, but a higher-counter destination can evade that check. A successful backup drill or a games-projection rebuild does not establish ratings ordering safety.
+
+`GambitRatingsGameBlocked` fires when `ratings_games_total{outcome="blocked"}` increased in the last 15 minutes, that is, when a batch recorded a new block. Because `increase()` needs two samples, it also fires when a gateway's series is first scraped already above zero, as when its startup backfill blocks a game before the first scrape. The same term fires once for a gateway that went unscraped for more than 15 minutes and returns with a non-zero count, which may be an old block. It clears on its own 15 minutes later, so check `rating_blocked_games` for every block since the last review, not only the latest. A replay or rewind that meets an earlier block counts `outcome="already_blocked"` and logs nothing, so it does not fire the alert. The gateway logs each new block once, as `A finished game could not be proven rateable`, with the game id and the error. Only a stream that loaded and was proven unrateable is blocked. A load failure, including an unreadable event version, fails the batch instead (see [Ratings batch failures](#ratings-batch-failures)).
+
+A game recorded in `rating_blocked_games` stays blocked across replay and checkpoint rewind. Run `npm run ratings:blocked --workspace @chess-platform/persistence -- list` to page through blocked games (`nextAfter` is the optional cursor), then `... -- show <game-id>` to inspect the original error, time and any disposition. To record a deliberate decision to leave it blocked, run `... -- leave-blocked <game-id> <operator> <reason>`. The command records the decision once and never deletes the block. Use the database credentials from the normal private operator environment; the CLI reads `DATABASE_URL`.
+
+Do not retry one historical game after later games have been rated. Glicko-2 updates depend on prior ratings, so doing so would corrupt the downstream chain. If the owner approves recovering a blocked game's rating, first design and verify a rebuild of the entire affected variant × speed pool in the original ending order, with a privacy review where account deletion is involved. This PR supplies no single-game retry or unblock command.
+
+## Ratings batch failures
+
+`GambitRatingsBatchFailing` fires when `ratings_batch_failures_total` has kept increasing for ten minutes. A failed batch is one rolled-back transaction: it applies nothing and leaves the checkpoint where it was, and the gateway retries it with backoff capped at 30 seconds. This is not a blocked game. Only a successfully loaded stream proven unrateable (a `CorruptGameStreamError`, or a variant outside `variants`) creates a `rating_blocked_games` row, and that batch continues. Any other error fails the batch, whatever its type or SQLSTATE: a stream that cannot be loaded, a rating-table constraint, a decision-guard exception or a lost connection. One checkpoint orders every pool, so a failure that repeats on the same ending stops all ratings.
+
+1. Read the gateway log `Ratings batch failed` and its `error` stack. Connection, timeout, serialization and lock errors clear once PostgreSQL is healthy and need no data action. `no upcaster registered for event <type>@<version>` means a newer gateway wrote an event version this one cannot read, which is expected during a rolling deploy. It clears once every gateway runs the new version; the game is not blocked.
+2. If the same error repeats, find the ending the applier is retrying. This query only reads:
+
+   ```sql
+   SELECT e.game_id, e.server_ts, e.xact_id
+   FROM game_events e CROSS JOIN rating_checkpoint c
+   WHERE e.type = 'GameEnded' AND (e.xact_id, e.server_ts, e.game_id) > (c.xact_id, c.server_ts, c.game_id)
+   ORDER BY e.xact_id, e.server_ts, e.game_id
+   LIMIT 1;
+   ```
+
+   Match it against the error, for example a constraint name such as `ratings_rating_sane` or a game id in a guard exception.
+3. Do not edit `ratings`, `rating_applications`, `rating_checkpoint` or the decision tables by hand, and do not insert a `rating_ineligible_games` or `rating_blocked_games` row to get past the game. Either one is a rating decision that changes every later rating in that pool.
+4. Fix the cause in code, configuration or capacity, and deploy it. The applier resumes from the unchanged checkpoint, and the ledger keeps each game applied exactly once. Confirm that the counter stops increasing and `ratings_oldest_pending_ending_age_seconds` falls back to zero.
+5. If no such fix exists, escalate to the owner with the game id, the error and the pool. Skipping or forcing a decision for that game needs an owner-approved, reviewed plan. The repository provides no command for it.
+

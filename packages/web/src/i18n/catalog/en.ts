@@ -216,6 +216,7 @@ export const enMessages = {
   // Leaderboard
   'leaderboard.title': 'Leaderboard',
   'leaderboard.variant': 'Variant',
+  'leaderboard.speed': 'Time control',
   'leaderboard.loading': 'Loading…',
   'leaderboard.emptyTitle': 'No ranked players',
   'leaderboard.emptyBody': 'Play rated games to appear on the leaderboard.',

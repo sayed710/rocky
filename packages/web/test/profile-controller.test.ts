@@ -6,7 +6,7 @@ import type { UserProfile, GameSummary, Variant } from '../src/api/models.js';
 function makeProfile(handle: string = 'alice'): UserProfile {
   return {
     user: { id: 'u1', handle, country: null, createdAt: '2026-01-01T00:00:00Z' },
-    ratings: [{ variant: 'standard' as Variant, rating: 1500, rd: 200, vol: 0.06, updatedAt: null }],
+    ratings: [{ variant: 'standard' as Variant, speed: 'blitz' as const, rating: 1500, rd: 200, vol: 0.06, updatedAt: null }],
   };
 }
 

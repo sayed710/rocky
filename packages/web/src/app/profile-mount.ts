@@ -17,6 +17,7 @@ import {
   appendPanelRow,
 } from './render-helpers.js';
 import type { RowAction } from './render-helpers.js';
+import { SPEED_LABELS, VARIANT_LABELS } from './variant-labels.js';
 
 /**
  * Render the action bar shown on another player's profile.
@@ -461,7 +462,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
             for (const r of p.ratings) {
               const row = doc.createElement('div');
               row.className = 'rating-row';
-              row.textContent = `${r.variant}: ${Math.round(r.rating)} (RD ${Math.round(r.rd)})`;
+              row.textContent = `${VARIANT_LABELS[r.variant] ?? r.variant} · ${SPEED_LABELS[r.speed] ?? r.speed}: ${Math.round(r.rating)} (RD ${Math.round(r.rd)})`;
               ratingsEl.appendChild(row);
             }
           }
