@@ -3,8 +3,12 @@ import assert from 'node:assert/strict';
 import {
   createLtrElement,
   applyLtrIsolation,
+  applyAutoDirection,
+  createUserTextElement,
   isChessNotation,
+  isPgnMovetext,
   wrapLtrHtml,
+  wrapUserTextHtml,
 } from '../src/i18n/bidi.js';
 
 interface FakeElement {
@@ -62,6 +66,31 @@ describe('i18n bidi & chess isolation', () => {
     assert.ok(el.className.includes('bidi-ltr'));
   });
 
+  it('applyAutoDirection sets dir=auto for user text', () => {
+    const el = createFakeElement('span');
+    applyAutoDirection(el as unknown as HTMLElement);
+    assert.equal(el.getAttribute('dir'), 'auto');
+  });
+
+  it('createUserTextElement creates element with dir=auto', () => {
+    const fakeDoc = {
+      createElement(tag: string) {
+        return createFakeElement(tag);
+      },
+    };
+    const el = createUserTextElement(fakeDoc as unknown as Document, 'span', 'لاعب شطرنج');
+    assert.equal(el.tagName, 'SPAN');
+    assert.equal(el.getAttribute('dir'), 'auto');
+    assert.equal(el.textContent, 'لاعب شطرنج');
+  });
+
+  it('wrapUserTextHtml generates markup with dir=auto and escapes HTML', () => {
+    assert.equal(
+      wrapUserTextHtml('Player <tag>'),
+      '<bdi dir="auto">Player &lt;tag&gt;</bdi>',
+    );
+  });
+
   it('wrapLtrHtml generates valid HTML markup with dir=ltr and isolate class', () => {
     assert.equal(
       wrapLtrHtml('Nf3'),
@@ -80,7 +109,7 @@ describe('i18n bidi & chess isolation', () => {
     );
   });
 
-  it('isChessNotation identifies SAN, UCI, FEN, and clock notation', () => {
+  it('isChessNotation identifies SAN, UCI, FEN, clocks, ratings, and SAN with UCI', () => {
     // UCI
     assert.equal(isChessNotation('e2e4'), true);
     assert.equal(isChessNotation('e7e8q'), true);
@@ -93,19 +122,53 @@ describe('i18n bidi & chess isolation', () => {
     assert.equal(isChessNotation('Qxd8#'), true);
     assert.equal(isChessNotation('Rd1+'), true);
 
+    // SAN with UCI
+    assert.equal(isChessNotation('e4 (e2e4)'), true);
+    assert.equal(isChessNotation('Nf3 (g1f3)'), true);
+
     // FEN
     assert.equal(
       isChessNotation('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'),
       true,
     );
 
-    // Clock
+    // Clocks
     assert.equal(isChessNotation('10:00'), true);
     assert.equal(isChessNotation('3:05'), true);
+    assert.equal(isChessNotation('05:00 – 05:00'), true);
+
+    // Ratings
+    assert.equal(isChessNotation('1500 (±50)'), true);
+    assert.equal(isChessNotation('1500 (RD 50)'), true);
+
+    // Evaluations
+    assert.equal(isChessNotation('+0.45'), true);
+    assert.equal(isChessNotation('-1.20'), true);
+    assert.equal(isChessNotation('#+2'), true);
 
     // Not chess notation
     assert.equal(isChessNotation('Play chess'), false);
     assert.equal(isChessNotation('Sign in to play'), false);
     assert.equal(isChessNotation('Tournament Details'), false);
+  });
+
+  it('isPgnMovetext accurately classifies valid PGN sequences and rejects prose', () => {
+    // Standard movetext sequences
+    assert.equal(isPgnMovetext('1. e4 e5 2. Nf3 Nc6'), true);
+    assert.equal(isPgnMovetext('1. e4 e5 2. Nf3 Nc6 3. Bb5 a6'), true);
+    assert.equal(isPgnMovetext('1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. O-O Nf6'), true);
+    assert.equal(isPgnMovetext('1. e4 d5 2. exd5 c6 3. dxc6 e5 4. cxb7 e4 5. bxa8=Q'), true);
+    assert.equal(isPgnMovetext('1. f3 e5 2. g4 Qh4# 0-1'), true);
+    assert.equal(isPgnMovetext('1. e4 e5 1/2-1/2'), true);
+
+    // Combined forms
+    assert.equal(isPgnMovetext('1.e4'), true);
+    assert.equal(isPgnMovetext('1.e4 e5 2.Nf3'), true);
+
+    // Rejects non-chess English prose
+    assert.equal(isPgnMovetext('1. First step'), false);
+    assert.equal(isPgnMovetext('1. Introduction 2. Overview'), false);
+    assert.equal(isPgnMovetext('Just some normal text'), false);
+    assert.equal(isPgnMovetext(''), false);
   });
 });

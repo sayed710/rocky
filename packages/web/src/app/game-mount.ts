@@ -91,6 +91,7 @@ import type { AuthSession } from './auth-controller.js';
 import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
 import { isEngineBotUserId } from '@chess-platform/game';
+import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
 
 /**
  * The line counts the panel offers. Every one is at or below the server's published MultiPV
@@ -1136,10 +1137,17 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         board.setTurn(myTurn);
       },
       onClock: (whiteMs: number, blackMs: number) => {
-        if (whiteClockEl) whiteClockEl.textContent = formatClock(whiteMs);
-        if (blackClockEl) blackClockEl.textContent = formatClock(blackMs);
+        if (whiteClockEl) {
+          whiteClockEl.textContent = formatClock(whiteMs);
+          applyLtrIsolation(whiteClockEl);
+        }
+        if (blackClockEl) {
+          blackClockEl.textContent = formatClock(blackMs);
+          applyLtrIsolation(blackClockEl);
+        }
         if (clockEl) {
           clockEl.textContent = `${formatClock(whiteMs)} – ${formatClock(blackMs)}`;
+          applyLtrIsolation(clockEl);
         }
       },
       onStatus: (text: string) => {
@@ -1199,6 +1207,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (metaWhiteEl && metaWhiteNameEl) {
           const isMe = state.myColor === 'w';
           metaWhiteNameEl.textContent = 'White' + (isMe ? ' (You)' : '');
+          applyAutoDirection(metaWhiteNameEl);
 
           const dot = metaWhiteEl.querySelector<HTMLElement>('.presence-dot');
           const txt = metaWhiteEl.querySelector('.presence-text');
@@ -1226,6 +1235,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (metaBlackEl && metaBlackNameEl) {
           const isMe = state.myColor === 'b';
           metaBlackNameEl.textContent = 'Black' + (isMe ? ' (You)' : '');
+          applyAutoDirection(metaBlackNameEl);
 
           const dot = metaBlackEl.querySelector<HTMLElement>('.presence-dot');
           const txt = metaBlackEl.querySelector('.presence-text');
@@ -1413,6 +1423,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           : ` · ${move.assessment.centipawnLoss} cp`;
         const moveLabel = doc.createElement('span');
         moveLabel.textContent = `${move.ply}. ${move.san}`;
+        applyLtrIsolation(moveLabel);
         const verdict = doc.createElement('strong');
         verdict.textContent = `${annotation.symbol} ${annotation.label}${loss}`;
         row.replaceChildren(moveLabel, verdict);

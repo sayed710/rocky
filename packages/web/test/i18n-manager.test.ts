@@ -40,8 +40,23 @@ describe('i18n manager', () => {
     );
   });
 
-  it('setLocale changes active locale and notifies subscribers', () => {
+  it('falls back safely to raw key in default production mode (strict: false)', () => {
     const i18n = createI18n();
+    const result = i18n.t('nonexistent.key' as MessageKey);
+    assert.equal(result, 'nonexistent.key');
+  });
+
+  it('rejects activating ar in production when no Arabic catalog is registered, remaining en', () => {
+    const i18n = createI18n();
+    assert.equal(i18n.locale, 'en');
+    i18n.setLocale('ar');
+    assert.equal(i18n.locale, 'en');
+  });
+
+  it('setLocale changes active locale and notifies subscribers when catalog is registered', () => {
+    const i18n = createI18n();
+    i18n.registerCatalog('ar', { 'shell.brand': 'روك زن' } as unknown as MessagesCatalog);
+
     let notifiedLocale: string | null = null;
     const unsub = i18n.onLocaleChange((newLocale: Locale) => {
       notifiedLocale = newLocale;
@@ -71,13 +86,35 @@ describe('i18n manager', () => {
     assert.equal(i18n.t('shell.skipBoard'), 'Skip to board');
   });
 
-  it('persists locale changes when storage is provided', () => {
+  it('persists locale changes when storage is provided and catalog is available', () => {
     const storage = new MemoryStorage();
     const localeStorage = new LocaleStorage({ storage });
     const i18n = createI18n({ storage: localeStorage });
+    i18n.registerCatalog('ar', { 'shell.brand': 'روك زن' } as unknown as MessagesCatalog);
 
     assert.equal(i18n.locale, 'en');
     i18n.setLocale('ar');
+    assert.equal(i18n.locale, 'ar');
     assert.equal(localeStorage.load(), 'ar');
+  });
+
+  it('updates target Document html attributes on locale change', () => {
+    const fakeDoc = {
+      documentElement: {
+        lang: 'en',
+        dir: 'ltr',
+        setAttribute(k: string, v: string) {
+          if (k === 'lang') this.lang = v;
+          if (k === 'dir') this.dir = v;
+        },
+      },
+    } as unknown as Document;
+
+    const i18n = createI18n({ doc: fakeDoc });
+    i18n.registerCatalog('ar', { 'shell.brand': 'روك زن' } as unknown as MessagesCatalog);
+    i18n.setLocale('ar');
+
+    assert.equal(fakeDoc.documentElement.lang, 'ar');
+    assert.equal(fakeDoc.documentElement.dir, 'rtl');
   });
 });

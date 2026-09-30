@@ -99,12 +99,11 @@ export type DisposableKey = keyof BootstrappedDisposables;
 
 type ActiveBootstrappedDisposables = Partial<Omit<BootstrappedDisposables, 'app' | 'auth'>>;
 
-let currentShellLocalization: { dispose: () => void } | null = null;
-
 function createBootstrapped(
   app: App,
   auth: AuthController,
   theme: ThemeToggle,
+  shellLocalization: { dispose: () => void },
   activeDisposables: ActiveBootstrappedDisposables,
 ): Bootstrapped {
   return {
@@ -129,7 +128,7 @@ function createBootstrapped(
     emailVerification: null,
     connectivity: null,
     analysis: null,
-    shellLocalization: activeDisposables.shellLocalization ?? currentShellLocalization,
+    shellLocalization: activeDisposables.shellLocalization ?? shellLocalization,
     theme,
     ...activeDisposables,
   };
@@ -207,9 +206,11 @@ export function bootstrap(
     ...(deps?.wsFactory !== undefined ? { wsFactory: deps.wsFactory } : {}),
     ...(deps?.tokenStore !== undefined ? { tokenStore: deps.tokenStore } : {}),
     ...(deps?.storage !== undefined ? { storage: deps.storage } : {}),
+    ...(deps?.i18n !== undefined ? { i18n: deps.i18n } : {}),
+    doc,
   };
   const app = createApp(appDeps);
-  currentShellLocalization = localizeShell(doc, app.i18n);
+  const shellLocalizationHandle = localizeShell(doc, app.i18n);
 
   // --- Capabilities-driven navigation ---
   void applyNavCapabilities(doc, app.api);
@@ -258,6 +259,23 @@ export function bootstrap(
   const authStatusEl = doc.getElementById('auth-status');
   const authSectionEl = doc.getElementById('auth');
 
+  let currentAuthSession: AuthSession | null = null;
+  const updateAuthStatus = (): void => {
+    if (authStatusEl) {
+      authStatusEl.textContent = currentAuthSession
+        ? app.i18n.t('shell.authStatus.signedIn', { handle: currentAuthSession.handle })
+        : app.i18n.t('shell.authStatus.notSignedIn');
+    }
+  };
+  const unsubAuthLocale = app.i18n.onLocaleChange(() => updateAuthStatus());
+  updateAuthStatus();
+  const shellLocalization = {
+    dispose: () => {
+      unsubAuthLocale();
+      shellLocalizationHandle.dispose();
+    },
+  };
+
   let selfProfileSessionHandler: ((session: AuthSession | null) => void) | null = null;
   let setCreateGameAuthenticated: ((authenticated: boolean) => void) | null = null;
   let setPlayBotAuthenticated: ((authenticated: boolean) => void) | null = null;
@@ -270,9 +288,8 @@ export function bootstrap(
     ...(deps?.webauthnAdapter !== undefined ? { webauthnAdapter: deps.webauthnAdapter } : {}),
     callbacks: {
       onSessionChange: (session) => {
-        if (authStatusEl) {
-          authStatusEl.textContent = session ? `Signed in as ${session.handle}` : 'Not signed in';
-        }
+        currentAuthSession = session;
+        updateAuthStatus();
         // Show/hide the sign-in surface vs the logout button. The section is what hides, not just
         // the form inside it: hiding only the form left a signed-in visitor looking at an empty box.
         if (authSectionEl) authSectionEl.hidden = session !== null || hideAuthSection;
@@ -382,7 +399,7 @@ export function bootstrap(
   // The not-found page is a complete route surface. Keep the global shell controllers alive, but
   // do not fall through to the legacy standalone-board fallback hidden inside #game-main.
   if (route.name === 'not-found') {
-    return createBootstrapped(app, auth, theme, {});
+    return createBootstrapped(app, auth, theme, shellLocalization, {});
   }
 
   // --- Game view ---
@@ -401,7 +418,7 @@ export function bootstrap(
       restorePromise,
     });
     gameSessionHandler = mountedGame.onSessionChange;
-    return createBootstrapped(app, auth, theme, mountedGame);
+    return createBootstrapped(app, auth, theme, shellLocalization, mountedGame);
   }
 
   // --- Lobby view ---
@@ -417,7 +434,7 @@ export function bootstrap(
     setPlayBotAuthenticated = mountedLobby.setPlayBotAuthenticated;
     lobbySessionHandler = mountedLobby.onSessionChange;
 
-    return createBootstrapped(app, auth, theme, { lobby: mountedLobby.lobby });
+    return createBootstrapped(app, auth, theme, shellLocalization, { lobby: mountedLobby.lobby });
   }
 
   // --- Profile view ---
@@ -433,7 +450,7 @@ export function bootstrap(
     });
     selfProfileSessionHandler = mountedProfile.onSessionChange;
 
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       profile: mountedProfile.profile,
       passkeys: mountedProfile.passkeys,
     });
@@ -442,7 +459,7 @@ export function bootstrap(
   // --- Leaderboard view ---
   const leaderboardEl = doc.getElementById('leaderboard');
   if (leaderboardEl && route.name === 'leaderboard') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       leaderboard: mountLeaderboard(doc, app.api),
     });
   }
@@ -450,7 +467,7 @@ export function bootstrap(
   // --- Tournaments list view ---
   const tournamentsEl = doc.getElementById('tournaments');
   if (tournamentsEl && route.name === 'tournaments') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       tournament: mountTournamentList(doc, app.api),
     });
   }
@@ -458,7 +475,7 @@ export function bootstrap(
   // --- Single tournament detail view ---
   const tournamentEl = doc.getElementById('tournament');
   if (tournamentEl && route.name === 'tournament') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       tournament: mountTournamentDetail(doc, app.api, route.id),
       tournamentCommentary: (() => {
         const commentary = mountTournamentCommentary(doc, app.api, route.id);
@@ -473,13 +490,13 @@ export function bootstrap(
   // --- Search view ---
   const searchEl = doc.getElementById('search');
   if (searchEl && route.name === 'search') {
-    return createBootstrapped(app, auth, theme, { search: mountSearch(doc, app.api) });
+    return createBootstrapped(app, auth, theme, shellLocalization, { search: mountSearch(doc, app.api) });
   }
 
   // --- Messages Inbox view (/messages) ---
   const messagesEl = doc.getElementById('messages');
   if (messagesEl && route.name === 'messages') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       messages: mountMessagesInbox({
         doc,
         client: app.api,
@@ -492,7 +509,7 @@ export function bootstrap(
   // --- Conversation Thread view (/messages/:id) ---
   const conversationEl = doc.getElementById('conversation');
   if (conversationEl && route.name === 'conversation') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       messages: mountConversation({
         doc,
         client: app.api,
@@ -506,13 +523,13 @@ export function bootstrap(
   // --- Teams list view (/teams) ---
   const teamsEl = doc.getElementById('teams');
   if (teamsEl && route.name === 'teams') {
-    return createBootstrapped(app, auth, theme, { teams: mountTeamList(doc, app.api) });
+    return createBootstrapped(app, auth, theme, shellLocalization, { teams: mountTeamList(doc, app.api) });
   }
 
   // --- Team detail view (/teams/:slug) ---
   const teamEl = doc.getElementById('team');
   if (teamEl && route.name === 'team') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       teams: mountTeamDetail({
         doc,
         client: app.api,
@@ -526,7 +543,7 @@ export function bootstrap(
   // --- Forum thread list (/teams/:slug/forum) ---
   const forumEl = doc.getElementById('forum');
   if (forumEl && route.name === 'forum') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       forum: mountForum({
         doc,
         client: app.api,
@@ -540,7 +557,7 @@ export function bootstrap(
   // --- Forum thread (/teams/:slug/forum/:threadId) ---
   const threadEl = doc.getElementById('thread');
   if (threadEl && route.name === 'thread') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       forum: mountForumThread({
         doc,
         client: app.api,
@@ -566,7 +583,7 @@ export function bootstrap(
   // --- Endgame trainer (/endgames) ---
   const endgamesEl = doc.getElementById('endgames');
   if (endgamesEl && route.name === 'endgames') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       endgames: mountEndgamesRoute(),
     });
   }
@@ -574,7 +591,7 @@ export function bootstrap(
   // --- Courses list view (/courses) ---
   const coursesEl = doc.getElementById('courses');
   if (coursesEl && route.name === 'courses') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       learning: mountCourseList({ doc, client: app.api, surface: coursesEl }),
     });
   }
@@ -582,7 +599,7 @@ export function bootstrap(
   // --- Course detail view (/courses/:slug) ---
   const courseEl = doc.getElementById('course');
   if (courseEl && route.name === 'course') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       learning: mountCourseDetail({
         doc,
         client: app.api,
@@ -597,7 +614,7 @@ export function bootstrap(
   // --- Lesson detail view (/lessons/:id) ---
   const lessonEl = doc.getElementById('lesson');
   if (lessonEl && route.name === 'lesson') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       learning: mountLesson({
         doc,
         client: app.api,
@@ -612,7 +629,7 @@ export function bootstrap(
   // --- Studies list view (/studies) ---
   const studiesEl = doc.getElementById('studies');
   if (studiesEl && route.name === 'studies') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       studies: mountStudiesList({ doc, client: app.api, surface: studiesEl }),
     });
   }
@@ -620,7 +637,7 @@ export function bootstrap(
   // --- Study detail view (/studies/:id) ---
   const studyEl = doc.getElementById('study');
   if (studyEl && route.name === 'study') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       studies: mountStudyDetail({
         doc,
         client: app.api,
@@ -640,12 +657,12 @@ export function bootstrap(
       studyId: route.id,
       chapterId: route.chapterId,
     });
-    return createBootstrapped(app, auth, theme, mountedChapter);
+    return createBootstrapped(app, auth, theme, shellLocalization, mountedChapter);
   }
 
   // --- Password reset view ---
   if (showPasswordReset) {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       passwordReset: mountPasswordRecovery({
         doc,
         client: app.api,
@@ -657,7 +674,7 @@ export function bootstrap(
 
   // --- Email verification view ---
   if (showEmailVerify) {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       emailVerification: mountEmailVerification({
         doc,
         client: app.api,
@@ -673,5 +690,5 @@ export function bootstrap(
     ? mountBoard({ boardEl, statusEl, flipEl })
     : null;
 
-  return createBootstrapped(app, auth, theme, { board });
+  return createBootstrapped(app, auth, theme, shellLocalization, { board });
 }

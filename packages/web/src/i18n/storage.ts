@@ -3,7 +3,7 @@ import type { Locale } from './types.js';
 import { DEFAULT_LOCALE, isSupportedLocale } from './metadata.js';
 
 /** Default storage key for persisting explicit user locale preference. */
-export const DEFAULT_LOCALE_STORAGE_KEY = 'rookzen-locale';
+export const DEFAULT_LOCALE_STORAGE_KEY = 'rookzen_locale_v1';
 
 /** Options for initializing {@link LocaleStorage}. */
 export interface LocaleStorageOptions {

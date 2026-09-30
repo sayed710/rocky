@@ -19,6 +19,7 @@ import type {
   TournamentGameCommentary,
   TournamentRoundRecap,
 } from '../api/models.js';
+import { isChessNotation, applyLtrIsolation, applyAutoDirection } from '../i18n/bidi.js';
 
 export const COMMENTARY_MESSAGES = {
   idle: 'Ask for commentary on a finished game, or a recap of a completed round.',
@@ -203,6 +204,7 @@ function narrative(doc: Document, text: string): HTMLElement {
   label.textContent = COMMENTARY_MESSAGES.generated;
   const prose = doc.createElement('p');
   prose.className = 'commentary-prose';
+  prose.setAttribute('dir', 'auto');
   prose.textContent = text;
   block.appendChild(label);
   block.appendChild(prose);
@@ -238,9 +240,13 @@ function row(doc: Document, labelText: string, valueText: string): HTMLElement {
   const label = doc.createElement('span');
   label.className = 'commentary-label';
   label.textContent = labelText;
+  applyAutoDirection(label);
   const value = doc.createElement('span');
   value.className = 'commentary-value';
   value.textContent = valueText;
+  if (isChessNotation(valueText)) {
+    applyLtrIsolation(value);
+  }
   item.appendChild(label);
   item.appendChild(value);
   return item;

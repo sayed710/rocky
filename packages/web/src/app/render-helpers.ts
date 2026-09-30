@@ -111,6 +111,7 @@ export function appendPanelRow(
 
   const name = doc.createElement('span');
   name.textContent = label;
+  name.setAttribute('dir', 'auto');
   row.appendChild(name);
 
   if (actions.length > 0) {

@@ -6,6 +6,7 @@
  */
 import type { AnalysisResponse } from '../api/models.js';
 import { formatEvaluation, formatPrincipalVariation, formatSeconds } from './analysis-format.js';
+import { applyLtrIsolation } from '../i18n/bidi.js';
 
 export const ANALYSIS_MESSAGES = {
   idle: 'Analyse the position on the board.',
@@ -42,10 +43,12 @@ export function renderLines(container: HTMLElement, result: AnalysisResponse): v
     const evalEl = doc.createElement('span');
     evalEl.className = 'analysis-eval';
     evalEl.textContent = formatEvaluation(line.evaluation, result.fen);
+    applyLtrIsolation(evalEl);
 
     const movesEl = doc.createElement('span');
     movesEl.className = 'analysis-moves';
     movesEl.textContent = formatPrincipalVariation(line.moves);
+    applyLtrIsolation(movesEl);
 
     rowMain.appendChild(evalEl);
     rowMain.appendChild(movesEl);

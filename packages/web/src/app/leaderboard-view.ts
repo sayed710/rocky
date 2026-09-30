@@ -29,7 +29,7 @@ export function renderLeaderboard(
   const doc = container.ownerDocument;
   entries.forEach((entry, index) => {
     const rank = index + 1;
-    const rankSpan = el(doc, 'span', { class: 'leaderboard-rank' }, `#${rank}`);
+    const rankSpan = el(doc, 'span', { class: 'leaderboard-rank bidi-ltr', dir: 'ltr' }, `#${rank}`);
 
     const resolved = names.get(entry.userId);
     const playerNode = resolved
@@ -40,13 +40,14 @@ export function renderLeaderboard(
             href: `/profile/${encodeURIComponent(resolved.handle)}`,
             'data-route': 'profile',
             class: 'row-link',
+            dir: 'auto',
           },
           resolved.handle,
         )
       : el(doc, 'span', { class: 'leaderboard-player-unresolved' }, shortId(entry.userId));
 
     const rowMain = el(doc, 'span', { class: 'row-main' }, rankSpan, playerNode);
-    const statsSpan = el(doc, 'span', { class: 'count' }, `${entry.rating} (±${entry.rd})`);
+    const statsSpan = el(doc, 'span', { class: 'count bidi-ltr', dir: 'ltr' }, `${entry.rating} (±${entry.rd})`);
 
     const row = el(doc, 'div', { class: 'panel-row', role: 'listitem' }, rowMain, statsSpan);
     container.appendChild(row);

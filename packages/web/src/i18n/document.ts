@@ -8,12 +8,11 @@ import { getLocaleDirection } from './metadata.js';
  * localization attributes, preventing different components from racing or desynchronizing.
  */
 export function applyDocumentLocale(locale: Locale, doc?: Document): void {
-  const targetDoc = doc ?? (typeof document !== 'undefined' ? document : undefined);
-  if (!targetDoc?.documentElement) {
+  if (!doc?.documentElement) {
     return;
   }
 
   const dir = getLocaleDirection(locale);
-  targetDoc.documentElement.setAttribute('lang', locale);
-  targetDoc.documentElement.setAttribute('dir', dir);
+  doc.documentElement.setAttribute('lang', locale);
+  doc.documentElement.setAttribute('dir', dir);
 }

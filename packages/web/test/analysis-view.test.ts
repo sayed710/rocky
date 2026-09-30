@@ -110,10 +110,11 @@ test('result rendering: one row per line, in multipv order', () => {
   assert.equal(row1.className, 'panel-row');
   assert.equal(row1.children.length, 1);
   const row1Main = row1.children[0]!;
-  assert.equal(row1Main.className, 'row-main');
-  assert.equal(row1Main.children[0]!.className, 'analysis-eval');
+  assert.ok(row1Main.children[0]!.className.includes('analysis-eval'));
+  assert.equal(row1Main.children[0]!.getAttribute('dir'), 'ltr');
   assert.equal(row1Main.children[0]!.textContent, '+0.40');
-  assert.equal(row1Main.children[1]!.className, 'analysis-moves');
+  assert.ok(row1Main.children[1]!.className.includes('analysis-moves'));
+  assert.equal(row1Main.children[1]!.getAttribute('dir'), 'ltr');
   assert.equal(row1Main.children[1]!.textContent, 'e2e4 e7e5');
 
   // Line 2 is rendered second

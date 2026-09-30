@@ -20,6 +20,10 @@ class MemoryStorage implements KeyValueStorage {
 }
 
 describe('i18n locale storage', () => {
+  it('uses canonical versioned storage key rookzen_locale_v1', () => {
+    assert.equal(DEFAULT_LOCALE_STORAGE_KEY, 'rookzen_locale_v1');
+  });
+
   it('returns default locale when storage is empty', () => {
     const storage = new MemoryStorage();
     const localeStorage = new LocaleStorage({ storage });

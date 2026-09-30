@@ -13,6 +13,7 @@ import {
   formatNags,
   type TreeBranchNode,
 } from './studies-helpers.js';
+import { applyLtrIsolation } from '../i18n/bidi.js';
 
 /**
  * Render the studies list inside `.panel-list`.
@@ -41,12 +42,14 @@ export function renderStudyList(
     const link = document.createElement('a');
     link.href = `/studies/${study.id}`;
     link.setAttribute('data-route', 'study');
+    link.setAttribute('dir', 'auto');
     link.textContent = study.name;
     main.appendChild(link);
 
     if (study.description) {
       const desc = document.createElement('span');
       desc.className = 'count';
+      desc.setAttribute('dir', 'auto');
       desc.textContent = ` \u2014 ${study.description}`;
       main.appendChild(desc);
     }
@@ -82,8 +85,14 @@ export function renderStudyDetail(
   collaborators: readonly CollaboratorView[],
   exportUrl: string,
 ): void {
-  if (elements.nameEl) elements.nameEl.textContent = study.name;
-  if (elements.descEl) elements.descEl.textContent = study.description || 'No description.';
+  if (elements.nameEl) {
+    elements.nameEl.textContent = study.name;
+    elements.nameEl.setAttribute('dir', 'auto');
+  }
+  if (elements.descEl) {
+    elements.descEl.textContent = study.description || 'No description.';
+    elements.descEl.setAttribute('dir', 'auto');
+  }
   if (elements.visEl) {
     elements.visEl.textContent = study.visibility !== 'public' ? `Visibility: ${study.visibility}` : '';
   }
@@ -109,6 +118,7 @@ export function renderStudyDetail(
         const link = document.createElement('a');
         link.href = `/studies/${study.id}/chapters/${ch.id}`;
         link.setAttribute('data-route', 'study-chapter');
+        link.setAttribute('dir', 'auto');
         link.textContent = ch.name;
         main.appendChild(link);
 
@@ -167,9 +177,11 @@ export function renderChapterDetail(
   if (elements.studyLinkEl) {
     elements.studyLinkEl.href = `/studies/${study.id}`;
     elements.studyLinkEl.textContent = study.name;
+    elements.studyLinkEl.setAttribute('dir', 'auto');
   }
   if (elements.chapterNameEl) {
     elements.chapterNameEl.textContent = chapter.name;
+    elements.chapterNameEl.setAttribute('dir', 'auto');
   }
   if (elements.exportEl) {
     elements.exportEl.href = exportUrl;
@@ -189,11 +201,13 @@ export function renderChapterDetail(
         const current = document.createElement('span');
         current.className = 'chapter-nav-current';
         current.textContent = `${ch.name} (active)`;
+        current.setAttribute('dir', 'auto');
         main.appendChild(current);
       } else {
         const link = document.createElement('a');
         link.href = `/studies/${study.id}/chapters/${ch.id}`;
         link.setAttribute('data-route', 'study-chapter');
+        link.setAttribute('dir', 'auto');
         link.textContent = ch.name;
         main.appendChild(link);
       }
@@ -284,6 +298,7 @@ function renderBranchNodes(
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'notation-move';
+    applyLtrIsolation(btn);
     btn.setAttribute('data-node-id', node.id);
     btn.setAttribute(
       'aria-label',
@@ -311,6 +326,7 @@ function renderBranchNodes(
     if (node.comment) {
       const commentSpan = document.createElement('span');
       commentSpan.className = 'notation-comment count';
+      commentSpan.setAttribute('dir', 'auto');
       commentSpan.textContent = ` (${node.comment}) `;
       parentContainer.appendChild(commentSpan);
       currentContext.afterCommentOrVariation = true;

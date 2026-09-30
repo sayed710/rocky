@@ -39,6 +39,8 @@ export interface AppDependencies {
   readonly storage?: KeyValueStorage | undefined;
   /** Injected i18n manager for localized messaging. */
   readonly i18n?: I18n | undefined;
+  /** Injected target Document for document-level localization. */
+  readonly doc?: Document | undefined;
 }
 
 /** The wired application services produced by {@link createApp}. */
@@ -89,8 +91,16 @@ export function createApp(deps: AppDependencies): App {
   });
 
   const i18n = deps.i18n ?? createI18n({
-    storage: deps.storage ? new LocaleStorage({ storage: deps.storage }) : undefined,
+    doc: deps.doc,
+    storage: deps.storage
+      ? new LocaleStorage({ storage: deps.storage })
+      : typeof localStorage !== 'undefined'
+        ? new LocaleStorage({ storage: localStorage })
+        : undefined,
   });
+  if (deps.i18n && deps.doc) {
+    deps.i18n.setDocument(deps.doc);
+  }
 
   return {
     config: deps.config,

@@ -10,6 +10,7 @@ export interface I18nOptions {
   readonly storage?: LocaleStorage | undefined;
   readonly strict?: boolean | undefined;
   readonly doc?: Document | undefined;
+  readonly catalogs?: Partial<Record<Locale, MessagesCatalog>> | undefined;
 }
 
 /**
@@ -25,20 +26,30 @@ export class I18n {
   private activeLocale: Locale;
   private readonly storage: LocaleStorage | undefined;
   private readonly strict: boolean;
-  private readonly doc: Document | undefined;
+  private doc: Document | undefined;
   private readonly catalogs = new Map<Locale, MessagesCatalog>();
   private readonly listeners = new Set<(locale: Locale) => void>();
 
   constructor(opts: I18nOptions = {}) {
     this.storage = opts.storage;
-    this.strict = opts.strict ?? true;
+    this.strict = opts.strict ?? false;
     this.doc = opts.doc;
     this.catalogs.set('en', enMessages);
+    if (opts.catalogs) {
+      for (const [loc, cat] of Object.entries(opts.catalogs)) {
+        if (cat && isSupportedLocale(loc)) {
+          this.catalogs.set(loc, cat);
+        }
+      }
+    }
 
     // Initial locale resolution: explicit initial > storage > default
+    // Note: candidate must be supported AND have a registered catalog
     const stored = this.storage?.load();
     const candidate = opts.initialLocale ?? stored ?? DEFAULT_LOCALE;
-    this.activeLocale = isSupportedLocale(candidate) ? candidate : DEFAULT_LOCALE;
+    this.activeLocale = isSupportedLocale(candidate) && this.catalogs.has(candidate)
+      ? candidate
+      : DEFAULT_LOCALE;
 
     // Apply document attributes on initialization
     applyDocumentLocale(this.activeLocale, this.doc);
@@ -47,6 +58,21 @@ export class I18n {
   /** Current active locale. */
   get locale(): Locale {
     return this.activeLocale;
+  }
+
+  /** Target document owned by this manager. */
+  get document(): Document | undefined {
+    return this.doc;
+  }
+
+  /**
+   * Sets or updates the target document for document-level localization.
+   */
+  setDocument(doc: Document | undefined): void {
+    this.doc = doc;
+    if (this.doc) {
+      applyDocumentLocale(this.activeLocale, this.doc);
+    }
   }
 
   /**
@@ -86,7 +112,7 @@ export class I18n {
    * and notifies all registered subscribers.
    */
   setLocale(locale: Locale): void {
-    if (!isSupportedLocale(locale)) {
+    if (!isSupportedLocale(locale) || !this.catalogs.has(locale)) {
       return;
     }
     if (this.activeLocale === locale) {

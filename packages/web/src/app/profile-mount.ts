@@ -18,6 +18,7 @@ import {
 } from './render-helpers.js';
 import type { RowAction } from './render-helpers.js';
 import { SPEED_LABELS, VARIANT_LABELS } from './variant-labels.js';
+import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
 
 /**
  * Render the action bar shown on another player's profile.
@@ -445,7 +446,10 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     client,
     callbacks: {
       onProfile: (p) => {
-        if (handleEl) handleEl.textContent = p.user.handle;
+        if (handleEl) {
+          handleEl.textContent = p.user.handle;
+          applyAutoDirection(handleEl);
+        }
         loadSocialFor({ id: p.user.id, handle: p.user.handle });
         // Keyed by id, not handle: both achievements routes take a player id, and this is the
         // first point on the page where one is known.
@@ -463,6 +467,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
               const row = doc.createElement('div');
               row.className = 'rating-row';
               row.textContent = `${VARIANT_LABELS[r.variant] ?? r.variant} · ${SPEED_LABELS[r.speed] ?? r.speed}: ${Math.round(r.rating)} (RD ${Math.round(r.rd)})`;
+              applyLtrIsolation(row);
               ratingsEl.appendChild(row);
             }
           }
