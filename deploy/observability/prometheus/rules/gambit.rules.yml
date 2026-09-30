@@ -189,7 +189,11 @@ groups:
 
       - alert: GambitRatingsGameBlocked
         # increase() over a window: only blocks recorded recently fire it, however many exist from before.
-        expr: sum(increase(ratings_games_total{outcome="blocked"}[15m])) > 0
+        # increase() needs two samples, so a block a gateway records before its first scrape (during the
+        # startup backfill) is caught by the second term: a series first seen within 15 minutes, non-zero.
+        expr: >-
+          sum(increase(ratings_games_total{outcome="blocked"}[15m])) > 0
+          or sum(ratings_games_total{outcome="blocked"} unless ratings_games_total{outcome="blocked"} offset 15m) > 0
         labels:
           severity: warning
           component: gateway

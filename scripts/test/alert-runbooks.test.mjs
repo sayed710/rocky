@@ -48,7 +48,12 @@ test('a newly blocked rating game alerts on recent blocks only, from the metric 
   const alert = alerts(rules).find(({ body }) => /\bratings_games_total\{outcome="blocked"\}/.test(body));
   assert.ok(alert, 'no alert reads ratings_games_total{outcome="blocked"}');
   // A raw counter comparison would keep firing forever once any game had ever been blocked.
-  assert.match(alert.body, /expr:\s*sum\(increase\(ratings_games_total\{outcome="blocked"\}\[\d+m\]\)\) > 0/);
+  assert.match(alert.body, /sum\(increase\(ratings_games_total\{outcome="blocked"\}\[(\d+m)\]\)\) > 0/);
+  // increase() needs two samples; a series first scraped already non-zero is caught by this term.
+  const window = alert.body.match(/\[(\d+m)\]/)[1];
+  assert.match(alert.body, new RegExp(
+    `or sum\\(ratings_games_total\\{outcome="blocked"\\} unless ratings_games_total\\{outcome="blocked"\\} offset ${window}\\) > 0`,
+  ));
   assert.match(alert.body, /RUNBOOKS\.md#ratings-lag-or-blocked-games"/);
   // Its firing and clearing are evaluated by promtool against this file in CI.
   assert.match(read('deploy/observability/prometheus/tests/ratings-alerts.test.yml'), new RegExp(`alertname: ${alert.name}$`, 'm'));
