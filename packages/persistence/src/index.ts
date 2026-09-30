@@ -19,3 +19,4 @@ export * from './search-backfill';
 
 export * from './analysis-cache';
 export * from './games-projection';
+export * from './rating-eligibility';

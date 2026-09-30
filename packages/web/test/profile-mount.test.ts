@@ -886,3 +886,34 @@ test('achievements unavailable and error rendering', async () => {
   assert.equal(elements2.get('achievements')!.hidden, false, '500 error reveals achievements section');
   assert.equal(elements2.get('achievements-error')!.textContent, 'HTTP 500');
 });
+
+test('a profile shows each rating pool on its own row, named by variant and speed', async () => {
+  const { doc, elements } = createProfileDocument();
+  const transport = new FakeTransport().onEach((req) => {
+    const path = new URL(req.url).pathname;
+    if (req.method === 'GET' && path === '/v1/users/bob') {
+      return json(200, {
+        user: { id: 'u2', handle: 'bob', country: null, createdAt: '2026-01-01T00:00:00Z' },
+        ratings: [
+          { variant: 'standard', speed: 'blitz', rating: 1712.4, rd: 61.2, vol: 0.06, updatedAt: null },
+          { variant: 'standard', speed: 'correspondence', rating: 1480, rd: 300, vol: 0.06, updatedAt: null },
+        ],
+      });
+    }
+    if (req.method === 'GET' && path === '/v1/users/bob/games') return json(200, []);
+    if (req.method === 'GET' && path.startsWith('/v1/social/')) return json(200, { items: [], followerCount: 0, followingCount: 0, followers: [], following: [], named: true });
+    return json(404, {});
+  });
+
+  mountProfile({
+    doc,
+    client: createTestClient(transport, false),
+    handle: 'bob',
+    getCurrentSession: () => null,
+    restorePromise: Promise.resolve(null),
+  });
+  await flush();
+
+  const rows = Array.from(elements.get('profile-ratings')!.children).map((row) => row.textContent);
+  assert.deepEqual(rows, ['Standard · Blitz: 1712 (RD 61)', 'Standard · Correspondence: 1480 (RD 300)']);
+});

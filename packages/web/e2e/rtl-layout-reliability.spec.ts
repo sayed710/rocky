@@ -28,6 +28,8 @@ interface RouteFixture {
   name: string;
   path: string;
   setup?: (page: Page) => Promise<void>;
+  /** Runs after navigation, for routes that load their content only after a user choice. */
+  prepare?: (page: Page) => Promise<void>;
   readySelector: string;
   surfaceSelector: string;
 }
@@ -48,17 +50,22 @@ const ROUTES: readonly RouteFixture[] = [
     name: 'leaderboard',
     path: '/leaderboard',
     setup: async (page: Page) => {
-      await page.route('**/v1/leaderboard/**', async (route) => {
+      // A rating pool is a variant and a speed; only the chosen pool is served, so rows prove the real load.
+      await page.route('**/v1/leaderboard/standard/blitz?limit=100', async (route) => {
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify([
-            { userId: 'u1', variant: 'standard', rating: 1600, rd: 45 },
-            { userId: 'u2', variant: 'standard', rating: 1550, rd: 50 },
-            { userId: 'u3', variant: 'standard', rating: 1500, rd: 55 },
+            { userId: 'u1', variant: 'standard', speed: 'blitz', rating: 1600, rd: 45 },
+            { userId: 'u2', variant: 'standard', speed: 'blitz', rating: 1550, rd: 50 },
+            { userId: 'u3', variant: 'standard', speed: 'blitz', rating: 1500, rd: 55 },
           ]),
         });
       });
+    },
+    // The leaderboard loads nothing until a time control is chosen.
+    prepare: async (page: Page) => {
+      await page.locator('#leaderboard-speed-select').selectOption('blitz');
     },
     readySelector: '#leaderboard-results .panel-row',
     surfaceSelector: '#leaderboard',
@@ -160,6 +167,9 @@ test.describe('RTL Layout Reliability — Settled Route Containment', () => {
           });
         });
         await page.goto(route.path);
+        if (route.prepare) {
+          await route.prepare(page);
+        }
 
         // Wait for route-specific content/surface to settle asynchronously
         const readyEl = page.locator(route.readySelector).first();

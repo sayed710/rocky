@@ -9,6 +9,7 @@ export * from './migrate';
 export * from './event-store';
 export * from './terminal-event-inbox';
 export * from './games-projector';
+export * from './ratings-applier';
 export * from './no-show-candidates';
 export * from './flag-candidates';
 export * from './repositories';

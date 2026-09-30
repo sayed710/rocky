@@ -65,3 +65,15 @@ export class VersionConflictError extends PersistenceError {
     this.name = 'VersionConflictError';
   }
 }
+
+/**
+ * A committed game stream that no authority could have written: its fold or its rating facts are
+ * contradictory. It is deterministic, so retrying cannot help; a stream that merely could not be
+ * loaded or read (an unknown event version, a database error) is never this error.
+ */
+export class CorruptGameStreamError extends PersistenceError {
+  constructor(readonly gameId: string, reason: string) {
+    super(`game ${gameId}: ${reason}`);
+    this.name = 'CorruptGameStreamError';
+  }
+}
