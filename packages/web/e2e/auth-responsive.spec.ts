@@ -28,11 +28,33 @@ const VIEWPORTS = [
 
 const ACTIONS = ['#auth-submit', '#auth-register', '#auth-passkey'] as const;
 
-/** The element's rendered bounds, failing loudly rather than returning null the caller would measure. */
-async function boxOf(page: Page, selector: string): Promise<{ x: number; y: number; width: number; height: number }> {
-  const box = await page.locator(selector).boundingBox();
-  if (box === null) throw new Error(`${selector} has no rendered bounds`);
-  return box;
+type Box = { x: number; y: number; width: number; height: number };
+
+/**
+ * Every named element's rendered bounds, read in one script run so they all come from the same
+ * layout, failing loudly rather than returning a missing box the caller would measure.
+ *
+ * Separate `boundingBox()` calls are separate round trips, and the page does move between them: at
+ * tablet width the lobby sits above this card, and when `/v1/seeks` answers it renders the seek
+ * list's empty state and pushes the whole card 163px down. Register and the passkey button share a
+ * row in every frame, yet a call landing on each side of that shift read them as a row apart.
+ */
+async function boxesOf<K extends string>(page: Page, selectors: Record<K, string>): Promise<Record<K, Box>> {
+  const measured = await page.evaluate((entries) => entries.map(([name, selector]) => {
+    const el = document.querySelector(selector);
+    if (el === null || el.getClientRects().length === 0) return [name, null] as const;
+    const { x, y, width, height } = el.getBoundingClientRect();
+    return [name, { x, y, width, height }] as const;
+  }), Object.entries<string>(selectors));
+  for (const [name, box] of measured) {
+    if (box === null) throw new Error(`${selectors[name as K]} has no rendered bounds`);
+  }
+  return Object.fromEntries(measured) as Record<K, Box>;
+}
+
+/** One element's rendered bounds, for checks that do not compare it with another element. */
+async function boxOf(page: Page, selector: string): Promise<Box> {
+  return (await boxesOf(page, { box: selector })).box;
 }
 
 /** True when two boxes sit on the same visual row, tolerating sub-pixel layout. */
@@ -52,20 +74,29 @@ for (const viewport of VIEWPORTS) {
       viewportWidth: window.innerWidth,
     }))).toEqual({ documentWidth: viewport.width, viewportWidth: viewport.width });
 
+    const { card, submit, register, passkey, actionRow, handle, password, email, form } = await boxesOf(page, {
+      card: '#auth',
+      submit: '#auth-submit',
+      register: '#auth-register',
+      passkey: '#auth-passkey',
+      actionRow: '#auth-form .auth-actions',
+      handle: '.auth-field:has(#auth-handle)',
+      password: '.auth-field:has(#auth-password)',
+      // The sign-in code row shares the full-row class but stays hidden until the server asks
+      // for a code, so it is not measured here.
+      email: '.auth-field-full:has(#auth-email)',
+      form: '#auth-form',
+    });
+
     // The card itself stays inside the viewport, borders included.
-    const card = await boxOf(page, '#auth');
     expect(card.x).toBeGreaterThanOrEqual(0);
     expect(card.x + card.width).toBeLessThanOrEqual(viewport.width);
 
     // The two secondary actions come out the same width — the property `flex-wrap: wrap` could
     // not give them, because it sizes each button to its own label.
-    const submit = await boxOf(page, '#auth-submit');
-    const register = await boxOf(page, '#auth-register');
-    const passkey = await boxOf(page, '#auth-passkey');
     expect(Math.abs(register.width - passkey.width)).toBeLessThan(1);
 
     // The default action takes the whole row, alone, with the other two beneath it.
-    const actionRow = await boxOf(page, '#auth-form .auth-actions');
     expect(Math.abs(submit.width - actionRow.width)).toBeLessThan(1);
     expect(sameRow(submit, register)).toBe(false);
     expect(sameRow(register, passkey)).toBe(viewport.pairsActions);
@@ -79,14 +110,9 @@ for (const viewport of VIEWPORTS) {
     }
 
     // Fields pair where two 12rem tracks fit and stack where they do not.
-    const handle = await boxOf(page, '.auth-field:has(#auth-handle)');
-    const password = await boxOf(page, '.auth-field:has(#auth-password)');
     expect(sameRow(handle, password)).toBe(viewport.pairsFields);
 
-    // The email always takes the whole row, never half of one. (The sign-in code row shares the
-    // class but stays hidden until the server asks for a code, so it is not measured here.)
-    const email = await boxOf(page, '.auth-field-full:has(#auth-email)');
-    const form = await boxOf(page, '#auth-form');
+    // The email always takes the whole row, never half of one.
     expect(sameRow(email, handle)).toBe(false);
     expect(Math.abs(email.width - form.width)).toBeLessThan(1);
   });
@@ -113,13 +139,15 @@ test('the sign-in form mirrors under dir="rtl" without overflowing', async ({ pa
   }))).toEqual({ documentWidth: 1440, viewportWidth: 1440 });
 
   // Mirrored, not merely unbroken: the first field in source order now starts on the right.
-  const handle = await boxOf(page, '.auth-field:has(#auth-handle)');
-  const password = await boxOf(page, '.auth-field:has(#auth-password)');
+  const { handle, password, register, passkey } = await boxesOf(page, {
+    handle: '.auth-field:has(#auth-handle)',
+    password: '.auth-field:has(#auth-password)',
+    register: '#auth-register',
+    passkey: '#auth-passkey',
+  });
   expect(sameRow(handle, password)).toBe(true);
   expect(handle.x).toBeGreaterThan(password.x);
 
-  const register = await boxOf(page, '#auth-register');
-  const passkey = await boxOf(page, '#auth-passkey');
   expect(Math.abs(register.width - passkey.width)).toBeLessThan(1);
   expect(register.x).toBeGreaterThan(passkey.x);
 });
