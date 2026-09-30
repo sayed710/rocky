@@ -148,3 +148,57 @@ test('a database already at published migration 0045 upgrades without changing p
     through45.cleanup();
   }
 });
+
+test('the 0046 backfill freezes every earlier skip without one advisory lock per row', { skip }, async () => {
+  const through45 = migrationsThrough(45);
+  try {
+    await withTestDatabase(async ({ pool }) => {
+      await migrate(pool, through45.dir);
+      const endGame = async (): Promise<string> => {
+        const gameId = randomUUID();
+        await pool.query(`INSERT INTO game_events (game_id, seq, type, payload)
+          VALUES ($1, 0, 'GameCreated', '{"type":"GameCreated"}'::jsonb),
+                 ($1, 1, 'GameEnded', '{"type":"GameEnded"}'::jsonb)`, [gameId]);
+        return gameId;
+      };
+      const skipped: string[] = [];
+      for (let i = 0; i < 40; i += 1) skipped.push(await endGame());
+      await pool.query(`UPDATE rating_checkpoint SET (xact_id, server_ts, game_id) =
+        (SELECT xact_id, server_ts, game_id FROM game_events WHERE game_id = $1 AND type = 'GameEnded')`, [skipped.at(-1)]);
+      const pendingId = await endGame();
+
+      // Run 0046 in a transaction that is rolled back, to count the advisory locks it holds at commit time.
+      const sql = readFileSync(join(MIGRATIONS_DIR, '0046_rating_decisions_and_finite_values.sql'), 'utf8');
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(sql);
+        assert.equal((await client.query(
+          `SELECT count(*)::int AS n FROM rating_ineligible_games WHERE reason = 'pre_upgrade'`,
+        )).rows[0].n, skipped.length);
+        assert.equal((await client.query(
+          `SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()`,
+        )).rows[0].n, 0);
+      } finally {
+        await client.query('ROLLBACK');
+        client.release();
+      }
+
+      await migrate(pool, MIGRATIONS_DIR);
+      assert.deepEqual(
+        (await pool.query(`SELECT game_id FROM rating_ineligible_games WHERE reason = 'pre_upgrade' ORDER BY game_id`)).rows
+          .map((row: { game_id: string }) => row.game_id),
+        [...skipped].sort(),
+      );
+      assert.equal((await pool.query('SELECT 1 FROM rating_ineligible_games WHERE game_id = $1', [pendingId])).rowCount, 0);
+      // The ineligible-table guard is installed once the backfill is done.
+      const blockedId = randomUUID();
+      await pool.query('INSERT INTO rating_blocked_games (game_id, error) VALUES ($1, $2)', [blockedId, 'invalid stream']);
+      await assert.rejects(pool.query(
+        'INSERT INTO rating_ineligible_games (game_id, reason) VALUES ($1, $2)', [blockedId, 'casual'],
+      ), /already has a rating decision/);
+    });
+  } finally {
+    through45.cleanup();
+  }
+});

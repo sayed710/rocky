@@ -55,8 +55,6 @@ CREATE TRIGGER rating_application_disposition_guard
   BEFORE INSERT ON rating_applications FOR EACH ROW EXECUTE FUNCTION guard_rating_disposition();
 CREATE TRIGGER rating_block_disposition_guard
   BEFORE INSERT ON rating_blocked_games FOR EACH ROW EXECUTE FUNCTION guard_rating_disposition();
-CREATE TRIGGER rating_ineligible_disposition_guard
-  BEFORE INSERT ON rating_ineligible_games FOR EACH ROW EXECUTE FUNCTION guard_rating_disposition();
 
 -- Published 0044–0045 code acknowledged ineligible endings only by advancing the checkpoint.
 -- Freeze those earlier decisions before any new applier can replay them with changed account flags.
@@ -69,6 +67,12 @@ WHERE e.type = 'GameEnded'
   AND (e.xact_id, e.server_ts, e.game_id) <= (c.xact_id, c.server_ts, c.game_id)
   AND NOT EXISTS (SELECT 1 FROM rating_applications a WHERE a.game_id = e.game_id)
   AND NOT EXISTS (SELECT 1 FROM rating_blocked_games b WHERE b.game_id = e.game_id);
+
+-- Guard this table only after the backfill. The trigger takes one advisory lock per inserted row, and a
+-- lock per historical ending could exhaust max_locks_per_transaction. The backfill needs no guard: its
+-- NOT EXISTS clauses exclude every other decision, and the held checkpoint lock keeps appliers out.
+CREATE TRIGGER rating_ineligible_disposition_guard
+  BEFORE INSERT ON rating_ineligible_games FOR EACH ROW EXECUTE FUNCTION guard_rating_disposition();
 
 -- A gateway still running the 0044 code during a rolling deploy does not write explicit ineligible
 -- decisions. Its checkpoint update closes that gap in the same transaction. New gateways already
