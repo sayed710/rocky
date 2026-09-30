@@ -114,7 +114,7 @@ function routeNamed(path: string, verb?: string): Route {
 /** The community creation routes (all POST) and the buckets each must charge in one admission. */
 const COMMUNITY_ADMISSIONS: Record<string, readonly string[]> = {
   '/v1/social/follows/:playerId': ['social-initiate:user:', 'social-initiate:ip:'],
-  '/v1/social/friend-requests': ['social-initiate:user:', 'social-initiate:ip:'],
+  '/v1/social/friend-requests': ['social-initiate:user:', 'social-initiate:ip:', 'friend-request:pair:'],
   '/v1/teams': ['team-create:user:', 'team-create:ip:'],
   '/v1/teams/:id/members': ['team-join:user:', 'team-join:ip:'],
   '/v1/teams/:id/join-requests': ['team-join:user:', 'team-join:ip:'],
@@ -206,7 +206,8 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
 /**
  * A write bucket keyed by the player or team a write is aimed at would let strangers spend
  * that target's budget, or let one caller lock others out of a team. So each key interpolates
- * exactly one value, and it is the caller or the caller's address — nothing from the path or body.
+ * the caller or the caller's address and nothing else, with one exception. The friend-request
+ * pair bucket names the recipient too, but only after the sender, so only the sender can charge it.
  */
 test('authenticated-write buckets are keyed only by the caller and the caller\'s address', () => {
   const writes = [...Object.keys(COMMUNITY_ADMISSIONS), '/v1/seeks', '/v1/messages/conversations', '/v1/messages/conversations/:id/messages'];
@@ -219,12 +220,13 @@ test('authenticated-write buckets are keyed only by the caller and the caller\'s
         (p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'key',
       );
       assert.ok(key && ts.isTemplateExpression(key.initializer), `${path}: keys must be template literals`);
-      assert.equal(key.initializer.templateSpans.length, 1, `${path}: a key interpolates exactly one value`);
-      return key.initializer.templateSpans[0]!.expression.getText(SOURCE);
+      return key.initializer.templateSpans.map((span) => span.expression.getText(SOURCE));
     });
     // `/v1/seeks` names the caller `identity.userId`; every other route calls it `actorId`.
     const caller = path === '/v1/seeks' ? 'identity.userId' : 'actorId';
-    assert.deepEqual(keyed, [caller, "ctx.ip ?? 'unknown'"], `${path} must key by caller, then address`);
+    const expected = [[caller], ["ctx.ip ?? 'unknown'"]];
+    if (path === '/v1/social/friend-requests') expected.push(['actorId', 'addresseeId.toLowerCase()']);
+    assert.deepEqual(keyed, expected, `${path} must key by caller, then address (then sender → recipient)`);
   }
 });
 

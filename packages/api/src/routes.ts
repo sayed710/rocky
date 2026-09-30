@@ -2957,9 +2957,12 @@ export function buildRouter(deps: RouteDeps): Router {
       const id = ids.next();
       try {
         assertDistinct(actorId.toLowerCase(), addresseeId.toLowerCase());
+        // The pair bucket stops one sender re-asking one player after every decline. It is keyed
+        // by the sender first, so only the sender's own requests ever charge it.
         await admit([
           { key: `social-initiate:user:${actorId}`, limit: config.rateLimit.socialInitiation.perUser },
           { key: `social-initiate:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.socialInitiation.perIp },
+          { key: `friend-request:pair:${actorId}:${addresseeId.toLowerCase()}`, limit: config.rateLimit.friendRequestRepeat.perPair },
         ]);
         const req = await repo.sendFriendRequest(id, actorId, addresseeId, new Date(clock.now()));
         return json(201, friendRequestView(req));
@@ -3694,12 +3697,12 @@ export function buildRouter(deps: RouteDeps): Router {
       const repo = checkCommunityRepo();
       const actorId = requireAuth(ctx).userId;
       const teamId = parseUuid(ctx.params['id']!, 'id');
-      await admit([
-        { key: `team-join:user:${actorId}`, limit: config.rateLimit.teamJoin.perUser },
-        { key: `team-join:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.teamJoin.perIp },
-      ]);
 
       try {
+        await admit([
+          { key: `team-join:user:${actorId}`, limit: config.rateLimit.teamJoin.perUser },
+          { key: `team-join:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.teamJoin.perIp },
+        ]);
         const mem = await repo.joinTeam(teamId, actorId, new Date(deps.clock.now()));
         return json(201, membershipView(mem));
       } catch (err) {
@@ -3838,13 +3841,13 @@ export function buildRouter(deps: RouteDeps): Router {
       const repo = checkCommunityRepo();
       const actorId = requireAuth(ctx).userId;
       const teamId = parseUuid(ctx.params['id']!, 'id');
-      await admit([
-        { key: `team-join:user:${actorId}`, limit: config.rateLimit.teamJoin.perUser },
-        { key: `team-join:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.teamJoin.perIp },
-      ]);
       const requestId = deps.ids.next();
 
       try {
+        await admit([
+          { key: `team-join:user:${actorId}`, limit: config.rateLimit.teamJoin.perUser },
+          { key: `team-join:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.teamJoin.perIp },
+        ]);
         const req = await repo.createJoinRequest(requestId, teamId, actorId, new Date(deps.clock.now()));
         return json(201, joinRequestView(req));
       } catch (err) {

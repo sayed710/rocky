@@ -184,6 +184,14 @@ export interface RateLimitConfig {
     readonly perUser: RateLimitEndpointConfig;
     readonly perIp: RateLimitEndpointConfig;
   };
+  /**
+   * Friend requests from one sender to one recipient, charged alongside `socialInitiation`. It
+   * bounds re-sending after a decline to the same player. The key names both players but only the
+   * sender ever charges it, so a request can never spend the recipient's ability to act.
+   */
+  readonly friendRequestRepeat: {
+    readonly perPair: RateLimitEndpointConfig;
+  };
   readonly analysis: {
     readonly perUser: RateLimitEndpointConfig;
     readonly perIp: RateLimitEndpointConfig;
@@ -316,6 +324,13 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
     perUser: { maxRequests: 30, windowMs: 60 * 1000 }, // 30 / min
     perIp: { maxRequests: 300, windowMs: 60 * 1000 }, // 300 / min
   },
+  // The account budget alone still let one sender re-send a declined request to the same player
+  // every few seconds. Asking one person again is the pattern `emailVerificationRequest.perUser`
+  // bounds for one inbox (3). Here the recipient, not the sender, bears the cost, so the window is
+  // a day: a second and third try after an accidental decline still work.
+  friendRequestRepeat: {
+    perPair: { maxRequests: 3, windowMs: 24 * 60 * 60 * 1000 }, // 3 / 24 h per sender → recipient
+  },
   // Analysis is a CPU-amplification surface, so it is limited more tightly than a read endpoint.
   analysis: {
     perUser: { maxRequests: 30, windowMs: 60 * 1000 }, // 30 / min
@@ -422,23 +437,26 @@ function validateCors(cors: CorsConfig): void {
   }
 }
 
-/** The per-user and per-IP budgets on authenticated writes that {@link validateWriteRateLimits} checks. */
-const WRITE_RATE_LIMITS = [
-  'seekCreation',
-  'conversationCreation',
-  'messageSend',
-  'socialInitiation',
-  'teamCreation',
-  'teamJoin',
-  'forumThreadCreation',
-  'forumPostCreation',
-] as const;
+const USER_AND_IP = ['perUser', 'perIp'] as const;
+
+/** The budgets on authenticated writes that {@link validateWriteRateLimits} checks, with their dimensions. */
+const WRITE_RATE_LIMITS = {
+  seekCreation: USER_AND_IP,
+  conversationCreation: USER_AND_IP,
+  messageSend: USER_AND_IP,
+  socialInitiation: USER_AND_IP,
+  teamCreation: USER_AND_IP,
+  teamJoin: USER_AND_IP,
+  forumThreadCreation: USER_AND_IP,
+  forumPostCreation: USER_AND_IP,
+  friendRequestRepeat: ['perPair'],
+} as const;
 
 /** Fail startup on missing or unusable write budgets, including untyped runtime input. */
 function validateWriteRateLimits(rateLimit: RateLimitConfig): void {
-  for (const name of WRITE_RATE_LIMITS) {
-    const policy = rateLimit[name];
-    for (const dimension of ['perUser', 'perIp'] as const) {
+  for (const [name, dimensions] of Object.entries(WRITE_RATE_LIMITS)) {
+    const policy = rateLimit[name as keyof typeof WRITE_RATE_LIMITS] as Record<string, RateLimitEndpointConfig | undefined> | undefined;
+    for (const dimension of dimensions) {
       const limit = policy?.[dimension];
       if (
         !limit ||

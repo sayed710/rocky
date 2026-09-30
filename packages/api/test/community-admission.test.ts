@@ -101,19 +101,23 @@ describe('social initiation admission (follow, friend request)', () => {
     }
   });
 
-  it('bounds the decline-and-resend loop a requester could otherwise repeat without end', async () => {
-    const h = await startHarness({ trustProxy: true, rateLimit: { ...DEFAULT_RATE_LIMIT, socialInitiation: {
-      perUser: { maxRequests: 3, windowMs: 60_000 },
-      perIp: { maxRequests: 100, windowMs: 60_000 },
-    } } });
+  it('bounds re-asking one player after each decline, without limiting anyone else', async () => {
+    // A roomy account budget, so only the sender → recipient pair bucket can be what refuses.
+    const h = await startHarness({ trustProxy: true, rateLimit: {
+      ...DEFAULT_RATE_LIMIT,
+      socialInitiation: { perUser: { maxRequests: 100, windowMs: 60_000 }, perIp: { maxRequests: 100, windowMs: 60_000 } },
+      friendRequestRepeat: { perPair: { maxRequests: 2, windowMs: 60_000 } },
+    } });
     try {
       const pest = await h.makeUser('ca-loop-pest');
       const victim = await h.makeUser('ca-loop-victim');
+      const other = await h.makeUser('ca-loop-other');
+      const send = (token: string, addresseeId: string) =>
+        h.json('POST', '/v1/social/friend-requests', { token, body: { addresseeId } });
       const statuses: number[] = [];
-      for (let round = 0; round < 5; round += 1) {
-        const sent = await h.json('POST', '/v1/social/friend-requests', {
-          token: pest.token, body: { addresseeId: victim.userId },
-        });
+      for (let round = 0; round < 4; round += 1) {
+        // Upper-casing the recipient on the later rounds must not reset the pair.
+        const sent = await send(pest.token, round < 2 ? victim.userId : victim.userId.toUpperCase());
         statuses.push(sent.status);
         if (sent.status !== 201) continue;
         const declined = await h.json('POST', `/v1/social/friend-requests/${sent.body.id}/respond`, {
@@ -121,7 +125,12 @@ describe('social initiation admission (follow, friend request)', () => {
         });
         assert.equal(declined.status, 200, 'declining is never metered');
       }
-      assert.deepEqual(statuses, [201, 201, 201, 429, 429]);
+      assert.deepEqual(statuses, [201, 201, 429, 429]);
+      assert.equal(await totalOf(h, '/v1/social/friend-requests/incoming', victim.token), 0, 'the refused re-sends were never stored');
+
+      assert.equal((await send(pest.token, other.userId)).status, 201, 'the sender can still ask someone else');
+      assert.equal((await send(other.token, victim.userId)).status, 201, 'others can still ask the recipient');
+      assert.equal((await send(victim.token, pest.userId)).status, 201, 'the recipient can still ask the sender');
     } finally {
       await h.close();
     }
