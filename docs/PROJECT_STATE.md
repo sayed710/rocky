@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-29 — M15 Increment 75: RTL layout reliability and chessboard orientation invariance._
+_Last updated: 2026-09-30 — M15 Increment 76: RTL skip-link and active-game regression coverage._
+
+Prior: _Last updated: 2026-09-29 — M15 Increment 75: RTL layout reliability and chessboard orientation invariance._
 
 Prior: _Last updated: 2026-09-27 — M15 Increment 74: Finished-game action cleanup._
 
@@ -4503,3 +4505,12 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Falsification verified: mutating `.skip-link` back to `left: -999px;` reliably reproduced skip-link overflow failures; removing `direction: ltr;` from `.cb-board` inverted file coordinates under RTL.
 - Local verification: full CI equivalent passed cleanly (all 19 hermetic workspaces, 1200 unit tests in web, 36 offline RTL e2e tests, clean build and lint across every workspace).
 - Updated Playwright discovered spec count from 26 to 27 and offline spec count from 7 to 8 in `scripts/test/check-test-topology.test.mjs` to account for the new `rtl-layout-reliability.spec.ts` static suite.
+
+## M15 Increment 76 — RTL skip-link and active-game regression coverage (2026-09-30)
+- Corrects the coverage claim in Increment 75: at PR #78 head `a627ba885aac6d107e9d8dac6965f4f6072e41b6`, authoritative White/Black geometry and flip assertions ran only at 1440x900. Resizing to 390x844 checked document width only; the 762x698 width check existed only for White. The earlier entry is retained as history.
+- Chromium probes of the existing production build at LTR and RTL widths 1440, 1024, 390 and 320 confirmed native skip-link behavior: the first Tab focuses `#skip-board`; Enter navigates to `#board`; the following Tab focuses the board's roving square `a8`. The non-focusable board container itself does not become `document.activeElement`. No production CSS, markup or focus handler change was necessary.
+- The eight skip-link E2E cases now check the unfocused one-pixel clipped mechanism and document width, wait until the link is unhidden, reach it through Tab, assert unclipped focused styles, meaningful dimensions, logical positioning and center-point hit testing, then verify keyboard fragment activation and subsequent board-square focus. The static suite does not claim board arrow navigation or legal-move coverage.
+- The authoritative active-game test retains one browser context and refresh session per role. Both White and Black now exercise 1440x900, 390x844 and 762x698 identically: connected role, document width, board bounds and squareness, four-corner file/rank ordering, flip to the opposite perspective, and full ordering restoration before the next resize.
+- Falsification used a disposable copy of the strengthened spec outside the repository with focused zero-area clipping injected in memory. The RTL 320px case failed specifically because focused `clip` was `rect(0px, 0px, 0px, 0px)` instead of `auto`; removing the injection passed the same case. Production CSS was never mutated. The focused static RTL suite passed 36/36, and the responsive selection passed 83/83 (81 create-game cases plus both game-responsive tests), all without retries or skips.
+- Local `npm run ci:local -- --quick` passed builds, lint, all 19 hermetic workspaces, load-harness contracts, repository guards, test topology and 308 script tests. Its PostgreSQL, Redis/gateway, Docker/Nginx and POSIX jobs were not run locally; this records core validation, not a claim that those service/platform jobs passed.
+- The full backend-enabled Chromium Playwright suite passed 197/197 with four workers, zero retries and zero skips, including the strengthened RTL skip-link cases and both authoritative responsive roles.

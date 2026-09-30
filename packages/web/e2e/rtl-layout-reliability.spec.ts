@@ -8,7 +8,7 @@
  * 3. Keeps the accessible skip-link within viewport bounds at inline-start when focused,
  *    without off-screen coordinate overflow when unfocused.
  * 4. Strictly decouples chessboard orientation and algebraic coordinates from document direction,
- *    preserving standard chess geometry and navigation in both LTR and RTL.
+ *    preserving standard chess geometry in both LTR and RTL.
  * 5. Maintains layout containment, visibility, and control reachability across all 4 key viewports:
  *    Desktop (1440px, 1024px) and Mobile (390px, 320px).
  *
@@ -204,6 +204,7 @@ test.describe('RTL Layout Reliability — Accessible Skip Link', () => {
           });
         }, dir);
         await page.goto('/game/test-offline-board');
+        await expect(page.locator('html')).toHaveAttribute('dir', dir);
         await expect(page.locator('.cb-board')).toBeVisible();
 
         // Unfocused skip link must NOT cause horizontal overflow
@@ -212,15 +213,37 @@ test.describe('RTL Layout Reliability — Accessible Skip Link', () => {
 
         const skipLink = page.locator('#skip-board');
         await expect(skipLink).toBeAttached();
+        await expect(skipLink).not.toHaveAttribute('hidden');
+        await expect(skipLink).not.toBeFocused();
+        const hiddenStyles = await skipLink.evaluate((el) => {
+          const s = getComputedStyle(el);
+          const box = el.getBoundingClientRect();
+          return {
+            clip: s.clip,
+            overflow: s.overflow,
+            width: box.width,
+            height: box.height,
+          };
+        });
+        expect(hiddenStyles).toEqual({
+          clip: 'rect(0px, 0px, 0px, 0px)',
+          overflow: 'hidden',
+          width: 1,
+          height: 1,
+        });
 
-        // Focus skip link
-        await skipLink.focus();
+        // The link is the first keyboard stop after the game route has mounted.
+        await page.keyboard.press('Tab');
+        await expect(skipLink).toBeFocused();
         await expect(skipLink).toBeVisible();
 
         const box = await boxOf(page, '#skip-board');
         expect(box.y).toBeGreaterThanOrEqual(0);
+        expect(box.y).toBeLessThanOrEqual(20);
         expect(box.x).toBeGreaterThanOrEqual(0);
         expect(box.x + box.width).toBeLessThanOrEqual(viewport.width + 1);
+        expect(box.width).toBeGreaterThan(20);
+        expect(box.height).toBeGreaterThan(20);
 
         if (dir === 'ltr') {
           // In LTR, inline start is on the left
@@ -237,11 +260,32 @@ test.describe('RTL Layout Reliability — Accessible Skip Link', () => {
             bg: s.backgroundColor,
             color: s.color,
             zIndex: s.zIndex,
+            clip: s.clip,
+            clipPath: s.clipPath,
+            overflow: s.overflow,
           };
         });
+        expect(styles.clip, 'Focused skip link must remove the zero-area clip').toBe('auto');
+        expect(styles.clipPath).toBe('none');
+        expect(styles.overflow).toBe('visible');
         expect(styles.bg).not.toBe('rgba(0, 0, 0, 0)');
         expect(styles.color).not.toBe('rgba(0, 0, 0, 0)');
         expect(Number.parseInt(styles.zIndex, 10)).toBeGreaterThanOrEqual(30);
+        expect(await skipLink.evaluate((el) => {
+          const box = el.getBoundingClientRect();
+          return el.contains(document.elementFromPoint(
+            box.x + box.width / 2,
+            box.y + box.height / 2,
+          ));
+        }), 'Focused skip link must be exposed to hit testing').toBe(true);
+
+        await page.keyboard.press('Enter');
+        await expect(page).toHaveURL(/#board$/);
+        // Native fragment navigation establishes the sequential focus starting point;
+        // the non-focusable board container need not become document.activeElement.
+        await page.keyboard.press('Tab');
+        await expect(page.locator('#board .cb-sq[tabindex="0"]')).toBeFocused();
+        await expect(page.locator('#board .cb-sq[tabindex="0"]')).toHaveAttribute('data-square', 'a8');
       });
     }
   }
