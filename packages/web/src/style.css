@@ -106,14 +106,28 @@ body {
 }
 .skip-link {
   position: absolute;
-  left: -999px;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 .skip-link:focus {
-  left: 8px;
+  position: absolute;
   top: 8px;
+  inset-inline-start: 8px;
+  width: auto;
+  height: auto;
+  padding: 8px;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
   background: var(--fg);
   color: var(--bg);
-  padding: 8px;
   z-index: var(--z-skip);
 }
 .topbar {
@@ -176,6 +190,7 @@ body {
    viewport column with the stacked sidebar and collapsed to 115px at 390×844. Let the page scroll
    vertically instead: width establishes the square and the sidebar follows below it. */
 .cb-board {
+  direction: ltr;
   display: flex;
   flex-direction: column;
   aspect-ratio: 1 / 1;
