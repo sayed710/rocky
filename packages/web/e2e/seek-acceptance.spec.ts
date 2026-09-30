@@ -15,6 +15,15 @@ import { randomUUID } from 'node:crypto';
 
 test.skip(!process.env['GAMBIT_E2E_BACKEND'], 'requires running backend — M6 acceptance gate');
 
+/**
+ * `LobbyController`'s refresh interval. A lobby learns about other players' seeks, and a creator
+ * learns that its seek was matched, only on this tick. Waiting in real time for it raced the
+ * test's own timeouts: the creator's next tick lands up to one interval after the accept, the
+ * same 10 s its `waitForURL` allowed, so a busy machine missed it. Each page's clock is advanced
+ * by exactly one interval instead, which fires the pending tick deterministically.
+ */
+const LOBBY_REFRESH_MS = 10_000;
+
 test('atomic matching flow: Player A creates a seek, Player B accepts', async ({ browser }) => {
   const ctx1 = await browser.newContext();
   const ctx2 = await browser.newContext();
@@ -57,6 +66,10 @@ test('atomic matching flow: Player A creates a seek, Player B accepts', async ({
       localStorage.setItem('gambit-session', JSON.stringify({ handle: h, userId: uid }));
     }, { handle: handle2, uid: userId2 });
 
+    // Fake timers that still flow in real time; only `fastForward` moves them ahead.
+    await page1.clock.install();
+    await page2.clock.install();
+
     // 2. Both players go to Lobby
     await page1.goto('/');
     await page2.goto('/');
@@ -78,10 +91,11 @@ test('atomic matching flow: Player A creates a seek, Player B accepts', async ({
     expect(seekId).toBeTruthy();
 
     // 4. Player 2 should see Player 1's seek and accept it
-    // Lobby polling runs every 10 seconds, so allow one complete refresh cycle
-    // and target this test's seek rather than any stale row from a retry.
+    // Player 2's lobby shows a new seek on its next refresh; run that refresh now, and target
+    // this test's seek rather than any stale row from a retry.
+    await page2.clock.fastForward(LOBBY_REFRESH_MS);
     const opponentRow = page2.locator(`.seek-row[data-seek-id="${seekId}"]`);
-    await expect(opponentRow).toBeVisible({ timeout: 15_000 });
+    await expect(opponentRow).toBeVisible();
     const opponentLink = opponentRow.locator('a.row-link');
     await expect(opponentLink).toHaveText(handle1);
     await expect(opponentLink).toHaveAttribute('href', `/profile/${handle1}`);
@@ -92,13 +106,12 @@ test('atomic matching flow: Player A creates a seek, Player B accepts', async ({
     await expect(acceptBtn).toHaveAccessibleName(`Play — accept seek from ${handle1}`);
     await acceptBtn.click();
 
-    // 5. Both should be automatically routed to the game page
-    await page1.waitForURL(/\/game\/.+/, { timeout: 10_000 });
-    await page2.waitForURL(/\/game\/.+/, { timeout: 10_000 });
-
-    const url1 = page1.url();
-    const url2 = page2.url();
-    expect(url1).toEqual(url2);
+    // 5. The acceptor is routed by the accept response itself. Only then does the creator's
+    // next lobby refresh see the match, and it must route the creator to the same game.
+    await page2.waitForURL(/\/game\/.+/, { waitUntil: 'commit' });
+    const gameUrl = page2.url();
+    await page1.clock.fastForward(LOBBY_REFRESH_MS);
+    await page1.waitForURL(gameUrl, { waitUntil: 'commit' });
 
     // Wait for boards to render
     await expect(page1.locator('#board')).toBeVisible({ timeout: 10_000 });
