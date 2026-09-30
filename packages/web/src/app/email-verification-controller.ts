@@ -6,6 +6,7 @@
  * the bootstrap layer wires callbacks to DOM elements.
  */
 import type { GambitClient } from '../api/client.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { UnauthorizedError } from '../net/errors.js';
 
 export interface EmailVerificationCallbacks {
@@ -22,11 +23,13 @@ export interface EmailVerificationCallbacks {
 export interface EmailVerificationControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: EmailVerificationCallbacks;
+  readonly i18n?: I18nManager | undefined;
 }
 
 export class EmailVerificationController {
   private readonly client: GambitClient;
   private readonly callbacks: EmailVerificationCallbacks;
+  private readonly i18n?: I18nManager | undefined;
   private requestGeneration = 0;
   private pendingGeneration = 0;
   private isSubmitting = false;
@@ -36,6 +39,7 @@ export class EmailVerificationController {
   constructor(opts: EmailVerificationControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.i18n = opts.i18n;
   }
 
   /**
@@ -48,7 +52,9 @@ export class EmailVerificationController {
     const trimmed = token?.trim() ?? '';
     if (!trimmed) {
       this.terminal = true;
-      this.callbacks.onError('This page needs a verification link. Open the link in the verification email we sent you.');
+      this.callbacks.onError(
+        this.i18n ? this.i18n.t('emailVerification.needsLink') : 'This page needs a verification link. Open the link in the verification email we sent you.',
+      );
       this.callbacks.onSuccess(null);
       this.callbacks.onRetryable(false);
       return false;
@@ -64,18 +70,24 @@ export class EmailVerificationController {
       await this.client.auth.verifyEmail({ token: trimmed });
       if (!this.isCurrent(generation)) return false;
 
-      this.callbacks.onSuccess('Your email address is verified.');
+      this.callbacks.onSuccess(
+        this.i18n ? this.i18n.t('emailVerification.verified') : 'Your email address is verified.',
+      );
       this.callbacks.onRetryable(false);
       this.terminal = true;
       return true;
     } catch (err) {
       if (this.isCurrent(generation)) {
         if (err instanceof UnauthorizedError) {
-          this.callbacks.onError('This verification link is invalid, has expired, or has already been used.');
+          this.callbacks.onError(
+            this.i18n ? this.i18n.t('emailVerification.linkInvalid') : 'This verification link is invalid, has expired, or has already been used.',
+          );
           this.callbacks.onRetryable(false);
           this.terminal = true;
         } else {
-          this.callbacks.onError('We could not verify your email address right now. Please try again.');
+          this.callbacks.onError(
+            this.i18n ? this.i18n.t('emailVerification.couldNotVerify') : 'We could not verify your email address right now. Please try again.',
+          );
           this.callbacks.onRetryable(true);
         }
       }

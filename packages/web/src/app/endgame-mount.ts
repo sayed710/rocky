@@ -7,13 +7,17 @@
  * the board's `onMove` submits to that game — so training gets its own surface, the way lessons do.
  */
 import type { GambitClient } from '../api/client.js';
+import type { EndgameAttemptResult, EndgamePosition } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { EndgameController } from './endgame-controller.js';
 import {
   ENDGAME_MESSAGES,
   clearEndgame,
+  getEndgameMessage,
   renderEndgameError,
   renderEndgameNote,
   renderEndgamePosition,
+  renderEndgamePositionRows,
   renderEndgameVerdict,
   setEndgameBusy,
 } from './endgame-view.js';
@@ -22,6 +26,7 @@ export interface EndgameMountDependencies {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly isAuthenticated: () => boolean;
+  readonly i18n?: I18nManager | undefined;
 }
 
 export interface MountedEndgames {
@@ -59,6 +64,12 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
 
   const unbinds: Array<() => void> = [];
   let hasPosition = false;
+  let lastPosition: EndgamePosition | null = null;
+  let lastAttemptResult: EndgameAttemptResult | null = null;
+  let lastVerdictNote: string | null = null;
+  let lastNoteKey: keyof typeof ENDGAME_MESSAGES | null = null;
+  let lastErrorKey: keyof typeof ENDGAME_MESSAGES | null = null;
+
   /** The board currently on screen. Held so it can be torn down; `mountBoard` binds listeners. */
   let board: { dispose: () => void } | null = null;
 
@@ -86,6 +97,11 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
     if (noteEl) renderEndgameNote(noteEl, null);
     if (moveInput) moveInput.value = '';
     hasPosition = false;
+    lastPosition = null;
+    lastAttemptResult = null;
+    lastVerdictNote = null;
+    lastNoteKey = null;
+    lastErrorKey = null;
   };
 
   /** Bring the two controls into agreement with the session and whether a position is loaded. */
@@ -96,28 +112,19 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
     if (submitBtn) submitBtn.disabled = !authed || !hasPosition || controller.isPending;
     if (moveInput) moveInput.disabled = !authed || !hasPosition;
     if (!noteEl) return;
-    const owned = new Set<string>([
-      ENDGAME_MESSAGES.idle,
-      ENDGAME_MESSAGES.signedOut,
-      // Owned too: it is the prompt for a position, so it must not outlive one. A remount clears
-      // the position but leaves this DOM behind, and a note this function will not overwrite would
-      // sit there telling a visitor to move in a position that is no longer on the board.
-      ENDGAME_MESSAGES.yourMove,
-      '',
-    ]);
-    if (!owned.has(noteEl.textContent ?? '')) return;
-    // `yourMove` is owned so a remount can clear it, which means this has to know when to put it
-    // back: without the `hasPosition` arm, `onPosition` set the prompt and the `refresh()` at the
-    // end of the same callback replaced it with "pick a training endgame" over a loaded board.
-    // Raised in the CodeRabbit review of PR #151.
-    renderEndgameNote(
-      noteEl,
-      !authed
-        ? ENDGAME_MESSAGES.signedOut
-        : hasPosition
-          ? ENDGAME_MESSAGES.yourMove
-          : ENDGAME_MESSAGES.idle,
-    );
+    const currentText = noteEl.textContent ?? '';
+    const isOwned =
+      currentText === '' ||
+      currentText === ENDGAME_MESSAGES.idle ||
+      currentText === ENDGAME_MESSAGES.signedOut ||
+      currentText === ENDGAME_MESSAGES.yourMove ||
+      currentText === getEndgameMessage('idle', deps.i18n) ||
+      currentText === getEndgameMessage('signedOut', deps.i18n) ||
+      currentText === getEndgameMessage('yourMove', deps.i18n);
+    if (!isOwned) return;
+    const noteKey = !authed ? 'signedOut' : hasPosition ? 'yourMove' : 'idle';
+    lastNoteKey = noteKey;
+    renderEndgameNote(noteEl, getEndgameMessage(noteKey, deps.i18n));
   };
 
   const controller = new EndgameController({
@@ -128,47 +135,67 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
         // "not busy" through the two engine searches an attempt costs.
         if (resultEl) setEndgameBusy(resultEl, phase === 'loading' || phase === 'attempting');
         refresh();
-        if (noteEl && phase === 'loading') renderEndgameNote(noteEl, ENDGAME_MESSAGES.loading);
-        if (noteEl && phase === 'attempting') renderEndgameNote(noteEl, ENDGAME_MESSAGES.judging);
+        if (noteEl && phase === 'loading') {
+          lastNoteKey = 'loading';
+          renderEndgameNote(noteEl, getEndgameMessage('loading', deps.i18n));
+        }
+        if (noteEl && phase === 'attempting') {
+          lastNoteKey = 'judging';
+          renderEndgameNote(noteEl, getEndgameMessage('judging', deps.i18n));
+        }
       },
       onPosition: (position) => {
+        lastPosition = position;
+        lastAttemptResult = null;
+        lastVerdictNote = null;
         if (boardEl && positionRowsEl) {
           disposeBoard();
           boardEl.innerHTML = '';
-          board = renderEndgamePosition(doc, boardEl, positionRowsEl, position);
+          board = renderEndgamePosition(doc, boardEl, positionRowsEl, position, deps.i18n);
         }
         if (rowsEl && resultEl) clearEndgame(rowsEl, resultEl);
         if (moveInput) moveInput.value = '';
-        if (errorEl) renderEndgameError(errorEl, null);
+        if (errorEl) {
+          lastErrorKey = null;
+          renderEndgameError(errorEl, null);
+        }
         hasPosition = true;
-        if (noteEl) renderEndgameNote(noteEl, ENDGAME_MESSAGES.yourMove);
+        lastNoteKey = 'yourMove';
+        if (noteEl) renderEndgameNote(noteEl, getEndgameMessage('yourMove', deps.i18n));
         refresh();
       },
       onAttemptResult: (result) => {
+        lastAttemptResult = result;
         if (rowsEl && resultEl) {
-          const note = renderEndgameVerdict(doc, rowsEl, resultEl, result);
+          const note = renderEndgameVerdict(doc, rowsEl, resultEl, result, deps.i18n);
+          lastVerdictNote = note;
           if (noteEl) renderEndgameNote(noteEl, note);
         }
-        if (errorEl) renderEndgameError(errorEl, null);
+        if (errorEl) {
+          lastErrorKey = null;
+          renderEndgameError(errorEl, null);
+        }
         refresh();
       },
       onFailure: (failure) => {
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': ENDGAME_MESSAGES.rateLimited,
-          unavailable: ENDGAME_MESSAGES.unavailable,
-          unauthenticated: ENDGAME_MESSAGES.signedOut,
-        };
-        const note = noteFor[failure];
-        if (note) {
-          if (noteEl) renderEndgameNote(noteEl, note);
-          if (errorEl) renderEndgameError(errorEl, null);
-        } else {
-          if (noteEl) renderEndgameNote(noteEl, null);
+        if (failure === 'rate-limited' || failure === 'unavailable' || failure === 'unauthenticated') {
+          const key: keyof typeof ENDGAME_MESSAGES =
+            failure === 'rate-limited' ? 'rateLimited' : failure === 'unavailable' ? 'unavailable' : 'signedOut';
+          lastNoteKey = key;
+          if (noteEl) renderEndgameNote(noteEl, getEndgameMessage(key, deps.i18n));
           if (errorEl) {
-            renderEndgameError(
-              errorEl,
-              failure === 'rejected' ? ENDGAME_MESSAGES.rejected : ENDGAME_MESSAGES.failed,
-            );
+            lastErrorKey = null;
+            renderEndgameError(errorEl, null);
+          }
+        } else {
+          const key: keyof typeof ENDGAME_MESSAGES = failure === 'rejected' ? 'rejected' : 'failed';
+          lastErrorKey = key;
+          if (noteEl) {
+            lastNoteKey = null;
+            renderEndgameNote(noteEl, null);
+          }
+          if (errorEl) {
+            renderEndgameError(errorEl, getEndgameMessage(key, deps.i18n));
           }
         }
         refresh();
@@ -182,6 +209,27 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
       },
     },
   });
+
+  if (deps.i18n) {
+    const unsub = deps.i18n.onLocaleChange(() => {
+      if (hasPosition && lastPosition && positionRowsEl) {
+        renderEndgamePositionRows(doc, positionRowsEl, lastPosition, deps.i18n);
+      }
+      if (lastAttemptResult && rowsEl && resultEl) {
+        lastVerdictNote = renderEndgameVerdict(doc, rowsEl, resultEl, lastAttemptResult, deps.i18n);
+      }
+      if (lastVerdictNote !== null && noteEl) {
+        renderEndgameNote(noteEl, lastVerdictNote);
+      } else if (lastNoteKey && noteEl) {
+        renderEndgameNote(noteEl, getEndgameMessage(lastNoteKey, deps.i18n));
+      }
+      if (lastErrorKey && errorEl) {
+        renderEndgameError(errorEl, getEndgameMessage(lastErrorKey, deps.i18n));
+      }
+      refresh();
+    });
+    unbinds.push(unsub);
+  }
 
   reset();
   refresh();

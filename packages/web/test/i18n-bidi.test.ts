@@ -171,4 +171,64 @@ describe('i18n bidi & chess isolation', () => {
     assert.equal(isPgnMovetext('Just some normal text'), false);
     assert.equal(isPgnMovetext(''), false);
   });
+
+  it('human-language labels do NOT receive LTR isolation and inherit document direction (RTL regression)', () => {
+    // In profile rating rows or game status rows:
+    // Variant/speed label is localizable human text and must NOT be forced LTR.
+    // In an RTL (Arabic) document, it must inherit direction.
+    const fakeDoc = {
+      createElement(tag: string) {
+        return createFakeElement(tag);
+      },
+    };
+
+    // Arabic label for Standard Blitz
+    const labelSpan = fakeDoc.createElement('span');
+    labelSpan.textContent = 'شطرنج قياسي · خاطف: ';
+    // Must NOT have LTR isolation applied
+    assert.equal(labelSpan.getAttribute('dir'), null);
+    assert.equal(labelSpan.className.includes('bidi-ltr'), false);
+
+    // Only the numeric rating/stats token receives LTR isolation
+    const statsSpan = fakeDoc.createElement('span');
+    statsSpan.textContent = '2450 (RD 25)';
+    applyLtrIsolation(statsSpan as unknown as HTMLElement);
+
+    assert.equal(statsSpan.getAttribute('dir'), 'ltr');
+    assert.ok(statsSpan.className.includes('bidi-ltr'));
+  });
+
+  it('user content isolation does not insert invisible Unicode bidi control characters', () => {
+    const userTexts = [
+      'لاعب_شطرنج',
+      'Alice vs Bob (tournament match)',
+      'سيد الشطرنج 123',
+      'Grandmaster ♚',
+    ];
+
+    const unicodeBidiControlChars = /[\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069]/;
+
+    for (const text of userTexts) {
+      const html = wrapUserTextHtml(text);
+      assert.match(html, /<bdi dir="auto">.*<\/bdi>/);
+      assert.equal(
+        unicodeBidiControlChars.test(html),
+        false,
+        `Expected no Unicode bidi control characters in HTML output for "${text}"`,
+      );
+
+      const fakeDoc = {
+        createElement(tag: string) {
+          return createFakeElement(tag);
+        },
+      };
+      const el = createUserTextElement(fakeDoc as unknown as Document, 'span', text);
+      assert.equal(el.getAttribute('dir'), 'auto');
+      assert.equal(
+        unicodeBidiControlChars.test(el.textContent),
+        false,
+        `Expected no Unicode bidi control characters in textContent for "${text}"`,
+      );
+    }
+  });
 });

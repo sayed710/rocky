@@ -1,5 +1,5 @@
 import type { GambitClient } from '../api/client.js';
-import type { SocialPlayer } from '../api/models.js';
+import type { GameSummary, PlayerAchievement, SocialPlayer, UserProfile } from '../api/models.js';
 import type { AuthSession } from './auth-controller.js';
 import { ProfileController } from './profile-controller.js';
 import { SocialController } from './social-controller.js';
@@ -17,8 +17,9 @@ import {
   appendPanelRow,
 } from './render-helpers.js';
 import type { RowAction } from './render-helpers.js';
-import { SPEED_LABELS, VARIANT_LABELS } from './variant-labels.js';
+import { getSpeedLabel, getVariantLabel } from './variant-labels.js';
 import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 /**
  * Render the action bar shown on another player's profile.
@@ -36,6 +37,7 @@ function renderSocialActions(
   relationship: Relationship | null,
   social: SocialController,
   busy: boolean,
+  i18n?: I18nManager,
   onOpenMessage?: () => void,
 ): void {
   container.innerHTML = '';
@@ -46,32 +48,61 @@ function renderSocialActions(
   if (relationship.blocked) {
     // A block supersedes everything else, so offering follow or friend controls
     // beside it would advertise actions the server will refuse.
-    actions.push({ label: 'Unblock', run: () => void social.unblockSubject() });
+    actions.push({
+      label: i18n ? i18n.t('profile.social.unblock') : 'Unblock',
+      run: () => void social.unblockSubject(),
+    });
   } else {
     actions.push(
       relationship.following
-        ? { label: 'Unfollow', run: () => void social.unfollow() }
-        : { label: 'Follow', run: () => void social.follow() },
+        ? {
+            label: i18n ? i18n.t('profile.social.unfollow') : 'Unfollow',
+            run: () => void social.unfollow(),
+          }
+        : {
+            label: i18n ? i18n.t('profile.social.follow') : 'Follow',
+            run: () => void social.follow(),
+          },
     );
 
     if (onOpenMessage) {
-      actions.push({ label: 'Message', run: onOpenMessage, communicative: true });
+      actions.push({
+        label: i18n ? i18n.t('profile.social.message') : 'Message',
+        run: onOpenMessage,
+        communicative: true,
+      });
     }
 
     if (relationship.incomingRequestId !== null) {
       const id = relationship.incomingRequestId;
       actions.push(
-        { label: 'Accept friend request', run: () => void social.respond(id, 'accept') },
-        { label: 'Decline friend request', run: () => void social.respond(id, 'decline') },
+        {
+          label: i18n ? i18n.t('profile.social.acceptFriend') : 'Accept friend request',
+          run: () => void social.respond(id, 'accept'),
+        },
+        {
+          label: i18n ? i18n.t('profile.social.declineFriend') : 'Decline friend request',
+          run: () => void social.respond(id, 'decline'),
+        },
       );
     } else if (relationship.outgoingRequestId !== null) {
       const id = relationship.outgoingRequestId;
-      actions.push({ label: 'Cancel friend request', run: () => void social.respond(id, 'cancel') });
+      actions.push({
+        label: i18n ? i18n.t('profile.social.cancelFriend') : 'Cancel friend request',
+        run: () => void social.respond(id, 'cancel'),
+      });
     } else {
-      actions.push({ label: 'Add friend', run: () => void social.sendFriendRequest() });
+      actions.push({
+        label: i18n ? i18n.t('profile.social.addFriend') : 'Add friend',
+        run: () => void social.sendFriendRequest(),
+      });
     }
 
-    actions.push({ label: 'Block', run: () => void social.block(), destructive: true });
+    actions.push({
+      label: i18n ? i18n.t('profile.social.block') : 'Block',
+      run: () => void social.block(),
+      destructive: true,
+    });
   }
 
   const doc = container.ownerDocument;
@@ -118,6 +149,7 @@ interface ProfileMountDependencies {
   readonly getCurrentSession: () => AuthSession | null;
   readonly restorePromise: Promise<AuthSession | null>;
   readonly webauthnAdapter?: WebAuthnAdapter;
+  readonly i18n?: I18nManager;
 }
 
 /** The result of mounting the profile view. */
@@ -134,7 +166,7 @@ interface MountedProfile {
  * wiring ratings, recent games, social relationships, achievements, and passkey management.
  */
 export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
-  const { doc, client, handle, webauthnAdapter, getCurrentSession, restorePromise } = deps;
+  const { doc, client, handle, webauthnAdapter, getCurrentSession, restorePromise, i18n } = deps;
 
   const handleEl = doc.getElementById('profile-handle');
   const ratingsEl = doc.getElementById('profile-ratings');
@@ -181,11 +213,194 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
   let socialBusy = false;
   let passkeysBusy = false;
   let sessionsBusy = false;
+  let lastProfile: UserProfile | null = null;
+  let lastGames: readonly GameSummary[] | null = null;
+  let lastConnections: {
+    followers: readonly SocialPlayer[];
+    following: readonly SocialPlayer[];
+    followerCount: number;
+    followingCount: number;
+    named: boolean;
+  } | null = null;
   let lastRelationship: Relationship | null = null;
   let lastSelfSocial: SelfSocial | null = null;
+  let lastAchievements: { items: readonly PlayerAchievement[]; summary: Parameters<typeof summaryLabel>[0] } | null = null;
+  let lastPasskeys: Parameters<typeof renderPasskeys>[1] | null = null;
+  let lastSessions: Parameters<typeof renderSessions>[1] | null = null;
   let passkeysCtrl: PasskeysController | null = null;
   let passkeysUnbind = () => {};
   let sessionsCtrl: SessionsController | null = null;
+
+  const renderProfileRatings = (p: UserProfile): void => {
+    if (!ratingsEl) return;
+    if (p.ratings.length === 0) {
+      renderEmpty(ratingsEl, {
+        title: i18n ? i18n.t('profile.ratings.emptyTitle') : 'No ratings yet',
+        body: i18n ? i18n.t('profile.ratings.emptyBody') : 'Play a rated game to establish a rating.',
+        inline: true,
+      });
+    } else {
+      ratingsEl.innerHTML = '';
+      for (const r of p.ratings) {
+        const row = doc.createElement('div');
+        row.className = 'rating-row';
+        const labelSpan = doc.createElement('span');
+        labelSpan.textContent = `${getVariantLabel(r.variant, i18n)} · ${getSpeedLabel(r.speed, i18n)}: `;
+        const statsSpan = doc.createElement('span');
+        statsSpan.textContent = `${Math.round(r.rating)} (RD ${Math.round(r.rd)})`;
+        applyLtrIsolation(statsSpan);
+        row.append(labelSpan, statsSpan);
+        ratingsEl.appendChild(row);
+      }
+    }
+  };
+
+  const renderProfileGames = (games: readonly GameSummary[]): void => {
+    if (!gamesEl) return;
+    if (games.length === 0) {
+      renderEmpty(gamesEl, {
+        mark: '♞',
+        title: i18n ? i18n.t('profile.games.emptyTitle') : 'No games yet',
+        body: i18n ? i18n.t('profile.games.emptyBody') : 'Your finished games will show up here.',
+        cta: {
+          label: i18n ? i18n.t('profile.games.findGame') : 'Find a game',
+          href: '/',
+          route: 'lobby',
+        },
+      });
+    } else {
+      gamesEl.innerHTML = '';
+      for (const g of games) {
+        const row = doc.createElement('div');
+        row.className = 'game-row';
+        const variantStr = getVariantLabel(g.variant, i18n);
+        const speedStr = getSpeedLabel(g.speed, i18n);
+        const resultStr = g.result ?? (i18n ? i18n.t('profile.games.ongoing') : 'ongoing');
+        const plyStr = i18n ? i18n.t('profile.games.plyCount', { count: g.plyCount }) : `${g.plyCount} ply`;
+        row.textContent = `${variantStr} · ${speedStr} · ${resultStr} · ${plyStr}`;
+        gamesEl.appendChild(row);
+      }
+    }
+  };
+
+  const renderConnectionsView = (c: {
+    followers: readonly SocialPlayer[];
+    following: readonly SocialPlayer[];
+    followerCount: number;
+    followingCount: number;
+    named: boolean;
+  }): void => {
+    if (followerCountEl) followerCountEl.textContent = String(c.followerCount);
+    if (followingCountEl) followingCountEl.textContent = String(c.followingCount);
+    if (followersEl) {
+      renderPlayerList(
+        followersEl,
+        c.followers,
+        {
+          title: i18n ? i18n.t('profile.social.emptyFollowersTitle') : 'No followers yet',
+          body: i18n ? i18n.t('profile.social.emptyFollowersBody') : 'Followers appear here once someone follows this player.',
+        },
+        socialBusy,
+      );
+    }
+    if (followingEl) {
+      renderPlayerList(
+        followingEl,
+        c.following,
+        {
+          title: i18n ? i18n.t('profile.social.emptyFollowingTitle') : 'Not following anyone yet',
+          body: i18n ? i18n.t('profile.social.emptyFollowingBody') : 'Players this account follows appear here.',
+        },
+        socialBusy,
+      );
+    }
+    if (socialNoteEl) {
+      socialNoteEl.textContent = c.named
+        ? ''
+        : (i18n ? i18n.t('profile.social.noteNoNames') : 'Player names are unavailable while the read layer is disabled; showing partial ids.');
+    }
+  };
+
+  const renderSelfSocialView = (s: SelfSocial): void => {
+    if (socialSelfEl) socialSelfEl.hidden = false;
+    if (incomingEl) {
+      incomingEl.innerHTML = '';
+      if (s.incoming.length === 0) {
+        renderEmpty(incomingEl, {
+          title: i18n ? i18n.t('profile.social.emptyIncomingTitle') : 'No requests waiting',
+          body: i18n ? i18n.t('profile.social.emptyIncomingBody') : 'Friend requests sent to you appear here.',
+          inline: true,
+        });
+      } else {
+        for (const { request, player } of s.incoming) {
+          appendPanelRow(
+            incomingEl,
+            player.handle,
+            [
+              {
+                label: i18n ? i18n.t('profile.social.accept') : 'Accept',
+                run: () => void social.respond(request.id, 'accept'),
+              },
+              {
+                label: i18n ? i18n.t('profile.social.decline') : 'Decline',
+                run: () => void social.respond(request.id, 'decline'),
+              },
+            ],
+            socialBusy,
+          );
+        }
+      }
+    }
+    if (outgoingEl) {
+      outgoingEl.innerHTML = '';
+      if (s.outgoing.length === 0) {
+        renderEmpty(outgoingEl, {
+          title: i18n ? i18n.t('profile.social.emptyOutgoingTitle') : 'Nothing pending',
+          body: i18n ? i18n.t('profile.social.emptyOutgoingBody') : 'Requests you send appear here until they are answered.',
+          inline: true,
+        });
+      } else {
+        for (const { request, player } of s.outgoing) {
+          appendPanelRow(
+            outgoingEl,
+            player.handle,
+            [{
+              label: i18n ? i18n.t('profile.social.cancel') : 'Cancel',
+              run: () => void social.respond(request.id, 'cancel'),
+            }],
+            socialBusy,
+          );
+        }
+      }
+    }
+    if (friendCountEl) friendCountEl.textContent = String(s.friends.length);
+    if (friendsEl) {
+      renderPlayerList(
+        friendsEl,
+        s.friends,
+        {
+          title: i18n ? i18n.t('profile.social.emptyFriendsTitle') : 'No friends yet',
+          body: i18n ? i18n.t('profile.social.emptyFriendsBody') : 'Accepted friend requests appear here.',
+        },
+        socialBusy,
+      );
+    }
+    if (blockedEl) {
+      renderPlayerList(
+        blockedEl,
+        s.blocked,
+        {
+          title: i18n ? i18n.t('profile.social.emptyBlockedTitle') : 'No blocked players',
+          body: i18n ? i18n.t('profile.social.emptyBlockedBody') : 'Players you block appear here.',
+        },
+        socialBusy,
+        (player) => [{
+          label: i18n ? i18n.t('profile.social.unblock') : 'Unblock',
+          run: () => void social.unblock(player.id),
+        }],
+      );
+    }
+  };
 
   if (!handle) {
     passkeysCtrl = new PasskeysController({
@@ -193,6 +408,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
       ...(webauthnAdapter !== undefined ? { webauthnAdapter } : {}),
       callbacks: {
         onPasskeys: (items) => {
+          lastPasskeys = items;
           if (passkeysCountEl) passkeysCountEl.textContent = items.length > 0 ? `(${items.length})` : '';
           if (passkeysListEl) {
             renderPasskeys(
@@ -200,6 +416,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
               items,
               (id) => void passkeysCtrl?.deletePasskey(id),
               passkeysBusy,
+              i18n,
             );
           }
         },
@@ -238,6 +455,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
       client,
       callbacks: {
         onSessions: (items) => {
+          lastSessions = items;
           const active = activeSessions(items, Date.now());
           if (sessionsCountEl) sessionsCountEl.textContent = active.length > 0 ? `(${active.length})` : '';
           if (sessionsListEl) {
@@ -246,6 +464,8 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
               items,
               (id) => void sessionsCtrl?.revokeSession(id),
               sessionsBusy,
+              Date.now(),
+              i18n,
             );
           }
         },
@@ -272,104 +492,23 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     client,
     callbacks: {
       onConnections: (c) => {
-        if (followerCountEl) followerCountEl.textContent = String(c.followerCount);
-        if (followingCountEl) followingCountEl.textContent = String(c.followingCount);
-        if (followersEl) {
-          renderPlayerList(
-            followersEl,
-            c.followers,
-            { title: 'No followers yet', body: 'Followers appear here once someone follows this player.' },
-            socialBusy,
-          );
-        }
-        if (followingEl) {
-          renderPlayerList(
-            followingEl,
-            c.following,
-            { title: 'Not following anyone yet', body: 'Players this account follows appear here.' },
-            socialBusy,
-          );
-        }
-        if (socialNoteEl) {
-          // Names come only from the read layer. Saying so beats showing
-          // truncated ids with no explanation.
-          socialNoteEl.textContent = c.named
-            ? ''
-            : 'Player names are unavailable while the read layer is disabled; showing partial ids.';
-        }
+        lastConnections = c;
+        renderConnectionsView(c);
       },
       onRelationship: (r) => {
         lastRelationship = r;
-        if (socialActionsEl) renderSocialActions(socialActionsEl, r, social, socialBusy, getOpenMessageFn());
+        if (socialActionsEl) renderSocialActions(socialActionsEl, r, social, socialBusy, i18n, getOpenMessageFn());
       },
       onSelfSocial: (s) => {
         lastSelfSocial = s;
         if (socialSelfEl) socialSelfEl.hidden = s === null;
         if (s === null) return;
-        if (incomingEl) {
-          incomingEl.innerHTML = '';
-          if (s.incoming.length === 0) {
-            renderEmpty(incomingEl, {
-              title: 'No requests waiting',
-              body: 'Friend requests sent to you appear here.',
-              inline: true,
-            });
-          } else {
-            for (const { request, player } of s.incoming) {
-              appendPanelRow(
-                incomingEl,
-                player.handle,
-                [
-                  { label: 'Accept', run: () => void social.respond(request.id, 'accept') },
-                  { label: 'Decline', run: () => void social.respond(request.id, 'decline') },
-                ],
-                socialBusy,
-              );
-            }
-          }
-        }
-        if (outgoingEl) {
-          outgoingEl.innerHTML = '';
-          if (s.outgoing.length === 0) {
-            renderEmpty(outgoingEl, {
-              title: 'Nothing pending',
-              body: 'Requests you send appear here until they are answered.',
-              inline: true,
-            });
-          } else {
-            for (const { request, player } of s.outgoing) {
-              appendPanelRow(
-                outgoingEl,
-                player.handle,
-                [{ label: 'Cancel', run: () => void social.respond(request.id, 'cancel') }],
-                socialBusy,
-              );
-            }
-          }
-        }
-        if (friendCountEl) friendCountEl.textContent = String(s.friends.length);
-        if (friendsEl) {
-          renderPlayerList(
-            friendsEl,
-            s.friends,
-            { title: 'No friends yet', body: 'Accepted friend requests appear here.' },
-            socialBusy,
-          );
-        }
-        if (blockedEl) {
-          renderPlayerList(
-            blockedEl,
-            s.blocked,
-            { title: 'No blocked players', body: 'Players you block appear here.' },
-            socialBusy,
-            (player) => [{ label: 'Unblock', run: () => void social.unblock(player.id) }],
-          );
-        }
+        renderSelfSocialView(s);
       },
       onBusy: (busy) => {
         socialBusy = busy;
         // Re-render only what carries controls, so a click cannot land twice.
-        if (socialActionsEl) renderSocialActions(socialActionsEl, lastRelationship, social, busy, getOpenMessageFn());
+        if (socialActionsEl) renderSocialActions(socialActionsEl, lastRelationship, social, busy, i18n, getOpenMessageFn());
         if (lastSelfSocial !== null && socialSelfEl && !socialSelfEl.hidden) {
           for (const el of [incomingEl, outgoingEl, blockedEl]) {
             if (!el) continue;
@@ -417,8 +556,9 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     client,
     callbacks: {
       onAchievements: (items, summary) => {
-        if (achievementsCountEl) achievementsCountEl.textContent = summaryLabel(summary, items);
-        if (achievementsListEl) renderAchievements(achievementsListEl, items);
+        lastAchievements = { items, summary };
+        if (achievementsCountEl) achievementsCountEl.textContent = summaryLabel(summary, items, i18n);
+        if (achievementsListEl) renderAchievements(achievementsListEl, items, i18n);
         if (achievementsErrorEl) achievementsErrorEl.textContent = '';
         if (achievementsEl) achievementsEl.hidden = false;
       },
@@ -442,10 +582,37 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     void achievements.load(playerId);
   };
 
+  const unsubLocale = i18n?.onLocaleChange(() => {
+    if (lastProfile) renderProfileRatings(lastProfile);
+    if (lastGames) renderProfileGames(lastGames);
+    if (lastConnections) renderConnectionsView(lastConnections);
+    if (lastRelationship && socialActionsEl) {
+      renderSocialActions(socialActionsEl, lastRelationship, social, socialBusy, i18n, getOpenMessageFn());
+    }
+    if (lastSelfSocial) renderSelfSocialView(lastSelfSocial);
+    if (lastAchievements) {
+      if (achievementsCountEl) achievementsCountEl.textContent = summaryLabel(lastAchievements.summary, lastAchievements.items, i18n);
+      if (achievementsListEl) renderAchievements(achievementsListEl, lastAchievements.items, i18n);
+    }
+    if (lastPasskeys && passkeysListEl) {
+      renderPasskeys(passkeysListEl, lastPasskeys, (id) => void passkeysCtrl?.deletePasskey(id), passkeysBusy, i18n);
+    }
+    if (lastSessions && sessionsListEl) {
+      renderSessions(sessionsListEl, lastSessions, (id) => void sessionsCtrl?.revokeSession(id), sessionsBusy, Date.now(), i18n);
+    }
+    if (!handle && getCurrentSession() === null && profileErrorEl && profileErrorEl.textContent) {
+      profileErrorEl.textContent = i18n ? i18n.t('profile.signInToView') : 'Sign in to view your profile.';
+    }
+  });
+
   const profile = new ProfileController({
     client,
+    onDispose: () => {
+      unsubLocale?.();
+    },
     callbacks: {
       onProfile: (p) => {
+        lastProfile = p;
         if (handleEl) {
           handleEl.textContent = p.user.handle;
           applyAutoDirection(handleEl);
@@ -454,44 +621,11 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
         // Keyed by id, not handle: both achievements routes take a player id, and this is the
         // first point on the page where one is known.
         loadAchievementsFor(p.user.id);
-        if (ratingsEl) {
-          if (p.ratings.length === 0) {
-            renderEmpty(ratingsEl, {
-              title: 'No ratings yet',
-              body: 'Play a rated game to establish a rating.',
-              inline: true,
-            });
-          } else {
-            ratingsEl.innerHTML = '';
-            for (const r of p.ratings) {
-              const row = doc.createElement('div');
-              row.className = 'rating-row';
-              row.textContent = `${VARIANT_LABELS[r.variant] ?? r.variant} · ${SPEED_LABELS[r.speed] ?? r.speed}: ${Math.round(r.rating)} (RD ${Math.round(r.rd)})`;
-              applyLtrIsolation(row);
-              ratingsEl.appendChild(row);
-            }
-          }
-        }
+        renderProfileRatings(p);
       },
       onGames: (games) => {
-        if (gamesEl) {
-          if (games.length === 0) {
-            renderEmpty(gamesEl, {
-              mark: '♞',
-              title: 'No games yet',
-              body: 'Your finished games will show up here.',
-              cta: { label: 'Find a game', href: '/', route: 'lobby' },
-            });
-          } else {
-            gamesEl.innerHTML = '';
-            for (const g of games) {
-              const row = doc.createElement('div');
-              row.className = 'game-row';
-              row.textContent = `${g.variant} · ${g.speed} · ${g.result ?? 'ongoing'} · ${g.plyCount} ply`;
-              gamesEl.appendChild(row);
-            }
-          }
-        }
+        lastGames = games;
+        renderProfileGames(games);
       },
       onError: (msg) => {
         if (profileErrorEl) profileErrorEl.textContent = msg;
@@ -517,6 +651,13 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     // a user signs in while already on this route.
     let loadedUserId: string | null = null;
     const clearSelfProfile = (): void => {
+      lastProfile = null;
+      lastGames = null;
+      lastConnections = null;
+      lastSelfSocial = null;
+      lastAchievements = null;
+      lastPasskeys = null;
+      lastSessions = null;
       if (handleEl) handleEl.textContent = '';
       if (ratingsEl) ratingsEl.innerHTML = '';
       if (gamesEl) gamesEl.innerHTML = '';
@@ -556,7 +697,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
         loadedUserId = null;
         profile.reset();
         clearSelfProfile();
-        if (profileErrorEl) profileErrorEl.textContent = 'Sign in to view your profile.';
+        if (profileErrorEl) profileErrorEl.textContent = i18n ? i18n.t('profile.signInToView') : 'Sign in to view your profile.';
         return;
       }
 

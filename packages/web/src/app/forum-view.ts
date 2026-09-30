@@ -7,19 +7,22 @@ import { renderEmpty } from './render-helpers.js';
 import { shortId } from '../api/graphql.js';
 import { postDisplayBody, sortThreads, threadDisplayTitle } from './forum-helpers.js';
 import type { ForumPost, ForumThread, SocialPlayer } from '../api/models.js';
+import { applyAutoDirection } from '../i18n/bidi.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 export function renderThreadList(
   container: HTMLElement,
   slug: string,
   threads: readonly ForumThread[],
   names: ReadonlyMap<string, SocialPlayer>,
+  i18n?: I18nManager,
 ): void {
   container.replaceChildren();
   if (threads.length === 0) {
     renderEmpty(container, {
       mark: '♞',
-      title: 'No threads yet',
-      body: 'Start the first conversation in this team.',
+      title: i18n ? i18n.t('community.forum.emptyThreadsTitle') : 'No threads yet',
+      body: i18n ? i18n.t('community.forum.emptyThreadsBody') : 'Start the first conversation in this team.',
     });
     return;
   }
@@ -35,18 +38,21 @@ export function renderThreadList(
         'data-route': 'thread',
         class: 'row-link',
       },
-      threadDisplayTitle(thread),
+      threadDisplayTitle(thread, i18n),
     );
+    applyAutoDirection(link);
 
     // `.panel-row` is space-between, so the row takes exactly two children: what identifies the
     // thread leads, and its state trails.
-    const leading: (Node | string)[] = [link, el(doc, 'span', { class: 'count' }, author)];
+    const authorEl = el(doc, 'span', { class: 'count' }, author);
+    applyAutoDirection(authorEl);
+    const leading: (Node | string)[] = [link, authorEl];
     const row = el(doc, 'div', { class: 'panel-row' }, el(doc, 'span', { class: 'row-main' }, ...leading));
 
     // Only states that change what you can do earn a tag; "unlocked" and "unpinned" are the norm.
     const tags: string[] = [];
-    if (thread.pinned) tags.push('pinned');
-    if (thread.locked) tags.push('locked');
+    if (thread.pinned) tags.push(i18n ? i18n.t('community.forum.tagPinned') : 'pinned');
+    if (thread.locked) tags.push(i18n ? i18n.t('community.forum.tagLocked') : 'locked');
     if (tags.length > 0) {
       row.appendChild(el(doc, 'span', { class: 'count' }, tags.join(' · ')));
     }
@@ -60,24 +66,32 @@ export function renderPosts(
   posts: readonly ForumPost[],
   names: ReadonlyMap<string, SocialPlayer>,
   viewerId: string | null,
+  i18n?: I18nManager,
 ): void {
   container.replaceChildren();
   if (posts.length === 0) {
-    renderEmpty(container, { title: 'No posts', body: 'This thread has no posts yet.', inline: true });
+    renderEmpty(container, {
+      title: i18n ? i18n.t('community.forum.emptyPostsTitle') : 'No posts',
+      body: i18n ? i18n.t('community.forum.emptyPostsBody') : 'This thread has no posts yet.',
+      inline: true,
+    });
     return;
   }
 
   const doc = container.ownerDocument;
   for (const post of posts) {
     const author = names.get(post.authorId)?.handle ?? shortId(post.authorId);
+    const senderEl = el(doc, 'span', { class: 'message-sender' }, author);
+    applyAutoDirection(senderEl);
+
     const meta: (Node | string)[] = [
-      el(doc, 'span', { class: 'message-sender' }, author),
-      el(doc, 'span', { class: 'count' }, formatPostTime(post.createdAt)),
+      senderEl,
+      el(doc, 'span', { class: 'count' }, formatPostTime(post.createdAt, i18n?.locale)),
     ];
     // An edit is a fact about the post that changes how to read it; it is not an emphasis, so it
     // sits in the same muted meta line rather than getting a treatment of its own.
     if (post.editedAt !== null && post.deletedAt === null) {
-      meta.push(el(doc, 'span', { class: 'count' }, 'edited'));
+      meta.push(el(doc, 'span', { class: 'count' }, i18n ? i18n.t('community.forum.tagEdited') : 'edited'));
     }
 
     const isTombstone = post.deletedAt !== null;
@@ -85,8 +99,9 @@ export function renderPosts(
       doc,
       'div',
       { class: isTombstone ? 'message-body message-tombstone' : 'message-body' },
-      postDisplayBody(post),
+      postDisplayBody(post, i18n),
     );
+    applyAutoDirection(bodyEl);
 
     const own = viewerId !== null && post.authorId === viewerId;
     container.appendChild(
@@ -101,11 +116,11 @@ export function renderPosts(
   }
 }
 
-function formatPostTime(iso: string): string {
+function formatPostTime(iso: string, locale?: string): string {
   try {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
-    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleString(locale ?? [], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   } catch {
     return iso;
   }

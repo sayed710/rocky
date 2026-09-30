@@ -7,6 +7,10 @@ import { LobbyController } from './lobby-controller.js';
 import { PlayBotDialog } from './play-bot-dialog.js';
 import { formatTimeControl, renderEmpty } from './render-helpers.js';
 
+import { applyAutoDirection } from '../i18n/bidi.js';
+import { getSpeedLabel, getVariantLabel } from './variant-labels.js';
+import type { I18n } from '../i18n/manager.js';
+
 /**
  * Render a seek list into a DOM element. Each seek is a row with variant,
  * speed, time control, opponent handle (derived directly from seek.creatorHandle
@@ -18,12 +22,14 @@ import { formatTimeControl, renderEmpty } from './render-helpers.js';
  * @param seeks - List of active open seeks to render
  * @param currentUserId - ID of currently signed-in user or null if anonymous
  * @param names - Optional fallback map of player identity resolved via read layer
+ * @param i18n - Optional internationalization manager
  */
 export function renderSeeks(
   container: HTMLElement,
   seeks: readonly SeekView[],
   currentUserId: string | null,
   names?: ReadonlyMap<string, SocialPlayer>,
+  i18n?: I18n,
 ): void {
   const doc = container.ownerDocument ?? document;
   const active = doc.activeElement;
@@ -52,8 +58,8 @@ export function renderSeeks(
     container.setAttribute('tabindex', '-1');
     renderEmpty(container, {
       mark: '♟',
-      title: 'No open seeks right now',
-      body: 'Create a game above — the first player to accept joins you.',
+      title: i18n ? i18n.t('lobby.emptySeeksTitle') : 'No open seeks right now',
+      body: i18n ? i18n.t('lobby.emptySeeksBody') : 'Create a game above — the first player to accept joins you.',
     });
     if (focusedControl) {
       container.focus();
@@ -71,8 +77,11 @@ export function renderSeeks(
 
     const info = doc.createElement('span');
     info.className = 'seek-info';
-    const tc = formatTimeControl(seek.timeControl);
-    info.textContent = `${seek.variant} · ${seek.speed} · ${tc}${seek.rated ? ' · rated' : ''}`;
+    const tc = formatTimeControl(seek.timeControl, i18n);
+    const variantStr = i18n ? getVariantLabel(seek.variant, i18n) : seek.variant;
+    const speedStr = i18n ? getSpeedLabel(seek.speed, i18n) : seek.speed;
+    const ratedStr = seek.rated ? (i18n ? ` · ${i18n.t('lobby.rated')}` : ' · rated') : '';
+    info.textContent = `${variantStr} · ${speedStr} · ${tc}${ratedStr}`;
 
     if (owned) {
       // Your own open seek is live and waiting to be accepted — say so, and
@@ -86,16 +95,16 @@ export function renderSeeks(
       const dot = doc.createElement('span');
       dot.className = 'seek-dot';
       dot.setAttribute('aria-hidden', 'true');
-      waiting.append(dot, 'Waiting for an opponent…');
+      waiting.append(dot, i18n ? i18n.t('lobby.waitingOpponent') : 'Waiting for an opponent…');
       main.appendChild(waiting);
       row.appendChild(main);
 
       const cancelBtn = doc.createElement('button');
       cancelBtn.type = 'button';
       cancelBtn.className = 'seek-cancel';
-      cancelBtn.textContent = 'Cancel';
+      cancelBtn.textContent = i18n ? i18n.t('lobby.cancel') : 'Cancel';
       cancelBtn.dataset.seekId = seek.id;
-      cancelBtn.setAttribute('aria-label', 'Cancel your seek');
+      cancelBtn.setAttribute('aria-label', i18n ? i18n.t('lobby.cancelSeekAria') : 'Cancel your seek');
       row.appendChild(cancelBtn);
     } else {
       const main = doc.createElement('div');
@@ -114,6 +123,7 @@ export function renderSeeks(
         link.setAttribute('data-route', 'profile');
         link.dataset.seekId = seek.id;
         link.textContent = opponentHandle;
+        applyAutoDirection(link);
         opponentEl.appendChild(link);
       } else {
         opponentEl.textContent = shortId(seek.creatorId);
@@ -122,9 +132,9 @@ export function renderSeeks(
 
       const detailParts: string[] = [];
       if (seek.color === 'white') {
-        detailParts.push('plays White');
+        detailParts.push(i18n ? i18n.t('lobby.playsWhite') : 'plays White');
       } else if (seek.color === 'black') {
-        detailParts.push('plays Black');
+        detailParts.push(i18n ? i18n.t('lobby.playsBlack') : 'plays Black');
       }
 
       if (seek.minRating !== null && seek.maxRating !== null) {
@@ -147,12 +157,12 @@ export function renderSeeks(
       const acceptBtn = doc.createElement('button');
       acceptBtn.type = 'button';
       acceptBtn.className = 'seek-accept button primary';
-      acceptBtn.textContent = 'Play';
+      acceptBtn.textContent = i18n ? i18n.t('lobby.play') : 'Play';
       acceptBtn.dataset.seekId = seek.id;
-      acceptBtn.setAttribute(
-        'aria-label',
-        opponentHandle ? `Play — accept seek from ${opponentHandle}` : 'Play — accept seek',
-      );
+      const acceptAria = opponentHandle
+        ? (i18n ? i18n.t('lobby.acceptSeekWith', { handle: opponentHandle }) : `Play — accept seek from ${opponentHandle}`)
+        : (i18n ? i18n.t('lobby.acceptSeek') : 'Play — accept seek');
+      acceptBtn.setAttribute('aria-label', acceptAria);
       row.appendChild(acceptBtn);
     }
 
@@ -177,15 +187,16 @@ export function renderSeeks(
 }
 
 /** Dependencies required to mount the lobby view. */
-interface LobbyMountDependencies {
+export interface LobbyMountDependencies {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly isAuthenticated: () => boolean;
   readonly storage?: KeyValueStorage;
+  readonly i18n?: I18n;
 }
 
 /** The result of mounting the lobby view. */
-interface MountedLobby {
+export interface MountedLobby {
   readonly lobby: LobbyController;
   readonly setCreateGameAuthenticated: (authenticated: boolean) => void;
   readonly setPlayBotAuthenticated: (authenticated: boolean) => void;
@@ -199,7 +210,7 @@ interface MountedLobby {
  * and delegated click handlers for seek cancellation and acceptance.
  */
 export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
-  const { doc, client, isAuthenticated, storage } = deps;
+  const { doc, client, isAuthenticated, storage, i18n } = deps;
   const seekListEl = doc.getElementById('seek-list');
   const createGameEl = doc.getElementById('create-game');
   const playBotMountEl = doc.getElementById('play-bot-mount');
@@ -223,13 +234,27 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
     }
   }
 
+  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (routeActive && seekListEl) {
+      renderSeeks(
+        seekListEl,
+        renderedSeeks,
+        client.session.current?.user.id ?? null,
+        renderedNames,
+        i18n,
+      );
+    }
+  });
+
   const lobby = new LobbyController({
     client,
     callbacks: {
       onSeeks: (seeks, names) => {
         renderedSeeks = seeks;
         renderedNames = names;
-        if (seekListEl) renderSeeks(seekListEl, seeks, client.session.current?.user.id ?? null, names);
+        if (seekListEl) {
+          renderSeeks(seekListEl, seeks, client.session.current?.user.id ?? null, names, i18n);
+        }
       },
       onCreatePending: (pending) => {
         panel?.setPending(pending);
@@ -245,6 +270,8 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
     onDispose: () => {
       routeActive = false;
       seekListEl?.removeEventListener('click', handleSeekAction);
+      panel?.dispose();
+      unsubscribeLocale?.();
     },
   });
 
@@ -254,6 +281,7 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
       doc,
       mount: createGameEl,
       initialAuthenticated: isAuthenticated(),
+      i18n,
       ...(storage !== undefined
         ? { storage }
         : typeof localStorage !== 'undefined'
@@ -281,6 +309,7 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
       doc,
       mount: playBotMountEl,
       initialAuthenticated: isAuthenticated(),
+      i18n,
       callbacks: {
         onSubmit: async (params) => {
           const result = await lobby.createBotGame({
@@ -324,6 +353,7 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
         renderedSeeks,
         client.session.current?.user.id ?? null,
         renderedNames,
+        i18n,
       );
     }
   }

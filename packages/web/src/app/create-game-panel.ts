@@ -14,6 +14,7 @@ import {
   type TimeControl,
   type Variant,
 } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 import type { KeyValueStorage } from '../net/session.js';
 import {
   CREATE_GAME_PRESETS,
@@ -103,9 +104,10 @@ export interface CreateGamePanelOptions {
   readonly doc: Document;
   readonly mount: HTMLElement;
   readonly callbacks: CreateGamePanelCallbacks;
-  readonly initialAuthenticated?: boolean;
+  readonly initialAuthenticated?: boolean | undefined;
   /** Persists the last successful settings. */
-  readonly storage?: KeyValueStorage;
+  readonly storage?: KeyValueStorage | undefined;
+  readonly i18n?: I18nManager | undefined;
 }
 
 export class CreateGamePanel {
@@ -127,6 +129,8 @@ export class CreateGamePanel {
   private readonly moreSummary: HTMLSpanElement;
   private readonly advancedRegion: HTMLDivElement;
   private readonly storage: KeyValueStorage | undefined;
+  private readonly i18n?: I18nManager | undefined;
+  private readonly unsubscribeLocale?: (() => void) | undefined;
 
   private expanded = false;
   private pending = false;
@@ -137,12 +141,13 @@ export class CreateGamePanel {
     this.doc = opts.doc;
     this.callbacks = opts.callbacks;
     this.storage = opts.storage;
+    this.i18n = opts.i18n;
     const prefs = this.readPrefs();
     this.trigger = this.createTrigger();
     this.submitBtn = el(this.doc, 'button', { type: 'submit', class: 'cg-submit' });
-    this.submitBtn.textContent = 'Create seek';
+    this.submitBtn.textContent = this.i18n?.t('lobby.createSeekSubmit') ?? 'Create seek';
     this.cancelBtn = el(this.doc, 'button', { type: 'button', class: 'cg-cancel' });
-    this.cancelBtn.textContent = 'Cancel';
+    this.cancelBtn.textContent = this.i18n?.t('common.cancel') ?? 'Cancel';
     this.customMinutes = this.numberInput(
       'cg-minutes',
       {
@@ -183,7 +188,7 @@ export class CreateGamePanel {
     this.form = el(this.doc, 'form', {
       id: 'create-game-form',
       class: 'cg-form',
-      'aria-label': 'Create a game',
+      'aria-label': this.i18n?.t('lobby.createGame') ?? 'Create a game',
       novalidate: '',
       hidden: '',
     });
@@ -195,7 +200,7 @@ export class CreateGamePanel {
       'aria-controls': ADVANCED_REGION_ID,
     });
     this.moreToggle.append(
-      el(this.doc, 'span', { class: 'cg-more-label' }, 'More options'),
+      el(this.doc, 'span', { class: 'cg-more-label' }, this.i18n?.t('lobby.moreOptions') ?? 'More options'),
       this.moreSummary,
     );
     this.advancedRegion = el(
@@ -220,6 +225,19 @@ export class CreateGamePanel {
     this.setAdvancedOpen(this.hasAdvancedState());
     opts.mount.replaceChildren(this.trigger, this.form);
     this.setAuthenticated(opts.initialAuthenticated ?? false);
+
+    this.unsubscribeLocale = this.i18n?.onLocaleChange(() => {
+      this.trigger.textContent = this.i18n!.t('lobby.createGame');
+      this.form.setAttribute('aria-label', this.i18n!.t('lobby.createGame'));
+      this.submitBtn.textContent = this.pending
+        ? (this.i18n!.t('common.loading') ?? 'Creating…')
+        : this.i18n!.t('lobby.createSeekSubmit');
+      this.cancelBtn.textContent = this.i18n!.t('common.cancel');
+    });
+  }
+
+  dispose(): void {
+    this.unsubscribeLocale?.();
   }
 
   /** Build the collapsed entry point that owns the form disclosure state. */
@@ -231,7 +249,7 @@ export class CreateGamePanel {
       'aria-expanded': 'false',
       'aria-controls': 'create-game-form',
     });
-    trigger.textContent = 'Create a game';
+    trigger.textContent = this.i18n?.t('lobby.createGame') ?? 'Create a game';
     return trigger;
   }
 
@@ -711,7 +729,7 @@ export class CreateGamePanel {
   /** Gate the entire flow and collapse it immediately when authentication is lost. */
   setAuthenticated(authenticated: boolean): void {
     this.trigger.disabled = !authenticated;
-    this.trigger.title = authenticated ? '' : 'Sign in to create a seek';
+    this.trigger.title = authenticated ? '' : (this.i18n?.t('lobby.signInToCreate') ?? 'Sign in to create a seek');
     if (!authenticated && this.expanded) this.setExpanded(false);
   }
 
@@ -730,7 +748,9 @@ export class CreateGamePanel {
       }
     }
     this.syncTimeSelection(false);
-    this.submitBtn.textContent = pending ? 'Creating…' : 'Create seek';
+    this.submitBtn.textContent = pending
+      ? (this.i18n?.t('common.loading') ?? 'Creating…')
+      : (this.i18n?.t('lobby.createSeekSubmit') ?? 'Create seek');
   }
 
   /** Synchronize custom-field visibility and a stable summary region. */

@@ -6,6 +6,8 @@ import { el } from './dom.js';
 import { renderEmpty } from './render-helpers.js';
 import { shortId } from '../api/graphql.js';
 import { getOtherParticipantId, getMessageDisplayBody, truncatePreview } from './messages-helpers.js';
+import { applyAutoDirection } from '../i18n/bidi.js';
+import type { I18n } from '../i18n/manager.js';
 import type { ConversationSummary, MessageView, SocialPlayer } from '../api/models.js';
 
 export function renderInbox(
@@ -13,13 +15,14 @@ export function renderInbox(
   items: readonly ConversationSummary[],
   names: ReadonlyMap<string, SocialPlayer>,
   currentUserId: string | null,
+  i18n?: I18n,
 ): void {
   container.innerHTML = '';
   if (items.length === 0) {
     renderEmpty(container, {
       mark: '💬',
-      title: 'No messages yet',
-      body: 'Start a conversation from a user profile.',
+      title: i18n ? i18n.t('community.messages.emptyInboxTitle') : 'No messages yet',
+      body: i18n ? i18n.t('community.messages.emptyInboxBody') : 'Start a conversation from a user profile.',
     });
     return;
   }
@@ -37,10 +40,11 @@ export function renderInbox(
       { href: `/messages/${encodeURIComponent(item.conversation.id)}`, class: 'row-link' },
       handle,
     );
+    applyAutoDirection(nameLink);
 
     let previewText = '';
     if (item.lastMessage) {
-      const displayBody = getMessageDisplayBody(item.lastMessage);
+      const displayBody = getMessageDisplayBody(item.lastMessage, i18n);
       previewText = truncatePreview(displayBody, 40);
     }
 
@@ -50,11 +54,17 @@ export function renderInbox(
 
     const detailsText = previewText ? `${previewText} · ${timeStr}` : timeStr;
     const infoSpan = el(doc, 'span', { class: 'count' }, detailsText);
+    if (previewText) {
+      applyAutoDirection(infoSpan);
+    }
 
     const rowChildren: (Node | string)[] = [nameLink, infoSpan];
 
     if (item.unreadCount > 0) {
-      const badge = el(doc, 'span', { class: 'count' }, ` (${item.unreadCount} unread)`);
+      const badgeText = i18n
+        ? i18n.t('community.messages.unreadBadge', { count: item.unreadCount })
+        : ` (${item.unreadCount} unread)`;
+      const badge = el(doc, 'span', { class: 'count' }, badgeText);
       rowChildren.push(badge);
     }
 
@@ -68,12 +78,13 @@ export function renderThread(
   messages: readonly MessageView[],
   names: ReadonlyMap<string, SocialPlayer>,
   currentUserId: string | null,
+  i18n?: I18n,
 ): void {
   container.innerHTML = '';
   if (messages.length === 0) {
     renderEmpty(container, {
-      title: 'No messages in this thread',
-      body: 'Type a message below to start chatting.',
+      title: i18n ? i18n.t('community.messages.emptyThreadTitle') : 'No messages in this thread',
+      body: i18n ? i18n.t('community.messages.emptyThreadBody') : 'Type a message below to start chatting.',
       inline: true,
     });
     return;
@@ -86,13 +97,15 @@ export function renderThread(
     const timeStr = formatTimestamp(m.sentAt);
 
     const senderSpan = el(doc, 'span', { class: 'message-sender' }, senderHandle);
+    applyAutoDirection(senderSpan);
     const timeSpan = el(doc, 'span', { class: 'count' }, timeStr);
     const header = el(doc, 'div', { class: 'message-header' }, senderSpan, timeSpan);
 
-    const displayBody = getMessageDisplayBody(m);
+    const displayBody = getMessageDisplayBody(m, i18n);
     const isTombstone = m.deletedAt !== null;
     const bodyClass = isTombstone ? 'message-body message-tombstone' : 'message-body';
     const bodyEl = el(doc, 'div', { class: bodyClass }, displayBody);
+    applyAutoDirection(bodyEl);
 
     const messageClass = isOwn ? 'message-item own' : 'message-item';
     const itemEl = el(doc, 'div', { class: messageClass }, header, bodyEl);

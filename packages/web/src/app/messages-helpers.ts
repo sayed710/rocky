@@ -2,6 +2,7 @@
  * Pure helpers for the Direct Messaging UI.
  */
 import type { ConversationView, MessageView } from '../api/models.js';
+import type { I18n } from '../i18n/manager.js';
 
 /**
  * Derive the other participant's user ID from a ConversationView and the caller's user ID.
@@ -15,9 +16,9 @@ export function getOtherParticipantId(conv: ConversationView, currentUserId: str
  * Get the text to display for a message body.
  * If the message has been tombstoned (deletedAt !== null), returns placeholder text.
  */
-export function getMessageDisplayBody(message: MessageView): string {
+export function getMessageDisplayBody(message: MessageView, i18n?: I18n): string {
   if (message.deletedAt !== null) {
-    return '[Message deleted]';
+    return i18n ? i18n.t('community.messages.deleted') : '[Message deleted]';
   }
   return message.body;
 }

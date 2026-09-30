@@ -8,6 +8,8 @@ import type {
   LessonView,
   StepView,
 } from '../api/models.js';
+import { applyAutoDirection } from '../i18n/bidi.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { mountBoard } from './board.js';
 import { difficultyLabel, courseProgressLabel, stepStatusLabel } from './learning-helpers.js';
 import { renderEmpty } from './render-helpers.js';
@@ -15,13 +17,17 @@ import { renderEmpty } from './render-helpers.js';
 /**
  * Render the list of published courses.
  */
-export function renderCourseList(container: HTMLElement, courses: readonly CourseView[]): void {
+export function renderCourseList(
+  container: HTMLElement,
+  courses: readonly CourseView[],
+  i18n?: I18nManager,
+): void {
   container.innerHTML = '';
   if (courses.length === 0) {
     renderEmpty(container, {
       mark: '♟',
-      title: 'No courses available',
-      body: 'Check back later for new learning content.',
+      title: i18n ? i18n.t('learning.emptyCoursesTitle') : 'No courses available',
+      body: i18n ? i18n.t('learning.emptyCoursesBody') : 'Check back later for new learning content.',
       inline: true,
     });
     return;
@@ -38,19 +44,21 @@ export function renderCourseList(container: HTMLElement, courses: readonly Cours
     titleLink.href = `/courses/${encodeURIComponent(course.slug)}`;
     titleLink.dataset.route = 'course';
     titleLink.textContent = course.title;
+    applyAutoDirection(titleLink);
     main.appendChild(titleLink);
 
     if (course.description) {
       const desc = document.createElement('span');
       desc.className = 'count';
       desc.textContent = course.description;
+      applyAutoDirection(desc);
       main.appendChild(desc);
     }
     row.appendChild(main);
 
     const difficulty = document.createElement('span');
     difficulty.className = 'count';
-    difficulty.textContent = difficultyLabel(course.difficulty);
+    difficulty.textContent = difficultyLabel(course.difficulty, i18n);
     row.appendChild(difficulty);
 
     container.appendChild(row);
@@ -65,23 +73,30 @@ export function renderCourseDetail(
   course: CourseView,
   lessons: readonly LessonView[],
   progress: CourseProgressSummaryView | null,
+  i18n?: I18nManager,
 ): void {
   const titleEl = container.querySelector('#course-title');
   const descEl = container.querySelector('#course-description');
   const progressEl = container.querySelector('#course-progress');
   const listEl = container.querySelector('#lesson-list');
 
-  if (titleEl) titleEl.textContent = course.title;
-  if (descEl) descEl.textContent = course.description;
-  if (progressEl) progressEl.textContent = courseProgressLabel(progress);
+  if (titleEl) {
+    titleEl.textContent = course.title;
+    if (titleEl instanceof HTMLElement) applyAutoDirection(titleEl);
+  }
+  if (descEl) {
+    descEl.textContent = course.description;
+    if (descEl instanceof HTMLElement) applyAutoDirection(descEl);
+  }
+  if (progressEl) progressEl.textContent = courseProgressLabel(progress, i18n);
 
   if (!listEl) return;
   listEl.innerHTML = '';
 
   if (lessons.length === 0) {
     renderEmpty(listEl as HTMLElement, {
-      title: 'No lessons in this course',
-      body: 'This course has no lessons yet.',
+      title: i18n ? i18n.t('learning.emptyLessonsTitle') : 'No lessons in this course',
+      body: i18n ? i18n.t('learning.emptyLessonsBody') : 'This course has no lessons yet.',
       inline: true,
     });
     return;
@@ -97,7 +112,10 @@ export function renderCourseDetail(
     const link = document.createElement('a');
     link.href = `/lessons/${encodeURIComponent(lesson.id)}`;
     link.dataset.route = 'lesson';
-    link.textContent = `Lesson ${lesson.orderIndex + 1}: ${lesson.title}`;
+    link.textContent = i18n
+      ? i18n.t('learning.step.lessonN', { n: String(lesson.orderIndex + 1), title: lesson.title })
+      : `Lesson ${lesson.orderIndex + 1}: ${lesson.title}`;
+    applyAutoDirection(link);
     main.appendChild(link);
     row.appendChild(main);
 
@@ -115,21 +133,25 @@ export function renderLessonDetail(
   progress: CourseProgressSummaryView | null,
   stepAttempts: ReadonlyMap<string, AttemptResultView>,
   onAttemptSubmit: (stepId: string, input: { san?: string; selectedIndex?: number }) => Promise<void>,
+  i18n?: I18nManager,
 ): void {
   const titleEl = container.querySelector('#lesson-title');
   const progressEl = container.querySelector('#lesson-progress');
   const stepListEl = container.querySelector('#step-list');
 
-  if (titleEl) titleEl.textContent = lesson.title;
-  if (progressEl) progressEl.textContent = courseProgressLabel(progress);
+  if (titleEl) {
+    titleEl.textContent = lesson.title;
+    if (titleEl instanceof HTMLElement) applyAutoDirection(titleEl);
+  }
+  if (progressEl) progressEl.textContent = courseProgressLabel(progress, i18n);
 
   if (!stepListEl) return;
   stepListEl.innerHTML = '';
 
   if (steps.length === 0) {
     renderEmpty(stepListEl as HTMLElement, {
-      title: 'No steps in this lesson',
-      body: 'This lesson has no steps yet.',
+      title: i18n ? i18n.t('learning.emptyStepsTitle') : 'No steps in this lesson',
+      body: i18n ? i18n.t('learning.emptyStepsBody') : 'This lesson has no steps yet.',
       inline: true,
     });
     return;
@@ -145,12 +167,14 @@ export function renderLessonDetail(
 
     const numberLabel = document.createElement('span');
     numberLabel.className = 'step-number count';
-    numberLabel.textContent = `Step ${step.orderIndex + 1}`;
+    numberLabel.textContent = i18n
+      ? i18n.t('learning.step.stepN', { n: String(step.orderIndex + 1) })
+      : `Step ${step.orderIndex + 1}`;
     header.appendChild(numberLabel);
 
     const statusLabel = document.createElement('span');
     statusLabel.className = 'step-status count';
-    statusLabel.textContent = stepStatusLabel(stepAttempts.get(step.id));
+    statusLabel.textContent = stepStatusLabel(stepAttempts.get(step.id), i18n);
     header.appendChild(statusLabel);
 
     block.appendChild(header);
@@ -159,6 +183,7 @@ export function renderLessonDetail(
       const prose = document.createElement('div');
       prose.className = 'step-prose';
       prose.textContent = step.prose;
+      applyAutoDirection(prose);
       block.appendChild(prose);
 
       const actions = document.createElement('div');
@@ -167,7 +192,7 @@ export function renderLessonDetail(
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'step-complete-btn';
-      btn.textContent = 'Complete';
+      btn.textContent = i18n ? i18n.t('learning.step.complete') : 'Complete';
       btn.addEventListener('click', () => {
         btn.disabled = true;
         void onAttemptSubmit(step.id, {}).then(() => {
@@ -180,11 +205,18 @@ export function renderLessonDetail(
       const boardContainer = document.createElement('div');
       boardContainer.className = 'step-board-wrapper';
       boardContainer.setAttribute('role', 'region');
-      boardContainer.setAttribute('aria-label', `Chess board position for Step ${step.orderIndex + 1} (read-only)`);
+      boardContainer.setAttribute(
+        'aria-label',
+        i18n
+          ? i18n.t('learning.step.boardReadOnlyAria', { n: String(step.orderIndex + 1) })
+          : `Chess board position for Step ${step.orderIndex + 1} (read-only)`,
+      );
 
       const boardDesc = document.createElement('p');
       boardDesc.className = 'sr-only';
-      boardDesc.textContent = `Static chess position FEN: ${step.fen}. Non-interactive board.`;
+      boardDesc.textContent = i18n
+        ? i18n.t('learning.step.boardSrOnly', { fen: step.fen })
+        : `Static chess position FEN: ${step.fen}. Non-interactive board.`;
       boardContainer.appendChild(boardDesc);
 
       const boardEl = document.createElement('div');
@@ -201,6 +233,7 @@ export function renderLessonDetail(
         const hint = document.createElement('p');
         hint.className = 'step-hint count';
         hint.textContent = step.hint;
+        applyAutoDirection(hint);
         block.appendChild(hint);
       }
 
@@ -210,21 +243,21 @@ export function renderLessonDetail(
       const label = document.createElement('label');
       label.className = 'sr-only';
       label.htmlFor = `san-input-${step.id}`;
-      label.textContent = 'SAN move';
+      label.textContent = i18n ? i18n.t('learning.step.sanInputLabel') : 'SAN move';
       form.appendChild(label);
 
       const input = document.createElement('input');
       input.id = `san-input-${step.id}`;
       input.type = 'text';
       input.className = 'step-san-input';
-      input.placeholder = 'e.g. Nf3';
+      input.placeholder = i18n ? i18n.t('learning.step.sanPlaceholder') : 'e.g. Nf3';
       input.autocomplete = 'off';
       input.required = true;
       form.appendChild(input);
 
       const submitBtn = document.createElement('button');
       submitBtn.type = 'submit';
-      submitBtn.textContent = 'Submit move';
+      submitBtn.textContent = i18n ? i18n.t('learning.step.submitMove') : 'Submit move';
       form.appendChild(submitBtn);
 
       form.addEventListener('submit', (e) => {
@@ -244,6 +277,7 @@ export function renderLessonDetail(
       const question = document.createElement('div');
       question.className = 'step-question';
       question.textContent = step.question;
+      applyAutoDirection(question);
       block.appendChild(question);
 
       const optionsGroup = document.createElement('div');
@@ -256,6 +290,7 @@ export function renderLessonDetail(
         btn.type = 'button';
         btn.className = 'quiz-option-btn';
         btn.textContent = optionText;
+        applyAutoDirection(btn);
         btn.addEventListener('click', () => {
           optionsGroup.querySelectorAll('button').forEach((b) => (b.disabled = true));
           void onAttemptSubmit(step.id, { selectedIndex: idx }).then(() => {

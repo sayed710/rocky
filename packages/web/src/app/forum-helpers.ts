@@ -13,6 +13,7 @@
  */
 import { membershipOf } from './teams-helpers.js';
 import type { ForumPost, ForumThread, TeamMembership } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 /** Whether a viewer may start a thread, and why not when they may not. */
 export type ThreadStartAbility =
@@ -47,14 +48,17 @@ export function canReply(
 }
 
 /** The sentence shown in place of a composer, so a dead end always explains itself. */
-export function abilityExplanation(reason: 'signed-out' | 'not-member' | 'locked'): string {
+export function abilityExplanation(
+  reason: 'signed-out' | 'not-member' | 'locked',
+  i18n?: I18nManager,
+): string {
   switch (reason) {
     case 'signed-out':
-      return 'Sign in to take part in this forum.';
+      return i18n ? i18n.t('community.forum.deniedSignedOut') : 'Sign in to take part in this forum.';
     case 'not-member':
-      return 'Only team members can post here.';
+      return i18n ? i18n.t('community.forum.deniedNotMember') : 'Only team members can post here.';
     case 'locked':
-      return 'This thread is locked. No new replies can be added.';
+      return i18n ? i18n.t('community.forum.deniedLocked') : 'This thread is locked. No new replies can be added.';
   }
 }
 
@@ -75,11 +79,17 @@ export function sortThreads(threads: readonly ForumThread[]): readonly ForumThre
  * What to render as a post's body. A tombstoned post keeps its row — the conversation still
  * happened — but never shows what it said.
  */
-export function postDisplayBody(post: ForumPost): string {
-  return post.deletedAt !== null ? '[Post deleted]' : post.body;
+export function postDisplayBody(post: ForumPost, i18n?: I18nManager): string {
+  if (post.deletedAt !== null) {
+    return i18n ? i18n.t('community.forum.tombstonePost') : '[Post deleted]';
+  }
+  return post.body;
 }
 
 /** A tombstoned thread is still listed, but must not read as an ordinary title. */
-export function threadDisplayTitle(thread: ForumThread): string {
-  return thread.deletedAt !== null ? '[Thread deleted]' : thread.title;
+export function threadDisplayTitle(thread: ForumThread, i18n?: I18nManager): string {
+  if (thread.deletedAt !== null) {
+    return i18n ? i18n.t('community.forum.tombstoneThread') : '[Thread deleted]';
+  }
+  return thread.title;
 }

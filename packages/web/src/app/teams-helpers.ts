@@ -13,6 +13,7 @@
  * transfers, and the creator is not necessarily the current owner.
  */
 import type { TeamMembership, TeamView } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 /** A viewer's role in a team, or null when they are not a member. */
 export type TeamRole = 'owner' | 'admin' | 'member';
@@ -63,14 +64,17 @@ export function teamAction(
 }
 
 /** The sentence shown in place of an action, so a dead end always explains itself. */
-export function actionExplanation(reason: 'signed-out' | 'by-request' | 'owner'): string {
+export function actionExplanation(
+  reason: 'signed-out' | 'by-request' | 'owner',
+  i18n?: I18nManager,
+): string {
   switch (reason) {
     case 'signed-out':
-      return 'Sign in to join this team.';
+      return i18n ? i18n.t('community.teams.reasonSignedOut') : 'Sign in to join this team.';
     case 'by-request':
-      return 'This team is private. Joining is by request, which is not available yet.';
+      return i18n ? i18n.t('community.teams.reasonByRequest') : 'This team is private. Joining is by request, which is not available yet.';
     case 'owner':
-      return 'You own this team. Transfer ownership before leaving.';
+      return i18n ? i18n.t('community.teams.reasonOwner') : 'You own this team. Transfer ownership before leaving.';
   }
 }
 

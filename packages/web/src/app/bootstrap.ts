@@ -416,6 +416,7 @@ export function bootstrap(
       ...(token !== undefined ? { token } : {}),
       ...(auth.currentSession !== null ? { initialSessionId: auth.currentSession.userId } : {}),
       restorePromise,
+      i18n: app.i18n,
     });
     gameSessionHandler = mountedGame.onSessionChange;
     return createBootstrapped(app, auth, theme, shellLocalization, mountedGame);
@@ -523,7 +524,9 @@ export function bootstrap(
   // --- Teams list view (/teams) ---
   const teamsEl = doc.getElementById('teams');
   if (teamsEl && route.name === 'teams') {
-    return createBootstrapped(app, auth, theme, shellLocalization, { teams: mountTeamList(doc, app.api) });
+    return createBootstrapped(app, auth, theme, shellLocalization, {
+      teams: mountTeamList(doc, app.api, app.i18n),
+    });
   }
 
   // --- Team detail view (/teams/:slug) ---
@@ -536,6 +539,7 @@ export function bootstrap(
         slug: route.slug,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -550,6 +554,7 @@ export function bootstrap(
         slug: route.slug,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -565,6 +570,7 @@ export function bootstrap(
         threadId: route.threadId,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -575,6 +581,7 @@ export function bootstrap(
       doc,
       client: app.api,
       isAuthenticated: () => auth.currentSession !== null,
+      i18n: app.i18n,
     });
     endgameSessionHandler = mounted.onSessionChange;
     return mounted;
@@ -592,7 +599,7 @@ export function bootstrap(
   const coursesEl = doc.getElementById('courses');
   if (coursesEl && route.name === 'courses') {
     return createBootstrapped(app, auth, theme, shellLocalization, {
-      learning: mountCourseList({ doc, client: app.api, surface: coursesEl }),
+      learning: mountCourseList({ doc, client: app.api, surface: coursesEl, i18n: app.i18n }),
     });
   }
 
@@ -607,6 +614,7 @@ export function bootstrap(
         slug: route.slug,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -622,6 +630,7 @@ export function bootstrap(
         lessonId: route.id,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -630,7 +639,7 @@ export function bootstrap(
   const studiesEl = doc.getElementById('studies');
   if (studiesEl && route.name === 'studies') {
     return createBootstrapped(app, auth, theme, shellLocalization, {
-      studies: mountStudiesList({ doc, client: app.api, surface: studiesEl }),
+      studies: mountStudiesList({ doc, client: app.api, surface: studiesEl, i18n: app.i18n }),
     });
   }
 
@@ -643,6 +652,7 @@ export function bootstrap(
         client: app.api,
         surface: studyEl,
         studyId: route.id,
+        i18n: app.i18n,
       }),
     });
   }
@@ -656,6 +666,7 @@ export function bootstrap(
       surface: studyChapterEl,
       studyId: route.id,
       chapterId: route.chapterId,
+      i18n: app.i18n,
     });
     return createBootstrapped(app, auth, theme, shellLocalization, mountedChapter);
   }
@@ -668,6 +679,7 @@ export function bootstrap(
         client: app.api,
         resetToken: activeResetToken,
         onSessionInvalidated: () => auth.clearLocalSession(),
+        i18n: app.i18n,
       }),
     });
   }
@@ -679,6 +691,7 @@ export function bootstrap(
         doc,
         client: app.api,
         verificationToken: activeVerificationToken,
+        i18n: app.i18n,
       }),
     });
   }

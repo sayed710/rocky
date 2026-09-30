@@ -14,6 +14,7 @@
  *   a lowered catalogue target and the next award.
  */
 import type { AchievementSummary, PlayerAchievement } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 /**
  * An absent target means one step, matching `resolveAward`. A target at or below zero would make
@@ -45,8 +46,8 @@ function isUnlocked(achievement: PlayerAchievement): boolean {
  * read contract does not guarantee it, and a catalogue target lowered after the fact leaves stored
  * rows above their own target.
  */
-export function progressLabel(achievement: PlayerAchievement): string {
-  if (isUnlocked(achievement)) return 'Unlocked';
+export function progressLabel(achievement: PlayerAchievement, i18n?: I18nManager): string {
+  if (isUnlocked(achievement)) return i18n ? i18n.t('profile.achievements.unlocked') : 'Unlocked';
   const target = targetOf(achievement);
   const shown = achievement.progress < 0 ? 0 : Math.min(achievement.progress, target);
   return `${shown} / ${target}`;
@@ -65,7 +66,17 @@ export function progressLabel(achievement: PlayerAchievement): string {
 export function summaryLabel(
   summary: AchievementSummary,
   achievements: readonly PlayerAchievement[],
+  i18n?: I18nManager,
 ): string {
-  const points = summary.pointsTotal === 1 ? '1 point' : `${summary.pointsTotal} points`;
+  const points = summary.pointsTotal === 1
+    ? (i18n ? i18n.t('profile.achievements.pointsOne') : '1 point')
+    : (i18n ? i18n.t('profile.achievements.pointsOther', { count: summary.pointsTotal }) : `${summary.pointsTotal} points`);
+  if (i18n) {
+    return i18n.t('profile.achievements.summary', {
+      unlocked: summary.unlockedCount,
+      total: achievements.length,
+      points,
+    });
+  }
   return `${summary.unlockedCount} of ${achievements.length} · ${points}`;
 }

@@ -1,5 +1,17 @@
 import type { GambitClient } from '../api/client.js';
-import type { Speed, TournamentDetail, TournamentRound, Variant } from '../api/models.js';
+import type {
+  LeaderboardEntry,
+  SocialPlayer,
+  Speed,
+  TournamentDetail,
+  TournamentGameCommentary,
+  TournamentLiveBoard,
+  TournamentRound,
+  TournamentRoundRecap,
+  TournamentStanding,
+  TournamentSummary,
+  Variant,
+} from '../api/models.js';
 import { LeaderboardController } from './leaderboard-controller.js';
 import type { LeaderboardCallbacks } from './leaderboard-controller.js';
 import {
@@ -20,12 +32,14 @@ import {
 } from './tournament-view.js';
 import { loadCapabilities, tournamentCommentaryEnabled } from './capabilities-nav.js';
 import { TournamentCommentaryController } from './tournament-commentary-controller.js';
-import type { CommentaryFailure, CommentaryTarget } from './tournament-commentary-controller.js';
+import type { CommentaryFailure, CommentaryPhase, CommentaryTarget } from './tournament-commentary-controller.js';
 import {
   COMMENTARY_MESSAGES,
+  getCommentaryMessage,
   renderGameCommentary,
   renderRoundRecap,
 } from './tournament-commentary-view.js';
+import type { I18n } from '../i18n/manager.js';
 
 interface LeaderboardMount {
   dispose(): void;
@@ -62,13 +76,18 @@ function setLeaderboardLoading(
   if (!state.resultsRendered) elements.results.innerHTML = '';
 }
 
-function createLeaderboardCallbacks(elements: LeaderboardElements): LeaderboardCallbacks {
+function createLeaderboardCallbacks(
+  elements: LeaderboardElements,
+  onEntries: (entries: readonly LeaderboardEntry[], names: ReadonlyMap<string, SocialPlayer>) => void,
+  i18n?: I18n,
+): LeaderboardCallbacks {
   const state: LeaderboardRenderState = { resultsRendered: false };
   return {
     onResults: (entries, names) => {
       state.resultsRendered = true;
+      onEntries(entries, names);
       if (elements.error) elements.error.textContent = '';
-      if (elements.results) renderLeaderboard(elements.results, entries, names);
+      if (elements.results) renderLeaderboard(elements.results, entries, names, i18n);
     },
     onLoading: (loading) => setLeaderboardLoading(elements, state, loading),
     onError: (message) => {
@@ -77,7 +96,7 @@ function createLeaderboardCallbacks(elements: LeaderboardElements): LeaderboardC
   };
 }
 
-export function mountLeaderboard(doc: Document, client: GambitClient): LeaderboardMount {
+export function mountLeaderboard(doc: Document, client: GambitClient, i18n?: I18n): LeaderboardMount {
   const elements: LeaderboardElements = {
     select: doc.getElementById('leaderboard-variant-select') as HTMLSelectElement | null,
     speedSelect: doc.getElementById('leaderboard-speed-select') as HTMLSelectElement | null,
@@ -88,13 +107,35 @@ export function mountLeaderboard(doc: Document, client: GambitClient): Leaderboa
   let activeVariant: Variant = 'standard';
   // No speed is chosen for the viewer: a pool is a variant and a speed, and there is no default pool.
   let activeSpeed: Speed | null = null;
-  if (elements.select) renderVariantSelector(elements.select, activeVariant);
-  if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed);
-  if (elements.results) renderChooseSpeed(elements.results);
+  let lastEntries: readonly LeaderboardEntry[] | null = null;
+  let lastNames: ReadonlyMap<string, SocialPlayer> | null = null;
+
+  if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
+  if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
+  if (elements.results) renderChooseSpeed(elements.results, i18n);
+
+  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
+    if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
+    if (elements.results) {
+      if (lastEntries !== null && lastNames !== null) {
+        renderLeaderboard(elements.results, lastEntries, lastNames, i18n);
+      } else if (activeSpeed === null) {
+        renderChooseSpeed(elements.results, i18n);
+      }
+    }
+  });
 
   const controller = new LeaderboardController({
     client,
-    callbacks: createLeaderboardCallbacks(elements),
+    callbacks: createLeaderboardCallbacks(
+      elements,
+      (entries, names) => {
+        lastEntries = entries;
+        lastNames = names;
+      },
+      i18n,
+    ),
   });
   const load = (): void => {
     if (activeSpeed !== null) void controller.loadLeaderboard(activeVariant, activeSpeed);
@@ -116,6 +157,7 @@ export function mountLeaderboard(doc: Document, client: GambitClient): Leaderboa
     dispose: () => {
       unbindVariant();
       unbindSpeed();
+      unsubscribeLocale?.();
       controller.dispose();
     },
   };
@@ -134,12 +176,14 @@ function setTournamentListLoading(
   elements: TournamentListElements,
   state: TournamentListRenderState,
   loading: boolean,
+  i18n?: I18n,
 ): void {
   if (!elements.list) return;
   elements.list.setAttribute('aria-busy', loading ? 'true' : 'false');
   if (loading) {
     state.listRendered = false;
-    elements.list.innerHTML = '<div class="panel-row">Loading…</div>';
+    const loadingText = i18n ? i18n.t('common.loading') : 'Loading…';
+    elements.list.innerHTML = `<div class="panel-row">${loadingText}</div>`;
     return;
   }
   // A failed request has already populated the error region. Keeping the loading row would
@@ -147,31 +191,58 @@ function setTournamentListLoading(
   if (!state.listRendered) elements.list.innerHTML = '';
 }
 
-function createTournamentListCallbacks(elements: TournamentListElements): TournamentCallbacks {
+function createTournamentListCallbacks(
+  elements: TournamentListElements,
+  onTournaments: (tournaments: readonly TournamentSummary[]) => void,
+  i18n?: I18n,
+): TournamentCallbacks {
   const state: TournamentListRenderState = { listRendered: false };
   return {
     onList: (tournaments) => {
       state.listRendered = true;
-      if (elements.list) renderTournamentList(elements.list, tournaments);
+      onTournaments(tournaments);
+      if (elements.list) renderTournamentList(elements.list, tournaments, i18n);
     },
     onDetail: () => {},
     onStandings: () => {},
     onLiveGames: () => {},
-    onLoading: (loading) => setTournamentListLoading(elements, state, loading),
+    onLoading: (loading) => setTournamentListLoading(elements, state, loading, i18n),
     onError: (message) => {
       if (elements.error) elements.error.textContent = message;
     },
   };
 }
 
-export function mountTournamentList(doc: Document, client: GambitClient): TournamentController {
+export function mountTournamentList(
+  doc: Document,
+  client: GambitClient,
+  i18n?: I18n,
+): TournamentController {
   const elements: TournamentListElements = {
     list: doc.getElementById('tournament-list'),
     error: doc.getElementById('tournaments-error'),
   };
+
+  let lastTournaments: readonly TournamentSummary[] | null = null;
+
+  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (lastTournaments !== null && elements.list) {
+      renderTournamentList(elements.list, lastTournaments, i18n);
+    }
+  });
+
   const controller = new TournamentController({
     client,
-    callbacks: createTournamentListCallbacks(elements),
+    callbacks: createTournamentListCallbacks(
+      elements,
+      (tournaments) => {
+        lastTournaments = tournaments;
+      },
+      i18n,
+    ),
+    onDispose: () => {
+      unsubscribeLocale?.();
+    },
   });
   void controller.loadList();
   return controller;
@@ -193,13 +264,15 @@ function setTournamentDetailLoading(
   elements: TournamentDetailElements,
   state: TournamentDetailRenderState,
   loading: boolean,
+  i18n?: I18n,
 ): void {
   if (elements.meta) elements.meta.setAttribute('aria-busy', loading ? 'true' : 'false');
   if (elements.standings) elements.standings.setAttribute('aria-busy', loading ? 'true' : 'false');
   if (elements.live) elements.live.setAttribute('aria-busy', loading ? 'true' : 'false');
   if (!elements.meta) return;
   if (loading && state.currentDetail === null) {
-    elements.meta.innerHTML = '<div class="panel-row">Loading…</div>';
+    const loadingText = i18n ? i18n.t('common.loading') : 'Loading…';
+    elements.meta.innerHTML = `<div class="panel-row">${loadingText}</div>`;
     return;
   }
   // A failed initial load has already populated the error region. Clear only its stale placeholder.
@@ -209,24 +282,39 @@ function setTournamentDetailLoading(
 function createTournamentDetailCallbacks(
   elements: TournamentDetailElements,
   startLive: (tournamentId: string) => void,
+  onStateUpdate: {
+    onDetail: (detail: TournamentDetail) => void;
+    onStandings: (
+      standings: readonly TournamentStanding[],
+      names: ReadonlyMap<string, { id: string; handle: string }>,
+    ) => void;
+    onLiveGames: (
+      games: readonly TournamentLiveBoard[],
+      names: ReadonlyMap<string, { id: string; handle: string }>,
+    ) => void;
+  },
+  i18n?: I18n,
 ): TournamentCallbacks {
   const state: TournamentDetailRenderState = { currentDetail: null };
   return {
     onList: () => {},
     onDetail: (detail) => {
       state.currentDetail = detail;
+      onStateUpdate.onDetail(detail);
       const nameElement = elements.doc.getElementById('tournament-name');
       if (nameElement) nameElement.textContent = detail.name;
-      if (elements.meta) renderTournamentDetail(elements.meta, detail);
+      if (elements.meta) renderTournamentDetail(elements.meta, detail, i18n);
       if (detail.state === 'running') startLive(detail.id);
     },
     onStandings: (standings, names) => {
-      if (elements.standings) renderStandings(elements.standings, standings, names);
+      onStateUpdate.onStandings(standings, names);
+      if (elements.standings) renderStandings(elements.standings, standings, names, i18n);
     },
     onLiveGames: (games, names) => {
-      if (elements.live) renderLiveBoards(elements.live, games, names);
+      onStateUpdate.onLiveGames(games, names);
+      if (elements.live) renderLiveBoards(elements.live, games, names, i18n);
     },
-    onLoading: (loading) => setTournamentDetailLoading(elements, state, loading),
+    onLoading: (loading) => setTournamentDetailLoading(elements, state, loading, i18n),
     onError: (message) => {
       if (elements.error) elements.error.textContent = message;
     },
@@ -237,6 +325,7 @@ export function mountTournamentDetail(
   doc: Document,
   client: GambitClient,
   tournamentId: string,
+  i18n?: I18n,
 ): TournamentController {
   const elements: TournamentDetailElements = {
     doc,
@@ -245,13 +334,41 @@ export function mountTournamentDetail(
     live: doc.getElementById('tournament-live'),
     error: doc.getElementById('tournament-error'),
   };
+
+  let lastDetail: TournamentDetail | null = null;
+  let lastStandings: readonly TournamentStanding[] | null = null;
+  let lastStandingsNames: ReadonlyMap<string, { id: string; handle: string }> | null = null;
+  let lastLiveGames: readonly TournamentLiveBoard[] | null = null;
+  let lastLiveNames: ReadonlyMap<string, { id: string; handle: string }> | null = null;
+
+  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (lastDetail && elements.meta) {
+      renderTournamentDetail(elements.meta, lastDetail, i18n);
+    }
+    if (lastStandings && lastStandingsNames && elements.standings) {
+      renderStandings(elements.standings, lastStandings, lastStandingsNames, i18n);
+    }
+    if (lastLiveGames && lastLiveNames && elements.live) {
+      renderLiveBoards(elements.live, lastLiveGames, lastLiveNames, i18n);
+    }
+  });
+
   let controller: TournamentController;
   controller = new TournamentController({
     client,
     callbacks: createTournamentDetailCallbacks(
       elements,
       (runningTournamentId) => controller.startLive(runningTournamentId),
+      {
+        onDetail: (d) => { lastDetail = d; },
+        onStandings: (s, n) => { lastStandings = s; lastStandingsNames = n; },
+        onLiveGames: (g, n) => { lastLiveGames = g; lastLiveNames = n; },
+      },
+      i18n,
     ),
+    onDispose: () => {
+      unsubscribeLocale?.();
+    },
   });
   void controller.loadDetail(tournamentId);
   return controller;
@@ -274,24 +391,25 @@ interface CommentaryElements {
 
 /**
  * @param failure - what went wrong.
+ * @param i18n - optional internationalization manager.
  * @returns the wording for it, in this section's vocabulary.
  */
-function commentaryFailureMessage(failure: CommentaryFailure): string {
+function commentaryFailureMessage(failure: CommentaryFailure, i18n?: I18n): string {
   switch (failure) {
     case 'unauthenticated':
-      return COMMENTARY_MESSAGES.signedOut;
+      return getCommentaryMessage('signedOut', i18n);
     case 'rate-limited':
-      return COMMENTARY_MESSAGES.rateLimited;
+      return getCommentaryMessage('rateLimited', i18n);
     case 'unavailable':
-      return COMMENTARY_MESSAGES.unavailable;
+      return getCommentaryMessage('unavailable', i18n);
     case 'unsupported-variant':
-      return COMMENTARY_MESSAGES.unsupportedVariant;
+      return getCommentaryMessage('unsupportedVariant', i18n);
     case 'not-ready':
-      return COMMENTARY_MESSAGES.notReady;
+      return getCommentaryMessage('notReady', i18n);
     case 'rejected':
-      return COMMENTARY_MESSAGES.rejected;
+      return getCommentaryMessage('rejected', i18n);
     default:
-      return COMMENTARY_MESSAGES.failed;
+      return getCommentaryMessage('failed', i18n);
   }
 }
 
@@ -320,6 +438,7 @@ function commentaryFailureMessage(failure: CommentaryFailure): string {
  * @param client - the API client.
  * @param tournamentId - the tournament on screen.
  * @param loadFlags - the memoised capabilities read, injectable for tests.
+ * @param i18n - optional internationalization manager.
  * @returns the mounted section.
  */
 export function mountTournamentCommentary(
@@ -327,6 +446,7 @@ export function mountTournamentCommentary(
   client: GambitClient,
   tournamentId: string,
   loadFlags: (api: GambitClient) => Promise<unknown> = loadCapabilities,
+  i18n?: I18n,
 ): MountedTournamentCommentary {
   const elements: CommentaryElements = {
     panel: doc.getElementById('tournament-commentary-panel'),
@@ -337,9 +457,17 @@ export function mountTournamentCommentary(
 
   let disposed = false;
   let available = false;
+  let currentResult:
+    | { kind: 'game'; value: TournamentGameCommentary }
+    | { kind: 'round'; value: TournamentRoundRecap }
+    | null = null;
+  let currentPhase: CommentaryPhase = 'idle';
+  let currentFailure: CommentaryFailure | null = null;
+  let currentRounds: readonly TournamentRound[] | null = null;
 
   /** Drop whatever answer is on screen and hide the region it was in. */
   const clearResult = (): void => {
+    currentResult = null;
     if (elements.result) {
       elements.result.textContent = '';
       elements.result.hidden = true;
@@ -350,27 +478,31 @@ export function mountTournamentCommentary(
     client,
     callbacks: {
       onPhase: (phase) => {
+        currentPhase = phase;
         if (!elements.status) return;
         // `error` is deliberately absent. The controller reports the failure first and the phase
         // immediately after, so a branch here that wrote anything for `error` would erase the
         // message `onFailure` had just set — which is what it did, blanking the status line on every
         // refusal until a mount test caught it.
-        if (phase === 'loading') elements.status.textContent = COMMENTARY_MESSAGES.running;
-        else if (phase === 'idle') elements.status.textContent = COMMENTARY_MESSAGES.idle;
+        if (phase === 'loading') elements.status.textContent = getCommentaryMessage('running', i18n);
+        else if (phase === 'idle') elements.status.textContent = getCommentaryMessage('idle', i18n);
         else if (phase === 'result') elements.status.textContent = '';
       },
       onResult: (result) => {
+        currentResult = result;
+        currentFailure = null;
         if (!elements.result) return;
         if (result.kind === 'game') {
-          renderGameCommentary(doc, elements.result, result.value);
+          renderGameCommentary(doc, elements.result, result.value, i18n);
         } else {
-          renderRoundRecap(doc, elements.result, result.value);
+          renderRoundRecap(doc, elements.result, result.value, i18n);
         }
         elements.result.hidden = false;
       },
       onFailure: (failure) => {
+        currentFailure = failure;
         clearResult();
-        if (elements.status) elements.status.textContent = commentaryFailureMessage(failure);
+        if (elements.status) elements.status.textContent = commentaryFailureMessage(failure, i18n);
       },
       onInvalidated: clearResult,
     },
@@ -416,9 +548,12 @@ export function mountTournamentCommentary(
   const renderControls = (rounds: readonly TournamentRound[]): void => {
     for (const round of rounds) {
       const number = round.roundIndex + 1;
+      const recapLabel = i18n
+        ? i18n.t('tournaments.recapRound', { number })
+        : `Recap round ${String(number)}`;
       addControl(
         `tournament-commentary-recap-${String(round.roundIndex)}`,
-        `Recap round ${String(number)}`,
+        recapLabel,
         { kind: 'round', tournamentId, round: round.roundIndex },
       );
 
@@ -426,14 +561,44 @@ export function mountTournamentCommentary(
       // id to ask about. A bye carries no game at all.
       round.pairings.forEach((pairing, board) => {
         if (pairing.kind !== 'game' || pairing.gameId === null) return;
+        const commentateLabel = i18n
+          ? i18n.t('tournaments.commentateRoundBoard', { number, board: board + 1 })
+          : `Commentate round ${String(number)}, board ${String(board + 1)}`;
         addControl(
           `tournament-commentary-game-${String(round.roundIndex)}-${String(board)}`,
-          `Commentate round ${String(number)}, board ${String(board + 1)}`,
+          commentateLabel,
           { kind: 'game', tournamentId, gameId: pairing.gameId },
         );
       });
     }
   };
+
+  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (elements.status) {
+      if (currentFailure !== null) {
+        elements.status.textContent = commentaryFailureMessage(currentFailure, i18n);
+      } else if (currentPhase === 'loading') {
+        elements.status.textContent = getCommentaryMessage('running', i18n);
+      } else if (currentPhase === 'idle') {
+        elements.status.textContent = getCommentaryMessage('idle', i18n);
+      }
+    }
+    if (elements.result && currentResult !== null) {
+      if (currentResult.kind === 'game') {
+        renderGameCommentary(doc, elements.result, currentResult.value, i18n);
+      } else {
+        renderRoundRecap(doc, elements.result, currentResult.value, i18n);
+      }
+    }
+    if (currentRounds !== null && elements.controls) {
+      for (const entry of appended) {
+        entry.el.removeEventListener('click', entry.onClick);
+        elements.controls?.removeChild(entry.el);
+      }
+      appended.length = 0;
+      renderControls(currentRounds);
+    }
+  });
 
   void loadFlags(client)
     .then(async (flags) => {
@@ -441,12 +606,13 @@ export function mountTournamentCommentary(
       available = tournamentCommentaryEnabled(flags);
       if (elements.panel) elements.panel.hidden = !available;
       if (!available) return;
-      if (elements.status) elements.status.textContent = COMMENTARY_MESSAGES.idle;
+      if (elements.status) elements.status.textContent = getCommentaryMessage('idle', i18n);
 
       // Read only once the capability says the panel will be shown, so a deployment without
       // commentary makes no request on behalf of a section nobody will see.
       const rounds = await client.tournaments.rounds(tournamentId);
       if (disposed) return;
+      currentRounds = rounds;
       renderControls(rounds);
     })
     .catch(() => {
@@ -460,13 +626,14 @@ export function mountTournamentCommentary(
       // "ask for commentary", so saying nothing left a reader looking at a panel that claimed to be
       // ready with nothing in it to click. Raised in the CodeRabbit review of PR #153.
       if (!available) return;
-      if (elements.status) elements.status.textContent = COMMENTARY_MESSAGES.failed;
+      if (elements.status) elements.status.textContent = getCommentaryMessage('failed', i18n);
     });
 
   return {
     dispose: () => {
       disposed = true;
       controller.dispose();
+      unsubscribeLocale?.();
       // Removed, not just abandoned. See `appended` above: the container outlives this mount.
       for (const entry of appended) {
         entry.el.removeEventListener('click', entry.onClick);

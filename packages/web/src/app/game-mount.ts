@@ -7,9 +7,8 @@
  */
 import type { App } from './composition.js';
 import type { GambitClient } from '../api/client.js';
-import { mountBoard } from './board.js';
-import type { MountedBoard } from './board.js';
-import { GameController } from './game-controller.js';
+import { mountBoard, type MountedBoard } from './board.js';
+import { GameController, type GameActionState, type GameMetadataState } from './game-controller.js';
 import { AnalysisController } from './analysis-controller.js';
 import {
   ANALYSIS_MESSAGES,
@@ -92,6 +91,9 @@ import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
 import { isEngineBotUserId } from '@chess-platform/game';
 import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
+import { createI18nManager } from '../i18n/manager.js';
+import type { I18nManager } from '../i18n/manager.js';
+import { getVariantLabel } from './variant-labels.js';
 
 /**
  * The line counts the panel offers. Every one is at or below the server's published MultiPV
@@ -112,6 +114,7 @@ interface GameMountDependencies {
   readonly token?: string;
   readonly initialSessionId?: string;
   readonly restorePromise: Promise<AuthSession | null>;
+  readonly i18n?: I18nManager;
 }
 
 /** The result of mounting the game route. */
@@ -129,6 +132,7 @@ interface MountedGame {
    * simply was not.
    */
   readonly onSessionChange: (session: AuthSession | null) => void;
+  readonly dispose?: () => void;
 }
 
 /**
@@ -145,6 +149,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     token,
     restorePromise,
   } = deps;
+
+  const i18n = deps.i18n ?? createI18nManager();
+  let lastMetadataState: GameMetadataState | null = null;
+  let lastActionState: GameActionState | null = null;
+  let lastReviewResult: Awaited<ReturnType<GambitClient['games']['review']>> | null = null;
 
   const statusEl = doc.getElementById('status');
   const flipEl = doc.getElementById('flip');
@@ -213,8 +222,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (gameReviewNoteEl && !gameReviewPending && gameReviewMovesEl?.childElementCount === 0) {
       gameReviewNoteEl.textContent = gameReviewSessionId !== null
-        ? 'Review your moves after the game.'
-        : 'Sign in to review your game.';
+        ? i18n.t('game.review.noteSignedIn')
+        : i18n.t('game.review.noteSignedOut');
     }
   };
 
@@ -1096,19 +1105,202 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     },
   );
 
+  const renderMetadata = (state: GameMetadataState): void => {
+    let liveAnnouncement = '';
+
+    if (metaConnectionEl) {
+      const connText = state.connected
+        ? i18n.t('game.connection.connected')
+        : state.role !== null
+          ? i18n.t('game.connection.reconnecting')
+          : i18n.t('game.connection.connecting');
+      if (metaConnectionEl.textContent !== connText) {
+        metaConnectionEl.textContent = connText;
+        liveAnnouncement += i18n.t('game.connection.announcement', { status: connText });
+      }
+    }
+
+    if (metaRoleEl) {
+      const roleText = state.role === 'white' ? i18n.t('game.role.playingWhite')
+        : state.role === 'black' ? i18n.t('game.role.playingBlack')
+        : state.role === 'spectator' ? i18n.t('game.role.spectating')
+        : i18n.t('game.role.waiting');
+      metaRoleEl.textContent = roleText;
+    }
+
+    const unknownPresence = !state.connected || !state.presence;
+
+    if (metaWhiteEl && metaWhiteNameEl) {
+      const isMe = state.myColor === 'w';
+      metaWhiteNameEl.textContent = isMe ? i18n.t('game.player.whiteYou') : i18n.t('game.player.white');
+      applyAutoDirection(metaWhiteNameEl);
+
+      const dot = metaWhiteEl.querySelector<HTMLElement>('.presence-dot');
+      const txt = metaWhiteEl.querySelector('.presence-text');
+      if (dot && txt) {
+        if (state.players && isEngineBotUserId(state.players.white)) {
+          dot.hidden = true;
+          txt.textContent = i18n.t('game.presence.computer');
+        } else if (unknownPresence) {
+          dot.hidden = false;
+          dot.className = 'presence-dot offline';
+          txt.textContent = i18n.t('game.presence.unknown');
+        } else {
+          dot.hidden = false;
+          const online = state.presence!.white;
+          dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
+          const newTxt = online ? i18n.t('game.presence.online') : i18n.t('game.presence.offline');
+          if (txt.textContent !== newTxt) {
+            txt.textContent = newTxt;
+            liveAnnouncement += i18n.t('game.presence.whiteIs', { status: newTxt });
+          }
+        }
+      }
+    }
+
+    if (metaBlackEl && metaBlackNameEl) {
+      const isMe = state.myColor === 'b';
+      metaBlackNameEl.textContent = isMe ? i18n.t('game.player.blackYou') : i18n.t('game.player.black');
+      applyAutoDirection(metaBlackNameEl);
+
+      const dot = metaBlackEl.querySelector<HTMLElement>('.presence-dot');
+      const txt = metaBlackEl.querySelector('.presence-text');
+      if (dot && txt) {
+        if (state.players && isEngineBotUserId(state.players.black)) {
+          dot.hidden = true;
+          txt.textContent = i18n.t('game.presence.computer');
+        } else if (unknownPresence) {
+          dot.hidden = false;
+          dot.className = 'presence-dot offline';
+          txt.textContent = i18n.t('game.presence.unknown');
+        } else {
+          dot.hidden = false;
+          const online = state.presence!.black;
+          dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
+          const newTxt = online ? i18n.t('game.presence.online') : i18n.t('game.presence.offline');
+          if (txt.textContent !== newTxt) {
+            txt.textContent = newTxt;
+            liveAnnouncement += i18n.t('game.presence.blackIs', { status: newTxt });
+          }
+        }
+      }
+    }
+
+    if (metaSpectatorsEl) {
+      metaSpectatorsEl.textContent = unknownPresence ? '—' : String(state.presence!.spectators);
+    }
+
+    if (metaVariantEl && state.variant) {
+      const label = getVariantLabel(state.variant, i18n);
+      metaVariantEl.textContent =
+        typeof state.chess960StartId === 'number'
+          ? `${label} · #${state.chess960StartId}`
+          : label;
+    }
+    if (metaTimeEl && state.timeControl) {
+      metaTimeEl.textContent = formatTimeControl(state.timeControl, i18n);
+    }
+
+    if (metaLiveStatusEl && liveAnnouncement) {
+      metaLiveStatusEl.textContent = liveAnnouncement.trim();
+    }
+  };
+
+  const renderActionState = (state: GameActionState): void => {
+    isGamePlayer = state.isPlayer;
+    isHumanGame = state.isHumanGame;
+    gameOver = state.isOver;
+    refreshGameReview();
+    refreshAnalysisControls();
+    refreshPuzzleControls();
+    refreshOpeningControls();
+    refreshCoachControls();
+    refreshExplainControls();
+    refreshAssessControls();
+    if (actionsPanelEl) {
+      if (state.isOver && !actionsPanelEl.hidden && doc.activeElement && actionsPanelEl.contains(doc.activeElement)) {
+        statusEl?.focus();
+      }
+      actionsPanelEl.hidden = !state.isPlayer || state.isOver;
+    }
+    if (!state.isPlayer) return;
+
+    const disabled = !state.connected || state.isOver || state.pendingAction !== null;
+
+    if (btnOfferDraw) {
+      if (state.drawOffer === 'sent') {
+        btnOfferDraw.textContent = i18n.t('game.actions.drawOfferSent');
+        btnOfferDraw.disabled = true;
+      } else {
+        btnOfferDraw.textContent = i18n.t('game.actions.offerDraw');
+        btnOfferDraw.disabled = disabled || state.drawOffer !== 'none';
+      }
+    }
+    if (btnClaimFlag) btnClaimFlag.disabled = disabled;
+
+    if (btnResign) {
+      btnResign.disabled = disabled;
+      if (disabled && confirmResignEl && !confirmResignEl.hidden) {
+        confirmResignEl.hidden = true;
+        if (confirmResignYes) (confirmResignYes as HTMLButtonElement).disabled = true;
+        if (confirmResignNo) (confirmResignNo as HTMLButtonElement).disabled = true;
+        btnResign.hidden = false;
+        statusEl?.focus();
+      }
+    }
+
+    if (btnAbort) {
+      btnAbort.hidden = !state.canAbort;
+      btnAbort.disabled = disabled;
+      if ((disabled || !state.canAbort) && confirmAbortEl && !confirmAbortEl.hidden) {
+        confirmAbortEl.hidden = true;
+        if (confirmAbortYes) (confirmAbortYes as HTMLButtonElement).disabled = true;
+        if (confirmAbortNo) (confirmAbortNo as HTMLButtonElement).disabled = true;
+        btnAbort.hidden = !state.canAbort;
+        statusEl?.focus();
+      }
+    }
+
+    if (drawOfferReceivedEl) {
+      drawOfferReceivedEl.hidden = state.drawOffer !== 'received' || state.isOver;
+    }
+    if (btnAcceptDraw) {
+      (btnAcceptDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
+    }
+    if (btnDeclineDraw) {
+      (btnDeclineDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
+    }
+
+    if (actionErrorEl) {
+      actionErrorEl.hidden = state.lastReject === null;
+      actionErrorEl.textContent = state.lastReject ?? '';
+    }
+  };
+
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
+    refreshGameReview();
+    if (lastMetadataState) {
+      renderMetadata(lastMetadataState);
+    }
+    if (lastActionState) {
+      renderActionState(lastActionState);
+    }
+    if (lastReviewResult) {
+      renderGameReview(lastReviewResult);
+    }
+  });
+
   controller = new GameController({
     gameSync,
+    i18n,
+    onDispose: () => unsubscribeLocale(),
     callbacks: {
       onPosition: (fen: string) => {
         authoritativeGameFen = fen;
         board.setPosition(fen);
         analysisController.positionChanged(fen);
         if (currentVariant) puzzleController.positionChanged({ fen, variant: currentVariant });
-        // Keyed on the ledger rather than the position, and told about every change including the
-        // ones that leave nothing to ask about.
         openingStateChanged();
-        // Coaching keys on the position *and* the last replayed move, so it hears about both this
-        // and `onExplainableChange` below — same reasoning as the opening section.
         coachStateChanged();
         explainController.targetChanged();
         assessController.targetChanged();
@@ -1118,16 +1310,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         refreshExplainControls();
         refreshAssessControls();
       },
-      // Both controls key on the same replayed move, so both are told when it changes — including
-      // the resync case where an authoritative snapshot clears it while the FEN stays put.
       onExplainableChange: () => {
         explainController.targetChanged();
         assessController.targetChanged();
         refreshExplainControls();
         refreshAssessControls();
-        // The ledger can be replaced at an unchanged position — an authoritative snapshot taken
-        // where the board already was — and `onPosition` stays silent for that. Opening
-        // identification reads the ledger, so it has to hear about this one too.
         openingStateChanged();
         refreshOpeningControls();
         coachStateChanged();
@@ -1162,206 +1349,22 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (color === 'b') board.setOrientation('black');
       },
       onMetadata: (state) => {
+        lastMetadataState = state;
         if (state.variant) {
           currentVariant = state.variant;
           refreshAnalysisControls();
           refreshPuzzleControls();
-          // Every gate depends on the variant, and this is the arrival that supplies it. Refreshing
-          // only the analysis one left the explain control offered on a variant with no engine
-          // whenever capabilities answered first.
           refreshExplainControls();
           refreshAssessControls();
-          // And this one, which gates on the variant harder than the rest: it serves `standard`
-          // alone, so before the variant arrives it has no target and the control stays off.
           refreshOpeningControls();
-          // Coaching has no target until the variant is known either, so it needs the same wake-up.
-          // Omitting it here is what left the opening control permanently disabled in M15 inc 19.
           refreshCoachControls();
           refreshGameReview();
         }
-
-        let liveAnnouncement = '';
-
-        if (metaConnectionEl) {
-          const connText = state.connected
-            ? 'Connected'
-            : state.role !== null
-              ? 'Reconnecting…'
-              : 'Connecting…';
-          if (metaConnectionEl.textContent !== connText) {
-            metaConnectionEl.textContent = connText;
-            liveAnnouncement += `Connection: ${connText}. `;
-          }
-        }
-
-        if (metaRoleEl) {
-          const roleText = state.role === 'white' ? 'Playing as White'
-            : state.role === 'black' ? 'Playing as Black'
-            : state.role === 'spectator' ? 'Spectating'
-            : 'Waiting…';
-          metaRoleEl.textContent = roleText;
-        }
-
-        const unknownPresence = !state.connected || !state.presence;
-
-        if (metaWhiteEl && metaWhiteNameEl) {
-          const isMe = state.myColor === 'w';
-          metaWhiteNameEl.textContent = 'White' + (isMe ? ' (You)' : '');
-          applyAutoDirection(metaWhiteNameEl);
-
-          const dot = metaWhiteEl.querySelector<HTMLElement>('.presence-dot');
-          const txt = metaWhiteEl.querySelector('.presence-text');
-          if (dot && txt) {
-            if (state.players && isEngineBotUserId(state.players.white)) {
-              dot.hidden = true;
-              txt.textContent = 'Computer';
-            } else if (unknownPresence) {
-              dot.hidden = false;
-              dot.className = 'presence-dot offline';
-              txt.textContent = 'Unknown';
-            } else {
-              dot.hidden = false;
-              const online = state.presence!.white;
-              dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
-              const newTxt = online ? 'Online' : 'Offline';
-              if (txt.textContent !== newTxt) {
-                txt.textContent = newTxt;
-                liveAnnouncement += `White is ${newTxt}. `;
-              }
-            }
-          }
-        }
-
-        if (metaBlackEl && metaBlackNameEl) {
-          const isMe = state.myColor === 'b';
-          metaBlackNameEl.textContent = 'Black' + (isMe ? ' (You)' : '');
-          applyAutoDirection(metaBlackNameEl);
-
-          const dot = metaBlackEl.querySelector<HTMLElement>('.presence-dot');
-          const txt = metaBlackEl.querySelector('.presence-text');
-          if (dot && txt) {
-            if (state.players && isEngineBotUserId(state.players.black)) {
-              dot.hidden = true;
-              txt.textContent = 'Computer';
-            } else if (unknownPresence) {
-              dot.hidden = false;
-              dot.className = 'presence-dot offline';
-              txt.textContent = 'Unknown';
-            } else {
-              dot.hidden = false;
-              const online = state.presence!.black;
-              dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
-              const newTxt = online ? 'Online' : 'Offline';
-              if (txt.textContent !== newTxt) {
-                txt.textContent = newTxt;
-                liveAnnouncement += `Black is ${newTxt}. `;
-              }
-            }
-          }
-        }
-
-        if (metaSpectatorsEl) {
-          metaSpectatorsEl.textContent = unknownPresence ? '—' : String(state.presence!.spectators);
-        }
-
-        if (metaVariantEl && state.variant) {
-          const label = state.variant.charAt(0).toUpperCase() + state.variant.slice(1);
-          // The starting position is part of what the variant *is* for this game: "Chess960" alone
-          // does not say which of the 960 arrangements is on the board, and once the first move is
-          // played the FEN no longer says either. Appended to the metadata field that already exists
-          // rather than given a row of its own — it is one short qualifier on a label already there,
-          // and a dedicated row would sit empty for every other variant.
-          //
-          // Written as "is there a number?" rather than "is it null?". `GameMetadataState` declares
-          // `number | null` and `GameController` is its only writer (`?? null` on the snapshot), so the
-          // two forms are equivalent for every value the type permits — but this is the same single
-          // check in its positive form, not a second guard, and it degrades to the plain label for
-          // anything the type does not permit rather than rendering "#undefined". Raised in the Qodo
-          // review of PR #12; the normalisation itself is pinned by chess960-metadata.test.ts.
-          metaVariantEl.textContent =
-            typeof state.chess960StartId === 'number'
-              ? `${label} · #${state.chess960StartId}`
-              : label;
-        }
-        if (metaTimeEl && state.timeControl) {
-          metaTimeEl.textContent = formatTimeControl(state.timeControl);
-        }
-
-        if (metaLiveStatusEl && liveAnnouncement) {
-          metaLiveStatusEl.textContent = liveAnnouncement.trim();
-        }
+        renderMetadata(state);
       },
       onActionState: (state) => {
-        isGamePlayer = state.isPlayer;
-        isHumanGame = state.isHumanGame;
-        gameOver = state.isOver;
-        refreshGameReview();
-        refreshAnalysisControls();
-        refreshPuzzleControls();
-        refreshOpeningControls();
-        refreshCoachControls();
-        refreshExplainControls();
-        refreshAssessControls();
-        if (actionsPanelEl) {
-          // The authoritative game status, not transport or request state, ends the live controls.
-          // Move focus before hiding a currently focused action or confirmation.
-          if (state.isOver && !actionsPanelEl.hidden && doc.activeElement && actionsPanelEl.contains(doc.activeElement)) {
-            statusEl?.focus();
-          }
-          actionsPanelEl.hidden = !state.isPlayer || state.isOver;
-        }
-        if (!state.isPlayer) return;
-
-        const disabled = !state.connected || state.isOver || state.pendingAction !== null;
-
-        if (btnOfferDraw) {
-          if (state.drawOffer === 'sent') {
-            btnOfferDraw.textContent = 'Draw offered';
-            btnOfferDraw.disabled = true;
-          } else {
-            btnOfferDraw.textContent = 'Offer draw';
-            btnOfferDraw.disabled = disabled || state.drawOffer !== 'none';
-          }
-        }
-        if (btnClaimFlag) btnClaimFlag.disabled = disabled;
-
-        if (btnResign) {
-          btnResign.disabled = disabled;
-          if (disabled && confirmResignEl && !confirmResignEl.hidden) {
-            confirmResignEl.hidden = true;
-            if (confirmResignYes) (confirmResignYes as HTMLButtonElement).disabled = true;
-            if (confirmResignNo) (confirmResignNo as HTMLButtonElement).disabled = true;
-            btnResign.hidden = false;
-            statusEl?.focus();
-          }
-        }
-
-        if (btnAbort) {
-          btnAbort.hidden = !state.canAbort;
-          btnAbort.disabled = disabled;
-          if ((disabled || !state.canAbort) && confirmAbortEl && !confirmAbortEl.hidden) {
-            confirmAbortEl.hidden = true;
-            if (confirmAbortYes) (confirmAbortYes as HTMLButtonElement).disabled = true;
-            if (confirmAbortNo) (confirmAbortNo as HTMLButtonElement).disabled = true;
-            btnAbort.hidden = !state.canAbort;
-            statusEl?.focus();
-          }
-        }
-
-        if (drawOfferReceivedEl) {
-          drawOfferReceivedEl.hidden = state.drawOffer !== 'received' || state.isOver;
-        }
-        if (btnAcceptDraw) {
-          (btnAcceptDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
-        }
-        if (btnDeclineDraw) {
-          (btnDeclineDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
-        }
-
-        if (actionErrorEl) {
-          actionErrorEl.hidden = state.lastReject === null;
-          actionErrorEl.textContent = state.lastReject ?? '';
-        }
+        lastActionState = state;
+        renderActionState(state);
       },
     },
   });
@@ -1384,21 +1387,41 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (statusEl) statusEl.textContent = authoritativeGameStatus;
   };
 
+  const classificationLabel = (name: string): string => {
+    switch (name) {
+      case 'Brilliant': return i18n.t('game.review.classification.brilliant');
+      case 'Great': return i18n.t('game.review.classification.great');
+      case 'Best': return i18n.t('game.review.classification.best');
+      case 'Best move': return i18n.t('game.review.classification.bestMove');
+      case 'Excellent': return i18n.t('game.review.classification.excellent');
+      case 'Good': return i18n.t('game.review.classification.good');
+      case 'Good move': return i18n.t('game.review.classification.goodMove');
+      case 'Book': return i18n.t('game.review.classification.book');
+      case 'Inaccuracy': return i18n.t('game.review.classification.inaccuracy');
+      case 'Mistake': return i18n.t('game.review.classification.mistake');
+      case 'Miss': return i18n.t('game.review.classification.miss');
+      case 'Blunder': return i18n.t('game.review.classification.blunder');
+      case 'Missed win': return i18n.t('game.review.classification.missedWin');
+      default: return i18n.t('game.review.classification.unrated');
+    }
+  };
+
   /** Render a controller-approved review and its navigable pre-move positions. */
   const renderGameReview = (review: Awaited<ReturnType<GambitClient['games']['review']>>): void => {
+    lastReviewResult = review;
     if (gameReviewSummaryEl) {
       const summary = [
-        ['Brilliant', '!!', review.summary.brilliant, 'brilliant'],
-        ['Great', '!', review.summary.great, 'great'],
-        ['Best', '★', review.summary.best, 'best'],
-        ['Excellent', '✓', review.summary.excellent, 'excellent'],
-        ['Good', '✓', review.summary.good, 'good'],
-        ['Book', '📖', review.summary.book, 'book'],
-        ['Inaccuracy', '?!', review.summary.inaccuracy, 'inaccuracy'],
-        ['Mistake', '?', review.summary.mistake, 'mistake'],
-        ['Miss', '×', review.summary.miss, 'miss'],
-        ['Blunder', '??', review.summary.blunder, 'blunder'],
-        ['Missed win', '×', review.summary.missed_win, 'missed_win'],
+        [classificationLabel('Brilliant'), '!!', review.summary.brilliant, 'brilliant'],
+        [classificationLabel('Great'), '!', review.summary.great, 'great'],
+        [classificationLabel('Best'), '★', review.summary.best, 'best'],
+        [classificationLabel('Excellent'), '✓', review.summary.excellent, 'excellent'],
+        [classificationLabel('Good'), '✓', review.summary.good, 'good'],
+        [classificationLabel('Book'), '📖', review.summary.book, 'book'],
+        [classificationLabel('Inaccuracy'), '?!', review.summary.inaccuracy, 'inaccuracy'],
+        [classificationLabel('Mistake'), '?', review.summary.mistake, 'mistake'],
+        [classificationLabel('Miss'), '×', review.summary.miss, 'miss'],
+        [classificationLabel('Blunder'), '??', review.summary.blunder, 'blunder'],
+        [classificationLabel('Missed win'), '×', review.summary.missed_win, 'missed_win'],
       ] as const;
       gameReviewSummaryEl.replaceChildren(...summary.map(([label, symbol, count, tone]) => {
         const stat = doc.createElement('div');
@@ -1425,13 +1448,18 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         moveLabel.textContent = `${move.ply}. ${move.san}`;
         applyLtrIsolation(moveLabel);
         const verdict = doc.createElement('strong');
-        verdict.textContent = `${annotation.symbol} ${annotation.label}${loss}`;
+        verdict.textContent = `${annotation.symbol} ${classificationLabel(annotation.label)}${loss}`;
         row.replaceChildren(moveLabel, verdict);
         row.addEventListener('click', () => {
           board.setPosition(move.fenBefore);
           board.setTurn(false);
           if (move.move.length >= 4) board.setLastMove(move.move.slice(0, 2), move.move.slice(2, 4));
-          if (statusEl) statusEl.textContent = `Reviewing ${move.san}. Best move: ${move.assessment.bestMove ?? 'not available'}.`;
+          if (statusEl) {
+            statusEl.textContent = i18n.t('game.review.statusReviewing', {
+              san: move.san,
+              bestMove: move.assessment.bestMove ?? i18n.t('game.review.bestMoveNotAvailable'),
+            });
+          }
         });
         return row;
       }));
@@ -1440,9 +1468,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       if (review.isPartial) {
         const analyzed = review.analyzedPlayerMoves ?? review.moves.length;
         const total = review.totalPlayerMoves ?? analyzed;
-        gameReviewNoteEl.textContent = `Partial review: first ${analyzed} of ${total} player moves analyzed due to move limit. Select a move to see the position before it was played.`;
+        gameReviewNoteEl.textContent = i18n.t('game.review.partialNote', {
+          analyzed: String(analyzed),
+          total: String(total),
+        });
       } else {
-        gameReviewNoteEl.textContent = 'Select a move to see the position before it was played.';
+        gameReviewNoteEl.textContent = i18n.t('game.review.selectMoveNote');
       }
     }
   };
@@ -1455,14 +1486,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       onPhase: (phase) => {
         gameReviewPending = phase === 'loading';
         if (gameReviewMovesEl) gameReviewMovesEl.setAttribute('aria-busy', String(gameReviewPending));
-        if (phase === 'loading' && gameReviewNoteEl) gameReviewNoteEl.textContent = 'Reviewing your moves…';
+        if (phase === 'loading' && gameReviewNoteEl) {
+          gameReviewNoteEl.textContent = i18n.t('game.review.reviewingMoves');
+        }
         refreshGameReview();
       },
       onResult: renderGameReview,
       onFailure: () => {
         if (gameReviewErrorEl) {
           gameReviewErrorEl.hidden = false;
-          gameReviewErrorEl.textContent = 'The review is not available right now. Please try again.';
+          gameReviewErrorEl.textContent = i18n.t('game.review.unavailableError');
         }
       },
       onInvalidated: invalidateGameReviewPresentation,
@@ -1700,6 +1733,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       // social region. Raised in the Qodo review of PR #152.
       if (!isUserAuthenticated()) coachController.targetLost();
       refreshCoachControls();
+    },
+    dispose: () => {
+      unsubscribeLocale();
+      controller.dispose();
     },
   };
 }

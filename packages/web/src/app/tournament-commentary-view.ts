@@ -20,6 +20,7 @@ import type {
   TournamentRoundRecap,
 } from '../api/models.js';
 import { isChessNotation, applyLtrIsolation, applyAutoDirection } from '../i18n/bidi.js';
+import type { I18n } from '../i18n/manager.js';
 
 export const COMMENTARY_MESSAGES = {
   idle: 'Ask for commentary on a finished game, or a recap of a completed round.',
@@ -35,6 +36,24 @@ export const COMMENTARY_MESSAGES = {
   citation: 'Engine evaluation',
   partial: 'The narrative covers only the decided games in this round.',
 } as const;
+
+export function getCommentaryMessage(key: keyof typeof COMMENTARY_MESSAGES, i18n?: I18n): string {
+  if (!i18n) return COMMENTARY_MESSAGES[key];
+  switch (key) {
+    case 'idle': return i18n.t('tournaments.commentary.idle');
+    case 'running': return i18n.t('tournaments.commentary.running');
+    case 'signedOut': return i18n.t('tournaments.commentary.signedOut');
+    case 'rateLimited': return i18n.t('tournaments.commentary.rateLimited');
+    case 'unavailable': return i18n.t('tournaments.commentary.unavailable');
+    case 'unsupportedVariant': return i18n.t('tournaments.commentary.unsupportedVariant');
+    case 'rejected': return i18n.t('tournaments.commentary.rejected');
+    case 'notReady': return i18n.t('tournaments.commentary.notReady');
+    case 'failed': return i18n.t('tournaments.commentary.failed');
+    case 'generated': return i18n.t('tournaments.commentary.generated');
+    case 'citation': return i18n.t('tournaments.commentary.citation');
+    case 'partial': return i18n.t('tournaments.commentary.partial');
+  }
+}
 
 /** How the tournament's result vocabulary reads to a person. */
 const RESULT_LABELS: Record<RoundRecapResult, string> = {
@@ -58,9 +77,13 @@ const RESULT_LABELS: Record<RoundRecapResult, string> = {
  * would be the client asserting a fact it does not have.
  *
  * @param result - the aggregate's recorded value.
+ * @param i18n - optional internationalization manager.
  * @returns the label to show.
  */
-function resultLabel(result: string): string {
+function resultLabel(result: string, i18n?: I18n): string {
+  if (result === 'double_forfeit') return i18n ? i18n.t('tournaments.result.bothForfeited') : 'Both forfeited';
+  if (result === 'bye') return i18n ? i18n.t('tournaments.result.bye') : 'Bye';
+  if (result === 'void') return i18n ? i18n.t('tournaments.result.void') : 'Void';
   return RESULT_LABELS[result as RoundRecapResult] ?? result;
 }
 
@@ -102,39 +125,51 @@ function isNarratable(pairing: RoundRecapPairing): boolean {
  * @param doc - the owning document, a parameter so this works under the test double.
  * @param container - the element to fill; cleared first.
  * @param commentary - the server's answer.
+ * @param i18n - optional internationalization manager.
  */
 export function renderGameCommentary(
   doc: Document,
   container: HTMLElement,
   commentary: TournamentGameCommentary,
+  i18n?: I18n,
 ): void {
   container.innerHTML = '';
 
-  const facts = section(doc, `Round ${String(commentary.round + 1)}`);
+  const roundHeading = i18n
+    ? i18n.t('tournaments.commentary.roundHeading', { round: commentary.round + 1 })
+    : `Round ${String(commentary.round + 1)}`;
+  const facts = section(doc, roundHeading);
   facts.appendChild(row(doc, `${commentary.white} vs ${commentary.black}`, commentary.result));
   // Shown only when the tournament scored the game differently from the way it ended. Two true
   // statements about different things, and a reader seeing '1-0' beside a forfeit in the
   // standings deserves to be told which is which rather than left to reconcile them.
   if (commentary.tournamentResult !== null && !sameOutcome(commentary.result, commentary.tournamentResult)) {
-    facts.appendChild(row(doc, 'Recorded by the tournament', resultLabel(commentary.tournamentResult)));
+    const recLabel = i18n ? i18n.t('tournaments.commentary.recordedByTournament') : 'Recorded by the tournament';
+    facts.appendChild(row(doc, recLabel, resultLabel(commentary.tournamentResult, i18n)));
   }
-  facts.appendChild(row(doc, 'Ended by', commentary.termination));
-  facts.appendChild(row(doc, 'Final move', `${commentary.finalMove.san} (${commentary.finalMove.uci})`));
-  facts.appendChild(row(doc, 'Moves played', String(commentary.ply)));
+  const endedByLabel = i18n ? i18n.t('tournaments.commentary.endedBy') : 'Ended by';
+  facts.appendChild(row(doc, endedByLabel, commentary.termination));
+  const finalMoveLabel = i18n ? i18n.t('tournaments.commentary.finalMove') : 'Final move';
+  facts.appendChild(row(doc, finalMoveLabel, `${commentary.finalMove.san} (${commentary.finalMove.uci})`));
+  const movesPlayedLabel = i18n ? i18n.t('tournaments.commentary.movesPlayed') : 'Moves played';
+  facts.appendChild(row(doc, movesPlayedLabel, String(commentary.ply)));
   container.appendChild(facts);
 
   // The citation is a measurement, so it is labelled as one and carries the depth it was measured
   // at. The server refuses to publish a citation with no search behind it, so a depth shown here is
   // always a depth something actually reached.
-  const citation = section(doc, COMMENTARY_MESSAGES.citation);
-  citation.appendChild(row(doc, 'Evaluation', commentary.citation.evalLabel));
-  citation.appendChild(row(doc, 'Depth', String(commentary.citation.depth)));
+  const citation = section(doc, getCommentaryMessage('citation', i18n));
+  const evalLabel = i18n ? i18n.t('tournaments.commentary.evaluation') : 'Evaluation';
+  citation.appendChild(row(doc, evalLabel, commentary.citation.evalLabel));
+  const depthLabel = i18n ? i18n.t('tournaments.commentary.depth') : 'Depth';
+  citation.appendChild(row(doc, depthLabel, String(commentary.citation.depth)));
   if (commentary.citation.bestLine.length > 0) {
-    citation.appendChild(row(doc, 'Best line', commentary.citation.bestLine.join(' ')));
+    const bestLineLabel = i18n ? i18n.t('tournaments.commentary.bestLine') : 'Best line';
+    citation.appendChild(row(doc, bestLineLabel, commentary.citation.bestLine.join(' ')));
   }
   container.appendChild(citation);
 
-  container.appendChild(narrative(doc, commentary.commentary));
+  container.appendChild(narrative(doc, commentary.commentary, i18n));
 }
 
 /**
@@ -143,15 +178,20 @@ export function renderGameCommentary(
  * @param doc - the owning document, a parameter so this works under the test double.
  * @param container - the element to fill; cleared first.
  * @param recap - the server's answer.
+ * @param i18n - optional internationalization manager.
  */
 export function renderRoundRecap(
   doc: Document,
   container: HTMLElement,
   recap: TournamentRoundRecap,
+  i18n?: I18n,
 ): void {
   container.innerHTML = '';
 
-  const results = section(doc, `Round ${String(recap.round + 1)} results`);
+  const resultsHeading = i18n
+    ? i18n.t('tournaments.commentary.roundResults', { round: recap.round + 1 })
+    : `Round ${String(recap.round + 1)} results`;
+  const results = section(doc, resultsHeading);
   for (const pairing of recap.results) {
     const opponent = pairing.black === null ? '—' : pairing.black;
     results.appendChild(
@@ -159,12 +199,15 @@ export function renderRoundRecap(
       // compile time only, and a server ahead of this build can still send a token it does not know.
       // Indexing directly rendered that as empty text here while the commentary above rendered it as
       // itself — one value, two behaviours. Raised in the CodeRabbit review of PR #153.
-      row(doc, `${pairing.white} vs ${opponent}`, resultLabel(pairing.result)),
+      row(doc, `${pairing.white} vs ${opponent}`, resultLabel(pairing.result, i18n)),
     );
   }
   container.appendChild(results);
 
-  const standings = section(doc, `Standings after round ${String(recap.round + 1)}`);
+  const standingsHeading = i18n
+    ? i18n.t('tournaments.commentary.standingsAfterRound', { round: recap.round + 1 })
+    : `Standings after round ${String(recap.round + 1)}`;
+  const standings = section(doc, standingsHeading);
   for (const standing of recap.standings) {
     standings.appendChild(
       row(doc, `${String(standing.rank)}. ${standing.player}`, String(standing.points)),
@@ -172,7 +215,7 @@ export function renderRoundRecap(
   }
   container.appendChild(standings);
 
-  container.appendChild(narrative(doc, recap.narrative));
+  container.appendChild(narrative(doc, recap.narrative, i18n));
 
   // Counted from the rows rather than trusted from the field alone: the note is about what the
   // reader can see, so it appears exactly when the table in front of them holds a pairing the prose
@@ -181,7 +224,7 @@ export function renderRoundRecap(
   if (recap.pairingsNarrated < recap.results.length || narratable < recap.results.length) {
     const note = doc.createElement('p');
     note.className = 'commentary-partial';
-    note.textContent = COMMENTARY_MESSAGES.partial;
+    note.textContent = getCommentaryMessage('partial', i18n);
     container.appendChild(note);
   }
 }
@@ -194,14 +237,15 @@ export function renderRoundRecap(
  *
  * @param doc - the owning document.
  * @param text - the model's prose.
+ * @param i18n - optional internationalization manager.
  * @returns the block, unattached.
  */
-function narrative(doc: Document, text: string): HTMLElement {
+function narrative(doc: Document, text: string, i18n?: I18n): HTMLElement {
   const block = doc.createElement('div');
   block.className = 'commentary-narrative';
   const label = doc.createElement('h3');
   label.className = 'commentary-section-title';
-  label.textContent = COMMENTARY_MESSAGES.generated;
+  label.textContent = getCommentaryMessage('generated', i18n);
   const prose = doc.createElement('p');
   prose.className = 'commentary-prose';
   prose.setAttribute('dir', 'auto');

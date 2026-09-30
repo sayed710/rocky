@@ -9,6 +9,7 @@ import type {
   ProgressView,
   StepView,
 } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 /**
  * Filter out deleted lessons and sort them in ascending `orderIndex` order.
@@ -31,22 +32,28 @@ export function activeSteps(steps: readonly StepView[]): readonly StepView[] {
 /**
  * Format course difficulty with initial capital letter.
  */
-export function difficultyLabel(difficulty: CourseDifficulty): string {
+export function difficultyLabel(difficulty: CourseDifficulty, i18n?: I18nManager): string {
   switch (difficulty) {
     case 'beginner':
-      return 'Beginner';
+      return i18n ? i18n.t('learning.difficulty.beginner') : 'Beginner';
     case 'intermediate':
-      return 'Intermediate';
+      return i18n ? i18n.t('learning.difficulty.intermediate') : 'Intermediate';
     case 'advanced':
-      return 'Advanced';
+      return i18n ? i18n.t('learning.difficulty.advanced') : 'Advanced';
   }
 }
 
 /**
  * Progress label in text format (e.g., "3 / 5 steps completed").
  */
-export function courseProgressLabel(progress: CourseProgressSummaryView | null): string {
+export function courseProgressLabel(progress: CourseProgressSummaryView | null, i18n?: I18nManager): string {
   if (!progress) return '';
+  if (i18n) {
+    return i18n.t('learning.progressLabel', {
+      completed: String(progress.completedSteps),
+      total: String(progress.totalSteps),
+    });
+  }
   return `${progress.completedSteps} / ${progress.totalSteps} steps completed`;
 }
 
@@ -88,9 +95,9 @@ export function deriveStepAttempts(progressDetails: readonly ProgressView[]): Ma
  * which reads `completedAt` — so a reload silently corrected the row. Same rule as `unlockedAt` in
  * ADR-0089 §2.
  */
-export function stepStatusLabel(result?: AttemptResultView | null): string {
+export function stepStatusLabel(result?: AttemptResultView | null, i18n?: I18nManager): string {
   if (!result) return '';
-  if (result.completedAt !== undefined) return 'Done';
-  if (result.attempts > 0) return 'Try again';
+  if (result.completedAt !== undefined) return i18n ? i18n.t('learning.step.done') : 'Done';
+  if (result.attempts > 0) return i18n ? i18n.t('learning.step.tryAgain') : 'Try again';
   return '';
 }

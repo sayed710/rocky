@@ -13,7 +13,8 @@ import {
   formatNags,
   type TreeBranchNode,
 } from './studies-helpers.js';
-import { applyLtrIsolation } from '../i18n/bidi.js';
+import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 /**
  * Render the studies list inside `.panel-list`.
@@ -21,13 +22,14 @@ import { applyLtrIsolation } from '../i18n/bidi.js';
 export function renderStudyList(
   containerEl: HTMLElement,
   studies: readonly StudyView[],
+  i18n?: I18nManager,
 ): void {
   containerEl.replaceChildren();
 
   if (studies.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'count';
-    empty.textContent = 'No studies found.';
+    empty.textContent = i18n ? i18n.t('learning.studies.emptyStudies') : 'No studies found.';
     containerEl.appendChild(empty);
     return;
   }
@@ -42,14 +44,14 @@ export function renderStudyList(
     const link = document.createElement('a');
     link.href = `/studies/${study.id}`;
     link.setAttribute('data-route', 'study');
-    link.setAttribute('dir', 'auto');
+    applyAutoDirection(link);
     link.textContent = study.name;
     main.appendChild(link);
 
     if (study.description) {
       const desc = document.createElement('span');
       desc.className = 'count';
-      desc.setAttribute('dir', 'auto');
+      applyAutoDirection(desc);
       desc.textContent = ` \u2014 ${study.description}`;
       main.appendChild(desc);
     }
@@ -60,7 +62,9 @@ export function renderStudyList(
     if (study.visibility !== 'public') {
       const tag = document.createElement('span');
       tag.className = 'count';
-      tag.textContent = study.visibility;
+      tag.textContent = i18n
+        ? (study.visibility === 'private' ? i18n.t('community.teams.privateTag') : study.visibility)
+        : study.visibility;
       row.appendChild(tag);
     }
 
@@ -84,17 +88,20 @@ export function renderStudyDetail(
   chapters: readonly ChapterView[],
   collaborators: readonly CollaboratorView[],
   exportUrl: string,
+  i18n?: I18nManager,
 ): void {
   if (elements.nameEl) {
     elements.nameEl.textContent = study.name;
-    elements.nameEl.setAttribute('dir', 'auto');
+    applyAutoDirection(elements.nameEl);
   }
   if (elements.descEl) {
-    elements.descEl.textContent = study.description || 'No description.';
-    elements.descEl.setAttribute('dir', 'auto');
+    elements.descEl.textContent = study.description || (i18n ? i18n.t('learning.studies.noDescription') : 'No description.');
+    applyAutoDirection(elements.descEl);
   }
   if (elements.visEl) {
-    elements.visEl.textContent = study.visibility !== 'public' ? `Visibility: ${study.visibility}` : '';
+    elements.visEl.textContent = study.visibility !== 'public'
+      ? (i18n ? i18n.t('learning.studies.visibility', { visibility: study.visibility }) : `Visibility: ${study.visibility}`)
+      : '';
   }
   if (elements.exportEl) {
     elements.exportEl.href = exportUrl;
@@ -105,7 +112,7 @@ export function renderStudyDetail(
     if (chapters.length === 0) {
       const empty = document.createElement('p');
       empty.className = 'count';
-      empty.textContent = 'No chapters in this study.';
+      empty.textContent = i18n ? i18n.t('learning.studies.emptyChapters') : 'No chapters in this study.';
       elements.chaptersEl.appendChild(empty);
     } else {
       for (const ch of chapters) {
@@ -118,7 +125,7 @@ export function renderStudyDetail(
         const link = document.createElement('a');
         link.href = `/studies/${study.id}/chapters/${ch.id}`;
         link.setAttribute('data-route', 'study-chapter');
-        link.setAttribute('dir', 'auto');
+        applyAutoDirection(link);
         link.textContent = ch.name;
         main.appendChild(link);
 
@@ -133,7 +140,7 @@ export function renderStudyDetail(
     if (collaborators.length === 0) {
       const empty = document.createElement('p');
       empty.className = 'count';
-      empty.textContent = 'Owner only.';
+      empty.textContent = i18n ? i18n.t('learning.studies.ownerOnly') : 'Owner only.';
       elements.collabsEl.appendChild(empty);
     } else {
       for (const col of collaborators) {
@@ -143,6 +150,7 @@ export function renderStudyDetail(
         const main = document.createElement('div');
         main.className = 'row-main';
         main.textContent = col.playerId;
+        applyAutoDirection(main);
 
         const role = document.createElement('span');
         role.className = 'count';
@@ -173,15 +181,16 @@ export function renderChapterDetail(
   chapters: readonly ChapterView[],
   exportUrl: string,
   onNodeSelect: (fenAfter: string, nodeId: string | null) => void,
+  i18n?: I18nManager,
 ): void {
   if (elements.studyLinkEl) {
     elements.studyLinkEl.href = `/studies/${study.id}`;
     elements.studyLinkEl.textContent = study.name;
-    elements.studyLinkEl.setAttribute('dir', 'auto');
+    applyAutoDirection(elements.studyLinkEl);
   }
   if (elements.chapterNameEl) {
     elements.chapterNameEl.textContent = chapter.name;
-    elements.chapterNameEl.setAttribute('dir', 'auto');
+    applyAutoDirection(elements.chapterNameEl);
   }
   if (elements.exportEl) {
     elements.exportEl.href = exportUrl;
@@ -200,14 +209,14 @@ export function renderChapterDetail(
       if (ch.id === chapter.id) {
         const current = document.createElement('span');
         current.className = 'chapter-nav-current';
-        current.textContent = `${ch.name} (active)`;
-        current.setAttribute('dir', 'auto');
+        current.textContent = i18n ? i18n.t('learning.studies.activeTag', { name: ch.name }) : `${ch.name} (active)`;
+        applyAutoDirection(current);
         main.appendChild(current);
       } else {
         const link = document.createElement('a');
         link.href = `/studies/${study.id}/chapters/${ch.id}`;
         link.setAttribute('data-route', 'study-chapter');
-        link.setAttribute('dir', 'auto');
+        applyAutoDirection(link);
         link.textContent = ch.name;
         main.appendChild(link);
       }
@@ -245,8 +254,8 @@ export function renderChapterDetail(
     const startBtn = document.createElement('button');
     startBtn.type = 'button';
     startBtn.className = 'notation-start-btn button';
-    startBtn.textContent = 'Starting position';
-    startBtn.setAttribute('aria-label', 'Reset to starting position');
+    startBtn.textContent = i18n ? i18n.t('learning.studies.startPosition') : 'Starting position';
+    startBtn.setAttribute('aria-label', i18n ? i18n.t('learning.studies.startPositionAria') : 'Reset to starting position');
     startBtn.addEventListener('click', () => {
       updateActiveButton(null);
       onNodeSelect(chapter.startingFen, null);
@@ -256,7 +265,7 @@ export function renderChapterDetail(
     if (tree.length === 0) {
       const empty = document.createElement('p');
       empty.className = 'count';
-      empty.textContent = 'No moves in this chapter.';
+      empty.textContent = i18n ? i18n.t('learning.studies.emptyMoves') : 'No moves in this chapter.';
       elements.treeEl.appendChild(empty);
       return;
     }

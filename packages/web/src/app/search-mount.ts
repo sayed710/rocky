@@ -1,8 +1,9 @@
 import type { GambitClient } from '../api/client.js';
 import type { SearchMode } from '../api/models.js';
+import type { I18n } from '../i18n/manager.js';
 import { SearchController } from './search-controller.js';
 import type { SearchCallbacks } from './search-controller.js';
-import { buildSearchUrl, parseSearchMode } from './search-results.js';
+import { buildSearchUrl, parseSearchMode, type SearchRow } from './search-results.js';
 import {
   renderSearchPrompt,
   renderSearchResults,
@@ -106,17 +107,29 @@ function createModeInput(
   return input;
 }
 
+function getSearchModeLabel(mode: SearchMode, i18n?: I18n): string {
+  switch (mode) {
+    case 'keyword':
+      return i18n ? i18n.t('search.mode.keyword') : 'Keyword';
+    case 'semantic':
+      return i18n ? i18n.t('search.mode.semantic') : 'Semantic (experimental)';
+    case 'hybrid':
+      return i18n ? i18n.t('search.mode.hybrid') : 'Hybrid (experimental)';
+  }
+}
+
 function createModeControl(
   doc: Document,
   option: SearchModeOption,
   activeMode: SearchMode,
   currentQuery: () => string,
+  i18n?: I18n,
 ): HTMLLabelElement {
   const control = doc.createElement('label');
   control.className = 'cg-seg';
   const label = doc.createElement('span');
   label.className = 'cg-seg-label';
-  label.textContent = option.label;
+  label.textContent = getSearchModeLabel(option.value, i18n);
   control.append(createModeInput(doc, option, activeMode, currentQuery), label);
   return control;
 }
@@ -127,10 +140,11 @@ function renderModeSelector(
   activeMode: SearchMode,
   currentQuery: () => string,
   modes: readonly SearchModeOption[],
+  i18n?: I18n,
 ): void {
   container.innerHTML = '';
   for (const option of modes) {
-    container.appendChild(createModeControl(doc, option, activeMode, currentQuery));
+    container.appendChild(createModeControl(doc, option, activeMode, currentQuery, i18n));
   }
 }
 
@@ -162,13 +176,18 @@ function setSearchLoading(
   if (!state.resultsRendered) elements.results.innerHTML = '';
 }
 
-function createSearchCallbacks(elements: SearchElements): SearchCallbacks {
+function createSearchCallbacks(
+  elements: SearchElements,
+  onResultHits: (hits: readonly SearchRow[]) => void,
+  i18n?: I18n,
+): SearchCallbacks {
   const state: SearchRenderState = { resultsRendered: false };
   return {
     onResults: (hits) => {
       state.resultsRendered = true;
+      onResultHits(hits);
       if (elements.error) elements.error.textContent = '';
-      if (elements.results) renderSearchResults(elements.results, hits);
+      if (elements.results) renderSearchResults(elements.results, hits, i18n);
     },
     onLoading: (loading) => setSearchLoading(elements, state, loading),
     onError: (message) => {
@@ -197,10 +216,17 @@ export function mountSearch(
   doc: Document,
   client: GambitClient,
   loadFlags: (api: GambitClient) => Promise<unknown> = loadCapabilities,
+  i18n?: I18n,
 ): SearchController {
   const elements = searchElements(doc);
   const request = currentSearchRequest();
   resetSearchSurface(elements);
+
+  let currentStatus: 'none' | 'prompt' | 'unavailable' | 'undetermined' | 'results' = 'none';
+  let lastHits: readonly SearchRow[] | null = null;
+  let currentSemanticAvailable = false;
+  let currentActiveMode: SearchMode = 'keyword';
+  let modeSelectorRendered = false;
 
   // The persistent header form is bound once in main.ts; route mounts only refresh its value.
   if (elements.input) elements.input.value = request.rawQuery;
@@ -212,9 +238,43 @@ export function mountSearch(
     elements.mode.hidden = true;
   }
 
+  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (modeSelectorRendered && elements.mode && !elements.mode.hidden) {
+      renderModeSelector(
+        doc,
+        elements.mode,
+        currentActiveMode,
+        () => elements.input?.value.trim() ?? request.query,
+        availableModes(currentSemanticAvailable),
+        i18n,
+      );
+    }
+    if (elements.results) {
+      if (currentStatus === 'results' && lastHits !== null) {
+        renderSearchResults(elements.results, lastHits, i18n);
+      } else if (currentStatus === 'prompt') {
+        renderSearchPrompt(elements.results, i18n);
+      } else if (currentStatus === 'unavailable') {
+        renderSearchUnavailable(elements.results, i18n);
+      } else if (currentStatus === 'undetermined') {
+        renderSearchUndetermined(elements.results, i18n);
+      }
+    }
+  });
+
   const controller = new SearchController({
     client,
-    callbacks: createSearchCallbacks(elements),
+    callbacks: createSearchCallbacks(
+      elements,
+      (hits) => {
+        currentStatus = 'results';
+        lastHits = hits;
+      },
+      i18n,
+    ),
+    onDispose: () => {
+      unsubscribeLocale?.();
+    },
   });
 
   void loadFlags(client)
@@ -235,24 +295,31 @@ export function mountSearch(
         // Fail closed either way, but do not tell the visitor the deployment is configured a way
         // we have no evidence for: only an explicit `false` is the server saying so.
         if (elements.results) {
-          if (searchExplicitlyDisabled(flags)) renderSearchUnavailable(elements.results);
-          else renderSearchUndetermined(elements.results);
+          if (searchExplicitlyDisabled(flags)) {
+            currentStatus = 'unavailable';
+            renderSearchUnavailable(elements.results, i18n);
+          } else {
+            currentStatus = 'undetermined';
+            renderSearchUndetermined(elements.results, i18n);
+          }
         }
         return;
       }
 
-      const semanticAvailable = semanticSearchEnabled(flags);
+      currentSemanticAvailable = semanticSearchEnabled(flags);
 
       // A mode this deployment cannot serve falls back to keyword, and `replaceState` rather than
       // `pushState` keeps it from becoming a back-button destination.
       const mode: SearchMode =
-        request.mode === 'keyword' || semanticAvailable ? request.mode : 'keyword';
+        request.mode === 'keyword' || currentSemanticAvailable ? request.mode : 'keyword';
+      currentActiveMode = mode;
       if (mode !== request.mode) {
         history.replaceState(null, '', buildSearchUrl(request.query, mode));
       }
 
       if (elements.mode) {
         elements.mode.hidden = false;
+        modeSelectorRendered = true;
         renderModeSelector(
           doc,
           elements.mode,
@@ -261,12 +328,17 @@ export function mountSearch(
           // and `main.ts`'s submit handler already reads the box the same way — switching mode
           // should carry the same term pressing enter would.
           () => elements.input?.value.trim() ?? request.query,
-          availableModes(semanticAvailable),
+          availableModes(currentSemanticAvailable),
+          i18n,
         );
       }
 
-      if (request.query) void controller.search(request.query, mode);
-      else if (elements.results) renderSearchPrompt(elements.results);
+      if (request.query) {
+        void controller.search(request.query, mode);
+      } else if (elements.results) {
+        currentStatus = 'prompt';
+        renderSearchPrompt(elements.results, i18n);
+      }
     });
 
   return controller;

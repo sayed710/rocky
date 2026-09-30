@@ -22,6 +22,12 @@ export interface I18nOptions {
  * - Strictly throws in strict mode when a required key is missing entirely (no silent bugs).
  * - Synchronizes with LocaleStorage and applies document-level lang/dir attributes.
  */
+export type I18nManager = I18n;
+
+export function createI18nManager(options?: I18nOptions): I18nManager {
+  return new I18n(options);
+}
+
 export class I18n {
   private activeLocale: Locale;
   private readonly storage: LocaleStorage | undefined;

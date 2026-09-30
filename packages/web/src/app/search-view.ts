@@ -4,24 +4,27 @@
  */
 import { el } from './dom.js';
 import { renderEmpty } from './render-helpers.js';
+import { applyAutoDirection } from '../i18n/bidi.js';
+import type { I18n } from '../i18n/manager.js';
 import type { SearchRow, SearchEntityType } from './search-results.js';
 
 /**
  * Formats a search entity type for display.
  *
  * @param type - The entity type to format.
+ * @param i18n - Optional internationalization manager.
  * @returns The formatted display string.
  */
-export function formatEntityType(type: SearchEntityType | null): string {
+export function formatEntityType(type: SearchEntityType | null, i18n?: I18n): string {
   switch (type) {
     case 'game':
-      return 'Game';
+      return i18n ? i18n.t('search.typeGame') : 'Game';
     case 'player':
-      return 'Player';
+      return i18n ? i18n.t('search.typePlayer') : 'Player';
     case 'tournament':
-      return 'Tournament';
+      return i18n ? i18n.t('search.typeTournament') : 'Tournament';
     default:
-      return 'Result';
+      return i18n ? i18n.t('search.typeResult') : 'Result';
   }
 }
 
@@ -30,17 +33,19 @@ export function formatEntityType(type: SearchEntityType | null): string {
  *
  * @param container - The DOM element to render into.
  * @param hits - The list of search results.
+ * @param i18n - Optional internationalization manager.
  */
 export function renderSearchResults(
   container: HTMLElement,
   hits: readonly SearchRow[],
+  i18n?: I18n,
 ): void {
   container.innerHTML = '';
   if (hits.length === 0) {
     renderEmpty(container, {
       mark: '🔍',
-      title: 'No results found',
-      body: 'Try adjusting your search query or switching mode.',
+      title: i18n ? i18n.t('search.emptyResultsTitle') : 'No results found',
+      body: i18n ? i18n.t('search.emptyResultsBody') : 'Try adjusting your search query or switching mode.',
     });
     return;
   }
@@ -50,16 +55,22 @@ export function renderSearchResults(
     const nameNode = hit.href
       ? el(doc, 'a', { href: hit.href, class: 'row-link' }, hit.label)
       : el(doc, 'span', {}, hit.label);
+    applyAutoDirection(nameNode);
 
     // `.panel-row` is space-between and takes exactly two children. The subtitle belongs to the
     // title, so it travels with it inside `.row-main`; handed to the row as a third child it would
     // fly to the opposite edge, detached from the thing it describes. Same rule as teams, forum
     // threads and achievements — see DESIGN.md.
-    const leading = hit.subtitle
-      ? el(doc, 'span', { class: 'row-main' }, nameNode, el(doc, 'span', { class: 'count' }, hit.subtitle))
-      : el(doc, 'span', { class: 'row-main' }, nameNode);
+    let leading: HTMLElement;
+    if (hit.subtitle) {
+      const subtitleEl = el(doc, 'span', { class: 'count' }, hit.subtitle);
+      applyAutoDirection(subtitleEl);
+      leading = el(doc, 'span', { class: 'row-main' }, nameNode, subtitleEl);
+    } else {
+      leading = el(doc, 'span', { class: 'row-main' }, nameNode);
+    }
 
-    const typeSpan = el(doc, 'span', { class: 'count' }, formatEntityType(hit.type));
+    const typeSpan = el(doc, 'span', { class: 'count' }, formatEntityType(hit.type, i18n));
     container.appendChild(el(doc, 'div', { class: 'panel-row' }, leading, typeSpan));
   }
 }
@@ -68,12 +79,13 @@ export function renderSearchResults(
  * Renders the initial search prompt when no search has been performed.
  *
  * @param container - The DOM element to render into.
+ * @param i18n - Optional internationalization manager.
  */
-export function renderSearchPrompt(container: HTMLElement): void {
+export function renderSearchPrompt(container: HTMLElement, i18n?: I18n): void {
   renderEmpty(container, {
     mark: '🔍',
-    title: 'Search Rookzen',
-    body: 'Search for players, games, or tournaments above.',
+    title: i18n ? i18n.t('search.promptTitle') : 'Search Rookzen',
+    body: i18n ? i18n.t('search.promptBody') : 'Search for players, games, or tournaments above.',
   });
 }
 
@@ -86,12 +98,13 @@ export function renderSearchPrompt(container: HTMLElement): void {
  * not broken, it is configured.
  *
  * @param container - The DOM element to render into.
+ * @param i18n - Optional internationalization manager.
  */
-export function renderSearchUnavailable(container: HTMLElement): void {
+export function renderSearchUnavailable(container: HTMLElement, i18n?: I18n): void {
   renderEmpty(container, {
     mark: '🔍',
-    title: 'Search is unavailable',
-    body: 'This server has search switched off. Nothing else is affected.',
+    title: i18n ? i18n.t('search.unavailableTitle') : 'Search is unavailable',
+    body: i18n ? i18n.t('search.unavailableBody') : 'This server has search switched off. Nothing else is affected.',
   });
 }
 
@@ -107,11 +120,12 @@ export function renderSearchUnavailable(container: HTMLElement): void {
  * with deliberately no reset seam: within this page there is nothing left to retry.
  *
  * @param container - The DOM element to render into.
+ * @param i18n - Optional internationalization manager.
  */
-export function renderSearchUndetermined(container: HTMLElement): void {
+export function renderSearchUndetermined(container: HTMLElement, i18n?: I18n): void {
   renderEmpty(container, {
     mark: '🔍',
-    title: 'Search is unavailable',
-    body: 'Rookzen could not check whether this server offers search. Reload the page to try again.',
+    title: i18n ? i18n.t('search.undeterminedTitle') : 'Search is unavailable',
+    body: i18n ? i18n.t('search.undeterminedBody') : 'Rookzen could not check whether this server offers search. Reload the page to try again.',
   });
 }

@@ -3,6 +3,8 @@
  */
 import type { TimeControl } from '../net/ws-protocol.js';
 
+import type { I18nManager } from '../i18n/manager.js';
+
 /** Format clock milliseconds as `M:SS`. */
 export function formatClock(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -12,21 +14,33 @@ export function formatClock(ms: number): string {
 }
 
 /** Format a time control into a human-readable string. */
-export function formatTimeControl(tc: Pick<TimeControl, 'kind' | 'initialMs' | 'incrementMs' | 'delayMs'>): string {
-  if (tc.kind === 'unlimited') return 'Unlimited';
+export function formatTimeControl(
+  tc: Pick<TimeControl, 'kind' | 'initialMs' | 'incrementMs' | 'delayMs'>,
+  i18n?: I18nManager,
+): string {
+  const t = i18n ? i18n.t.bind(i18n) : null;
+  if (tc.kind === 'unlimited') return t ? t('timeControl.unlimited') : 'Unlimited';
   if (tc.kind === 'sudden_death') {
     const sec = tc.initialMs / 1000;
-    return sec >= 60 && sec % 60 === 0 ? `${sec / 60} min` : `${sec} sec`;
+    if (sec >= 60 && sec % 60 === 0) {
+      const count = String(sec / 60);
+      return t ? t('timeControl.min', { count }) : `${count} min`;
+    }
+    const count = String(sec);
+    return t ? t('timeControl.sec', { count }) : `${count} sec`;
   }
   if (tc.kind === 'increment') {
     return `${tc.initialMs / 60000}+${tc.incrementMs / 1000}`;
   }
   if (tc.kind === 'delay') {
     const sec = tc.initialMs / 1000;
-    const base = sec >= 60 && sec % 60 === 0 ? `${sec / 60} min` : `${sec} sec`;
-    return `${base} delay ${tc.delayMs / 1000}`;
+    const base = sec >= 60 && sec % 60 === 0
+      ? (t ? t('timeControl.min', { count: String(sec / 60) }) : `${sec / 60} min`)
+      : (t ? t('timeControl.sec', { count: String(sec) }) : `${sec} sec`);
+    const delay = String(tc.delayMs / 1000);
+    return t ? t('timeControl.delay', { base, delay }) : `${base} delay ${delay}`;
   }
-  return 'Unknown';
+  return t ? t('timeControl.unknown') : 'Unknown';
 }
 
 /** Options for {@link renderEmpty}. */

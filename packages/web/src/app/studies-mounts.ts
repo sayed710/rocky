@@ -1,4 +1,11 @@
 import type { GambitClient } from '../api/client.js';
+import type {
+  ChapterView,
+  CollaboratorView,
+  StudyView,
+  TreeNodeView,
+} from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { mountBoard } from './board.js';
 import type { MountedBoard } from './board.js';
 import { StudiesController } from './studies-controller.js';
@@ -9,6 +16,7 @@ interface StudiesListMountDependencies {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly surface: HTMLElement;
+  readonly i18n?: I18nManager | undefined;
 }
 
 interface StudyDetailMountDependencies extends StudiesListMountDependencies {
@@ -49,11 +57,11 @@ interface StudyChapterElements {
   readonly error: HTMLElement | null;
 }
 
-function renderUnavailable(doc: Document, surface: HTMLElement): void {
+function renderUnavailable(doc: Document, surface: HTMLElement, i18n?: I18nManager): void {
   surface.replaceChildren();
   const message = doc.createElement('p');
   message.className = 'count';
-  message.textContent = 'Studies service unavailable.';
+  message.textContent = i18n ? i18n.t('learning.studies.serviceUnavailable') : 'Studies service unavailable.';
   surface.appendChild(message);
 }
 
@@ -68,11 +76,14 @@ function studiesListElements(doc: Document): StudiesListElements {
 function createStudiesListCallbacks(
   elements: StudiesListElements,
   showUnavailable: () => void,
+  i18n?: I18nManager,
+  onListLoaded?: (studies: readonly StudyView[]) => void,
 ): StudiesCallbacks {
   return {
     onStudyList: (studies) => {
+      onListLoaded?.(studies);
       if (elements.error) elements.error.textContent = '';
-      if (elements.list) renderStudyList(elements.list, studies);
+      if (elements.list) renderStudyList(elements.list, studies, i18n);
     },
     onStudy: () => {},
     onChapterDetail: () => {},
@@ -105,12 +116,33 @@ export function mountStudiesList({
   doc,
   client,
   surface,
+  i18n,
 }: StudiesListMountDependencies): StudiesController {
   const elements = studiesListElements(doc);
+  let lastStudies: readonly StudyView[] | null = null;
+  let unsubscribeLocale: (() => void) | undefined;
+
   const controller = new StudiesController({
     client,
-    callbacks: createStudiesListCallbacks(elements, () => renderUnavailable(doc, surface)),
+    callbacks: createStudiesListCallbacks(
+      elements,
+      () => renderUnavailable(doc, surface, i18n),
+      i18n,
+      (studies) => {
+        lastStudies = studies;
+      },
+    ),
+    onDispose: () => {
+      unsubscribeLocale?.();
+    },
   });
+
+  unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (lastStudies && elements.list) {
+      renderStudyList(elements.list, lastStudies, i18n);
+    }
+  });
+
   bindStudySearch(doc, elements.searchForm, controller);
   void controller.loadStudies();
   return controller;
@@ -131,12 +163,20 @@ function studyDetailElements(doc: Document): StudyDetailElements {
 function createStudyDetailCallbacks(
   elements: StudyDetailElements,
   showUnavailable: () => void,
+  i18n?: I18nManager,
+  onStudyLoaded?: (state: {
+    study: StudyView;
+    chapters: readonly ChapterView[];
+    collaborators: readonly CollaboratorView[];
+    exportUrl: string;
+  }) => void,
 ): StudiesCallbacks {
   return {
     onStudyList: () => {},
     onStudy: (study, chapters, collaborators, exportUrl) => {
+      onStudyLoaded?.({ study, chapters, collaborators, exportUrl });
       if (elements.error) elements.error.textContent = '';
-      renderStudyDetail(elements, study, chapters, collaborators, exportUrl);
+      renderStudyDetail(elements, study, chapters, collaborators, exportUrl, i18n);
     },
     onChapterDetail: () => {},
     onLoading: (loading) => {
@@ -156,12 +196,45 @@ export function mountStudyDetail({
   client,
   surface,
   studyId,
+  i18n,
 }: StudyDetailMountDependencies): StudiesController {
   const elements = studyDetailElements(doc);
+  let lastStudyState: {
+    study: StudyView;
+    chapters: readonly ChapterView[];
+    collaborators: readonly CollaboratorView[];
+    exportUrl: string;
+  } | null = null;
+  let unsubscribeLocale: (() => void) | undefined;
+
   const controller = new StudiesController({
     client,
-    callbacks: createStudyDetailCallbacks(elements, () => renderUnavailable(doc, surface)),
+    callbacks: createStudyDetailCallbacks(
+      elements,
+      () => renderUnavailable(doc, surface, i18n),
+      i18n,
+      (state) => {
+        lastStudyState = state;
+      },
+    ),
+    onDispose: () => {
+      unsubscribeLocale?.();
+    },
   });
+
+  unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (lastStudyState) {
+      renderStudyDetail(
+        elements,
+        lastStudyState.study,
+        lastStudyState.chapters,
+        lastStudyState.collaborators,
+        lastStudyState.exportUrl,
+        i18n,
+      );
+    }
+  });
+
   void controller.loadStudy(studyId);
   return controller;
 }
@@ -181,16 +254,34 @@ function createStudyChapterCallbacks(
   elements: StudyChapterElements,
   board: MountedBoard | null,
   showUnavailable: () => void,
+  i18n?: I18nManager,
+  onChapterLoaded?: (state: {
+    study: StudyView;
+    chapter: ChapterView;
+    tree: readonly TreeNodeView[];
+    chapters: readonly ChapterView[];
+    exportUrl: string;
+  }) => void,
 ): StudiesCallbacks {
   return {
     onStudyList: () => {},
     onStudy: () => {},
     onChapterDetail: (study, chapter, tree, chapters, exportUrl) => {
+      onChapterLoaded?.({ study, chapter, tree, chapters, exportUrl });
       if (elements.error) elements.error.textContent = '';
       board?.setPosition(chapter.startingFen);
-      renderChapterDetail(elements, study, chapter, tree, chapters, exportUrl, (fenAfter) => {
-        board?.setPosition(fenAfter);
-      });
+      renderChapterDetail(
+        elements,
+        study,
+        chapter,
+        tree,
+        chapters,
+        exportUrl,
+        (fenAfter) => {
+          board?.setPosition(fenAfter);
+        },
+        i18n,
+      );
     },
     onLoading: (loading) => {
       if (elements.treeEl) elements.treeEl.setAttribute('aria-busy', loading ? 'true' : 'false');
@@ -208,19 +299,55 @@ export function mountStudyChapter({
   surface,
   studyId,
   chapterId,
+  i18n,
 }: StudyChapterMountDependencies): MountedStudyChapter {
   const boardElement = doc.getElementById('chapter-board');
   const board = boardElement ? mountBoard({ boardEl: boardElement }) : null;
   board?.setTurn(false);
 
+  const elements = studyChapterElements(doc);
+  let lastChapterState: {
+    study: StudyView;
+    chapter: ChapterView;
+    tree: readonly TreeNodeView[];
+    chapters: readonly ChapterView[];
+    exportUrl: string;
+  } | null = null;
+  let unsubscribeLocale: (() => void) | undefined;
+
   const controller = new StudiesController({
     client,
     callbacks: createStudyChapterCallbacks(
-      studyChapterElements(doc),
+      elements,
       board,
-      () => renderUnavailable(doc, surface),
+      () => renderUnavailable(doc, surface, i18n),
+      i18n,
+      (state) => {
+        lastChapterState = state;
+      },
     ),
+    onDispose: () => {
+      unsubscribeLocale?.();
+    },
   });
+
+  unsubscribeLocale = i18n?.onLocaleChange(() => {
+    if (lastChapterState) {
+      renderChapterDetail(
+        elements,
+        lastChapterState.study,
+        lastChapterState.chapter,
+        lastChapterState.tree,
+        lastChapterState.chapters,
+        lastChapterState.exportUrl,
+        (fenAfter) => {
+          board?.setPosition(fenAfter);
+        },
+        i18n,
+      );
+    }
+  });
+
   void controller.loadChapter(studyId, chapterId);
   return { board, studies: controller };
 }

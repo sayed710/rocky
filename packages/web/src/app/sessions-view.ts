@@ -6,6 +6,7 @@
  * which the system already has a treatment for.
  */
 import type { SessionView } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { appendPanelRow, renderEmpty } from './render-helpers.js';
 
 /**
@@ -32,8 +33,8 @@ export function activeSessions(sessions: readonly SessionView[], now: number): S
  * minor version right is worth nothing here. Anything unrecognised reads as "Unknown device" rather
  * than dumping a 120-character user-agent string into a row built for one line.
  */
-export function describeDevice(userAgent: string | null): string {
-  if (!userAgent) return 'Unknown device';
+export function describeDevice(userAgent: string | null, i18n?: I18nManager): string {
+  if (!userAgent) return i18n ? i18n.t('profile.sessions.unknownDevice') : 'Unknown device';
   const browser =
     /\bEdg\//.test(userAgent) ? 'Edge'
       : /\bOPR\//.test(userAgent) ? 'Opera'
@@ -49,8 +50,10 @@ export function describeDevice(userAgent: string | null): string {
       : /\bLinux\b/.test(userAgent) ? 'Linux'
       : null;
 
-  if (browser && platform) return `${browser} on ${platform}`;
-  return browser ?? platform ?? 'Unknown device';
+  if (browser && platform) {
+    return i18n ? i18n.t('profile.sessions.deviceOnPlatform', { browser, platform }) : `${browser} on ${platform}`;
+  }
+  return browser ?? platform ?? (i18n ? i18n.t('profile.sessions.unknownDevice') : 'Unknown device');
 }
 
 /** `2026-08-16` from an ISO timestamp; the raw value if it is not parseable. */
@@ -65,14 +68,15 @@ export function renderSessions(
   onRevoke: (id: string) => void,
   busy: boolean,
   now: number = Date.now(),
+  i18n?: I18nManager,
 ): void {
   container.innerHTML = '';
 
   const active = activeSessions(sessions, now);
   if (active.length === 0) {
     renderEmpty(container, {
-      title: 'No other active sessions',
-      body: 'Signing in on another browser or device will list it here.',
+      title: i18n ? i18n.t('profile.sessions.emptyTitle') : 'No other active sessions',
+      body: i18n ? i18n.t('profile.sessions.emptyBody') : 'Signing in on another browser or device will list it here.',
       inline: true,
     });
     return;
@@ -89,16 +93,18 @@ export function renderSessions(
     // the honest last-seen time regardless: every refresh rotates the session, so an active row was
     // created the last time that browser was actually here.
     const lastSeen = isoDate(session.lastSeenAt) ?? isoDate(session.createdAt);
+    const lastSeenStr = lastSeen ? (i18n ? i18n.t('profile.sessions.lastSeen', { date: lastSeen }) : `last seen ${lastSeen}`) : null;
     const parts = [
-      describeDevice(session.lastUserAgent ?? session.createdUserAgent),
+      describeDevice(session.lastUserAgent ?? session.createdUserAgent, i18n),
       session.lastIp ?? session.createdIp,
-      lastSeen ? `last seen ${lastSeen}` : null,
+      lastSeenStr,
     ].filter((part): part is string => Boolean(part));
 
+    const revokeLabel = i18n ? i18n.t('profile.sessions.revoke') : 'Revoke';
     appendPanelRow(
       container,
       parts.join(' · '),
-      [{ label: 'Revoke', run: () => onRevoke(session.id) }],
+      [{ label: revokeLabel, run: () => onRevoke(session.id) }],
       busy,
     );
   }

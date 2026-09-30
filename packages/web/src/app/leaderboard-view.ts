@@ -1,25 +1,23 @@
-/**
- * Leaderboard view renderers — pure DOM helpers that take a container plus data
- * and write DOM using `el()` and existing styling classes.
- */
 import { el } from './dom.js';
 import { renderEmpty } from './render-helpers.js';
 import { shortId } from '../api/graphql.js';
 import { OFFERED_VARIANTS, SPEEDS } from '../api/models.js';
-import { SPEED_LABELS, VARIANT_LABELS } from './variant-labels.js';
+import { getSpeedLabel, getVariantLabel } from './variant-labels.js';
+import type { I18n } from '../i18n/manager.js';
 import type { LeaderboardEntry, Speed, Variant, SocialPlayer } from '../api/models.js';
 
 export function renderLeaderboard(
   container: HTMLElement,
   entries: readonly LeaderboardEntry[],
   names: ReadonlyMap<string, SocialPlayer>,
+  i18n?: I18n,
 ): void {
   container.innerHTML = '';
   if (entries.length === 0) {
     container.setAttribute('role', 'status');
     renderEmpty(container, {
-      title: 'No leaderboard entries',
-      body: 'No ratings have been recorded in this variant and time control yet.',
+      title: i18n ? i18n.t('leaderboard.emptyEntriesTitle') : 'No leaderboard entries',
+      body: i18n ? i18n.t('leaderboard.emptyEntriesBody') : 'No ratings have been recorded in this variant and time control yet.',
     });
     return;
   }
@@ -57,11 +55,12 @@ export function renderLeaderboard(
 export function renderVariantSelector(
   selectEl: HTMLSelectElement,
   selectedVariant: Variant,
+  i18n?: I18n,
 ): void {
   selectEl.innerHTML = '';
   const doc = selectEl.ownerDocument;
   for (const v of OFFERED_VARIANTS) {
-    const option = el(doc, 'option', { value: v }, VARIANT_LABELS[v]);
+    const option = el(doc, 'option', { value: v }, getVariantLabel(v, i18n));
     if (v === selectedVariant) {
       option.selected = true;
     }
@@ -88,23 +87,32 @@ export function bindVariantSelector(
  * Every rating pool is a variant and a speed, and the page does not pick a speed for the viewer:
  * until one is chosen the results say so instead of showing some default pool.
  */
-export function renderChooseSpeed(container: HTMLElement): void {
+export function renderChooseSpeed(container: HTMLElement, i18n?: I18n): void {
   container.innerHTML = '';
   container.setAttribute('role', 'status');
   renderEmpty(container, {
-    title: 'Choose a time control',
-    body: 'Each variant and time control has its own ratings. Pick a time control to see its standings.',
+    title: i18n ? i18n.t('leaderboard.chooseSpeedTitle') : 'Choose a time control',
+    body: i18n ? i18n.t('leaderboard.chooseSpeedBody') : 'Each variant and time control has its own ratings. Pick a time control to see its standings.',
   });
 }
 
-export function renderSpeedSelector(selectEl: HTMLSelectElement, selectedSpeed: Speed | null): void {
+export function renderSpeedSelector(
+  selectEl: HTMLSelectElement,
+  selectedSpeed: Speed | null,
+  i18n?: I18n,
+): void {
   selectEl.innerHTML = '';
   const doc = selectEl.ownerDocument;
-  const prompt = el(doc, 'option', { value: '', disabled: '' }, 'Choose…');
+  const prompt = el(
+    doc,
+    'option',
+    { value: '', disabled: '' },
+    i18n ? i18n.t('leaderboard.choosePrompt') : 'Choose…',
+  );
   prompt.selected = selectedSpeed === null;
   selectEl.appendChild(prompt);
   for (const s of SPEEDS) {
-    const option = el(doc, 'option', { value: s }, SPEED_LABELS[s]);
+    const option = el(doc, 'option', { value: s }, getSpeedLabel(s, i18n));
     option.selected = s === selectedSpeed;
     selectEl.appendChild(option);
   }
