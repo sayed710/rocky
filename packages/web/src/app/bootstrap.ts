@@ -58,6 +58,7 @@ import { mountEmailVerification } from './email-verification-mount.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
 import { parseRoute } from './router.js';
 import { applyRouteSurface } from './route-surface.js';
+import { localizeShell } from '../i18n/index.js';
 
 export { renderEmpty, formatClock, formatTimeControl };
 export type { EmptyStateOptions };
@@ -85,6 +86,7 @@ export interface BootstrappedDisposables {
   readonly emailVerification: { dispose: () => void } | null;
   readonly connectivity: { dispose: () => void } | null;
   readonly analysis: { dispose: () => void } | null;
+  readonly shellLocalization: { dispose: () => void } | null;
 }
 
 /** Everything the bootstrap wired, returned for later increments and tests. */
@@ -96,6 +98,8 @@ export interface Bootstrapped extends BootstrappedDisposables {
 export type DisposableKey = keyof BootstrappedDisposables;
 
 type ActiveBootstrappedDisposables = Partial<Omit<BootstrappedDisposables, 'app' | 'auth'>>;
+
+let currentShellLocalization: { dispose: () => void } | null = null;
 
 function createBootstrapped(
   app: App,
@@ -125,6 +129,7 @@ function createBootstrapped(
     emailVerification: null,
     connectivity: null,
     analysis: null,
+    shellLocalization: activeDisposables.shellLocalization ?? currentShellLocalization,
     theme,
     ...activeDisposables,
   };
@@ -204,6 +209,7 @@ export function bootstrap(
     ...(deps?.storage !== undefined ? { storage: deps.storage } : {}),
   };
   const app = createApp(appDeps);
+  currentShellLocalization = localizeShell(doc, app.i18n);
 
   // --- Capabilities-driven navigation ---
   void applyNavCapabilities(doc, app.api);
