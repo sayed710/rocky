@@ -898,4 +898,7 @@ jobs:
           docker run --rm -v "$PWD/deploy/observability:/o:ro" \
             --entrypoint promtool prom/prometheus:v3.13.2 \
             check rules /o/prometheus/rules/gambit.rules.yml
+          docker run --rm -v "$PWD/deploy/observability:/o:ro" \
+            --entrypoint promtool prom/prometheus:v3.13.2 \
+            test rules /o/prometheus/tests/ratings-alerts.test.yml
 

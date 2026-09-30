@@ -187,6 +187,19 @@ groups:
             so a failure that repeats on the same ending stops all ratings until its cause is fixed.
           runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-batch-failures"
 
+      - alert: GambitRatingsGameBlocked
+        # increase() over a window: only blocks recorded recently fire it, however many exist from before.
+        expr: sum(increase(ratings_games_total{outcome="blocked"}[15m])) > 0
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "A finished game was blocked from rating"
+          description: >-
+            The ratings applier recorded a new game in rating_blocked_games in the last 15 minutes. A blocked game
+            is never rated automatically. Replaying an earlier block counts as already_blocked and does not fire this.
+          runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-lag-or-blocked-games"
+
       - alert: GambitRatingsBacklogSampleFailing
         expr: sum(rate(ratings_backlog_sample_failures_total[5m])) > 0
         for: 5m

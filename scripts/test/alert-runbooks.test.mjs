@@ -1,5 +1,5 @@
 /**
- * Every alert names a runbook section that exists, and a failing ratings batch alerts directly.
+ * Every alert names a runbook section that exists, and ratings batch failures and new blocks alert directly.
  *
  * A renamed runbook heading silently breaks the link an on-call engineer follows during the incident.
  * Reads the real rules and runbook, since the value is in catching drift between the two files.
@@ -38,4 +38,18 @@ test('a failing ratings batch alerts on the failure counter itself', () => {
   const alert = alerts(rules).find(({ body }) => /expr:.*\bratings_batch_failures_total\b/.test(body));
   assert.ok(alert, 'no alert reads ratings_batch_failures_total');
   assert.match(alert.body, /RUNBOOKS\.md#ratings-batch-failures"/);
+});
+
+test('a newly blocked rating game alerts on recent blocks only, from the metric the gateway emits', () => {
+  const gateway = read('services/gateway/src/serve.ts');
+  assert.match(gateway, /metrics\.counter\('ratings_games_total', \{ outcome \}\)/, 'the gateway no longer emits ratings_games_total{outcome}');
+  assert.match(gateway, /const outcomes = \[[^\]]*'blocked'[^\]]*\]/, "the gateway no longer counts the 'blocked' outcome");
+
+  const alert = alerts(rules).find(({ body }) => /\bratings_games_total\{outcome="blocked"\}/.test(body));
+  assert.ok(alert, 'no alert reads ratings_games_total{outcome="blocked"}');
+  // A raw counter comparison would keep firing forever once any game had ever been blocked.
+  assert.match(alert.body, /expr:\s*sum\(increase\(ratings_games_total\{outcome="blocked"\}\[\d+m\]\)\) > 0/);
+  assert.match(alert.body, /RUNBOOKS\.md#ratings-lag-or-blocked-games"/);
+  // Its firing and clearing are evaluated by promtool against this file in CI.
+  assert.match(read('deploy/observability/prometheus/tests/ratings-alerts.test.yml'), new RegExp(`alertname: ${alert.name}$`, 'm'));
 });

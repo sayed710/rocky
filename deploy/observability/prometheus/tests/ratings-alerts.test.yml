@@ -1,0 +1,55 @@
+# promtool rule tests for the ratings alerts (ADR-0150).
+# Run: promtool test rules deploy/observability/prometheus/tests/ratings-alerts.test.yml
+rule_files:
+  - ../rules/gambit.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Blocks recorded long ago, and only replays since: the counter is flat, so nothing fires.
+  - interval: 1m
+    input_series:
+      - series: 'ratings_games_total{outcome="blocked", instance="gateway-1"}'
+        values: '7x120'
+      - series: 'ratings_games_total{outcome="already_blocked", instance="gateway-1"}'
+        values: '0+3x120'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: GambitRatingsGameBlocked
+        exp_alerts: []
+      - eval_time: 120m
+        alertname: GambitRatingsGameBlocked
+        exp_alerts: []
+
+  # One new block at minute 31 fires at once and clears when it leaves the 15-minute window.
+  - interval: 1m
+    input_series:
+      - series: 'ratings_games_total{outcome="blocked", instance="gateway-1"}'
+        values: '7x30 8x89'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: GambitRatingsGameBlocked
+        exp_alerts: []
+      - eval_time: 32m
+        alertname: GambitRatingsGameBlocked
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: gateway
+            exp_annotations:
+              summary: "A finished game was blocked from rating"
+              description: "The ratings applier recorded a new game in rating_blocked_games in the last 15 minutes. A blocked game is never rated automatically. Replaying an earlier block counts as already_blocked and does not fire this."
+              runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-lag-or-blocked-games"
+      - eval_time: 60m
+        alertname: GambitRatingsGameBlocked
+        exp_alerts: []
+
+  # A gateway restart resets its counter to zero; that is not a new block.
+  - interval: 1m
+    input_series:
+      - series: 'ratings_games_total{outcome="blocked", instance="gateway-1"}'
+        values: '7x30 0x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: GambitRatingsGameBlocked
+        exp_alerts: []
