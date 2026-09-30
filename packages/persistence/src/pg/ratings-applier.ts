@@ -22,12 +22,13 @@
 import type { Pool, PoolClient } from 'pg';
 import { rateGame, initialRating, type Glicko2Rating } from '../glicko2';
 import { decideRating, type RateableGame } from '../rating-eligibility';
-import { inTransaction, isStreamDataFailure, loadStream } from './games-projector';
+import { CorruptGameStreamError } from '../errors';
+import { inTransaction, loadStream } from './games-projector';
 
 const ORIGIN = { xactId: '0', serverTs: '-infinity', gameId: '00000000-0000-0000-0000-000000000000' } as const;
 
-/** What happened to one ending. */
-export type RatingOutcome = 'applied' | 'already_applied' | 'ineligible' | 'blocked';
+/** What happened to one ending. `blocked` is a block recorded by this batch; `already_blocked` is one found from before. */
+export type RatingOutcome = 'applied' | 'already_applied' | 'ineligible' | 'blocked' | 'already_blocked';
 
 /** An ending whose eligibility could not be proven; it is recorded and never rated automatically. */
 export interface BlockedRating {
@@ -43,6 +44,7 @@ export interface RatingsBatch {
   /** The checkpoint was ahead of this cluster's transaction ids (e.g. a logical restore) and restarted from the origin. */
   readonly rewound: boolean;
   readonly outcomes: Readonly<Record<RatingOutcome, number>>;
+  /** Games this batch blocked; a block recorded earlier is counted as `already_blocked` and not listed. */
   readonly blocked: readonly BlockedRating[];
 }
 
@@ -108,13 +110,19 @@ export class PgRatingsApplier {
          FROM rating_checkpoint FOR UPDATE SKIP LOCKED`,
       );
       const row = locked.rows[0];
-      const outcomes: Record<RatingOutcome, number> = { applied: 0, already_applied: 0, ineligible: 0, blocked: 0 };
+      const outcomes: Record<RatingOutcome, number> = { applied: 0, already_applied: 0, ineligible: 0, blocked: 0, already_blocked: 0 };
       if (!row) return { busy: true, more: false, rewound: false, outcomes, blocked: [] };
 
-      // Within one cluster the checkpoint is always below the horizon. At or above it, the ids came
-      // from another cluster's counter; replaying from the origin is safe because the ledger refuses
-      // every game already applied.
-      const rewound = BigInt(row.xact_id) >= BigInt(horizon);
+      // Within one cluster the checkpoint is always below the horizon of any snapshot taken after it
+      // committed. At or above it, the ids came from another cluster's counter; replaying from the
+      // origin is safe because the ledger refuses every game already applied. The first horizon is
+      // not that test: another applier can commit past it while this one waits for the row lock, so
+      // the rewind is judged by a horizon read now. The page scan keeps the first horizon, and so
+      // finds nothing to do in that case.
+      const lockedHorizon = (await client.query<{ horizon: string }>(
+        'SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS horizon',
+      )).rows[0]!.horizon;
+      const rewound = BigInt(row.xact_id) >= BigInt(lockedHorizon);
       const cursor: Position = rewound ? ORIGIN : { xactId: row.xact_id, serverTs: row.server_ts, gameId: row.game_id };
 
       const page = await client.query<{ xact_id: string; server_ts: string; game_id: string }>(
@@ -151,34 +159,31 @@ type OneOutcome =
   | { readonly kind: Exclude<RatingOutcome, 'blocked'> }
   | { readonly kind: 'blocked'; readonly error: string };
 
-/** A savepoint confines one stream's data failure; the block is recorded in the same transaction. */
 async function rateOne(client: PoolClient, gameId: string): Promise<OneOutcome> {
-  const priorBlock = await client.query<{ error: string }>(
-    'SELECT error FROM rating_blocked_games WHERE game_id = $1', [gameId],
-  );
-  if (priorBlock.rows[0]) return { kind: 'blocked', error: priorBlock.rows[0].error };
+  const priorBlock = await client.query('SELECT 1 FROM rating_blocked_games WHERE game_id = $1', [gameId]);
+  if (priorBlock.rowCount) return { kind: 'already_blocked' };
   const priorIneligible = await client.query('SELECT 1 FROM rating_ineligible_games WHERE game_id = $1', [gameId]);
   if (priorIneligible.rowCount) return { kind: 'ineligible' };
   // The ledger is also a sticky decision. Rechecking today's account flags before it would
   // reclassify a previously rated game on rewind and collide with the durable application.
   const priorApplication = await client.query('SELECT 1 FROM rating_applications WHERE game_id = $1', [gameId]);
   if (priorApplication.rowCount) return { kind: 'already_applied' };
-  await client.query('SAVEPOINT rate_game');
+  // Loading is outside the block decision: an event version this gateway cannot upcast (a rolling
+  // deploy) or any database or driver failure aborts the batch for retry instead of blocking a game.
+  const stream = await loadStream(client, gameId);
   let decision: ReturnType<typeof decideRating>;
   try {
-    decision = decideRating(gameId, await loadStream(client, gameId));
+    decision = decideRating(gameId, stream);
+    if (decision.kind === 'rate') await requireCatalogVariant(client, decision.game);
   } catch (error) {
-    // Only loading and validating the stream can make a sticky block. A rating-table constraint
-    // error is state corruption, not evidence that the event stream is bad; it aborts the batch.
-    if (!isStreamDataFailure(error)) throw error;
-    await client.query('ROLLBACK TO SAVEPOINT rate_game');
-    await client.query('RELEASE SAVEPOINT rate_game');
-    const message = error instanceof Error ? error.message : String(error);
-    await client.query(
+    // Only a loaded stream proven unrateable makes a sticky block. Anything else, including a
+    // rating-table error, is not evidence that the stream is bad; it aborts the batch.
+    if (!(error instanceof CorruptGameStreamError)) throw error;
+    const created = await client.query(
       'INSERT INTO rating_blocked_games (game_id, error) VALUES ($1, $2) ON CONFLICT (game_id) DO NOTHING',
-      [gameId, message],
+      [gameId, error.message],
     );
-    return { kind: 'blocked', error: message };
+    return created.rowCount ? { kind: 'blocked', error: error.message } : { kind: 'already_blocked' };
   }
   const applied = decision.kind === 'rate' ? await applyRatedGame(client, decision.game) : 'ineligible';
   const reason = decision.kind === 'ineligible' ? decision.reason
@@ -186,8 +191,17 @@ async function rateOne(client: PoolClient, gameId: string): Promise<OneOutcome> 
   if (reason !== null) {
     await client.query('INSERT INTO rating_ineligible_games (game_id, reason) VALUES ($1, $2)', [gameId, reason]);
   }
-  await client.query('RELEASE SAVEPOINT rate_game');
   return { kind: applied === 'applied' || applied === 'already_applied' ? applied : 'ineligible' };
+}
+
+/**
+ * `ratings.variant` references `variants(code)`, so an ending in any other variant would fail that
+ * foreign key on every retry and stop every pool. The table is the catalog the key enforces, so the
+ * check cannot drift from it.
+ */
+async function requireCatalogVariant(client: PoolClient, game: RateableGame): Promise<void> {
+  const known = await client.query('SELECT 1 FROM variants WHERE code = $1', [String(game.variant)]);
+  if (!known.rowCount) throw new CorruptGameStreamError(game.gameId, `unsupported variant ${JSON.stringify(game.variant)}`);
 }
 
 /** The result of {@link applyRatedGame}; the last two change nothing. */

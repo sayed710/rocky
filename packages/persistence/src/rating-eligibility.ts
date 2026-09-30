@@ -8,7 +8,7 @@
 
 import { isEngineBotUserId, type ResultString, type Termination } from '@chess-platform/game';
 import type { Variant } from '@chess-platform/core';
-import { PersistenceError } from './errors';
+import { CorruptGameStreamError } from './errors';
 import type { StoredEvent } from './event-store';
 import { projectGameStream } from './games-projection';
 import type { Speed } from './repositories';
@@ -56,7 +56,7 @@ const TIME_CONTROL_KINDS: ReadonlySet<unknown> = new Set(['increment', 'delay', 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Decide from a game's complete committed stream. Throws {@link PersistenceError} for a stream no
+ * Decide from a game's complete committed stream. Throws {@link CorruptGameStreamError} for a stream no
  * authority could have written: one the games fold rejects, one that has not ended, a non-boolean
  * `rated`, an unknown time-control kind, a result that termination cannot have, a winner that
  * contradicts the result, or a player facing themself. Such a game is blocked, never rated and never
@@ -103,6 +103,6 @@ function ineligible(reason: IneligibleReason): RatingDecision {
   return { kind: 'ineligible', reason };
 }
 
-function corrupt(gameId: string, reason: string): PersistenceError {
-  return new PersistenceError(`game ${gameId}: ${reason}`);
+function corrupt(gameId: string, reason: string): CorruptGameStreamError {
+  return new CorruptGameStreamError(gameId, reason);
 }

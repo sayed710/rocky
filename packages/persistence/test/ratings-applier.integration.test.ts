@@ -7,6 +7,7 @@ import { ENGINE_BOT_USER_IDS, Game, type CreateGameParams, type GameEvent, type 
 import { initialRating, rateGame, uuidv7, type Glicko2Rating, type RateableGame } from '../src';
 import { migrate } from '../src/pg/migrate';
 import { PostgresEventStore } from '../src/pg/event-store';
+import { registerUpcaster } from '../src/event-store';
 import { PgRatingsRepository, PgUsersRepository } from '../src/pg/repositories';
 import { PgRatingsApplier, applyRatedGame, type RatingsBatch } from '../src/pg/ratings-applier';
 import { withTestDatabase } from '../src/test-support/database';
@@ -84,8 +85,74 @@ async function drain(pool: Pool, applier = new PgRatingsApplier(pool)): Promise<
   }
 }
 
-function total(batches: readonly RatingsBatch[], outcome: keyof RatingsBatch['outcomes']): number {
-  return batches.reduce((sum, b) => sum + b.outcomes[outcome], 0);
+function total(batches: readonly RatingsBatch[], outcome: string): number {
+  return batches.reduce((sum, b) => sum + ((b.outcomes as Readonly<Record<string, number>>)[outcome] ?? 0), 0);
+}
+
+const REWIND = `UPDATE rating_checkpoint SET xact_id = '0', server_ts = '-infinity', game_id = '00000000-0000-0000-0000-000000000000'`;
+
+async function checkpoint(pool: Pool): Promise<unknown[]> {
+  return (await pool.query('SELECT xact_id::text, server_ts::text, game_id FROM rating_checkpoint')).rows;
+}
+
+/** A played, resigned game's events, with `edit` applied to its `GameCreated` payload. */
+function endedEvents(create: CreateGameParams, edit: (created: Record<string, unknown>) => void = () => {}): GameEvent[] {
+  const started = Game.create(create);
+  const moved = started.game.playMove('e2e4', 2_000);
+  const events = [...started.events, ...moved.events, ...moved.game.resign('b', 3_000).events];
+  const created = { ...events[0]! } as unknown as Record<string, unknown>;
+  edit(created);
+  return [created as unknown as GameEvent, ...events.slice(1)];
+}
+
+/** Write a stream in one transaction; `version` gives each row's stored event version (default 1). */
+async function insertStream(pool: Pool, gameId: string, events: readonly GameEvent[], version = (_seq: number): number => 1): Promise<void> {
+  const writer = await inTx(pool);
+  try {
+    for (const [seq, event] of events.entries()) {
+      await writer.query(
+        'INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, $2, $3, $4, $5)',
+        [gameId, seq, event.type, version(seq), event],
+      );
+    }
+    await writer.query('COMMIT');
+  } finally {
+    writer.release();
+  }
+}
+
+/** Wait until every committed ending is below the cluster-wide apply horizon. */
+async function belowHorizon(pool: Pool): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (!(await pool.query<{ ok: boolean }>(
+    `SELECT COALESCE(max(xact_id) < pg_snapshot_xmin(pg_current_snapshot()), true) AS ok
+     FROM game_events WHERE type = 'GameEnded'`,
+  )).rows[0]!.ok) {
+    if (Date.now() > deadline) throw new Error('endings stayed above the horizon for 30 s');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/** A pool whose clients run `before(sql)` ahead of each query, to fail or pause one statement. */
+function interceptingPool(pool: Pool, before: (sql: string) => Promise<void> | void): Pool {
+  return {
+    connect: async () => {
+      const client = await pool.connect();
+      return new Proxy(client, {
+        get(target, prop) {
+          if (prop === 'query') {
+            return async (sql: unknown, ...rest: unknown[]) => {
+              if (typeof sql === 'string') await before(sql);
+              return (target.query as (...args: unknown[]) => unknown)(sql, ...rest);
+            };
+          }
+          const value = Reflect.get(target, prop) as unknown;
+          return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+    },
+    query: pool.query.bind(pool),
+  } as unknown as Pool;
 }
 
 async function rating(pool: Pool, userId: string, variant = 'standard', speed = 'blitz'): Promise<Glicko2Rating | undefined> {
@@ -775,5 +842,138 @@ test('endings sharing one transaction id (as migration 0040 left history) apply 
     s = rateGame(xa, xc, 1); xa = s.white; xc = s.black;
     s = rateGame(xb, xa, 1); xb = s.white; xa = s.black;
     assert.notDeepEqual(xa, ra);
+  });
+});
+
+test('a checkpoint another applier advanced while this one waited for the lock is progress, not a restore', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [a, b] = await users(pool, 2);
+    await record(pool, params(a!, b!), [move('e2e4'), resign('b')]);
+    await drain(pool);
+
+    // Worker A samples its horizon, then stops just before taking the checkpoint lock.
+    let reached!: () => void;
+    const atLock = new Promise<void>((resolve) => { reached = resolve; });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const workerA = new PgRatingsApplier(interceptingPool(pool, async (sql) => {
+      if (sql.includes('FOR UPDATE SKIP LOCKED')) { reached(); await gate; }
+    }));
+    const pausedBatch = workerA.runBatch();
+    await atLock;
+
+    // Worker B rates a game that ended after A's horizon, so the checkpoint moves past that horizon.
+    await record(pool, params(b!, a!), [move('e2e4'), resign('b')]);
+    await drain(pool);
+    assert.equal(await count(pool, 'rating_applications'), 2);
+    const advanced = await checkpoint(pool);
+
+    release();
+    const batch = await pausedBatch;
+    assert.equal(batch.rewound, false, 'ordinary progress by another worker is not a restore');
+    assert.equal(total([batch], 'already_applied'), 0, 'no history was replayed');
+    assert.equal(total([batch], 'applied'), 0);
+    assert.deepEqual(await checkpoint(pool), advanced, 'the checkpoint was not moved back');
+  });
+});
+
+test('replaying an already blocked game reports it as already blocked, never as a new block', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [a, b] = await users(pool, 2);
+    const bad = params(a!, b!);
+    await insertStream(pool, bad.gameId, endedEvents(bad, (created) => { delete created['rated']; }));
+
+    const first = await drain(pool);
+    assert.deepEqual(first.flatMap((batch) => batch.blocked.map((x) => x.gameId)), [bad.gameId]);
+    assert.equal(total(first, 'blocked'), 1);
+    assert.equal(total(first, 'already_blocked'), 0);
+
+    await pool.query(REWIND);
+    const replay = await drain(pool);
+    assert.deepEqual(replay.flatMap((batch) => batch.blocked), [], 'an old block is not reported as new');
+    assert.equal(total(replay, 'blocked'), 0);
+    assert.equal(total(replay, 'already_blocked'), 1);
+    assert.equal(await count(pool, 'rating_blocked_games'), 1);
+  });
+});
+
+test('an event version this gateway cannot read aborts the batch for retry and never blocks the game', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [a, b] = await users(pool, 2);
+    const newer = params(a!, b!);
+    const events = endedEvents(newer);
+    // As in a rolling deploy: a newer gateway wrote the ending at a version this one has no upcaster for.
+    await insertStream(pool, newer.gameId, events, (seq) => (seq === events.length - 1 ? 99 : 1));
+    const before = await checkpoint(pool);
+
+    await assert.rejects(drain(pool), /no upcaster registered for event GameEnded@99/);
+    assert.equal(await count(pool, 'rating_blocked_games'), 0);
+    assert.equal(await count(pool, 'rating_applications'), 0);
+    assert.deepEqual(await checkpoint(pool), before);
+
+    // Once this gateway can read the version, the same game rates normally.
+    registerUpcaster('GameEnded', 99, (payload) => payload as GameEvent);
+    const batches = await drain(pool);
+    assert.equal(total(batches, 'applied'), 1);
+    assert.equal(await count(pool, 'rating_blocked_games'), 0);
+  });
+});
+
+test('a loader or runtime failure aborts the whole batch atomically and never blocks the game', { skip }, async () => {
+  const failures: Error[] = [
+    Object.assign(new Error('invalid input syntax'), { code: '22P02' }),
+    Object.assign(new Error('duplicate key value'), { code: '23505' }),
+    new TypeError('driver returned an unreadable row'),
+    new RangeError('driver returned an out-of-range value'),
+  ];
+  for (const injected of failures) {
+    await withTestDatabase(async ({ pool }) => {
+      await migrate(pool, MIGRATIONS);
+      const [a, b] = await users(pool, 2);
+      await record(pool, params(a!, b!), [move('e2e4'), resign('b')]);
+      const failing = await record(pool, params(b!, a!), [move('e2e4'), resign('b')]);
+      const before = await checkpoint(pool);
+      let loads = 0;
+      // Fail only the second stream load, so the first game's rating must roll back with it.
+      const faulty = interceptingPool(pool, (sql) => {
+        if (sql.includes('FROM game_events WHERE game_id = $1 ORDER BY seq') && loads++ === 1) throw injected;
+      });
+      await belowHorizon(pool);
+      await assert.rejects(new PgRatingsApplier(faulty).runBatch(), (error) => error === injected);
+      assert.equal(loads, 2, 'both endings were in the failed batch');
+      assert.equal(await count(pool, 'rating_blocked_games'), 0, `${injected.name} ${injected.message} must not create a sticky block`);
+      assert.equal(await count(pool, 'rating_applications'), 0, 'the earlier game in the batch rolled back too');
+      assert.deepEqual(await checkpoint(pool), before);
+
+      const retried = await drain(pool);
+      assert.equal(total(retried, 'applied'), 2);
+      assert.ok((await pool.query('SELECT 1 FROM rating_applications WHERE game_id = $1', [failing])).rowCount);
+    });
+  }
+});
+
+test('an unsupported variant is blocked once, the checkpoint passes it, and later games still rate', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [a, b] = await users(pool, 2);
+    const unknown = params(a!, b!);
+    await insertStream(pool, unknown.gameId, endedEvents(unknown, (created) => { created['variant'] = 'shogi'; }));
+    await record(pool, params(a!, b!, { variant: 'atomic' }), [move('e2e4'), resign('b')]);
+
+    const batches = await drain(pool);
+    assert.deepEqual(batches.flatMap((batch) => batch.blocked.map((x) => x.gameId)), [unknown.gameId]);
+    assert.match((await pool.query('SELECT error FROM rating_blocked_games')).rows[0]!.error, /unsupported variant "shogi"/);
+    assert.equal(total(batches, 'applied'), 1);
+    assert.deepEqual(await rating(pool, a!, 'atomic'), rateGame(initialRating(), initialRating(), 1).white);
+    assert.equal(await pending(pool), false, 'the checkpoint moved past the blocked game');
+
+    await pool.query(REWIND);
+    const replay = await drain(pool);
+    assert.equal(total(replay, 'already_blocked'), 1);
+    assert.equal(total(replay, 'blocked'), 0);
+    assert.equal(await count(pool, 'rating_blocked_games'), 1);
   });
 });

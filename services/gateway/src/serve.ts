@@ -108,6 +108,7 @@ import {
 } from '@chess-platform/api';
 import type { TournamentResultReporter, LaunchInput } from '@chess-platform/api';
 import type { EventStore } from '@chess-platform/persistence';
+import type { RatingOutcome } from '@chess-platform/persistence/pg';
 
 /** A TokenVerifier backed by the API's AccessTokenService (shared secret). */
 class SharedSecretTokenVerifier implements TokenVerifier {
@@ -487,7 +488,7 @@ async function main(): Promise<void> {
   let ratingsApplier: { stop(): Promise<void> } | undefined;
   if (pgPool) {
     const { PgRatingsApplier, GamesProjectionWorker } = await import('@chess-platform/persistence/pg');
-    const outcomes = ['applied', 'already_applied', 'ineligible', 'blocked'] as const;
+    const outcomes = ['applied', 'already_applied', 'ineligible', 'blocked', 'already_blocked'] as const satisfies readonly RatingOutcome[];
     const outcomeCounters = new Map(outcomes.map((outcome) => [outcome, metrics.counter('ratings_games_total', { outcome })]));
     const batchFailures = metrics.counter('ratings_batch_failures_total');
     const backlogAge = metrics.gauge('ratings_oldest_pending_ending_age_seconds');
