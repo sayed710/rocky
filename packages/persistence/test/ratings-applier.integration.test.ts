@@ -977,3 +977,31 @@ test('an unsupported variant is blocked once, the checkpoint passes it, and late
     assert.equal(await count(pool, 'rating_blocked_games'), 1);
   });
 });
+
+test('a variant that is not a string is blocked, even when it names a catalog variant, and the same batch rates the next game', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, MIGRATIONS);
+    const [a, b] = await users(pool, 2);
+    const malformed = params(a!, b!);
+    // String(['standard']) is 'standard', but the driver would write the array as '{"standard"}'.
+    await insertStream(pool, malformed.gameId, endedEvents(malformed, (created) => { created['variant'] = ['standard']; }));
+    const valid = await record(pool, params(b!, a!), [move('e2e4'), resign('b')]);
+    await belowHorizon(pool);
+
+    const batch = await new PgRatingsApplier(pool).runBatch();
+    assert.deepEqual(batch.blocked.map((x) => x.gameId), [malformed.gameId], 'blocked once, in the same batch');
+    assert.equal(total([batch], 'blocked'), 1);
+    assert.equal(total([batch], 'applied'), 1);
+    assert.match((await pool.query('SELECT error FROM rating_blocked_games')).rows[0]!.error, /variant \["standard"\] is not a string/);
+    assert.equal((await pool.query('SELECT 1 FROM rating_applications WHERE game_id = $1', [malformed.gameId])).rowCount, 0);
+    assert.ok((await pool.query('SELECT 1 FROM rating_applications WHERE game_id = $1', [valid])).rowCount);
+    assert.equal(await pending(pool), false, 'the checkpoint moved past both games');
+
+    await pool.query(REWIND);
+    const replay = await drain(pool);
+    assert.deepEqual(replay.flatMap((x) => x.blocked), []);
+    assert.equal(total(replay, 'already_blocked'), 1);
+    assert.equal(total(replay, 'blocked'), 0);
+    assert.equal(await count(pool, 'rating_blocked_games'), 1);
+  });
+});

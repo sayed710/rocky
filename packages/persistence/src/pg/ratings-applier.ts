@@ -197,11 +197,16 @@ async function rateOne(client: PoolClient, gameId: string): Promise<OneOutcome> 
 /**
  * `ratings.variant` references `variants(code)`, so an ending in any other variant would fail that
  * foreign key on every retry and stop every pool. The table is the catalog the key enforces, so the
- * check cannot drift from it.
+ * check cannot drift from it. The payload is untyped at runtime: a non-string is never coerced, since
+ * `String(['standard'])` would pass here while the driver writes the array itself.
  */
 async function requireCatalogVariant(client: PoolClient, game: RateableGame): Promise<void> {
-  const known = await client.query('SELECT 1 FROM variants WHERE code = $1', [String(game.variant)]);
-  if (!known.rowCount) throw new CorruptGameStreamError(game.gameId, `unsupported variant ${JSON.stringify(game.variant)}`);
+  const variant: unknown = game.variant;
+  if (typeof variant !== 'string') {
+    throw new CorruptGameStreamError(game.gameId, `variant ${JSON.stringify(variant)} is not a string`);
+  }
+  const known = await client.query('SELECT 1 FROM variants WHERE code = $1', [variant]);
+  if (!known.rowCount) throw new CorruptGameStreamError(game.gameId, `unsupported variant ${JSON.stringify(variant)}`);
 }
 
 /** The result of {@link applyRatedGame}; the last two change nothing. */
