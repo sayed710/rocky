@@ -1,6 +1,7 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mountLobby, renderSeeks } from '../src/app/lobby-mount.js';
+import { mountLobby, renderSeeks as renderSeeksBase } from '../src/app/lobby-mount.js';
+import { createI18nManager, type I18nManager } from '../src/i18n/index.js';
 import { formatMoreOptionsSummary } from '../src/app/create-game-panel.js';
 import { LobbyController } from '../src/app/lobby-controller.js';
 import { OFFERED_VARIANTS } from '../src/api/models.js';
@@ -10,6 +11,7 @@ import type {
   CreateSeekRequest,
   GameSummary,
   SeekView,
+  SocialPlayer,
   Variant,
 } from '../src/api/models.js';
 import type { GambitClient } from '../src/api/client.js';
@@ -435,10 +437,22 @@ function makeFakeClient(opts: {
   return { client, createdSeeks, canceledSeeks, acceptedSeeks, botGameCalls };
 }
 
+const testI18n = createI18nManager();
 const mountedControllers = new Set<LobbyController>();
 
-function mountTestLobby(deps: Parameters<typeof mountLobby>[0]): ReturnType<typeof mountLobby> {
-  const mounted = mountLobby(deps);
+function renderSeeks(
+  container: HTMLElement,
+  seeks: readonly SeekView[],
+  currentUserId: string | null = null,
+  names?: ReadonlyMap<string, SocialPlayer>,
+  i18n: I18nManager = testI18n,
+): void {
+  renderSeeksBase(container, seeks, currentUserId, names, i18n);
+}
+
+function mountTestLobby(deps: Omit<Parameters<typeof mountLobby>[0], 'i18n'> & { i18n?: I18nManager }): ReturnType<typeof mountLobby> {
+  const i18n = deps.i18n ?? testI18n;
+  const mounted = mountLobby({ ...deps, i18n });
   mountedControllers.add(mounted.lobby);
   return mounted;
 }
@@ -555,7 +569,7 @@ test('renderSeeks: renders owned seek with cancel affordance and waiting indicat
   assert.equal(row.dataset['seekId'], 's-own');
 
   const info = row.querySelector('.seek-info');
-  assert.equal(info?.textContent, 'standard · blitz · 3+2 · rated');
+  assert.equal(info?.textContent, 'Standard · Blitz · 3+2 · rated');
 
   const waiting = row.querySelector('.seek-waiting');
   assert.ok(waiting);
@@ -591,7 +605,7 @@ test('renderSeeks: renders other player seek with accept Play button', () => {
   assert.equal(row.dataset['seekId'], 's-other');
 
   const info = row.querySelector('.seek-info');
-  assert.equal(info?.textContent, 'standard · rapid · 10 min');
+  assert.equal(info?.textContent, 'Standard · Rapid · 10 min');
 
   const acceptBtn = row.querySelector<FakeDOMElement>('.seek-accept');
   assert.ok(acceptBtn);
@@ -2105,7 +2119,7 @@ test('the disclosure summary names the variant and the rating bound in words', (
   ];
   for (const [variant, minRating, maxRating, expected] of cases) {
     assert.equal(
-      formatMoreOptionsSummary(variant, { ok: true, minRating, maxRating }),
+      formatMoreOptionsSummary(variant, { ok: true, minRating, maxRating }, testI18n),
       expected,
       expected,
     );
@@ -2115,11 +2129,11 @@ test('the disclosure summary names the variant and the rating bound in words', (
 /** A range the panel would reject must never read as a settled choice. */
 test('the disclosure summary refuses to describe an invalid rating as valid', () => {
   assert.equal(
-    formatMoreOptionsSummary('standard', { ok: false }),
+    formatMoreOptionsSummary('standard', { ok: false }, testI18n),
     'Standard · Opponent rating needs attention',
   );
   assert.equal(
-    formatMoreOptionsSummary('horde', { ok: false }),
+    formatMoreOptionsSummary('horde', { ok: false }, testI18n),
     'Horde · Opponent rating needs attention',
   );
 });

@@ -116,6 +116,7 @@ function setup(opts?: {
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   return { sockets, elements, mounted, requests };

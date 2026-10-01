@@ -16,18 +16,18 @@ export function formatClock(ms: number): string {
 /** Format a time control into a human-readable string. */
 export function formatTimeControl(
   tc: Pick<TimeControl, 'kind' | 'initialMs' | 'incrementMs' | 'delayMs'>,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): string {
-  const t = i18n ? i18n.t.bind(i18n) : null;
-  if (tc.kind === 'unlimited') return t ? t('timeControl.unlimited') : 'Unlimited';
+  const t = i18n.t.bind(i18n);
+  if (tc.kind === 'unlimited') return t('timeControl.unlimited');
   if (tc.kind === 'sudden_death') {
     const sec = tc.initialMs / 1000;
     if (sec >= 60 && sec % 60 === 0) {
       const count = String(sec / 60);
-      return t ? t('timeControl.min', { count }) : `${count} min`;
+      return t('timeControl.min', { count });
     }
     const count = String(sec);
-    return t ? t('timeControl.sec', { count }) : `${count} sec`;
+    return t('timeControl.sec', { count });
   }
   if (tc.kind === 'increment') {
     return `${tc.initialMs / 60000}+${tc.incrementMs / 1000}`;
@@ -35,12 +35,12 @@ export function formatTimeControl(
   if (tc.kind === 'delay') {
     const sec = tc.initialMs / 1000;
     const base = sec >= 60 && sec % 60 === 0
-      ? (t ? t('timeControl.min', { count: String(sec / 60) }) : `${sec / 60} min`)
-      : (t ? t('timeControl.sec', { count: String(sec) }) : `${sec} sec`);
+      ? t('timeControl.min', { count: String(sec / 60) })
+      : t('timeControl.sec', { count: String(sec) });
     const delay = String(tc.delayMs / 1000);
-    return t ? t('timeControl.delay', { base, delay }) : `${base} delay ${delay}`;
+    return t('timeControl.delay', { base, delay });
   }
-  return t ? t('timeControl.unknown') : 'Unknown';
+  return t('timeControl.unknown');
 }
 
 /** Options for {@link renderEmpty}. */

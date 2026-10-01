@@ -32,29 +32,26 @@ export function activeSteps(steps: readonly StepView[]): readonly StepView[] {
 /**
  * Format course difficulty with initial capital letter.
  */
-export function difficultyLabel(difficulty: CourseDifficulty, i18n?: I18nManager): string {
+export function difficultyLabel(difficulty: CourseDifficulty, i18n: I18nManager): string {
   switch (difficulty) {
     case 'beginner':
-      return i18n ? i18n.t('learning.difficulty.beginner') : 'Beginner';
+      return i18n.t('learning.difficulty.beginner');
     case 'intermediate':
-      return i18n ? i18n.t('learning.difficulty.intermediate') : 'Intermediate';
+      return i18n.t('learning.difficulty.intermediate');
     case 'advanced':
-      return i18n ? i18n.t('learning.difficulty.advanced') : 'Advanced';
+      return i18n.t('learning.difficulty.advanced');
   }
 }
 
 /**
  * Progress label in text format (e.g., "3 / 5 steps completed").
  */
-export function courseProgressLabel(progress: CourseProgressSummaryView | null, i18n?: I18nManager): string {
+export function courseProgressLabel(progress: CourseProgressSummaryView | null, i18n: I18nManager): string {
   if (!progress) return '';
-  if (i18n) {
-    return i18n.t('learning.progressLabel', {
-      completed: String(progress.completedSteps),
-      total: String(progress.totalSteps),
-    });
-  }
-  return `${progress.completedSteps} / ${progress.totalSteps} steps completed`;
+  return i18n.t('learning.progressLabel', {
+    completed: String(progress.completedSteps),
+    total: String(progress.totalSteps),
+  });
 }
 
 /**
@@ -95,9 +92,9 @@ export function deriveStepAttempts(progressDetails: readonly ProgressView[]): Ma
  * which reads `completedAt` — so a reload silently corrected the row. Same rule as `unlockedAt` in
  * ADR-0089 §2.
  */
-export function stepStatusLabel(result?: AttemptResultView | null, i18n?: I18nManager): string {
+export function stepStatusLabel(result: AttemptResultView | null | undefined, i18n: I18nManager): string {
   if (!result) return '';
-  if (result.completedAt !== undefined) return i18n ? i18n.t('learning.step.done') : 'Done';
-  if (result.attempts > 0) return i18n ? i18n.t('learning.step.tryAgain') : 'Try again';
+  if (result.completedAt !== undefined) return i18n.t('learning.step.done');
+  if (result.attempts > 0) return i18n.t('learning.step.tryAgain');
   return '';
 }

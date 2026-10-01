@@ -13,6 +13,9 @@ import {
   setBusy,
 } from '../src/app/analysis-view.js';
 import type { AnalysisResponse } from '../src/api/models.js';
+import { createI18nManager } from '../src/i18n/manager.js';
+
+const i18n = createI18nManager();
 
 class FakeHTMLElement {
   private _innerHTML = '';
@@ -190,8 +193,8 @@ test('reached vs limits are not conflated: with applied.depth = 16 and lines[0].
     ],
   });
 
-  renderReached(reachedEl, result);
-  renderLimits(limitsEl, result);
+  renderReached(reachedEl, result, i18n);
+  renderLimits(limitsEl, result, i18n);
 
   assert.equal(reachedEl.textContent, 'Reached depth 12 · 0.9 s');
   assert.equal(reachedEl.hidden, false);
@@ -204,7 +207,7 @@ test('renderReached hides element when there are no lines', () => {
   const reachedEl = new FakeHTMLElement() as unknown as HTMLElement;
   const result = sampleResult({ lines: [] });
 
-  renderReached(reachedEl, result);
+  renderReached(reachedEl, result, i18n);
 
   assert.equal(reachedEl.hidden, true);
   assert.equal(reachedEl.textContent, '');

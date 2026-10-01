@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { WsClient } from '../src/net/ws-client.js';
 import { GameSync } from '../src/net/game-sync.js';
 import { GameController } from '../src/app/game-controller.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { ReadyView, Role, StateView } from '../src/net/ws-protocol.js';
 import { decodeServer } from '../src/net/ws-protocol.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
@@ -26,6 +27,7 @@ function setup() {
   const turns: boolean[] = [];
   const controller = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     callbacks: {
       onPosition: () => {},
       onTurn: (myTurn) => turns.push(myTurn),

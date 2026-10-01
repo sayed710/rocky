@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GambitClient } from '../src/api/client.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { mountEmailVerification } from '../src/app/email-verification-mount.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { FakeTransport, empty, json } from './support/fake-transport.js';
@@ -20,6 +21,8 @@ const EMAIL_VERIFICATION_IDS = [
   'email-verify-error',
   'email-verify-retry',
 ] as const;
+
+const defaultI18n = createI18nManager();
 
 function mutableEmailVerificationElement(): MutableEmailVerificationElement {
   const attributes = new Map<string, string>();
@@ -74,6 +77,7 @@ test('missing token: no request, error copy shown, retry button stays hidden', a
     doc: surface.doc,
     client: emailVerificationClient(transport),
     verificationToken: null,
+    i18n: defaultI18n,
   });
   await settleRequests();
 
@@ -94,6 +98,7 @@ test('valid token: issues one request with body, shows success copy, hides retry
     doc: surface.doc,
     client: emailVerificationClient(transport),
     verificationToken: 'valid-token-123',
+    i18n: defaultI18n,
   });
   await settleRequests();
 
@@ -123,6 +128,7 @@ test('401 error: error copy shown, retry hidden, and programmatic retry issues n
     doc: surface.doc,
     client: emailVerificationClient(transport),
     verificationToken: 'expired-token',
+    i18n: defaultI18n,
   });
   await settleRequests();
 
@@ -155,6 +161,7 @@ test('500 error: retry becomes visible, retry click issues second request, succe
     doc: surface.doc,
     client: emailVerificationClient(transport),
     verificationToken: 'retryable-token',
+    i18n: defaultI18n,
   });
   await settleRequests();
 
@@ -194,6 +201,7 @@ test('disposing during a pending request restores idle controls and leaves UI un
     doc: surface.doc,
     client: emailVerificationClient(transport),
     verificationToken: 'pending-token',
+    i18n: defaultI18n,
   });
 
   assert.equal(calls.length, 1);
@@ -224,6 +232,7 @@ test('dispose twice is safe and does not re-touch the DOM', () => {
     doc: surface.doc,
     client: emailVerificationClient(transport),
     verificationToken: 'test-token',
+    i18n: defaultI18n,
   });
 
   mounted.dispose();
@@ -244,6 +253,7 @@ test('mounting twice on the same document leaves exactly one live retry handler'
     doc: surface.doc,
     client: emailVerificationClient(transport),
     verificationToken: 'token-1',
+    i18n: defaultI18n,
   });
   await settleRequests();
   assert.equal(transport.calls.length, 1);
@@ -253,6 +263,7 @@ test('mounting twice on the same document leaves exactly one live retry handler'
     doc: surface.doc,
     client: emailVerificationClient(transport),
     verificationToken: 'token-2',
+    i18n: defaultI18n,
   });
   await settleRequests();
   assert.equal(transport.calls.length, 2);

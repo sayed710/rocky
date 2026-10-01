@@ -26,7 +26,7 @@ export interface EndgameMountDependencies {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly isAuthenticated: () => boolean;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 export interface MountedEndgames {
@@ -115,9 +115,6 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
     const currentText = noteEl.textContent ?? '';
     const isOwned =
       currentText === '' ||
-      currentText === ENDGAME_MESSAGES.idle ||
-      currentText === ENDGAME_MESSAGES.signedOut ||
-      currentText === ENDGAME_MESSAGES.yourMove ||
       currentText === getEndgameMessage('idle', deps.i18n) ||
       currentText === getEndgameMessage('signedOut', deps.i18n) ||
       currentText === getEndgameMessage('yourMove', deps.i18n);
@@ -210,26 +207,24 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
     },
   });
 
-  if (deps.i18n) {
-    const unsub = deps.i18n.onLocaleChange(() => {
-      if (hasPosition && lastPosition && positionRowsEl) {
-        renderEndgamePositionRows(doc, positionRowsEl, lastPosition, deps.i18n);
-      }
-      if (lastAttemptResult && rowsEl && resultEl) {
-        lastVerdictNote = renderEndgameVerdict(doc, rowsEl, resultEl, lastAttemptResult, deps.i18n);
-      }
-      if (lastVerdictNote !== null && noteEl) {
-        renderEndgameNote(noteEl, lastVerdictNote);
-      } else if (lastNoteKey && noteEl) {
-        renderEndgameNote(noteEl, getEndgameMessage(lastNoteKey, deps.i18n));
-      }
-      if (lastErrorKey && errorEl) {
-        renderEndgameError(errorEl, getEndgameMessage(lastErrorKey, deps.i18n));
-      }
-      refresh();
-    });
-    unbinds.push(unsub);
-  }
+  const unsub = deps.i18n.onLocaleChange(() => {
+    if (hasPosition && lastPosition && positionRowsEl) {
+      renderEndgamePositionRows(doc, positionRowsEl, lastPosition, deps.i18n);
+    }
+    if (lastAttemptResult && rowsEl && resultEl) {
+      lastVerdictNote = renderEndgameVerdict(doc, rowsEl, resultEl, lastAttemptResult, deps.i18n);
+    }
+    if (lastVerdictNote !== null && noteEl) {
+      renderEndgameNote(noteEl, lastVerdictNote);
+    } else if (lastNoteKey && noteEl) {
+      renderEndgameNote(noteEl, getEndgameMessage(lastNoteKey, deps.i18n));
+    }
+    if (lastErrorKey && errorEl) {
+      renderEndgameError(errorEl, getEndgameMessage(lastErrorKey, deps.i18n));
+    }
+    refresh();
+  });
+  unbinds.push(unsub);
 
   reset();
   refresh();

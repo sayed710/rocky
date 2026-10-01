@@ -223,10 +223,9 @@ export function bootstrap(
         doc.documentElement.classList.toggle('dark', t === 'dark');
         doc.documentElement.classList.toggle('light', t === 'light');
         if (themeButtonEl) {
-          const next = t === 'dark' ? 'light' : 'dark';
           themeButtonEl.textContent = t === 'dark' ? '☀️' : '🌙';
-          themeButtonEl.setAttribute('aria-label', `Switch to ${next} theme`);
-          themeButtonEl.setAttribute('title', `Switch to ${next} theme`);
+          themeButtonEl.setAttribute('aria-label', app.i18n.t('shell.themeToggle'));
+          themeButtonEl.setAttribute('title', app.i18n.t('shell.themeToggle'));
         }
         if ('querySelector' in doc && typeof doc.querySelector === 'function') {
           const themeColor = doc.querySelector('meta[name="theme-color"]');
@@ -430,6 +429,7 @@ export function bootstrap(
       client: app.api,
       isAuthenticated: () => auth.isAuthenticated(),
       ...(deps?.storage !== undefined ? { storage: deps.storage } : {}),
+      i18n: app.i18n,
     });
     setCreateGameAuthenticated = mountedLobby.setCreateGameAuthenticated;
     setPlayBotAuthenticated = mountedLobby.setPlayBotAuthenticated;
@@ -448,6 +448,7 @@ export function bootstrap(
       getCurrentSession: () => auth.currentSession,
       restorePromise,
       ...(deps?.webauthnAdapter !== undefined ? { webauthnAdapter: deps.webauthnAdapter } : {}),
+      i18n: app.i18n,
     });
     selfProfileSessionHandler = mountedProfile.onSessionChange;
 
@@ -461,7 +462,7 @@ export function bootstrap(
   const leaderboardEl = doc.getElementById('leaderboard');
   if (leaderboardEl && route.name === 'leaderboard') {
     return createBootstrapped(app, auth, theme, shellLocalization, {
-      leaderboard: mountLeaderboard(doc, app.api),
+      leaderboard: mountLeaderboard(doc, app.api, app.i18n),
     });
   }
 
@@ -469,7 +470,7 @@ export function bootstrap(
   const tournamentsEl = doc.getElementById('tournaments');
   if (tournamentsEl && route.name === 'tournaments') {
     return createBootstrapped(app, auth, theme, shellLocalization, {
-      tournament: mountTournamentList(doc, app.api),
+      tournament: mountTournamentList(doc, app.api, app.i18n),
     });
   }
 
@@ -477,9 +478,9 @@ export function bootstrap(
   const tournamentEl = doc.getElementById('tournament');
   if (tournamentEl && route.name === 'tournament') {
     return createBootstrapped(app, auth, theme, shellLocalization, {
-      tournament: mountTournamentDetail(doc, app.api, route.id),
+      tournament: mountTournamentDetail(doc, app.api, route.id, app.i18n),
       tournamentCommentary: (() => {
-        const commentary = mountTournamentCommentary(doc, app.api, route.id);
+        const commentary = mountTournamentCommentary(doc, app.api, route.id, app.i18n);
         // Registered here rather than inside the mount, because the session callback is owned by
         // the AuthController above and this is the only place that holds both.
         commentarySessionHandler = (signedIn) => commentary.sessionChanged(signedIn);
@@ -491,7 +492,7 @@ export function bootstrap(
   // --- Search view ---
   const searchEl = doc.getElementById('search');
   if (searchEl && route.name === 'search') {
-    return createBootstrapped(app, auth, theme, shellLocalization, { search: mountSearch(doc, app.api) });
+    return createBootstrapped(app, auth, theme, shellLocalization, { search: mountSearch(doc, app.api, app.i18n) });
   }
 
   // --- Messages Inbox view (/messages) ---
@@ -503,6 +504,7 @@ export function bootstrap(
         client: app.api,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -517,6 +519,7 @@ export function bootstrap(
         conversationId: route.id,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }

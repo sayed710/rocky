@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { WsClient } from '../src/net/ws-client.js';
 import { GameSync } from '../src/net/game-sync.js';
 import { GameController } from '../src/app/game-controller.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { StateView, WsColor } from '../src/net/ws-protocol.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
 import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
@@ -28,6 +29,7 @@ function setup() {
   const metadatas: Array<any> = [];
   const controller = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     callbacks: {
       onPosition: (fen) => positions.push(fen),
       onTurn: (myTurn) => turns.push(myTurn),
@@ -234,6 +236,7 @@ test('onLastMove callback fires with from/to after a move broadcast', () => {
   controller.stop();
   const controller2 = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     callbacks: {
       onPosition: () => {},
       onTurn: () => {},
@@ -557,6 +560,7 @@ test('onActionState derives correctly for players and spectators', () => {
   controller.stop();
   const controller2 = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     callbacks: {
       onPosition: () => {},
       onTurn: () => {},
@@ -641,6 +645,7 @@ test('stale errors are cleared on intended transitions', () => {
   let lastReject: string | null = null;
   const controller2 = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     callbacks: {
       onPosition: () => {},
       onTurn: () => {},
@@ -789,6 +794,7 @@ test('live clock ticks White remaining down when White is to move', () => {
 
   const controller = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     now: () => fakeNow,
     setInterval: (fn) => {
       timerFn = fn;
@@ -857,6 +863,7 @@ test('countdown stops when game ends, and timer is cleared on stop', () => {
 
   const controller = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     now: () => fakeNow,
     setInterval: (fn) => {
       timerFn = fn;
@@ -911,6 +918,7 @@ test('clock value never goes below zero once anchor is exhausted', () => {
 
   const controller = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     now: () => fakeNow,
     setInterval: (fn) => {
       timerFn = fn;
@@ -961,6 +969,7 @@ test('snapshot with turnStartedAt null does not crash and does not tick', () => 
 
   const controller = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     now: () => fakeNow,
     setInterval: (fn) => {
       timerFn = fn;
@@ -1015,6 +1024,7 @@ test('a snapshot with no clock anchor renders the authoritative time, never NaN'
   let timerFn: (() => void) | null = null;
   const controller = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     now: () => fakeNow,
     setInterval: (fn) => {
       timerFn = fn;

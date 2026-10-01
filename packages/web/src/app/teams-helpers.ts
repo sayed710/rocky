@@ -66,15 +66,15 @@ export function teamAction(
 /** The sentence shown in place of an action, so a dead end always explains itself. */
 export function actionExplanation(
   reason: 'signed-out' | 'by-request' | 'owner',
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): string {
   switch (reason) {
     case 'signed-out':
-      return i18n ? i18n.t('community.teams.reasonSignedOut') : 'Sign in to join this team.';
+      return i18n.t('community.teams.reasonSignedOut');
     case 'by-request':
-      return i18n ? i18n.t('community.teams.reasonByRequest') : 'This team is private. Joining is by request, which is not available yet.';
+      return i18n.t('community.teams.reasonByRequest');
     case 'owner':
-      return i18n ? i18n.t('community.teams.reasonOwner') : 'You own this team. Transfer ownership before leaving.';
+      return i18n.t('community.teams.reasonOwner');
   }
 }
 

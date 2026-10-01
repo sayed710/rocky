@@ -36,7 +36,6 @@ interface SearchRequest {
 
 interface SearchModeOption {
   readonly value: SearchMode;
-  readonly label: string;
   /**
    * Whether this mode needs the deployment to have composed semantic search (ADR-0132).
    *
@@ -49,9 +48,9 @@ interface SearchModeOption {
 }
 
 const SEARCH_MODES: readonly SearchModeOption[] = [
-  { value: 'keyword', label: 'Keyword', needsSemanticSearch: false },
-  { value: 'semantic', label: 'Semantic (experimental)', needsSemanticSearch: true },
-  { value: 'hybrid', label: 'Hybrid (experimental)', needsSemanticSearch: true },
+  { value: 'keyword', needsSemanticSearch: false },
+  { value: 'semantic', needsSemanticSearch: true },
+  { value: 'hybrid', needsSemanticSearch: true },
 ];
 
 /** The modes this deployment can actually serve. */
@@ -107,14 +106,14 @@ function createModeInput(
   return input;
 }
 
-function getSearchModeLabel(mode: SearchMode, i18n?: I18n): string {
+function getSearchModeLabel(mode: SearchMode, i18n: I18n): string {
   switch (mode) {
     case 'keyword':
-      return i18n ? i18n.t('search.mode.keyword') : 'Keyword';
+      return i18n.t('search.mode.keyword');
     case 'semantic':
-      return i18n ? i18n.t('search.mode.semantic') : 'Semantic (experimental)';
+      return i18n.t('search.mode.semantic');
     case 'hybrid':
-      return i18n ? i18n.t('search.mode.hybrid') : 'Hybrid (experimental)';
+      return i18n.t('search.mode.hybrid');
   }
 }
 
@@ -123,7 +122,7 @@ function createModeControl(
   option: SearchModeOption,
   activeMode: SearchMode,
   currentQuery: () => string,
-  i18n?: I18n,
+  i18n: I18n,
 ): HTMLLabelElement {
   const control = doc.createElement('label');
   control.className = 'cg-seg';
@@ -140,7 +139,7 @@ function renderModeSelector(
   activeMode: SearchMode,
   currentQuery: () => string,
   modes: readonly SearchModeOption[],
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   container.innerHTML = '';
   for (const option of modes) {
@@ -179,7 +178,7 @@ function setSearchLoading(
 function createSearchCallbacks(
   elements: SearchElements,
   onResultHits: (hits: readonly SearchRow[]) => void,
-  i18n?: I18n,
+  i18n: I18n,
 ): SearchCallbacks {
   const state: SearchRenderState = { resultsRendered: false };
   return {
@@ -208,6 +207,9 @@ function createSearchCallbacks(
  * semantic off, keyword alone; both on, all three modes. A visitor who deep-links to a mode this
  * deployment cannot serve is moved to keyword rather than shown a 503.
  *
+ * @param doc - the document to mount to.
+ * @param client - the api client.
+ * @param i18n - the internationalization manager.
  * @param loadFlags - injectable because `loadCapabilities` memoises for the page's lifetime with no
  * reset seam, so a test cannot vary the answer twice in one process. Same reason, same shape, as
  * `mountTournamentDetail` in `competition-mounts.ts`.
@@ -215,8 +217,8 @@ function createSearchCallbacks(
 export function mountSearch(
   doc: Document,
   client: GambitClient,
+  i18n: I18n,
   loadFlags: (api: GambitClient) => Promise<unknown> = loadCapabilities,
-  i18n?: I18n,
 ): SearchController {
   const elements = searchElements(doc);
   const request = currentSearchRequest();
@@ -238,7 +240,7 @@ export function mountSearch(
     elements.mode.hidden = true;
   }
 
-  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (modeSelectorRendered && elements.mode && !elements.mode.hidden) {
       renderModeSelector(
         doc,
@@ -273,7 +275,7 @@ export function mountSearch(
       i18n,
     ),
     onDispose: () => {
-      unsubscribeLocale?.();
+      unsubscribeLocale();
     },
   });
 

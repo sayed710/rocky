@@ -18,7 +18,7 @@ export interface EmailVerificationMountOptions {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly verificationToken: string | null;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 function emailVerificationElements(doc: Document): EmailVerificationElements {
@@ -33,23 +33,21 @@ function emailVerificationElements(doc: Document): EmailVerificationElements {
 function setEmailVerificationPending(
   elements: EmailVerificationElements,
   pending: boolean,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   if (elements.retry) {
     elements.retry.disabled = pending;
-    if (i18n) elements.retry.textContent = i18n.t('emailVerification.retry');
+    elements.retry.textContent = i18n.t('emailVerification.retry');
   }
   if (elements.section) elements.section.setAttribute('aria-busy', String(pending));
   if (elements.status && pending) {
-    elements.status.textContent = i18n
-      ? i18n.t('emailVerification.verifyingStatus')
-      : 'Verifying your email address...';
+    elements.status.textContent = i18n.t('emailVerification.verifyingStatus');
   }
 }
 
 function resetEmailVerificationSurface(
   elements: EmailVerificationElements,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   if (elements.status) elements.status.textContent = '';
   if (elements.error) elements.error.textContent = '';
@@ -60,7 +58,7 @@ function resetEmailVerificationSurface(
 function createEmailVerificationCallbacks(
   elements: EmailVerificationElements,
   state: EmailVerificationState,
-  i18n?: I18nManager,
+  i18n: I18nManager,
   recordStatus?: (status: string | null, error: string | null) => void,
 ): EmailVerificationCallbacks {
   let wasRetryable = false;
@@ -115,7 +113,7 @@ function disposeEmailVerificationMount(
   elements: EmailVerificationElements,
   state: EmailVerificationState,
   controller: EmailVerificationController,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   if (elements.retry) elements.retry.onclick = null;
   controller.dispose();
@@ -127,7 +125,6 @@ export function mountEmailVerification(
   options: EmailVerificationMountOptions,
 ): { dispose: () => void } {
   let disposed = false;
-  let unsubscribeLocale: (() => void) | undefined;
   const elements = emailVerificationElements(options.doc);
   const state: EmailVerificationState = { token: options.verificationToken };
   resetEmailVerificationSurface(elements, options.i18n);
@@ -146,35 +143,27 @@ export function mountEmailVerification(
   bindEmailVerificationActions(elements, state, controller);
   void controller.verify(state.token);
 
-  if (options.i18n) {
-    unsubscribeLocale = options.i18n.onLocaleChange(() => {
-      if (elements.retry) elements.retry.textContent = options.i18n!.t('emailVerification.retry');
-      if (lastStatus && elements.status) {
-        elements.status.textContent = options.i18n!.t('emailVerification.verified');
+  const unsubscribeLocale = options.i18n.onLocaleChange(() => {
+    if (elements.retry) elements.retry.textContent = options.i18n.t('emailVerification.retry');
+    if (lastStatus && elements.status) {
+      elements.status.textContent = options.i18n.t('emailVerification.verified');
+    }
+    if (lastError && elements.error) {
+      if (lastError === options.i18n.t('emailVerification.needsLink')) {
+        elements.error.textContent = options.i18n.t('emailVerification.needsLink');
+      } else if (lastError === options.i18n.t('emailVerification.linkInvalid')) {
+        elements.error.textContent = options.i18n.t('emailVerification.linkInvalid');
+      } else {
+        elements.error.textContent = options.i18n.t('emailVerification.couldNotVerify');
       }
-      if (lastError && elements.error) {
-        if (
-          lastError.includes('needs a verification link') ||
-          lastError === options.i18n!.t('emailVerification.needsLink')
-        ) {
-          elements.error.textContent = options.i18n!.t('emailVerification.needsLink');
-        } else if (
-          lastError.includes('invalid') ||
-          lastError === options.i18n!.t('emailVerification.linkInvalid')
-        ) {
-          elements.error.textContent = options.i18n!.t('emailVerification.linkInvalid');
-        } else {
-          elements.error.textContent = options.i18n!.t('emailVerification.couldNotVerify');
-        }
-      }
-    });
-  }
+    }
+  });
 
   return {
     dispose: () => {
       if (disposed) return;
       disposed = true;
-      unsubscribeLocale?.();
+      unsubscribeLocale();
       disposeEmailVerificationMount(elements, state, controller, options.i18n);
     },
   };

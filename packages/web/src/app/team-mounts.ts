@@ -25,7 +25,7 @@ interface TeamDetailMountDependencies {
   readonly slug: string;
   readonly sessionPresent: boolean;
   readonly restorePromise: Promise<unknown>;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 interface TeamListElements {
@@ -53,7 +53,7 @@ interface TeamRenderDependencies {
   readonly controller: TeamsController;
   readonly slug: string;
   readonly viewerId: () => string | null;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 interface TeamActionRequest {
@@ -77,7 +77,7 @@ function teamListElements(doc: Document): TeamListElements {
 function createTeamListCallbacks(
   elements: TeamListElements,
   searched: () => boolean,
-  i18n?: I18nManager,
+  i18n: I18nManager,
   onListLoaded?: (teams: readonly TeamView[]) => void,
 ): TeamsCallbacks {
   return {
@@ -100,7 +100,7 @@ function createTeamListCallbacks(
 export function mountTeamList(
   doc: Document,
   client: GambitClient,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): TeamsController {
   const elements = teamListElements(doc);
   let searched = false;
@@ -122,7 +122,7 @@ export function mountTeamList(
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastTeams && elements.list) {
       renderTeamList(elements.list, lastTeams, searched, i18n);
     }
@@ -160,7 +160,7 @@ function renderTeamIdentity(
   team: TeamDetailView,
   members: readonly TeamMembership[],
   names: ReadonlyMap<string, SocialPlayer>,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   if (elements.error) elements.error.textContent = '';
   if (elements.name) {
@@ -232,8 +232,8 @@ function renderTeamAction(
   const button = dependencies.doc.createElement('button');
   button.type = 'button';
   button.textContent = action.kind === 'join'
-    ? (dependencies.i18n ? dependencies.i18n.t('community.teams.actionJoin') : 'Join team')
-    : (dependencies.i18n ? dependencies.i18n.t('community.teams.actionLeave') : 'Leave team');
+    ? dependencies.i18n.t('community.teams.actionJoin')
+    : dependencies.i18n.t('community.teams.actionLeave');
   button.addEventListener('click', () => {
     button.disabled = true;
     void runTeamAction({
@@ -250,9 +250,9 @@ function renderTeamAction(
   actions.appendChild(button);
 }
 
-function renderTeamNotFound(elements: TeamDetailElements, i18n?: I18nManager): void {
-  if (elements.name) elements.name.textContent = i18n ? i18n.t('community.teams.notFoundTitle') : 'Team not found';
-  if (elements.description) elements.description.textContent = i18n ? i18n.t('community.teams.notFoundBody') : 'No such team, or it is private.';
+function renderTeamNotFound(elements: TeamDetailElements, i18n: I18nManager): void {
+  if (elements.name) elements.name.textContent = i18n.t('community.teams.notFoundTitle');
+  if (elements.description) elements.description.textContent = i18n.t('community.teams.notFoundBody');
   if (elements.members) elements.members.replaceChildren();
   if (elements.actions) elements.actions.replaceChildren();
   if (elements.actionNote) elements.actionNote.textContent = '';
@@ -338,7 +338,7 @@ export function mountTeamDetail({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastTeamState) {
       renderTeamIdentity(
         dependencies.elements,

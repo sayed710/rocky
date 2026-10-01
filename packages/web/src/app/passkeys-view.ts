@@ -12,13 +12,13 @@ export function renderPasskeys(
   passkeys: readonly PasskeyView[],
   onDelete: (id: string) => void,
   busy: boolean,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   container.innerHTML = '';
   if (passkeys.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('profile.passkeys.emptyTitle') : 'No passkeys registered yet',
-      body: i18n ? i18n.t('profile.passkeys.emptyBody') : 'Add a passkey for fast, passwordless sign-in.',
+      title: i18n.t('profile.passkeys.emptyTitle'),
+      body: i18n.t('profile.passkeys.emptyBody'),
       inline: true,
     });
     return;
@@ -26,9 +26,9 @@ export function renderPasskeys(
 
   for (const passkey of passkeys) {
     const createdDate = passkey.createdAt.slice(0, 10);
-    const defaultName = i18n ? i18n.t('profile.passkeys.defaultName') : 'Passkey';
+    const defaultName = i18n.t('profile.passkeys.defaultName');
     const label = `${passkey.name || defaultName} (${createdDate})`;
-    const deleteLabel = i18n ? i18n.t('profile.passkeys.delete') : 'Delete';
+    const deleteLabel = i18n.t('profile.passkeys.delete');
     appendPanelRow(
       container,
       label,

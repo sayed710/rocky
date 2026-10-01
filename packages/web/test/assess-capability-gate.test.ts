@@ -49,6 +49,7 @@ test('the assess block stays hidden when the deployment does not serve mistake p
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   await new Promise((r) => setTimeout(r, 0));

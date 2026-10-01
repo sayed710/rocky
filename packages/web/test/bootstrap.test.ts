@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bootstrap, extractGameId, formatClock, formatTimeControl } from '../src/app/bootstrap.js';
 import type { BootstrapDependencies, Bootstrapped } from '../src/app/bootstrap.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { createLifecycle } from '../src/app/lifecycle.js';
 import { GameController } from '../src/app/game-controller.js';
 import { FakeTransport, json } from './support/fake-transport.js';
@@ -321,26 +322,28 @@ test('formatClock formats milliseconds as M:SS', () => {
 
 // ── formatTimeControl ───────────────────────────────────────────────────
 
+const testI18n = createI18nManager();
+
 test('formatTimeControl formats unlimited correctly', () => {
-  assert.equal(formatTimeControl({ kind: 'unlimited', initialMs: 0, incrementMs: 0, delayMs: 0 }), 'Unlimited');
+  assert.equal(formatTimeControl({ kind: 'unlimited', initialMs: 0, incrementMs: 0, delayMs: 0 }, testI18n), 'Unlimited');
 });
 
 test('formatTimeControl formats sudden_death correctly', () => {
-  assert.equal(formatTimeControl({ kind: 'sudden_death', initialMs: 30_000, incrementMs: 0, delayMs: 0 }), '30 sec');
-  assert.equal(formatTimeControl({ kind: 'sudden_death', initialMs: 60_000, incrementMs: 0, delayMs: 0 }), '1 min');
-  assert.equal(formatTimeControl({ kind: 'sudden_death', initialMs: 180_000, incrementMs: 0, delayMs: 0 }), '3 min');
-  assert.equal(formatTimeControl({ kind: 'sudden_death', initialMs: 90_000, incrementMs: 0, delayMs: 0 }), '90 sec');
+  assert.equal(formatTimeControl({ kind: 'sudden_death', initialMs: 30_000, incrementMs: 0, delayMs: 0 }, testI18n), '30 sec');
+  assert.equal(formatTimeControl({ kind: 'sudden_death', initialMs: 60_000, incrementMs: 0, delayMs: 0 }, testI18n), '1 min');
+  assert.equal(formatTimeControl({ kind: 'sudden_death', initialMs: 180_000, incrementMs: 0, delayMs: 0 }, testI18n), '3 min');
+  assert.equal(formatTimeControl({ kind: 'sudden_death', initialMs: 90_000, incrementMs: 0, delayMs: 0 }, testI18n), '90 sec');
 });
 
 test('formatTimeControl formats increment correctly', () => {
-  assert.equal(formatTimeControl({ kind: 'increment', initialMs: 60_000, incrementMs: 2_000, delayMs: 0 }), '1+2');
-  assert.equal(formatTimeControl({ kind: 'increment', initialMs: 30_000, incrementMs: 2_000, delayMs: 0 }), '0.5+2');
-  assert.equal(formatTimeControl({ kind: 'increment', initialMs: 180_000, incrementMs: 0, delayMs: 0 }), '3+0');
+  assert.equal(formatTimeControl({ kind: 'increment', initialMs: 60_000, incrementMs: 2_000, delayMs: 0 }, testI18n), '1+2');
+  assert.equal(formatTimeControl({ kind: 'increment', initialMs: 30_000, incrementMs: 2_000, delayMs: 0 }, testI18n), '0.5+2');
+  assert.equal(formatTimeControl({ kind: 'increment', initialMs: 180_000, incrementMs: 0, delayMs: 0 }, testI18n), '3+0');
 });
 
 test('formatTimeControl formats delay correctly', () => {
-  assert.equal(formatTimeControl({ kind: 'delay', initialMs: 60_000, incrementMs: 0, delayMs: 2_000 }), '1 min delay 2');
-  assert.equal(formatTimeControl({ kind: 'delay', initialMs: 30_000, incrementMs: 0, delayMs: 2_000 }), '30 sec delay 2');
+  assert.equal(formatTimeControl({ kind: 'delay', initialMs: 60_000, incrementMs: 0, delayMs: 2_000 }, testI18n), '1 min delay 2');
+  assert.equal(formatTimeControl({ kind: 'delay', initialMs: 30_000, incrementMs: 0, delayMs: 2_000 }, testI18n), '30 sec delay 2');
 });
 
 // ── bootstrap without game ID ───────────────────────────────────────────

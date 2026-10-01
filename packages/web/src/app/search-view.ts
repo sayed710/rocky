@@ -15,16 +15,16 @@ import type { SearchRow, SearchEntityType } from './search-results.js';
  * @param i18n - Optional internationalization manager.
  * @returns The formatted display string.
  */
-export function formatEntityType(type: SearchEntityType | null, i18n?: I18n): string {
+export function formatEntityType(type: SearchEntityType | null, i18n: I18n): string {
   switch (type) {
     case 'game':
-      return i18n ? i18n.t('search.typeGame') : 'Game';
+      return i18n.t('search.typeGame');
     case 'player':
-      return i18n ? i18n.t('search.typePlayer') : 'Player';
+      return i18n.t('search.typePlayer');
     case 'tournament':
-      return i18n ? i18n.t('search.typeTournament') : 'Tournament';
+      return i18n.t('search.typeTournament');
     default:
-      return i18n ? i18n.t('search.typeResult') : 'Result';
+      return i18n.t('search.typeResult');
   }
 }
 
@@ -33,19 +33,19 @@ export function formatEntityType(type: SearchEntityType | null, i18n?: I18n): st
  *
  * @param container - The DOM element to render into.
  * @param hits - The list of search results.
- * @param i18n - Optional internationalization manager.
+ * @param i18n - Internationalization manager.
  */
 export function renderSearchResults(
   container: HTMLElement,
   hits: readonly SearchRow[],
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   container.innerHTML = '';
   if (hits.length === 0) {
     renderEmpty(container, {
       mark: '🔍',
-      title: i18n ? i18n.t('search.emptyResultsTitle') : 'No results found',
-      body: i18n ? i18n.t('search.emptyResultsBody') : 'Try adjusting your search query or switching mode.',
+      title: i18n.t('search.emptyResultsTitle'),
+      body: i18n.t('search.emptyResultsBody'),
     });
     return;
   }
@@ -79,13 +79,13 @@ export function renderSearchResults(
  * Renders the initial search prompt when no search has been performed.
  *
  * @param container - The DOM element to render into.
- * @param i18n - Optional internationalization manager.
+ * @param i18n - Internationalization manager.
  */
-export function renderSearchPrompt(container: HTMLElement, i18n?: I18n): void {
+export function renderSearchPrompt(container: HTMLElement, i18n: I18n): void {
   renderEmpty(container, {
     mark: '🔍',
-    title: i18n ? i18n.t('search.promptTitle') : 'Search Rookzen',
-    body: i18n ? i18n.t('search.promptBody') : 'Search for players, games, or tournaments above.',
+    title: i18n.t('search.promptTitle'),
+    body: i18n.t('search.promptBody'),
   });
 }
 
@@ -98,13 +98,13 @@ export function renderSearchPrompt(container: HTMLElement, i18n?: I18n): void {
  * not broken, it is configured.
  *
  * @param container - The DOM element to render into.
- * @param i18n - Optional internationalization manager.
+ * @param i18n - Internationalization manager.
  */
-export function renderSearchUnavailable(container: HTMLElement, i18n?: I18n): void {
+export function renderSearchUnavailable(container: HTMLElement, i18n: I18n): void {
   renderEmpty(container, {
     mark: '🔍',
-    title: i18n ? i18n.t('search.unavailableTitle') : 'Search is unavailable',
-    body: i18n ? i18n.t('search.unavailableBody') : 'This server has search switched off. Nothing else is affected.',
+    title: i18n.t('search.unavailableTitle'),
+    body: i18n.t('search.unavailableBody'),
   });
 }
 
@@ -120,12 +120,12 @@ export function renderSearchUnavailable(container: HTMLElement, i18n?: I18n): vo
  * with deliberately no reset seam: within this page there is nothing left to retry.
  *
  * @param container - The DOM element to render into.
- * @param i18n - Optional internationalization manager.
+ * @param i18n - Internationalization manager.
  */
-export function renderSearchUndetermined(container: HTMLElement, i18n?: I18n): void {
+export function renderSearchUndetermined(container: HTMLElement, i18n: I18n): void {
   renderEmpty(container, {
     mark: '🔍',
-    title: i18n ? i18n.t('search.undeterminedTitle') : 'Search is unavailable',
-    body: i18n ? i18n.t('search.undeterminedBody') : 'Rookzen could not check whether this server offers search. Reload the page to try again.',
+    title: i18n.t('search.undeterminedTitle'),
+    body: i18n.t('search.undeterminedBody'),
   });
 }

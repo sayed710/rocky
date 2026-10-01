@@ -8,8 +8,11 @@ import {
 } from '../src/app/messages-helpers.js';
 import { MessagesController } from '../src/app/messages-controller.js';
 import { formatInboxTimestamp } from '../src/app/messages-view.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { ConversationView, MessageView } from '../src/api/models.js';
 import type { GambitClient } from '../src/api/client.js';
+
+const testI18n = createI18nManager();
 
 test('router parses /messages and /messages/:id routes', () => {
   assert.deepEqual(parseRoute('/messages'), { name: 'messages' });
@@ -47,7 +50,7 @@ test('getMessageDisplayBody returns message body or tombstone placeholder', () =
     editedAt: null,
     deletedAt: null,
   };
-  assert.equal(getMessageDisplayBody(normalMsg), 'Hello there!');
+  assert.equal(getMessageDisplayBody(normalMsg, testI18n), 'Hello there!');
 
   const tombstoneMsg: MessageView = {
     id: 'msg-2',
@@ -58,7 +61,7 @@ test('getMessageDisplayBody returns message body or tombstone placeholder', () =
     editedAt: null,
     deletedAt: '2026-08-04T00:02:00Z',
   };
-  assert.equal(getMessageDisplayBody(tombstoneMsg), '[Message deleted]');
+  assert.equal(getMessageDisplayBody(tombstoneMsg, testI18n), '[Message deleted]');
 });
 
 test('truncatePreview truncates text exceeding max length', () => {

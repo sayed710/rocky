@@ -15,9 +15,21 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mountTournamentCommentary } from '../src/app/competition-mounts.js';
+import { mountTournamentCommentary as mountTournamentCommentaryBase } from '../src/app/competition-mounts.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { COMMENTARY_MESSAGES } from '../src/app/tournament-commentary-view.js';
 import type { GambitClient } from '../src/api/client.js';
+
+const testI18n = createI18nManager();
+
+function mountTournamentCommentary(
+  doc: Document,
+  client: GambitClient,
+  tournamentId: string,
+  loadFlags?: (api: GambitClient) => Promise<unknown>,
+) {
+  return mountTournamentCommentaryBase(doc, client, tournamentId, testI18n, loadFlags);
+}
 import type { TournamentRound } from '../src/api/models.js';
 import { FakeElement } from './support/analysis-fixtures.js';
 

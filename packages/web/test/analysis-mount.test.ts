@@ -81,6 +81,7 @@ function setupMountedGame(opts?: {
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   return { sockets, app, transport, doc, elements, mounted };
@@ -431,6 +432,7 @@ test('SPA remount does not stack handlers: mounting twice and clicking once issu
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   // Teardown run 1
@@ -449,6 +451,7 @@ test('SPA remount does not stack handlers: mounting twice and clicking once issu
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   await new Promise((r) => setTimeout(r, 0));
@@ -600,6 +603,7 @@ test('a remount clears the previous game analysis rather than presenting it besi
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   };
 
   const first = mountGame(mountArgs);

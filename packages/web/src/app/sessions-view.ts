@@ -33,8 +33,8 @@ export function activeSessions(sessions: readonly SessionView[], now: number): S
  * minor version right is worth nothing here. Anything unrecognised reads as "Unknown device" rather
  * than dumping a 120-character user-agent string into a row built for one line.
  */
-export function describeDevice(userAgent: string | null, i18n?: I18nManager): string {
-  if (!userAgent) return i18n ? i18n.t('profile.sessions.unknownDevice') : 'Unknown device';
+export function describeDevice(userAgent: string | null, i18n: I18nManager): string {
+  if (!userAgent) return i18n.t('profile.sessions.unknownDevice');
   const browser =
     /\bEdg\//.test(userAgent) ? 'Edge'
       : /\bOPR\//.test(userAgent) ? 'Opera'
@@ -51,9 +51,9 @@ export function describeDevice(userAgent: string | null, i18n?: I18nManager): st
       : null;
 
   if (browser && platform) {
-    return i18n ? i18n.t('profile.sessions.deviceOnPlatform', { browser, platform }) : `${browser} on ${platform}`;
+    return i18n.t('profile.sessions.deviceOnPlatform', { browser, platform });
   }
-  return browser ?? platform ?? (i18n ? i18n.t('profile.sessions.unknownDevice') : 'Unknown device');
+  return browser ?? platform ?? i18n.t('profile.sessions.unknownDevice');
 }
 
 /** `2026-08-16` from an ISO timestamp; the raw value if it is not parseable. */
@@ -67,16 +67,16 @@ export function renderSessions(
   sessions: readonly SessionView[],
   onRevoke: (id: string) => void,
   busy: boolean,
-  now: number = Date.now(),
-  i18n?: I18nManager,
+  now: number,
+  i18n: I18nManager,
 ): void {
   container.innerHTML = '';
 
   const active = activeSessions(sessions, now);
   if (active.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('profile.sessions.emptyTitle') : 'No other active sessions',
-      body: i18n ? i18n.t('profile.sessions.emptyBody') : 'Signing in on another browser or device will list it here.',
+      title: i18n.t('profile.sessions.emptyTitle'),
+      body: i18n.t('profile.sessions.emptyBody'),
       inline: true,
     });
     return;
@@ -93,14 +93,14 @@ export function renderSessions(
     // the honest last-seen time regardless: every refresh rotates the session, so an active row was
     // created the last time that browser was actually here.
     const lastSeen = isoDate(session.lastSeenAt) ?? isoDate(session.createdAt);
-    const lastSeenStr = lastSeen ? (i18n ? i18n.t('profile.sessions.lastSeen', { date: lastSeen }) : `last seen ${lastSeen}`) : null;
+    const lastSeenStr = lastSeen ? i18n.t('profile.sessions.lastSeen', { date: lastSeen }) : null;
     const parts = [
       describeDevice(session.lastUserAgent ?? session.createdUserAgent, i18n),
       session.lastIp ?? session.createdIp,
       lastSeenStr,
     ].filter((part): part is string => Boolean(part));
 
-    const revokeLabel = i18n ? i18n.t('profile.sessions.revoke') : 'Revoke';
+    const revokeLabel = i18n.t('profile.sessions.revoke');
     appendPanelRow(
       container,
       parts.join(' · '),

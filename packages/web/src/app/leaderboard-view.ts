@@ -10,14 +10,14 @@ export function renderLeaderboard(
   container: HTMLElement,
   entries: readonly LeaderboardEntry[],
   names: ReadonlyMap<string, SocialPlayer>,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   container.innerHTML = '';
   if (entries.length === 0) {
     container.setAttribute('role', 'status');
     renderEmpty(container, {
-      title: i18n ? i18n.t('leaderboard.emptyEntriesTitle') : 'No leaderboard entries',
-      body: i18n ? i18n.t('leaderboard.emptyEntriesBody') : 'No ratings have been recorded in this variant and time control yet.',
+      title: i18n.t('leaderboard.emptyEntriesTitle'),
+      body: i18n.t('leaderboard.emptyEntriesBody'),
     });
     return;
   }
@@ -55,7 +55,7 @@ export function renderLeaderboard(
 export function renderVariantSelector(
   selectEl: HTMLSelectElement,
   selectedVariant: Variant,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   selectEl.innerHTML = '';
   const doc = selectEl.ownerDocument;
@@ -87,19 +87,19 @@ export function bindVariantSelector(
  * Every rating pool is a variant and a speed, and the page does not pick a speed for the viewer:
  * until one is chosen the results say so instead of showing some default pool.
  */
-export function renderChooseSpeed(container: HTMLElement, i18n?: I18n): void {
+export function renderChooseSpeed(container: HTMLElement, i18n: I18n): void {
   container.innerHTML = '';
   container.setAttribute('role', 'status');
   renderEmpty(container, {
-    title: i18n ? i18n.t('leaderboard.chooseSpeedTitle') : 'Choose a time control',
-    body: i18n ? i18n.t('leaderboard.chooseSpeedBody') : 'Each variant and time control has its own ratings. Pick a time control to see its standings.',
+    title: i18n.t('leaderboard.chooseSpeedTitle'),
+    body: i18n.t('leaderboard.chooseSpeedBody'),
   });
 }
 
 export function renderSpeedSelector(
   selectEl: HTMLSelectElement,
   selectedSpeed: Speed | null,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   selectEl.innerHTML = '';
   const doc = selectEl.ownerDocument;
@@ -107,7 +107,7 @@ export function renderSpeedSelector(
     doc,
     'option',
     { value: '', disabled: '' },
-    i18n ? i18n.t('leaderboard.choosePrompt') : 'Choose…',
+    i18n.t('leaderboard.choosePrompt'),
   );
   prompt.selected = selectedSpeed === null;
   selectEl.appendChild(prompt);

@@ -50,15 +50,15 @@ export function canReply(
 /** The sentence shown in place of a composer, so a dead end always explains itself. */
 export function abilityExplanation(
   reason: 'signed-out' | 'not-member' | 'locked',
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): string {
   switch (reason) {
     case 'signed-out':
-      return i18n ? i18n.t('community.forum.deniedSignedOut') : 'Sign in to take part in this forum.';
+      return i18n.t('community.forum.deniedSignedOut');
     case 'not-member':
-      return i18n ? i18n.t('community.forum.deniedNotMember') : 'Only team members can post here.';
+      return i18n.t('community.forum.deniedNotMember');
     case 'locked':
-      return i18n ? i18n.t('community.forum.deniedLocked') : 'This thread is locked. No new replies can be added.';
+      return i18n.t('community.forum.deniedLocked');
   }
 }
 
@@ -79,17 +79,17 @@ export function sortThreads(threads: readonly ForumThread[]): readonly ForumThre
  * What to render as a post's body. A tombstoned post keeps its row — the conversation still
  * happened — but never shows what it said.
  */
-export function postDisplayBody(post: ForumPost, i18n?: I18nManager): string {
+export function postDisplayBody(post: ForumPost, i18n: I18nManager): string {
   if (post.deletedAt !== null) {
-    return i18n ? i18n.t('community.forum.tombstonePost') : '[Post deleted]';
+    return i18n.t('community.forum.tombstonePost');
   }
   return post.body;
 }
 
 /** A tombstoned thread is still listed, but must not read as an ordinary title. */
-export function threadDisplayTitle(thread: ForumThread, i18n?: I18nManager): string {
+export function threadDisplayTitle(thread: ForumThread, i18n: I18nManager): string {
   if (thread.deletedAt !== null) {
-    return i18n ? i18n.t('community.forum.tombstoneThread') : '[Thread deleted]';
+    return i18n.t('community.forum.tombstoneThread');
   }
   return thread.title;
 }

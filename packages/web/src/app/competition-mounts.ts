@@ -79,7 +79,7 @@ function setLeaderboardLoading(
 function createLeaderboardCallbacks(
   elements: LeaderboardElements,
   onEntries: (entries: readonly LeaderboardEntry[], names: ReadonlyMap<string, SocialPlayer>) => void,
-  i18n?: I18n,
+  i18n: I18n,
 ): LeaderboardCallbacks {
   const state: LeaderboardRenderState = { resultsRendered: false };
   return {
@@ -96,7 +96,7 @@ function createLeaderboardCallbacks(
   };
 }
 
-export function mountLeaderboard(doc: Document, client: GambitClient, i18n?: I18n): LeaderboardMount {
+export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n): LeaderboardMount {
   const elements: LeaderboardElements = {
     select: doc.getElementById('leaderboard-variant-select') as HTMLSelectElement | null,
     speedSelect: doc.getElementById('leaderboard-speed-select') as HTMLSelectElement | null,
@@ -114,7 +114,7 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n?: I18
   if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
   if (elements.results) renderChooseSpeed(elements.results, i18n);
 
-  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
     if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
     if (elements.results) {
@@ -157,7 +157,7 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n?: I18
     dispose: () => {
       unbindVariant();
       unbindSpeed();
-      unsubscribeLocale?.();
+      unsubscribeLocale();
       controller.dispose();
     },
   };
@@ -176,25 +176,27 @@ function setTournamentListLoading(
   elements: TournamentListElements,
   state: TournamentListRenderState,
   loading: boolean,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   if (!elements.list) return;
   elements.list.setAttribute('aria-busy', loading ? 'true' : 'false');
   if (loading) {
     state.listRendered = false;
-    const loadingText = i18n ? i18n.t('common.loading') : 'Loading…';
-    elements.list.innerHTML = `<div class="panel-row">${loadingText}</div>`;
+    const row = (elements.list.ownerDocument ?? document).createElement('div');
+    row.className = 'panel-row';
+    row.textContent = i18n.t('common.loading');
+    elements.list.replaceChildren(row);
     return;
   }
   // A failed request has already populated the error region. Keeping the loading row would
   // contradict that failure and imply that work is still in progress.
-  if (!state.listRendered) elements.list.innerHTML = '';
+  if (!state.listRendered) elements.list.replaceChildren();
 }
 
 function createTournamentListCallbacks(
   elements: TournamentListElements,
   onTournaments: (tournaments: readonly TournamentSummary[]) => void,
-  i18n?: I18n,
+  i18n: I18n,
 ): TournamentCallbacks {
   const state: TournamentListRenderState = { listRendered: false };
   return {
@@ -216,7 +218,7 @@ function createTournamentListCallbacks(
 export function mountTournamentList(
   doc: Document,
   client: GambitClient,
-  i18n?: I18n,
+  i18n: I18n,
 ): TournamentController {
   const elements: TournamentListElements = {
     list: doc.getElementById('tournament-list'),
@@ -225,7 +227,7 @@ export function mountTournamentList(
 
   let lastTournaments: readonly TournamentSummary[] | null = null;
 
-  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastTournaments !== null && elements.list) {
       renderTournamentList(elements.list, lastTournaments, i18n);
     }
@@ -241,7 +243,7 @@ export function mountTournamentList(
       i18n,
     ),
     onDispose: () => {
-      unsubscribeLocale?.();
+      unsubscribeLocale();
     },
   });
   void controller.loadList();
@@ -264,19 +266,21 @@ function setTournamentDetailLoading(
   elements: TournamentDetailElements,
   state: TournamentDetailRenderState,
   loading: boolean,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   if (elements.meta) elements.meta.setAttribute('aria-busy', loading ? 'true' : 'false');
   if (elements.standings) elements.standings.setAttribute('aria-busy', loading ? 'true' : 'false');
   if (elements.live) elements.live.setAttribute('aria-busy', loading ? 'true' : 'false');
   if (!elements.meta) return;
   if (loading && state.currentDetail === null) {
-    const loadingText = i18n ? i18n.t('common.loading') : 'Loading…';
-    elements.meta.innerHTML = `<div class="panel-row">${loadingText}</div>`;
+    const row = (elements.meta.ownerDocument ?? document).createElement('div');
+    row.className = 'panel-row';
+    row.textContent = i18n.t('common.loading');
+    elements.meta.replaceChildren(row);
     return;
   }
   // A failed initial load has already populated the error region. Clear only its stale placeholder.
-  if (!loading && state.currentDetail === null) elements.meta.innerHTML = '';
+  if (!loading && state.currentDetail === null) elements.meta.replaceChildren();
 }
 
 function createTournamentDetailCallbacks(
@@ -293,7 +297,7 @@ function createTournamentDetailCallbacks(
       names: ReadonlyMap<string, { id: string; handle: string }>,
     ) => void;
   },
-  i18n?: I18n,
+  i18n: I18n,
 ): TournamentCallbacks {
   const state: TournamentDetailRenderState = { currentDetail: null };
   return {
@@ -325,7 +329,7 @@ export function mountTournamentDetail(
   doc: Document,
   client: GambitClient,
   tournamentId: string,
-  i18n?: I18n,
+  i18n: I18n,
 ): TournamentController {
   const elements: TournamentDetailElements = {
     doc,
@@ -341,7 +345,7 @@ export function mountTournamentDetail(
   let lastLiveGames: readonly TournamentLiveBoard[] | null = null;
   let lastLiveNames: ReadonlyMap<string, { id: string; handle: string }> | null = null;
 
-  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastDetail && elements.meta) {
       renderTournamentDetail(elements.meta, lastDetail, i18n);
     }
@@ -367,7 +371,7 @@ export function mountTournamentDetail(
       i18n,
     ),
     onDispose: () => {
-      unsubscribeLocale?.();
+      unsubscribeLocale();
     },
   });
   void controller.loadDetail(tournamentId);
@@ -391,10 +395,10 @@ interface CommentaryElements {
 
 /**
  * @param failure - what went wrong.
- * @param i18n - optional internationalization manager.
+ * @param i18n - internationalization manager.
  * @returns the wording for it, in this section's vocabulary.
  */
-function commentaryFailureMessage(failure: CommentaryFailure, i18n?: I18n): string {
+function commentaryFailureMessage(failure: CommentaryFailure, i18n: I18n): string {
   switch (failure) {
     case 'unauthenticated':
       return getCommentaryMessage('signedOut', i18n);
@@ -437,16 +441,16 @@ function commentaryFailureMessage(failure: CommentaryFailure, i18n?: I18n): stri
  * @param doc - the owning document.
  * @param client - the API client.
  * @param tournamentId - the tournament on screen.
+ * @param i18n - internationalization manager.
  * @param loadFlags - the memoised capabilities read, injectable for tests.
- * @param i18n - optional internationalization manager.
  * @returns the mounted section.
  */
 export function mountTournamentCommentary(
   doc: Document,
   client: GambitClient,
   tournamentId: string,
+  i18n: I18n,
   loadFlags: (api: GambitClient) => Promise<unknown> = loadCapabilities,
-  i18n?: I18n,
 ): MountedTournamentCommentary {
   const elements: CommentaryElements = {
     panel: doc.getElementById('tournament-commentary-panel'),
@@ -548,9 +552,7 @@ export function mountTournamentCommentary(
   const renderControls = (rounds: readonly TournamentRound[]): void => {
     for (const round of rounds) {
       const number = round.roundIndex + 1;
-      const recapLabel = i18n
-        ? i18n.t('tournaments.recapRound', { number })
-        : `Recap round ${String(number)}`;
+      const recapLabel = i18n.t('tournaments.recapRound', { number });
       addControl(
         `tournament-commentary-recap-${String(round.roundIndex)}`,
         recapLabel,
@@ -561,9 +563,7 @@ export function mountTournamentCommentary(
       // id to ask about. A bye carries no game at all.
       round.pairings.forEach((pairing, board) => {
         if (pairing.kind !== 'game' || pairing.gameId === null) return;
-        const commentateLabel = i18n
-          ? i18n.t('tournaments.commentateRoundBoard', { number, board: board + 1 })
-          : `Commentate round ${String(number)}, board ${String(board + 1)}`;
+        const commentateLabel = i18n.t('tournaments.commentateRoundBoard', { number, board: board + 1 });
         addControl(
           `tournament-commentary-game-${String(round.roundIndex)}-${String(board)}`,
           commentateLabel,
@@ -573,7 +573,7 @@ export function mountTournamentCommentary(
     }
   };
 
-  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (elements.status) {
       if (currentFailure !== null) {
         elements.status.textContent = commentaryFailureMessage(currentFailure, i18n);
@@ -633,7 +633,7 @@ export function mountTournamentCommentary(
     dispose: () => {
       disposed = true;
       controller.dispose();
-      unsubscribeLocale?.();
+      unsubscribeLocale();
       // Removed, not just abandoned. See `appended` above: the container outlives this mount.
       for (const entry of appended) {
         entry.el.removeEventListener('click', entry.onClick);

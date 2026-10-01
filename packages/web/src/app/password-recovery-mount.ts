@@ -26,7 +26,7 @@ export interface PasswordRecoveryMountOptions {
   readonly client: GambitClient;
   readonly resetToken: string | null;
   readonly onSessionInvalidated: () => void;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 function passwordRecoveryElements(doc: Document): PasswordRecoveryElements {
@@ -48,19 +48,19 @@ function passwordRecoveryElements(doc: Document): PasswordRecoveryElements {
 function setPasswordRecoveryPending(
   elements: PasswordRecoveryElements,
   pending: boolean,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   if (elements.requestSubmit) {
     elements.requestSubmit.disabled = pending;
     elements.requestSubmit.textContent = pending
-      ? (i18n ? i18n.t('passwordRecovery.sending') : 'Sending…')
-      : (i18n ? i18n.t('passwordRecovery.submit') : 'Send reset link');
+      ? i18n.t('passwordRecovery.sending')
+      : i18n.t('passwordRecovery.submit');
   }
   if (elements.confirmSubmit) {
     elements.confirmSubmit.disabled = pending;
     elements.confirmSubmit.textContent = pending
-      ? (i18n ? i18n.t('passwordRecovery.resetting') : 'Resetting…')
-      : (i18n ? i18n.t('passwordRecovery.resetSubmit') : 'Reset password');
+      ? i18n.t('passwordRecovery.resetting')
+      : i18n.t('passwordRecovery.resetSubmit');
   }
   if (elements.requestInput) elements.requestInput.disabled = pending;
   if (elements.passwordInput) elements.passwordInput.disabled = pending;
@@ -72,7 +72,7 @@ function setPasswordRecoveryPending(
 function resetPasswordRecoverySurface(
   elements: PasswordRecoveryElements,
   resetToken: string | null,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   if (elements.requestView) elements.requestView.hidden = resetToken !== null;
   if (elements.confirmView) elements.confirmView.hidden = resetToken === null;
@@ -85,7 +85,7 @@ function createPasswordResetCallbacks(
   elements: PasswordRecoveryElements,
   state: PasswordRecoveryState,
   onSessionInvalidated: () => void,
-  i18n?: I18nManager,
+  i18n: I18nManager,
   recordPending?: (pending: boolean) => void,
   recordFeedback?: (status: string | null, error: string | null) => void,
 ): PasswordResetCallbacks {
@@ -138,7 +138,7 @@ function bindPasswordRecoveryForms(
 function disposePasswordRecoveryMount(
   elements: PasswordRecoveryElements,
   controller: PasswordResetController,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   if (elements.requestForm) elements.requestForm.onsubmit = null;
   if (elements.confirmForm) elements.confirmForm.onsubmit = null;
@@ -153,7 +153,6 @@ export function mountPasswordRecovery(
   let isPending = false;
   let lastStatus: string | null = null;
   let lastError: string | null = null;
-  let unsubscribeLocale: (() => void) | undefined;
 
   const elements = passwordRecoveryElements(options.doc);
   const state: PasswordRecoveryState = { resetToken: options.resetToken };
@@ -176,35 +175,33 @@ export function mountPasswordRecovery(
   });
   bindPasswordRecoveryForms(elements, state, controller);
 
-  if (options.i18n) {
-    unsubscribeLocale = options.i18n.onLocaleChange(() => {
-      setPasswordRecoveryPending(elements, isPending, options.i18n);
-      if (lastStatus && elements.status) {
-        if (lastStatus.includes('reset successfully') || lastStatus === options.i18n!.t('passwordRecovery.resetSuccess')) {
-          elements.status.textContent = options.i18n!.t('passwordRecovery.resetSuccess');
-        } else {
-          elements.status.textContent = options.i18n!.t('passwordRecovery.sentInstructions');
-        }
+  const unsubscribeLocale = options.i18n.onLocaleChange(() => {
+    setPasswordRecoveryPending(elements, isPending, options.i18n);
+    if (lastStatus && elements.status) {
+      if (lastStatus === options.i18n.t('passwordRecovery.resetSuccess')) {
+        elements.status.textContent = options.i18n.t('passwordRecovery.resetSuccess');
+      } else {
+        elements.status.textContent = options.i18n.t('passwordRecovery.sentInstructions');
       }
-      if (lastError && elements.error) {
-        if (lastError.includes('handle or email') || lastError === options.i18n!.t('passwordRecovery.enterHandleOrEmail')) {
-          elements.error.textContent = options.i18n!.t('passwordRecovery.enterHandleOrEmail');
-        } else if (lastError.includes('invalid') || lastError === options.i18n!.t('passwordRecovery.linkInvalid')) {
-          elements.error.textContent = options.i18n!.t('passwordRecovery.linkInvalid');
-        } else if (lastError.includes('between 8') || lastError === options.i18n!.t('passwordRecovery.passwordLength')) {
-          elements.error.textContent = options.i18n!.t('passwordRecovery.passwordLength');
-        } else if (lastError.includes('do not match') || lastError === options.i18n!.t('passwordRecovery.passwordsDoNotMatch')) {
-          elements.error.textContent = options.i18n!.t('passwordRecovery.passwordsDoNotMatch');
-        }
+    }
+    if (lastError && elements.error) {
+      if (lastError === options.i18n.t('passwordRecovery.enterHandleOrEmail')) {
+        elements.error.textContent = options.i18n.t('passwordRecovery.enterHandleOrEmail');
+      } else if (lastError === options.i18n.t('passwordRecovery.linkInvalid')) {
+        elements.error.textContent = options.i18n.t('passwordRecovery.linkInvalid');
+      } else if (lastError === options.i18n.t('passwordRecovery.passwordLength')) {
+        elements.error.textContent = options.i18n.t('passwordRecovery.passwordLength');
+      } else if (lastError === options.i18n.t('passwordRecovery.passwordsDoNotMatch')) {
+        elements.error.textContent = options.i18n.t('passwordRecovery.passwordsDoNotMatch');
       }
-    });
-  }
+    }
+  });
 
   return {
     dispose: () => {
       if (disposed) return;
       disposed = true;
-      unsubscribeLocale?.();
+      unsubscribeLocale();
       disposePasswordRecoveryMount(elements, controller, options.i18n);
     },
   };

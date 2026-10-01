@@ -8,7 +8,10 @@ import {
   deriveStepAttempts,
   stepStatusLabel,
 } from '../src/app/learning-helpers.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { LessonView, StepView } from '../src/api/models.js';
+
+const testI18n = createI18nManager();
 
 test('activeLessons filters out deleted lessons and sorts by orderIndex', () => {
   const input: LessonView[] = [
@@ -37,15 +40,15 @@ test('activeSteps filters out deleted steps and sorts by orderIndex', () => {
 });
 
 test('difficultyLabel capitalizes difficulty strings', () => {
-  assert.equal(difficultyLabel('beginner'), 'Beginner');
-  assert.equal(difficultyLabel('intermediate'), 'Intermediate');
-  assert.equal(difficultyLabel('advanced'), 'Advanced');
+  assert.equal(difficultyLabel('beginner', testI18n), 'Beginner');
+  assert.equal(difficultyLabel('intermediate', testI18n), 'Intermediate');
+  assert.equal(difficultyLabel('advanced', testI18n), 'Advanced');
 });
 
 test('courseProgressLabel formats progress summary', () => {
-  assert.equal(courseProgressLabel(null), '');
+  assert.equal(courseProgressLabel(null, testI18n), '');
   assert.equal(
-    courseProgressLabel({ courseId: 'c1', playerId: 'p1', totalSteps: 5, completedSteps: 2 }),
+    courseProgressLabel({ courseId: 'c1', playerId: 'p1', totalSteps: 5, completedSteps: 2 }, testI18n),
     '2 / 5 steps completed',
   );
 });
@@ -53,14 +56,14 @@ test('courseProgressLabel formats progress summary', () => {
 const COMPLETED_AT = '2026-08-05T00:00:00.000Z';
 
 test('stepStatusLabel formats attempt status in muted voice', () => {
-  assert.equal(stepStatusLabel(null), '');
-  assert.equal(stepStatusLabel(undefined), '');
+  assert.equal(stepStatusLabel(null, testI18n), '');
+  assert.equal(stepStatusLabel(undefined, testI18n), '');
   // The server sets `completedAt` on every correct attempt, so this is the real shape of one.
   assert.equal(
-    stepStatusLabel({ stepId: 's1', correct: true, attempts: 1, completedAt: COMPLETED_AT }),
+    stepStatusLabel({ stepId: 's1', correct: true, attempts: 1, completedAt: COMPLETED_AT }, testI18n),
     'Done',
   );
-  assert.equal(stepStatusLabel({ stepId: 's1', correct: false, attempts: 2 }), 'Try again');
+  assert.equal(stepStatusLabel({ stepId: 's1', correct: false, attempts: 2 }, testI18n), 'Try again');
 });
 
 test('a wrong answer on an already-completed step leaves it done', () => {
@@ -70,7 +73,7 @@ test('a wrong answer on an already-completed step leaves it done', () => {
   // "Try again" while the course summary still counted the step complete — and `deriveStepAttempts`
   // disagreed, so a reload silently corrected it.
   assert.equal(
-    stepStatusLabel({ stepId: 's1', correct: false, attempts: 3, completedAt: COMPLETED_AT }),
+    stepStatusLabel({ stepId: 's1', correct: false, attempts: 3, completedAt: COMPLETED_AT }, testI18n),
     'Done',
   );
 });

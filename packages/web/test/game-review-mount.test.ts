@@ -133,6 +133,7 @@ function setup(options: SetupOptions = {}) {
     token: 'token',
     initialSessionId: 'user-1',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   sockets.last.open();
   sockets.last.emit({

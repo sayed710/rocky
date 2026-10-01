@@ -9,7 +9,7 @@ import { formatTimeControl, renderEmpty } from './render-helpers.js';
 
 import { applyAutoDirection } from '../i18n/bidi.js';
 import { getSpeedLabel, getVariantLabel } from './variant-labels.js';
-import type { I18n } from '../i18n/manager.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 /**
  * Render a seek list into a DOM element. Each seek is a row with variant,
@@ -28,8 +28,8 @@ export function renderSeeks(
   container: HTMLElement,
   seeks: readonly SeekView[],
   currentUserId: string | null,
-  names?: ReadonlyMap<string, SocialPlayer>,
-  i18n?: I18n,
+  names: ReadonlyMap<string, SocialPlayer> | undefined,
+  i18n: I18nManager,
 ): void {
   const doc = container.ownerDocument ?? document;
   const active = doc.activeElement;
@@ -58,8 +58,8 @@ export function renderSeeks(
     container.setAttribute('tabindex', '-1');
     renderEmpty(container, {
       mark: '♟',
-      title: i18n ? i18n.t('lobby.emptySeeksTitle') : 'No open seeks right now',
-      body: i18n ? i18n.t('lobby.emptySeeksBody') : 'Create a game above — the first player to accept joins you.',
+      title: i18n.t('lobby.emptySeeksTitle'),
+      body: i18n.t('lobby.emptySeeksBody'),
     });
     if (focusedControl) {
       container.focus();
@@ -78,9 +78,9 @@ export function renderSeeks(
     const info = doc.createElement('span');
     info.className = 'seek-info';
     const tc = formatTimeControl(seek.timeControl, i18n);
-    const variantStr = i18n ? getVariantLabel(seek.variant, i18n) : seek.variant;
-    const speedStr = i18n ? getSpeedLabel(seek.speed, i18n) : seek.speed;
-    const ratedStr = seek.rated ? (i18n ? ` · ${i18n.t('lobby.rated')}` : ' · rated') : '';
+    const variantStr = getVariantLabel(seek.variant, i18n);
+    const speedStr = getSpeedLabel(seek.speed, i18n);
+    const ratedStr = seek.rated ? ` · ${i18n.t('lobby.rated')}` : '';
     info.textContent = `${variantStr} · ${speedStr} · ${tc}${ratedStr}`;
 
     if (owned) {
@@ -95,16 +95,16 @@ export function renderSeeks(
       const dot = doc.createElement('span');
       dot.className = 'seek-dot';
       dot.setAttribute('aria-hidden', 'true');
-      waiting.append(dot, i18n ? i18n.t('lobby.waitingOpponent') : 'Waiting for an opponent…');
+      waiting.append(dot, i18n.t('lobby.waitingOpponent'));
       main.appendChild(waiting);
       row.appendChild(main);
 
       const cancelBtn = doc.createElement('button');
       cancelBtn.type = 'button';
       cancelBtn.className = 'seek-cancel';
-      cancelBtn.textContent = i18n ? i18n.t('lobby.cancel') : 'Cancel';
+      cancelBtn.textContent = i18n.t('lobby.cancel');
       cancelBtn.dataset.seekId = seek.id;
-      cancelBtn.setAttribute('aria-label', i18n ? i18n.t('lobby.cancelSeekAria') : 'Cancel your seek');
+      cancelBtn.setAttribute('aria-label', i18n.t('lobby.cancelSeekAria'));
       row.appendChild(cancelBtn);
     } else {
       const main = doc.createElement('div');
@@ -132,9 +132,9 @@ export function renderSeeks(
 
       const detailParts: string[] = [];
       if (seek.color === 'white') {
-        detailParts.push(i18n ? i18n.t('lobby.playsWhite') : 'plays White');
+        detailParts.push(i18n.t('lobby.playsWhite'));
       } else if (seek.color === 'black') {
-        detailParts.push(i18n ? i18n.t('lobby.playsBlack') : 'plays Black');
+        detailParts.push(i18n.t('lobby.playsBlack'));
       }
 
       if (seek.minRating !== null && seek.maxRating !== null) {
@@ -157,11 +157,11 @@ export function renderSeeks(
       const acceptBtn = doc.createElement('button');
       acceptBtn.type = 'button';
       acceptBtn.className = 'seek-accept button primary';
-      acceptBtn.textContent = i18n ? i18n.t('lobby.play') : 'Play';
+      acceptBtn.textContent = i18n.t('lobby.play');
       acceptBtn.dataset.seekId = seek.id;
       const acceptAria = opponentHandle
-        ? (i18n ? i18n.t('lobby.acceptSeekWith', { handle: opponentHandle }) : `Play — accept seek from ${opponentHandle}`)
-        : (i18n ? i18n.t('lobby.acceptSeek') : 'Play — accept seek');
+        ? i18n.t('lobby.acceptSeekWith', { handle: opponentHandle })
+        : i18n.t('lobby.acceptSeek');
       acceptBtn.setAttribute('aria-label', acceptAria);
       row.appendChild(acceptBtn);
     }
@@ -192,7 +192,7 @@ export interface LobbyMountDependencies {
   readonly client: GambitClient;
   readonly isAuthenticated: () => boolean;
   readonly storage?: KeyValueStorage;
-  readonly i18n?: I18n;
+  readonly i18n: I18nManager;
 }
 
 /** The result of mounting the lobby view. */
@@ -234,7 +234,7 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
     }
   }
 
-  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (routeActive && seekListEl) {
       renderSeeks(
         seekListEl,

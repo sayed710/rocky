@@ -12,7 +12,7 @@ export interface MessagingMountDependencies {
   readonly client: GambitClient;
   readonly sessionPresent: boolean;
   readonly restorePromise: Promise<unknown>;
-  readonly i18n?: I18n;
+  readonly i18n: I18n;
 }
 
 export interface ConversationMountDependencies extends MessagingMountDependencies {
@@ -45,17 +45,15 @@ function updateParticipantHeader(
   headerEl: HTMLElement | null,
   names: ReadonlyMap<string, SocialPlayer>,
   otherParticipantId: string | null,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   if (!headerEl) return;
   if (otherParticipantId === null) {
-    headerEl.textContent = i18n ? i18n.t('community.messages.conversation') : 'Conversation';
+    headerEl.textContent = i18n.t('community.messages.conversation');
     headerEl.removeAttribute('dir');
   } else {
     const handle = names.get(otherParticipantId)?.handle ?? shortId(otherParticipantId);
-    headerEl.textContent = i18n
-      ? i18n.t('community.messages.conversationWith', { handle })
-      : `Conversation with ${handle}`;
+    headerEl.textContent = i18n.t('community.messages.conversationWith', { handle });
     applyAutoDirection(headerEl);
   }
 }
@@ -66,7 +64,7 @@ function bindComposer(
   conversationId: string,
   sessionPresent: boolean,
   restorePromise: Promise<unknown>,
-  i18n?: I18n,
+  i18n: I18n,
 ): () => void {
   if (!elements.composer || !elements.input) return () => {};
   const composer = elements.composer;
@@ -103,7 +101,7 @@ function bindComposer(
       if (elements.error) {
         elements.error.textContent = error instanceof Error
           ? error.message
-          : (i18n ? i18n.t('community.messages.sendFailed') : 'Message could not be sent');
+          : i18n.t('community.messages.sendFailed');
       }
     });
   };
@@ -148,7 +146,7 @@ export function mountMessagesInbox({
     },
   };
 
-  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastItems !== null && lastNames !== null && elements.inbox) {
       renderInbox(elements.inbox, lastItems, lastNames, currentUserId(), i18n);
     }
@@ -158,7 +156,7 @@ export function mountMessagesInbox({
     client,
     callbacks,
     onDispose: () => {
-      unsubscribeLocale?.();
+      unsubscribeLocale();
     },
   });
 
@@ -207,7 +205,7 @@ export function mountConversation({
     },
   };
 
-  const unsubscribeLocale = i18n?.onLocaleChange(() => {
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastThread !== null) {
       if (elements.thread) {
         renderThread(elements.thread, lastThread.messages, lastThread.names, currentUserId(), i18n);
@@ -227,7 +225,7 @@ export function mountConversation({
     callbacks,
     onDispose: () => {
       unbindComposer();
-      unsubscribeLocale?.();
+      unsubscribeLocale();
     },
   });
 

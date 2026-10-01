@@ -15,14 +15,14 @@ export function renderInbox(
   items: readonly ConversationSummary[],
   names: ReadonlyMap<string, SocialPlayer>,
   currentUserId: string | null,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   container.innerHTML = '';
   if (items.length === 0) {
     renderEmpty(container, {
       mark: '💬',
-      title: i18n ? i18n.t('community.messages.emptyInboxTitle') : 'No messages yet',
-      body: i18n ? i18n.t('community.messages.emptyInboxBody') : 'Start a conversation from a user profile.',
+      title: i18n.t('community.messages.emptyInboxTitle'),
+      body: i18n.t('community.messages.emptyInboxBody'),
     });
     return;
   }
@@ -61,9 +61,7 @@ export function renderInbox(
     const rowChildren: (Node | string)[] = [nameLink, infoSpan];
 
     if (item.unreadCount > 0) {
-      const badgeText = i18n
-        ? i18n.t('community.messages.unreadBadge', { count: item.unreadCount })
-        : ` (${item.unreadCount} unread)`;
+      const badgeText = i18n.t('community.messages.unreadBadge', { count: item.unreadCount });
       const badge = el(doc, 'span', { class: 'count' }, badgeText);
       rowChildren.push(badge);
     }
@@ -78,13 +76,13 @@ export function renderThread(
   messages: readonly MessageView[],
   names: ReadonlyMap<string, SocialPlayer>,
   currentUserId: string | null,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   container.innerHTML = '';
   if (messages.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('community.messages.emptyThreadTitle') : 'No messages in this thread',
-      body: i18n ? i18n.t('community.messages.emptyThreadBody') : 'Type a message below to start chatting.',
+      title: i18n.t('community.messages.emptyThreadTitle'),
+      body: i18n.t('community.messages.emptyThreadBody'),
       inline: true,
     });
     return;

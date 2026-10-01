@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mountEndgames } from '../src/app/endgame-mount.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { GambitClient } from '../src/api/client.js';
 import { FakeTransport, json } from './support/fake-transport.js';
 import type { HttpRequest, HttpResponse } from '../src/ports/http.js';
@@ -61,7 +62,7 @@ function setup(
     user: { id: 'u1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
     tokens: { accessToken: 'token', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
   });
-  const mounted = mountEndgames({ doc, client, isAuthenticated });
+  const mounted = mountEndgames({ doc, client, isAuthenticated, i18n: createI18nManager() });
   return { elements, layout, transport, mounted };
 }
 

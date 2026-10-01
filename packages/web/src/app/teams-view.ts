@@ -14,18 +14,18 @@ export function renderTeamList(
   container: HTMLElement,
   teams: readonly TeamView[],
   searched: boolean,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (teams.length === 0) {
     renderEmpty(container, {
       mark: '♜',
       title: searched
-        ? (i18n ? i18n.t('community.teams.emptySearchTitle') : 'No teams match that search')
-        : (i18n ? i18n.t('community.teams.emptyListTitle') : 'No teams yet'),
+        ? i18n.t('community.teams.emptySearchTitle')
+        : i18n.t('community.teams.emptyListTitle'),
       body: searched
-        ? (i18n ? i18n.t('community.teams.emptySearchBody') : 'Try a different term.')
-        : (i18n ? i18n.t('community.teams.emptyListBody') : 'Teams created by players will appear here.'),
+        ? i18n.t('community.teams.emptySearchBody')
+        : i18n.t('community.teams.emptyListBody'),
     });
     return;
   }
@@ -52,7 +52,7 @@ export function renderTeamList(
 
     // Only say "private" when it is; a "public" tag on every other row is noise.
     if (team.visibility === 'private') {
-      row.appendChild(el(doc, 'span', { class: 'count' }, i18n ? i18n.t('community.teams.privateTag') : 'private'));
+      row.appendChild(el(doc, 'span', { class: 'count' }, i18n.t('community.teams.privateTag')));
     }
 
     container.appendChild(row);
@@ -63,13 +63,13 @@ export function renderTeamMembers(
   container: HTMLElement,
   members: readonly TeamMembership[],
   names: ReadonlyMap<string, SocialPlayer>,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (members.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('community.teams.emptyMembersTitle') : 'No members',
-      body: i18n ? i18n.t('community.teams.emptyMembersBody') : 'This team has no members yet.',
+      title: i18n.t('community.teams.emptyMembersTitle'),
+      body: i18n.t('community.teams.emptyMembersBody'),
       inline: true,
     });
     return;
@@ -104,13 +104,13 @@ export function renderJoinRequests(
     readonly onAccept: (request: JoinRequestView) => void;
     readonly onDecline: (request: JoinRequestView) => void;
   },
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (requests.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('community.teams.emptyRequestsTitle') : 'No pending requests',
-      body: i18n ? i18n.t('community.teams.emptyRequestsBody') : 'Requests to join this team will appear here.',
+      title: i18n.t('community.teams.emptyRequestsTitle'),
+      body: i18n.t('community.teams.emptyRequestsBody'),
       inline: true,
     });
     return;
@@ -122,8 +122,8 @@ export function renderJoinRequests(
       container,
       handle,
       [
-        { label: i18n ? i18n.t('community.teams.accept') : 'Accept', run: () => actions.onAccept(req) },
-        { label: i18n ? i18n.t('community.teams.decline') : 'Decline', run: () => actions.onDecline(req) },
+        { label: i18n.t('community.teams.accept'), run: () => actions.onAccept(req) },
+        { label: i18n.t('community.teams.decline'), run: () => actions.onDecline(req) },
       ],
       busy,
     );

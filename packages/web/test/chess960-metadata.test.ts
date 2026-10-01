@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { WsClient } from '../src/net/ws-client.js';
 import { GameSync } from '../src/net/game-sync.js';
 import { GameController, type GameMetadataState } from '../src/app/game-controller.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { StateView, WsColor } from '../src/net/ws-protocol.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
 
@@ -42,6 +43,7 @@ function setup() {
   const metadatas: GameMetadataState[] = [];
   const controller = new GameController({
     gameSync: sync,
+    i18n: createI18nManager(),
     callbacks: {
       onPosition: () => {},
       onTurn: () => {},

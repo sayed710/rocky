@@ -2,6 +2,7 @@ import { el } from './dom.js';
 import { renderEmpty, formatTimeControl, formatClock } from './render-helpers.js';
 import { shortId } from '../api/graphql.js';
 import { applyAutoDirection } from '../i18n/bidi.js';
+import { getVariantLabel } from './variant-labels.js';
 import type { I18n } from '../i18n/manager.js';
 import type {
   TournamentSummary,
@@ -12,39 +13,39 @@ import type {
   TournamentState,
 } from '../api/models.js';
 
-export function formatFormat(format: TournamentFormat, i18n?: I18n): string {
+export function formatFormat(format: TournamentFormat, i18n: I18n): string {
   switch (format) {
     case 'round_robin':
-      return i18n ? i18n.t('tournaments.format.roundRobin') : 'Round robin';
+      return i18n.t('tournaments.format.roundRobin');
     case 'swiss':
-      return i18n ? i18n.t('tournaments.format.swiss') : 'Swiss';
+      return i18n.t('tournaments.format.swiss');
     case 'arena':
-      return i18n ? i18n.t('tournaments.format.arena') : 'Arena';
+      return i18n.t('tournaments.format.arena');
   }
 }
 
-export function formatState(state: TournamentState, i18n?: I18n): string {
+export function formatState(state: TournamentState, i18n: I18n): string {
   switch (state) {
     case 'registration':
-      return i18n ? i18n.t('tournaments.state.registration') : 'Registration';
+      return i18n.t('tournaments.state.registration');
     case 'running':
-      return i18n ? i18n.t('tournaments.state.running') : 'Running';
+      return i18n.t('tournaments.state.running');
     case 'finished':
-      return i18n ? i18n.t('tournaments.state.finished') : 'Finished';
+      return i18n.t('tournaments.state.finished');
   }
 }
 
 export function renderTournamentList(
   container: HTMLElement,
   items: readonly TournamentSummary[],
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   container.innerHTML = '';
   if (items.length === 0) {
     renderEmpty(container, {
       mark: '🏆',
-      title: i18n ? i18n.t('tournaments.emptyListTitle') : 'No tournaments available',
-      body: i18n ? i18n.t('tournaments.emptyListBody') : 'Check back later for upcoming tournaments.',
+      title: i18n.t('tournaments.emptyListTitle'),
+      body: i18n.t('tournaments.emptyListBody'),
     });
     return;
   }
@@ -59,9 +60,7 @@ export function renderTournamentList(
     );
     applyAutoDirection(link);
 
-    const playersCountStr = i18n
-      ? i18n.t('tournaments.playersCount', { count: item.participantCount })
-      : `${item.participantCount} players`;
+    const playersCountStr = i18n.t('tournaments.playersCount', { count: item.participantCount });
 
     const info = el(
       doc,
@@ -85,7 +84,7 @@ export function renderTournamentList(
 export function renderTournamentDetail(
   container: HTMLElement,
   detail: TournamentDetail,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   const doc = container.ownerDocument;
   container.innerHTML = '';
@@ -94,7 +93,7 @@ export function renderTournamentDetail(
     doc,
     'div',
     { class: 'panel-row' },
-    el(doc, 'strong', {}, i18n ? i18n.t('tournaments.details.format') : 'Format'),
+    el(doc, 'strong', {}, i18n.t('tournaments.details.format')),
     el(doc, 'span', {}, formatFormat(detail.format, i18n)),
   );
 
@@ -102,7 +101,7 @@ export function renderTournamentDetail(
     doc,
     'div',
     { class: 'panel-row' },
-    el(doc, 'strong', {}, i18n ? i18n.t('tournaments.details.state') : 'State'),
+    el(doc, 'strong', {}, i18n.t('tournaments.details.state')),
     el(doc, 'span', {}, formatState(detail.state, i18n)),
   );
 
@@ -110,40 +109,36 @@ export function renderTournamentDetail(
     doc,
     'div',
     { class: 'panel-row' },
-    el(doc, 'strong', {}, i18n ? i18n.t('tournaments.details.variant') : 'Variant'),
-    el(doc, 'span', {}, detail.variant),
+    el(doc, 'strong', {}, i18n.t('tournaments.details.variant')),
+    el(doc, 'span', {}, getVariantLabel(detail.variant, i18n)),
   );
 
   const tcRow = el(
     doc,
     'div',
     { class: 'panel-row' },
-    el(doc, 'strong', {}, i18n ? i18n.t('tournaments.details.timeControl') : 'Time Control'),
-    el(doc, 'span', {}, formatTimeControl(detail.timeControl)),
+    el(doc, 'strong', {}, i18n.t('tournaments.details.timeControl')),
+    el(doc, 'span', {}, formatTimeControl(detail.timeControl, i18n)),
   );
 
-  const playersText = i18n
-    ? i18n.t('tournaments.playersCount', { count: detail.participants.length })
-    : `${detail.participants.length} players`;
+  const playersText = i18n.t('tournaments.playersCount', { count: detail.participants.length });
   const playersRow = el(
     doc,
     'div',
     { class: 'panel-row' },
-    el(doc, 'strong', {}, i18n ? i18n.t('tournaments.details.participants') : 'Participants'),
+    el(doc, 'strong', {}, i18n.t('tournaments.details.participants')),
     el(doc, 'span', {}, playersText),
   );
 
   container.append(formatRow, stateRow, variantRow, tcRow, playersRow);
 
   if (detail.format === 'arena') {
-    const durationText = i18n
-      ? i18n.t('tournaments.durationMin', { min: Math.round(detail.durationMs / 60000) })
-      : `${Math.round(detail.durationMs / 60000)} min`;
+    const durationText = i18n.t('tournaments.durationMin', { min: Math.round(detail.durationMs / 60000) });
     const durationRow = el(
       doc,
       'div',
       { class: 'panel-row' },
-      el(doc, 'strong', {}, i18n ? i18n.t('tournaments.details.duration') : 'Duration'),
+      el(doc, 'strong', {}, i18n.t('tournaments.details.duration')),
       el(doc, 'span', {}, durationText),
     );
     container.appendChild(durationRow);
@@ -155,7 +150,7 @@ export function renderTournamentDetail(
       doc,
       'div',
       { class: 'panel-row' },
-      el(doc, 'strong', {}, i18n ? i18n.t('tournaments.details.rounds') : 'Rounds'),
+      el(doc, 'strong', {}, i18n.t('tournaments.details.rounds')),
       el(doc, 'span', {}, roundsText),
     );
     container.appendChild(roundsRow);
@@ -166,13 +161,13 @@ export function renderStandings(
   container: HTMLElement,
   standings: readonly TournamentStanding[],
   names: ReadonlyMap<string, { id: string; handle: string }>,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   container.innerHTML = '';
   if (standings.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('tournaments.emptyStandingsTitle') : 'No standings yet',
-      body: i18n ? i18n.t('tournaments.emptyStandingsBody') : 'Standings will appear when participants join or play.',
+      title: i18n.t('tournaments.emptyStandingsTitle'),
+      body: i18n.t('tournaments.emptyStandingsBody'),
       inline: true,
     });
     return;
@@ -184,15 +179,15 @@ export function renderStandings(
     const playerSpan = el(doc, 'span', {}, `#${s.rank} ${handle}`);
     applyAutoDirection(playerSpan);
 
-    const ptsStr = i18n ? i18n.t('tournaments.standings.points', { points: s.points }) : `${s.points} pts`;
+    const ptsStr = i18n.t('tournaments.standings.points', { points: s.points });
     let statsStr = '';
     if ('wins' in s) {
       // ArenaStanding
-      const onFireStr = s.onFire ? (i18n ? i18n.t('tournaments.standings.onFire') : ' 🔥 On fire') : '';
+      const onFireStr = s.onFire ? i18n.t('tournaments.standings.onFire') : '';
       statsStr = `${ptsStr} (${s.wins}W/${s.draws}D/${s.losses}L, ${s.gamesPlayed} games)${onFireStr}`;
     } else {
       // SwissOrRoundRobinStanding
-      const withdrawnStr = s.withdrawn ? (i18n ? i18n.t('tournaments.standings.withdrawn') : ' [Withdrawn]') : '';
+      const withdrawnStr = s.withdrawn ? i18n.t('tournaments.standings.withdrawn') : '';
       statsStr = `${ptsStr} (Tiebreak: ${s.tiebreak}, Buchholz: ${s.buchholz})${withdrawnStr}`;
     }
 
@@ -206,13 +201,13 @@ export function renderLiveBoards(
   container: HTMLElement,
   games: readonly TournamentLiveBoard[],
   names: ReadonlyMap<string, { id: string; handle: string }>,
-  i18n?: I18n,
+  i18n: I18n,
 ): void {
   container.innerHTML = '';
   if (games.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('tournaments.emptyLiveGamesTitle') : 'No live games right now',
-      body: i18n ? i18n.t('tournaments.emptyLiveGamesBody') : 'Active games will appear here when rounds are in progress.',
+      title: i18n.t('tournaments.emptyLiveGamesTitle'),
+      body: i18n.t('tournaments.emptyLiveGamesBody'),
       inline: true,
     });
     return;
@@ -233,21 +228,17 @@ export function renderLiveBoards(
 
     let statusText = '';
     if (g.status.over) {
-      statusText = i18n
-        ? i18n.t('tournaments.liveGame.over', { result: g.status.result })
-        : `Over (${g.status.result})`;
+      statusText = i18n.t('tournaments.liveGame.over', { result: g.status.result });
     } else {
       const turnStr = g.turn === 'w'
-        ? (i18n ? i18n.t('game.player.white') : 'White')
-        : (i18n ? i18n.t('game.player.black') : 'Black');
+        ? i18n.t('game.player.white')
+        : i18n.t('game.player.black');
       const clocksStr = `${formatClock(g.clock.w)} - ${formatClock(g.clock.b)}`;
-      statusText = i18n
-        ? i18n.t('tournaments.liveGame.inProgress', {
-            move: Math.floor(g.ply / 2) + 1,
-            turn: turnStr,
-            clocks: clocksStr,
-          })
-        : `Move ${Math.floor(g.ply / 2) + 1} (${turnStr}) · ${clocksStr}`;
+      statusText = i18n.t('tournaments.liveGame.inProgress', {
+        move: Math.floor(g.ply / 2) + 1,
+        turn: turnStr,
+        clocks: clocksStr,
+      });
     }
 
     const infoSpan = el(doc, 'span', { class: 'count' }, statusText);

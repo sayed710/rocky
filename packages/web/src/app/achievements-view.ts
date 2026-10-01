@@ -20,13 +20,13 @@ import type { I18nManager } from '../i18n/manager.js';
 export function renderAchievements(
   container: HTMLElement,
   achievements: readonly PlayerAchievement[],
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (achievements.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('profile.achievements.emptyTitle') : 'No achievements available',
-      body: i18n ? i18n.t('profile.achievements.emptyBody') : 'Achievements will appear here once the catalogue is published.',
+      title: i18n.t('profile.achievements.emptyTitle'),
+      body: i18n.t('profile.achievements.emptyBody'),
       inline: true,
     });
     return;

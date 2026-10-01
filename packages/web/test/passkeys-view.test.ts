@@ -6,7 +6,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderPasskeys } from '../src/app/passkeys-view.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { PasskeyView } from '../src/api/models.js';
+
+const testI18n = createI18nManager();
 
 class FakeHTMLElement {
   innerHTML = '';
@@ -47,7 +50,7 @@ class FakeHTMLElement {
 test('renderPasskeys: empty list renders the inline empty state', () => {
   const container = new FakeHTMLElement() as unknown as HTMLElement;
 
-  renderPasskeys(container, [], () => {}, false);
+  renderPasskeys(container, [], () => {}, false, testI18n);
 
   const html = (container as unknown as FakeHTMLElement).innerHTML;
   // renderEmpty replaces contents and appends a wrapper.
@@ -69,7 +72,7 @@ test('renderPasskeys: list renders rows with accessible delete buttons and corre
     deletedId = id;
   };
 
-  renderPasskeys(container, passkeys, onDelete, false);
+  renderPasskeys(container, passkeys, onDelete, false, testI18n);
 
   const children = (container as unknown as FakeHTMLElement).children;
   assert.equal(children.length, 2);

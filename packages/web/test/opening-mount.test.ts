@@ -70,6 +70,7 @@ function setup(transport: HttpTransport) {
     client: app.api,
     token: 'token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   return { sockets, elements, mounted, app, doc };
 }
@@ -307,6 +308,7 @@ test('a remount clears an opening left on screen by the previous game', async ()
     client: app.api,
     token: 'token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   const first = mount();
@@ -469,6 +471,7 @@ test('a remount re-hides the section before the capability has spoken', async ()
     client: app.api,
     token: 'token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   const first = mount();
@@ -522,6 +525,7 @@ test('signing in enables the control without waiting for an unrelated game event
     getAccessToken: () => app.api.session.current?.tokens.accessToken,
     client: app.api,
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   try {
     await settled();

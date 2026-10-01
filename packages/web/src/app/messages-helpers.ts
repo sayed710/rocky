@@ -16,9 +16,9 @@ export function getOtherParticipantId(conv: ConversationView, currentUserId: str
  * Get the text to display for a message body.
  * If the message has been tombstoned (deletedAt !== null), returns placeholder text.
  */
-export function getMessageDisplayBody(message: MessageView, i18n?: I18n): string {
+export function getMessageDisplayBody(message: MessageView, i18n: I18n): string {
   if (message.deletedAt !== null) {
-    return i18n ? i18n.t('community.messages.deleted') : '[Message deleted]';
+    return i18n.t('community.messages.deleted');
   }
   return message.body;
 }

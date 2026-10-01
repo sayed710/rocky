@@ -23,13 +23,13 @@ export interface PasswordResetCallbacks {
 export interface PasswordResetControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: PasswordResetCallbacks;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 export class PasswordResetController {
   private readonly client: GambitClient;
   private readonly callbacks: PasswordResetCallbacks;
-  private readonly i18n?: I18nManager | undefined;
+  private readonly i18n: I18nManager;
   private requestGeneration = 0;
   private pendingGeneration = 0;
   private isSubmitting = false;
@@ -51,7 +51,7 @@ export class PasswordResetController {
     const trimmed = handleOrEmail.trim();
     if (!trimmed) {
       this.callbacks.onError(
-        this.i18n ? this.i18n.t('passwordRecovery.enterHandleOrEmail') : 'Please enter your handle or email address.',
+        this.i18n.t('passwordRecovery.enterHandleOrEmail'),
       );
       this.callbacks.onSuccess(null);
       return false;
@@ -67,9 +67,7 @@ export class PasswordResetController {
       if (!this.isCurrent(generation)) return false;
 
       this.callbacks.onSuccess(
-        this.i18n
-          ? this.i18n.t('passwordRecovery.sentInstructions')
-          : 'If an account matching that handle or email address exists, we have sent instructions to reset your password.',
+        this.i18n.t('passwordRecovery.sentInstructions'),
       );
       return true;
     } catch (err) {
@@ -91,7 +89,7 @@ export class PasswordResetController {
 
     if (!token) {
       this.callbacks.onError(
-        this.i18n ? this.i18n.t('passwordRecovery.linkInvalid') : 'This password reset link is invalid or has expired.',
+        this.i18n.t('passwordRecovery.linkInvalid'),
       );
       this.callbacks.onSuccess(null);
       return false;
@@ -99,7 +97,7 @@ export class PasswordResetController {
 
     if (newPassword.length < 8 || newPassword.length > 1024) {
       this.callbacks.onError(
-        this.i18n ? this.i18n.t('passwordRecovery.passwordLength') : 'Password must be between 8 and 1024 characters.',
+        this.i18n.t('passwordRecovery.passwordLength'),
       );
       this.callbacks.onSuccess(null);
       return false;
@@ -107,7 +105,7 @@ export class PasswordResetController {
 
     if (newPassword !== confirmPassword) {
       this.callbacks.onError(
-        this.i18n ? this.i18n.t('passwordRecovery.passwordsDoNotMatch') : 'Passwords do not match.',
+        this.i18n.t('passwordRecovery.passwordsDoNotMatch'),
       );
       this.callbacks.onSuccess(null);
       return false;
@@ -123,7 +121,7 @@ export class PasswordResetController {
       if (!this.isCurrent(generation)) return false;
 
       this.callbacks.onSuccess(
-        this.i18n ? this.i18n.t('passwordRecovery.resetSuccess') : 'Your password has been reset successfully.',
+        this.i18n.t('passwordRecovery.resetSuccess'),
       );
       this.callbacks.onSessionInvalidated?.();
       return true;
@@ -131,7 +129,7 @@ export class PasswordResetController {
       if (this.isCurrent(generation)) {
         if (err instanceof UnauthorizedError) {
           this.callbacks.onError(
-            this.i18n ? this.i18n.t('passwordRecovery.linkInvalid') : 'This password reset link is invalid or has expired.',
+            this.i18n.t('passwordRecovery.linkInvalid'),
           );
         } else {
           this.callbacks.onError(err instanceof Error ? err.message : String(err));

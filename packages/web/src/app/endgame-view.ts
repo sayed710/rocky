@@ -11,24 +11,24 @@ import type {
   EndgamePosition,
 } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
+import { enMessages } from '../i18n/catalog/en.js';
 import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
 import { mountBoard } from './board.js';
 
 export const ENDGAME_MESSAGES = {
-  idle: 'Pick a training endgame to begin.',
-  loading: 'Loading a training position…',
-  judging: 'Checking your move…',
-  signedOut: 'Sign in to train endgames.',
-  unavailable: 'Endgame training is unavailable right now.',
-  rateLimited: 'Too many attempts. Try again shortly.',
-  rejected: 'That move cannot be played in this position.',
-  failed: 'Could not load the endgame trainer.',
-  noMatch: 'No training position matches those filters.',
-  yourMove: 'Play the move you think is best.',
+  idle: enMessages['learning.endgames.msgIdle'],
+  loading: enMessages['learning.endgames.msgLoading'],
+  judging: enMessages['learning.endgames.msgJudging'],
+  signedOut: enMessages['learning.endgames.msgSignedOut'],
+  unavailable: enMessages['learning.endgames.msgUnavailable'],
+  rateLimited: enMessages['learning.endgames.msgRateLimited'],
+  rejected: enMessages['learning.endgames.msgRejected'],
+  failed: enMessages['learning.endgames.msgFailed'],
+  noMatch: enMessages['learning.endgames.msgNoMatch'],
+  yourMove: enMessages['learning.endgames.msgYourMove'],
 } as const;
 
-export function getEndgameMessage(key: keyof typeof ENDGAME_MESSAGES, i18n?: I18nManager): string {
-  if (!i18n) return ENDGAME_MESSAGES[key];
+export function getEndgameMessage(key: keyof typeof ENDGAME_MESSAGES, i18n: I18nManager): string {
   switch (key) {
     case 'idle': return i18n.t('learning.endgames.msgIdle');
     case 'loading': return i18n.t('learning.endgames.msgLoading');
@@ -43,43 +43,30 @@ export function getEndgameMessage(key: keyof typeof ENDGAME_MESSAGES, i18n?: I18
   }
 }
 
-/** Objective wording the learner reads, kept out of the render functions so it stays consistent. */
-const OBJECTIVE_LABEL: Record<EndgamePosition['objective'], string> = {
-  mate: 'Deliver checkmate',
-  win: 'Win the position',
-  draw: 'Hold the draw',
-};
-
-const CLASSIFICATION_LABEL: Record<EndgameAttemptResult['classification'], string> = {
-  optimal: 'Best move',
-  acceptable: 'Playable, but not best',
-  throws_result: 'Throws the result away',
-};
-
 export function renderEndgamePositionRows(
   doc: Document,
   rows: HTMLElement,
   position: EndgamePosition,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   rows.innerHTML = '';
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowEndgame') ?? 'Endgame', position.name, 'auto'));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowEndgame'), position.name, 'auto'));
 
   const objLabel = position.objective === 'mate'
-    ? (i18n?.t('learning.endgames.deliverCheckmate') ?? OBJECTIVE_LABEL['mate'])
+    ? i18n.t('learning.endgames.deliverCheckmate')
     : position.objective === 'win'
-      ? (i18n?.t('learning.endgames.winPosition') ?? OBJECTIVE_LABEL['win'])
-      : (i18n?.t('learning.endgames.holdDraw') ?? OBJECTIVE_LABEL['draw']);
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowObjective') ?? 'Objective', objLabel));
+      ? i18n.t('learning.endgames.winPosition')
+      : i18n.t('learning.endgames.holdDraw');
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowObjective'), objLabel));
 
   const turnLabel = position.sideToMove === 'w'
-    ? (i18n?.t('learning.endgames.rowWhite') ?? 'White')
-    : (i18n?.t('learning.endgames.rowBlack') ?? 'Black');
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowToMove') ?? 'To move', turnLabel));
+    ? i18n.t('learning.endgames.rowWhite')
+    : i18n.t('learning.endgames.rowBlack');
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowToMove'), turnLabel));
 
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowLevel') ?? 'Level', position.difficulty));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowLevel'), position.difficulty));
   if (position.technique) {
-    rows.appendChild(row(doc, i18n?.t('learning.endgames.rowTechnique') ?? 'Technique', position.technique, 'auto'));
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowTechnique'), position.technique, 'auto'));
   }
 }
 
@@ -101,7 +88,7 @@ export function renderEndgamePosition(
   boardEl: HTMLElement,
   rows: HTMLElement,
   position: EndgamePosition,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): { dispose: () => void } {
   const board = mountBoard({ boardEl });
   board.setTurn(false);
@@ -121,44 +108,44 @@ export function renderEndgameVerdict(
   rows: HTMLElement,
   resultEl: HTMLElement,
   result: EndgameAttemptResult,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): string | null {
   rows.innerHTML = '';
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowYourMove') ?? 'Your move', result.move, 'ltr'));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowYourMove'), result.move, 'ltr'));
 
   const verdictLabel = result.classification === 'optimal'
-    ? (i18n?.t('learning.endgames.bestMove') ?? CLASSIFICATION_LABEL['optimal'])
+    ? i18n.t('learning.endgames.bestMove')
     : result.classification === 'acceptable'
-      ? (i18n?.t('learning.endgames.playableNotBest') ?? CLASSIFICATION_LABEL['acceptable'])
-      : (i18n?.t('learning.endgames.throwsResult') ?? CLASSIFICATION_LABEL['throws_result']);
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowVerdict') ?? 'Verdict', verdictLabel));
+      ? i18n.t('learning.endgames.playableNotBest')
+      : i18n.t('learning.endgames.throwsResult');
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowVerdict'), verdictLabel));
 
   const goalLabel = result.goalPreserved
-    ? (i18n?.t('learning.endgames.stillAlive') ?? 'Still alive')
-    : (i18n?.t('learning.endgames.lost') ?? 'Lost');
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowGoal') ?? 'Goal', goalLabel));
+    ? i18n.t('learning.endgames.stillAlive')
+    : i18n.t('learning.endgames.lost');
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowGoal'), goalLabel));
 
   if (result.kind === 'terminal') {
     // A decided game has a result, not a score. Rendering an evaluation here — even a zero — would
     // describe a finished position as an equal one.
-    rows.appendChild(row(doc, i18n?.t('learning.endgames.rowGame') ?? 'Game', terminalLabel(result.terminal.reason, result.terminal.result), 'ltr'));
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowGame'), terminalLabel(result.terminal.reason, result.terminal.result), 'ltr'));
     resultEl.hidden = false;
     return null;
   }
 
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowBefore') ?? 'Before', evaluationLabel(result.evalBefore, i18n), 'ltr'));
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowAfter') ?? 'After', evaluationLabel(result.evalAfter, i18n), 'ltr'));
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowCost') ?? 'Cost', lossLabel(result, i18n)));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowBefore'), evaluationLabel(result.evalBefore, i18n), 'ltr'));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowAfter'), evaluationLabel(result.evalAfter, i18n), 'ltr'));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowCost'), lossLabel(result, i18n)));
 
   if (result.betterMove !== null) {
-    rows.appendChild(row(doc, i18n?.t('learning.endgames.rowEnginePrefers') ?? 'Engine prefers', result.betterMove, 'ltr'));
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowEnginePrefers'), result.betterMove, 'ltr'));
   }
 
   if (result.bestLine.length > 0) {
-    rows.appendChild(row(doc, i18n?.t('learning.endgames.rowLine') ?? 'Line', result.bestLine.join(' '), 'ltr'));
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowLine'), result.bestLine.join(' '), 'ltr'));
   }
 
-  rows.appendChild(row(doc, i18n?.t('learning.endgames.rowDepth') ?? 'Depth', String(result.depth), 'ltr'));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowDepth'), String(result.depth), 'ltr'));
 
   resultEl.hidden = false;
   return null;
@@ -205,15 +192,15 @@ export function renderEndgameError(el: HTMLElement, text: string | null): void {
 }
 
 /** `{kind:'decisive'}` has no number to show, and must not be given one. */
-function lossLabel(result: Extract<EndgameAttemptResult, { kind: 'judged' }>, i18n?: I18nManager): string {
+function lossLabel(result: Extract<EndgameAttemptResult, { kind: 'judged' }>, i18n: I18nManager): string {
   if (result.loss.kind === 'decisive') {
-    return i18n?.t('learning.endgames.costDecisive') ?? 'Decisive — the goal is gone';
+    return i18n.t('learning.endgames.costDecisive');
   }
   const pawns = result.loss.value / 100;
   if (pawns === 0) {
-    return i18n?.t('learning.endgames.costNothing') ?? 'Nothing';
+    return i18n.t('learning.endgames.costNothing');
   }
-  return i18n?.t('learning.endgames.costPawns', { pawns: pawns.toFixed(2) }) ?? `${pawns.toFixed(2)} pawns`;
+  return i18n.t('learning.endgames.costPawns', { pawns: pawns.toFixed(2) });
 }
 
 /**
@@ -223,13 +210,13 @@ function lossLabel(result: Extract<EndgameAttemptResult, { kind: 'judged' }>, i1
  */
 function evaluationLabel(
   evaluation: { readonly type: 'cp' | 'mate'; readonly value: number },
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): string {
   if (evaluation.type === 'mate') {
     if (evaluation.value >= 0) {
-      return i18n?.t('learning.endgames.evalMate', { count: String(evaluation.value) }) ?? `Mate in ${evaluation.value}`;
+      return i18n.t('learning.endgames.evalMate', { count: String(evaluation.value) });
     }
-    return i18n?.t('learning.endgames.evalMated', { count: String(Math.abs(evaluation.value)) }) ?? `Mated in ${Math.abs(evaluation.value)}`;
+    return i18n.t('learning.endgames.evalMated', { count: String(Math.abs(evaluation.value)) });
   }
   const pawns = evaluation.value / 100;
   return `${pawns > 0 ? '+' : ''}${pawns.toFixed(2)}`;

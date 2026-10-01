@@ -24,7 +24,7 @@ interface ForumMountDependencies {
   readonly slug: string;
   readonly sessionPresent: boolean;
   readonly restorePromise: Promise<unknown>;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 interface ThreadMountDependencies extends ForumMountDependencies {
@@ -55,14 +55,14 @@ interface ForumRenderDependencies {
   readonly slug: string;
   readonly viewerId: () => string | null;
   readonly setTeamId: (teamId: string) => void;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 interface ThreadRenderDependencies {
   readonly elements: ThreadElements;
   readonly viewerId: () => string | null;
   readonly setTeamId: (teamId: string) => void;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 interface ThreadRenderData {
@@ -107,13 +107,11 @@ function renderForumIdentity(
   members: readonly TeamMembership[],
   names: ReadonlyMap<string, SocialPlayer>,
   viewerId: string | null,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   if (elements.error) elements.error.textContent = '';
   if (elements.title) {
-    elements.title.textContent = i18n
-      ? i18n.t('community.forum.teamForumTitle', { name: team.name })
-      : `${team.name} forum`;
+    elements.title.textContent = i18n.t('community.forum.teamForumTitle', { name: team.name });
     applyAutoDirection(elements.title);
   }
   if (elements.list) renderThreadList(elements.list, slug, threads, names, i18n);
@@ -150,10 +148,10 @@ function createForumCallbacks(
       if (elements.error) elements.error.textContent = message;
     },
     onNotFound: () => {
-      if (elements.title) elements.title.textContent = i18n ? i18n.t('community.teams.notFoundTitle') : 'Team not found';
+      if (elements.title) elements.title.textContent = i18n.t('community.teams.notFoundTitle');
       if (elements.list) elements.list.replaceChildren();
       if (elements.form) elements.form.hidden = true;
-      if (elements.note) elements.note.textContent = i18n ? i18n.t('community.teams.notFoundBody') : 'No such team, or it is private.';
+      if (elements.note) elements.note.textContent = i18n.t('community.teams.notFoundBody');
     },
   };
 }
@@ -199,7 +197,7 @@ function renderThreadDetail(
   elements: ThreadElements,
   data: ThreadRenderData,
   viewerId: string | null,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   const { thread, posts, members, names } = data;
   if (elements.error) elements.error.textContent = '';
@@ -236,10 +234,10 @@ function createThreadCallbacks(
       if (elements.error) elements.error.textContent = message;
     },
     onNotFound: () => {
-      if (elements.title) elements.title.textContent = i18n ? i18n.t('community.forum.threadNotFoundTitle') : 'Thread not found';
+      if (elements.title) elements.title.textContent = i18n.t('community.forum.threadNotFoundTitle');
       if (elements.posts) elements.posts.replaceChildren();
       if (elements.form) elements.form.hidden = true;
-      if (elements.note) elements.note.textContent = i18n ? i18n.t('community.forum.threadNotFoundBody') : 'No such thread, or the team is private.';
+      if (elements.note) elements.note.textContent = i18n.t('community.forum.threadNotFoundBody');
     },
   };
 }
@@ -310,7 +308,7 @@ export function mountForum({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastThreadsState) {
       renderForumIdentity(
         elements,
@@ -364,7 +362,7 @@ export function mountForumThread({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastThreadData) {
       renderThreadDetail(
         elements,

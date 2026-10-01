@@ -114,7 +114,7 @@ interface GameMountDependencies {
   readonly token?: string;
   readonly initialSessionId?: string;
   readonly restorePromise: Promise<AuthSession | null>;
-  readonly i18n?: I18nManager;
+  readonly i18n: I18nManager;
 }
 
 /** The result of mounting the game route. */
@@ -148,9 +148,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     getAccessToken,
     token,
     restorePromise,
+    i18n,
   } = deps;
 
-  const i18n = deps.i18n ?? createI18nManager();
   let lastMetadataState: GameMetadataState | null = null;
   let lastActionState: GameActionState | null = null;
   let lastReviewResult: Awaited<ReturnType<GambitClient['games']['review']>> | null = null;
@@ -1033,8 +1033,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onResult: (result) => {
         if (analysisResultsEl) renderLines(analysisResultsEl, result);
-        if (analysisReachedEl) renderReached(analysisReachedEl, result);
-        if (analysisLimitsEl) renderLimits(analysisLimitsEl, result);
+        if (analysisReachedEl) renderReached(analysisReachedEl, result, i18n);
+        if (analysisLimitsEl) renderLimits(analysisLimitsEl, result, i18n);
         if (analysisNoteEl) renderNote(analysisNoteEl, null);
         if (analysisErrorEl) renderError(analysisErrorEl, null);
       },

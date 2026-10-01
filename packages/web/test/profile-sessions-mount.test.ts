@@ -8,7 +8,10 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GambitClient } from '../src/api/client.js';
 import { mountProfile } from '../src/app/profile-mount.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { AuthSession } from '../src/app/auth-controller.js';
+
+const testI18n = createI18nManager();
 import type { WebAuthnAdapter } from '../src/ports/webauthn.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { json } from './support/fake-transport.js';
@@ -279,6 +282,7 @@ function mountSelf(doc: Document, client: GambitClient) {
     getCurrentSession: () => ALICE,
     restorePromise: Promise.resolve(ALICE),
     webauthnAdapter: new FakeWebAuthn(),
+    i18n: testI18n,
   });
 }
 

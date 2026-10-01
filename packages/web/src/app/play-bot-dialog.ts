@@ -34,7 +34,7 @@ export interface PlayBotDialogOptions {
   readonly mount: HTMLElement;
   readonly callbacks: PlayBotDialogCallbacks;
   readonly initialAuthenticated?: boolean;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 interface ColorOption {
@@ -52,8 +52,8 @@ const COLOR_OPTIONS: readonly ColorOption[] = [
 export class PlayBotDialog {
   private readonly doc: Document;
   private readonly callbacks: PlayBotDialogCallbacks;
-  private readonly i18n?: I18nManager | undefined;
-  private readonly unsubscribeLocale?: (() => void) | undefined;
+  private readonly i18n: I18nManager;
+  private readonly unsubscribeLocale: () => void;
 
   private readonly trigger: HTMLButtonElement;
   private readonly dialog: HTMLDialogElement;
@@ -87,10 +87,10 @@ export class PlayBotDialog {
       id: 'play-bot',
       type: 'button',
     });
-    this.trigger.textContent = this.i18n ? this.i18n.t('bot.title') : 'Play vs Computer';
+    this.trigger.textContent = this.i18n.t('bot.title');
 
     // --- Title ---
-    this.titleEl = el(d, 'h2', { id: 'pb-dialog-title' }, this.i18n ? this.i18n.t('bot.title') : 'Play vs Computer');
+    this.titleEl = el(d, 'h2', { id: 'pb-dialog-title' }, this.i18n.t('bot.title'));
 
     // --- Difficulty fieldset ---
     this.levelHint = el(d, 'p', { class: 'cg-hint', id: 'pb-level-hint' });
@@ -100,7 +100,7 @@ export class PlayBotDialog {
         this.segment('pb-level', lvl.id, lvl.label, lvl.id === DEFAULT_BOT_LEVEL),
       );
     }
-    this.levelLegend = el(d, 'legend', {}, this.i18n ? this.i18n.t('bot.level') : 'Difficulty');
+    this.levelLegend = el(d, 'legend', {}, this.i18n.t('bot.level'));
     const levelField = el(
       d,
       'fieldset',
@@ -120,7 +120,7 @@ export class PlayBotDialog {
         this.segment('pb-color', c.value, c.label, c.value === 'random', c.glyph),
       );
     }
-    this.colorLegend = el(d, 'legend', {}, this.i18n ? this.i18n.t('bot.color') : 'Color');
+    this.colorLegend = el(d, 'legend', {}, this.i18n.t('bot.color'));
     const colorField = el(
       d,
       'fieldset',
@@ -137,7 +137,7 @@ export class PlayBotDialog {
         this.chip('pb-time', p.id, p.id, p.id === DEFAULT_PRESET_ID, speed),
       );
     }
-    this.timeLegend = el(d, 'legend', {}, this.i18n ? this.i18n.t('bot.timeControl') : 'Time control');
+    this.timeLegend = el(d, 'legend', {}, this.i18n.t('bot.timeControl'));
     const timeField = el(
       d,
       'fieldset',
@@ -151,7 +151,7 @@ export class PlayBotDialog {
       d,
       'p',
       { class: 'cg-hint pb-unrated-note' },
-      this.i18n ? this.i18n.t('bot.unratedNote') : 'Games against the computer are unrated.',
+      this.i18n.t('bot.unratedNote'),
     );
 
     // --- Error region ---
@@ -164,9 +164,9 @@ export class PlayBotDialog {
 
     // --- Actions ---
     this.submitBtn = el(d, 'button', { type: 'submit', class: 'cg-submit' });
-    this.submitBtn.textContent = this.i18n ? this.i18n.t('bot.start') : 'Start game';
+    this.submitBtn.textContent = this.i18n.t('bot.start');
     this.cancelBtn = el(d, 'button', { type: 'button', class: 'cg-cancel' });
-    this.cancelBtn.textContent = this.i18n ? this.i18n.t('bot.cancel') : 'Cancel';
+    this.cancelBtn.textContent = this.i18n.t('bot.cancel');
     const actions = el(d, 'div', { class: 'cg-actions' }, this.submitBtn, this.cancelBtn);
 
     // --- Form ---
@@ -204,7 +204,7 @@ export class PlayBotDialog {
       }
     });
 
-    this.unsubscribeLocale = this.i18n?.onLocaleChange(() => {
+    this.unsubscribeLocale = this.i18n.onLocaleChange(() => {
       this.relocalize();
     });
 
@@ -306,8 +306,8 @@ export class PlayBotDialog {
     this.pending = pending;
     this.submitBtn.disabled = pending;
     this.submitBtn.textContent = pending
-      ? (this.i18n ? this.i18n.t('bot.starting') : 'Starting…')
-      : (this.i18n ? this.i18n.t('bot.start') : 'Start game');
+      ? this.i18n.t('bot.starting')
+      : this.i18n.t('bot.start');
     this.cancelBtn.disabled = pending;
   }
 
@@ -316,14 +316,13 @@ export class PlayBotDialog {
     this.trigger.disabled = !authed;
     this.trigger.title = authed
       ? ''
-      : (this.i18n ? this.i18n.t('bot.signInToPlay') : 'Sign in to play the computer');
+      : this.i18n.t('bot.signInToPlay');
     if (!authed && this.dialog.open) {
       this.close();
     }
   }
 
   relocalize(): void {
-    if (!this.i18n) return;
     this.trigger.textContent = this.i18n.t('bot.title');
     this.titleEl.textContent = this.i18n.t('bot.title');
     this.levelLegend.textContent = this.i18n.t('bot.level');
@@ -338,6 +337,6 @@ export class PlayBotDialog {
   }
 
   dispose(): void {
-    this.unsubscribeLocale?.();
+    this.unsubscribeLocale();
   }
 }

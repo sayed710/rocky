@@ -23,13 +23,13 @@ export interface EmailVerificationCallbacks {
 export interface EmailVerificationControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: EmailVerificationCallbacks;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 export class EmailVerificationController {
   private readonly client: GambitClient;
   private readonly callbacks: EmailVerificationCallbacks;
-  private readonly i18n?: I18nManager | undefined;
+  private readonly i18n: I18nManager;
   private requestGeneration = 0;
   private pendingGeneration = 0;
   private isSubmitting = false;
@@ -53,7 +53,7 @@ export class EmailVerificationController {
     if (!trimmed) {
       this.terminal = true;
       this.callbacks.onError(
-        this.i18n ? this.i18n.t('emailVerification.needsLink') : 'This page needs a verification link. Open the link in the verification email we sent you.',
+        this.i18n.t('emailVerification.needsLink'),
       );
       this.callbacks.onSuccess(null);
       this.callbacks.onRetryable(false);
@@ -71,7 +71,7 @@ export class EmailVerificationController {
       if (!this.isCurrent(generation)) return false;
 
       this.callbacks.onSuccess(
-        this.i18n ? this.i18n.t('emailVerification.verified') : 'Your email address is verified.',
+        this.i18n.t('emailVerification.verified'),
       );
       this.callbacks.onRetryable(false);
       this.terminal = true;
@@ -80,13 +80,13 @@ export class EmailVerificationController {
       if (this.isCurrent(generation)) {
         if (err instanceof UnauthorizedError) {
           this.callbacks.onError(
-            this.i18n ? this.i18n.t('emailVerification.linkInvalid') : 'This verification link is invalid, has expired, or has already been used.',
+            this.i18n.t('emailVerification.linkInvalid'),
           );
           this.callbacks.onRetryable(false);
           this.terminal = true;
         } else {
           this.callbacks.onError(
-            this.i18n ? this.i18n.t('emailVerification.couldNotVerify') : 'We could not verify your email address right now. Please try again.',
+            this.i18n.t('emailVerification.couldNotVerify'),
           );
           this.callbacks.onRetryable(true);
         }

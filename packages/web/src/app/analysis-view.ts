@@ -5,22 +5,40 @@
  * the controller owns state, this renders it.
  */
 import type { AnalysisResponse } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
+import { enMessages } from '../i18n/catalog/en.js';
 import { formatEvaluation, formatPrincipalVariation, formatSeconds } from './analysis-format.js';
 import { applyLtrIsolation } from '../i18n/bidi.js';
 
 export const ANALYSIS_MESSAGES = {
-  idle: 'Analyse the position on the board.',
-  loading: 'Analysing…',
-  positionChanged: 'Position changed. Analyse again.',
-  signedOut: 'Sign in to analyse positions.',
-  rateLimited: 'Too many analysis requests. Wait a moment and try again.',
-  unavailable: 'Analysis is unavailable right now.',
-  unauthenticated: 'Sign in to analyse positions.',
-  activeGame: 'Analysis is unavailable while you are playing a live human game.',
-  unsupportedVariant: 'This deployment has no engine for this variant.',
-  rejected: 'This position could not be analysed.',
-  failed: 'Analysis failed. Try again.',
+  idle: enMessages['game.analysis.idle'],
+  loading: enMessages['game.analysis.loading'],
+  positionChanged: enMessages['game.analysis.positionChanged'],
+  signedOut: enMessages['game.analysis.signedOut'],
+  rateLimited: enMessages['game.analysis.rateLimited'],
+  unavailable: enMessages['game.analysis.unavailable'],
+  unauthenticated: enMessages['game.analysis.unauthenticated'],
+  activeGame: enMessages['game.analysis.activeGame'],
+  unsupportedVariant: enMessages['game.analysis.unsupportedVariant'],
+  rejected: enMessages['game.analysis.rejected'],
+  failed: enMessages['game.analysis.failed'],
 } as const;
+
+export function getAnalysisMessage(key: keyof typeof ANALYSIS_MESSAGES, i18n: I18nManager): string {
+  switch (key) {
+    case 'idle': return i18n.t('game.analysis.idle');
+    case 'loading': return i18n.t('game.analysis.loading');
+    case 'positionChanged': return i18n.t('game.analysis.positionChanged');
+    case 'signedOut': return i18n.t('game.analysis.signedOut');
+    case 'rateLimited': return i18n.t('game.analysis.rateLimited');
+    case 'unavailable': return i18n.t('game.analysis.unavailable');
+    case 'unauthenticated': return i18n.t('game.analysis.unauthenticated');
+    case 'activeGame': return i18n.t('game.analysis.activeGame');
+    case 'unsupportedVariant': return i18n.t('game.analysis.unsupportedVariant');
+    case 'rejected': return i18n.t('game.analysis.rejected');
+    case 'failed': return i18n.t('game.analysis.failed');
+  }
+}
 
 /**
  * Clear and render one `.panel-row` per line, in `multipv` order.
@@ -62,14 +80,17 @@ export function renderLines(container: HTMLElement, result: AnalysisResponse): v
  * Render the achieved search figures from `result.lines[0]`.
  * Hidden when there are no lines.
  */
-export function renderReached(el: HTMLElement, result: AnalysisResponse): void {
+export function renderReached(el: HTMLElement, result: AnalysisResponse, i18n: I18nManager): void {
   const first = result.lines[0];
   if (!first) {
     el.hidden = true;
     el.textContent = '';
     return;
   }
-  el.textContent = `Reached depth ${first.depth} · ${formatSeconds(first.timeMs)}`;
+  el.textContent = i18n.t('game.analysis.reachedDepth', {
+    depth: String(first.depth),
+    time: formatSeconds(first.timeMs),
+  });
   el.hidden = false;
 }
 
@@ -77,10 +98,14 @@ export function renderReached(el: HTMLElement, result: AnalysisResponse): void {
  * Render the applied limits from `result.applied`.
  * Applied limits represent what was requested and enforced, distinct from reached depth.
  */
-export function renderLimits(el: HTMLElement, result: AnalysisResponse): void {
+export function renderLimits(el: HTMLElement, result: AnalysisResponse, i18n: I18nManager): void {
   const linesCount = result.applied.multiPv;
-  const linesLabel = linesCount === 1 ? '1 line' : `${linesCount} lines`;
-  el.textContent = `Limits: depth ${result.applied.depth} · ${formatSeconds(result.applied.movetimeMs)} · ${linesLabel}`;
+  const linesLabel = linesCount === 1 ? i18n.t('game.analysis.oneLine') : `${linesCount} lines`;
+  el.textContent = i18n.t('game.analysis.limits', {
+    depth: String(result.applied.depth),
+    movetime: formatSeconds(result.applied.movetimeMs),
+    lines: linesLabel,
+  });
   el.hidden = false;
 }
 

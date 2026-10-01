@@ -35,21 +35,21 @@ function isKnownSpeed(speed: string): speed is Speed {
 /**
  * Returns the localized human-readable label for a chess variant.
  */
-export function getVariantLabel(variant: Variant | string, i18n?: I18n): string {
-  if (i18n && isKnownVariant(variant)) {
+export function getVariantLabel(variant: Variant | string, i18n: I18n): string {
+  if (isKnownVariant(variant)) {
     const key = `variant.${variant}` as MessageKey;
     return i18n.t(key);
   }
-  return (isKnownVariant(variant) ? VARIANT_LABELS[variant] : null) ?? variant;
+  return variant;
 }
 
 /**
  * Returns the localized human-readable label for a chess time-control speed class.
  */
-export function getSpeedLabel(speed: Speed | string, i18n?: I18n): string {
-  if (i18n && isKnownSpeed(speed)) {
+export function getSpeedLabel(speed: Speed | string, i18n: I18n): string {
+  if (isKnownSpeed(speed)) {
     const key = `speed.${speed}` as MessageKey;
     return i18n.t(key);
   }
-  return (isKnownSpeed(speed) ? SPEED_LABELS[speed] : null) ?? speed;
+  return speed;
 }

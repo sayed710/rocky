@@ -17,7 +17,7 @@ interface LearningMountDependencies {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly surface: HTMLElement;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 interface SessionBoundLearningMountDependencies extends LearningMountDependencies {
@@ -42,11 +42,11 @@ function loadAfterSessionRestore(
   else void restorePromise.then(() => load()).catch(() => undefined);
 }
 
-function renderUnavailable(doc: Document, surface: HTMLElement, i18n?: I18nManager): void {
+function renderUnavailable(doc: Document, surface: HTMLElement, i18n: I18nManager): void {
   surface.replaceChildren();
   const message = doc.createElement('p');
   message.className = 'count';
-  message.textContent = i18n ? i18n.t('learning.serviceUnavailable') : 'Learning service unavailable.';
+  message.textContent = i18n.t('learning.serviceUnavailable');
   surface.appendChild(message);
 }
 
@@ -85,7 +85,7 @@ export function mountCourseList({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastCourses && list) {
       renderCourseList(list, lastCourses, i18n);
     }
@@ -99,7 +99,7 @@ function createCourseCallbacks(
   doc: Document,
   surface: HTMLElement,
   error: HTMLElement | null,
-  i18n?: I18nManager,
+  i18n: I18nManager,
   onCourseLoaded?: (state: {
     course: CourseView;
     lessons: readonly LessonView[];
@@ -158,7 +158,7 @@ export function mountCourseDetail({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastCourseState) {
       renderCourseDetail(
         surface,
@@ -183,7 +183,7 @@ function createLessonCallbacks(
     courseId: string,
     input: SubmitAttemptRequest,
   ) => Promise<void>,
-  i18n?: I18nManager,
+  i18n: I18nManager,
   onLessonLoaded?: (state: {
     lesson: LessonView;
     steps: readonly StepView[];
@@ -279,7 +279,7 @@ export function mountLesson({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastLessonState) {
       renderLessonDetail(
         surface,

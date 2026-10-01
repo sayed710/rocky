@@ -6,8 +6,30 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeSessions, describeDevice, renderSessions } from '../src/app/sessions-view.js';
+import {
+  activeSessions,
+  describeDevice as describeDeviceBase,
+  renderSessions as renderSessionsBase,
+} from '../src/app/sessions-view.js';
+import { createI18nManager, type I18nManager } from '../src/i18n/index.js';
 import type { SessionView } from '../src/api/models.js';
+
+const testI18n = createI18nManager();
+
+function describeDevice(ua: string | null, i18n: I18nManager = testI18n): string {
+  return describeDeviceBase(ua, i18n);
+}
+
+function renderSessions(
+  container: HTMLElement,
+  sessions: readonly SessionView[],
+  onRevoke: (id: string) => void,
+  busy: boolean,
+  nowMs: number,
+  i18n: I18nManager = testI18n,
+): void {
+  renderSessionsBase(container, sessions, onRevoke, busy, nowMs, i18n);
+}
 
 const NOW = Date.parse('2026-08-16T00:00:00.000Z');
 

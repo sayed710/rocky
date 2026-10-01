@@ -40,18 +40,12 @@ import {
   type SeekMode,
 } from './create-game-prefs.js';
 import { el } from './dom.js';
-import { VARIANT_LABELS } from './variant-labels.js';
+import { VARIANT_LABELS, getVariantLabel } from './variant-labels.js';
 
 const CREATE_GAME_COLORS: readonly SeekColor[] = [
   DEFAULT_CREATE_GAME_COLOR,
   ...SEEK_COLORS.filter((color) => color !== DEFAULT_CREATE_GAME_COLOR),
 ];
-
-const COLOR_LABELS: Record<SeekColor, string> = {
-  random: 'Random',
-  white: 'White',
-  black: 'Black',
-};
 
 /** Id of the disclosure region, referenced by the toggle's `aria-controls`. */
 const ADVANCED_REGION_ID = 'cg-more-options';
@@ -69,18 +63,33 @@ export type RatingSummary =
  * gets the same sentence the eye does — and a range the panel would reject says
  * so, rather than reading as a settled choice.
  */
-export function formatMoreOptionsSummary(variant: Variant, rating: RatingSummary): string {
-  const label = VARIANT_LABELS[variant];
-  if (!rating.ok) return `${label} · Opponent rating needs attention`;
+export function formatMoreOptionsSummary(
+  variant: Variant,
+  rating: RatingSummary,
+  i18n: I18nManager,
+): string {
+  const label = getVariantLabel(variant, i18n);
+  if (!rating.ok) {
+    return i18n.t('lobby.summary.ratingAttention', { variant: label });
+  }
   const { minRating, maxRating } = rating;
   if (minRating !== null && maxRating !== null) {
-    return minRating === maxRating
-      ? `${label} · Rating ${minRating} exactly`
-      : `${label} · Rating ${minRating} to ${maxRating}`;
+    if (minRating === maxRating) {
+      return i18n.t('lobby.summary.ratingExact', { variant: label, rating: String(minRating) });
+    }
+    return i18n.t('lobby.summary.ratingRange', {
+      variant: label,
+      min: String(minRating),
+      max: String(maxRating),
+    });
   }
-  if (minRating !== null) return `${label} · Rating ${minRating} and up`;
-  if (maxRating !== null) return `${label} · Rating up to ${maxRating}`;
-  return `${label} · Any rating`;
+  if (minRating !== null) {
+    return i18n.t('lobby.summary.ratingMin', { variant: label, min: String(minRating) });
+  }
+  if (maxRating !== null) {
+    return i18n.t('lobby.summary.ratingMax', { variant: label, max: String(maxRating) });
+  }
+  return i18n.t('lobby.summary.ratingAny', { variant: label });
 }
 
 /** The validated settings sent through the existing seek-creation path. */
@@ -107,7 +116,7 @@ export interface CreateGamePanelOptions {
   readonly initialAuthenticated?: boolean | undefined;
   /** Persists the last successful settings. */
   readonly storage?: KeyValueStorage | undefined;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 export class CreateGamePanel {
@@ -129,8 +138,20 @@ export class CreateGamePanel {
   private readonly moreSummary: HTMLSpanElement;
   private readonly advancedRegion: HTMLDivElement;
   private readonly storage: KeyValueStorage | undefined;
-  private readonly i18n?: I18nManager | undefined;
-  private readonly unsubscribeLocale?: (() => void) | undefined;
+  private readonly i18n: I18nManager;
+  private readonly unsubscribeLocale: () => void;
+  private timeLegend!: HTMLLegendElement;
+  private customMinutesLabel!: HTMLSpanElement;
+  private customIncrementLabel!: HTMLSpanElement;
+  private modeLegend!: HTMLLegendElement;
+  private modeHintEl!: HTMLParagraphElement;
+  private variantLegend!: HTMLLegendElement;
+  private colorLegend!: HTMLLegendElement;
+  private ratingLegend!: HTMLLegendElement;
+  private ratingMinSpan!: HTMLSpanElement;
+  private ratingMaxSpan!: HTMLSpanElement;
+  private ratingHintEl!: HTMLParagraphElement;
+  private moreLabelEl!: HTMLSpanElement;
 
   private expanded = false;
   private pending = false;
@@ -145,9 +166,9 @@ export class CreateGamePanel {
     const prefs = this.readPrefs();
     this.trigger = this.createTrigger();
     this.submitBtn = el(this.doc, 'button', { type: 'submit', class: 'cg-submit' });
-    this.submitBtn.textContent = this.i18n?.t('lobby.createSeekSubmit') ?? 'Create seek';
+    this.submitBtn.textContent = this.i18n.t('lobby.createSeekSubmit');
     this.cancelBtn = el(this.doc, 'button', { type: 'button', class: 'cg-cancel' });
-    this.cancelBtn.textContent = this.i18n?.t('common.cancel') ?? 'Cancel';
+    this.cancelBtn.textContent = this.i18n.t('common.cancel');
     this.customMinutes = this.numberInput(
       'cg-minutes',
       {
@@ -188,11 +209,12 @@ export class CreateGamePanel {
     this.form = el(this.doc, 'form', {
       id: 'create-game-form',
       class: 'cg-form',
-      'aria-label': this.i18n?.t('lobby.createGame') ?? 'Create a game',
+      'aria-label': this.i18n.t('lobby.createGame'),
       novalidate: '',
       hidden: '',
     });
     this.moreSummary = el(this.doc, 'span', { class: 'cg-more-summary', dir: 'ltr' });
+    this.moreLabelEl = el(this.doc, 'span', { class: 'cg-more-label' }, this.i18n.t('lobby.moreOptions'));
     this.moreToggle = el(this.doc, 'button', {
       type: 'button',
       class: 'cg-more-toggle',
@@ -200,7 +222,7 @@ export class CreateGamePanel {
       'aria-controls': ADVANCED_REGION_ID,
     });
     this.moreToggle.append(
-      el(this.doc, 'span', { class: 'cg-more-label' }, this.i18n?.t('lobby.moreOptions') ?? 'More options'),
+      this.moreLabelEl,
       this.moreSummary,
     );
     this.advancedRegion = el(
@@ -226,18 +248,32 @@ export class CreateGamePanel {
     opts.mount.replaceChildren(this.trigger, this.form);
     this.setAuthenticated(opts.initialAuthenticated ?? false);
 
-    this.unsubscribeLocale = this.i18n?.onLocaleChange(() => {
-      this.trigger.textContent = this.i18n!.t('lobby.createGame');
-      this.form.setAttribute('aria-label', this.i18n!.t('lobby.createGame'));
+    this.unsubscribeLocale = this.i18n.onLocaleChange(() => {
+      this.trigger.textContent = this.i18n.t('lobby.createGame');
+      this.form.setAttribute('aria-label', this.i18n.t('lobby.createGame'));
       this.submitBtn.textContent = this.pending
-        ? (this.i18n!.t('common.loading') ?? 'Creating…')
-        : this.i18n!.t('lobby.createSeekSubmit');
-      this.cancelBtn.textContent = this.i18n!.t('common.cancel');
+        ? this.i18n.t('lobby.creating')
+        : this.i18n.t('lobby.createSeekSubmit');
+      this.cancelBtn.textContent = this.i18n.t('common.cancel');
+      if (this.timeLegend) this.timeLegend.textContent = this.i18n.t('lobby.time');
+      if (this.customMinutesLabel) this.customMinutesLabel.textContent = this.i18n.t('lobby.minutes');
+      if (this.customIncrementLabel) this.customIncrementLabel.textContent = this.i18n.t('lobby.incrementSeconds');
+      if (this.modeLegend) this.modeLegend.textContent = this.i18n.t('lobby.mode');
+      if (this.modeHintEl) this.modeHintEl.textContent = this.i18n.t('lobby.modeHint');
+      if (this.variantLegend) this.variantLegend.textContent = this.i18n.t('lobby.variant');
+      if (this.colorLegend) this.colorLegend.textContent = this.i18n.t('lobby.color');
+      if (this.ratingLegend) this.ratingLegend.textContent = this.i18n.t('lobby.ratingOpponent');
+      if (this.ratingMinSpan) this.ratingMinSpan.textContent = this.i18n.t('lobby.ratingMinLabel');
+      if (this.ratingMaxSpan) this.ratingMaxSpan.textContent = this.i18n.t('lobby.ratingMaxLabel');
+      if (this.ratingHintEl) this.ratingHintEl.textContent = this.i18n.t('lobby.ratingHint');
+      if (this.moreLabelEl) this.moreLabelEl.textContent = this.i18n.t('lobby.moreOptions');
+      this.syncTimeSelection(false);
+      this.syncAdvancedSummary();
     });
   }
 
   dispose(): void {
-    this.unsubscribeLocale?.();
+    this.unsubscribeLocale();
   }
 
   /** Build the collapsed entry point that owns the form disclosure state. */
@@ -249,7 +285,7 @@ export class CreateGamePanel {
       'aria-expanded': 'false',
       'aria-controls': 'create-game-form',
     });
-    trigger.textContent = this.i18n?.t('lobby.createGame') ?? 'Create a game';
+    trigger.textContent = this.i18n.t('lobby.createGame');
     return trigger;
   }
 
@@ -264,17 +300,18 @@ export class CreateGamePanel {
       this.radio(
         'cg-time',
         UNLIMITED_TIME_ID,
-        'Unlimited',
+        this.i18n.t('lobby.timeUnlimited'),
         initialTimeId === UNLIMITED_TIME_ID,
         estimateSpeed(UNLIMITED_TIME_CONTROL),
       ),
-      this.radio('cg-time', CUSTOM_PRESET_ID, 'Custom', initialTimeId === CUSTOM_PRESET_ID),
+      this.radio('cg-time', CUSTOM_PRESET_ID, this.i18n.t('lobby.timeCustom'), initialTimeId === CUSTOM_PRESET_ID),
     );
+    this.timeLegend = el(this.doc, 'legend', {}, this.i18n.t('lobby.time'));
     return el(
       this.doc,
       'fieldset',
       { class: 'cg-field' },
-      el(this.doc, 'legend', {}, 'Time'),
+      this.timeLegend,
       presets,
       el(this.doc, 'div', { class: 'cg-time-detail' }, this.timeSummary, this.customFields),
     );
@@ -286,6 +323,8 @@ export class CreateGamePanel {
     this.customIncrement.value = String(increment);
     this.customMinutes.setAttribute('aria-describedby', 'cg-custom-error');
     this.customIncrement.setAttribute('aria-describedby', 'cg-custom-error');
+    this.customMinutesLabel = el(this.doc, 'span', {}, this.i18n.t('lobby.minutes'));
+    this.customIncrementLabel = el(this.doc, 'span', {}, this.i18n.t('lobby.incrementSeconds'));
     return el(
       this.doc,
       'div',
@@ -294,14 +333,14 @@ export class CreateGamePanel {
         this.doc,
         'label',
         { class: 'cg-num' },
-        el(this.doc, 'span', {}, 'Minutes'),
+        this.customMinutesLabel,
         this.customMinutes,
       ),
       el(
         this.doc,
         'label',
         { class: 'cg-num' },
-        el(this.doc, 'span', {}, 'Increment (seconds)'),
+        this.customIncrementLabel,
         this.customIncrement,
       ),
       this.customError,
@@ -339,26 +378,27 @@ export class CreateGamePanel {
 
   /** Build the mutually exclusive Casual/Rated radio group and its explanation. */
   private createModeField(initialMode: SeekMode): HTMLFieldSetElement {
-    const modeHint = el(
+    this.modeHintEl = el(
       this.doc,
       'p',
       { class: 'cg-hint', id: 'cg-mode-hint' },
-      'Rated games affect your rating; casual games don’t.',
+      this.i18n.t('lobby.modeHint'),
     );
     const modes = el(
       this.doc,
       'div',
       { class: 'cg-segmented' },
-      this.radio('cg-mode', 'casual', 'Casual', initialMode === 'casual'),
-      this.radio('cg-mode', 'rated', 'Rated', initialMode === 'rated'),
+      this.radio('cg-mode', 'casual', this.i18n.t('lobby.mode.casual'), initialMode === 'casual'),
+      this.radio('cg-mode', 'rated', this.i18n.t('lobby.mode.rated'), initialMode === 'rated'),
     );
+    this.modeLegend = el(this.doc, 'legend', {}, this.i18n.t('lobby.mode'));
     const modeField = el(
       this.doc,
       'fieldset',
       { class: 'cg-field' },
-      el(this.doc, 'legend', {}, 'Mode'),
+      this.modeLegend,
       modes,
-      modeHint,
+      this.modeHintEl,
     );
     for (const radio of modes.querySelectorAll<HTMLInputElement>('input[name="cg-mode"]')) {
       radio.setAttribute('aria-describedby', 'cg-mode-hint');
@@ -371,29 +411,39 @@ export class CreateGamePanel {
     const variants = el(this.doc, 'div', { class: 'cg-variants' });
     for (const variant of OFFERED_VARIANTS) {
       variants.append(
-        this.radio('cg-variant', variant, VARIANT_LABELS[variant], variant === initialVariant),
+        this.radio('cg-variant', variant, getVariantLabel(variant, this.i18n), variant === initialVariant),
       );
     }
+    this.variantLegend = el(this.doc, 'legend', {}, this.i18n.t('lobby.variant'));
     return el(
       this.doc,
       'fieldset',
       { class: 'cg-field' },
-      el(this.doc, 'legend', {}, 'Variant'),
+      this.variantLegend,
       variants,
     );
+  }
+
+  private getColorLabel(color: SeekColor): string {
+    switch (color) {
+      case 'white': return this.i18n.t('lobby.color.white');
+      case 'black': return this.i18n.t('lobby.color.black');
+      case 'random': return this.i18n.t('lobby.color.random');
+    }
   }
 
   /** Build the color preference choices in their player-facing order. */
   private createColorField(initialColor: SeekColor): HTMLFieldSetElement {
     const colors = el(this.doc, 'div', { class: 'cg-colors' });
     for (const color of CREATE_GAME_COLORS) {
-      colors.append(this.radio('cg-color', color, COLOR_LABELS[color], color === initialColor));
+      colors.append(this.radio('cg-color', color, this.getColorLabel(color), color === initialColor));
     }
+    this.colorLegend = el(this.doc, 'legend', {}, this.i18n.t('lobby.color'));
     return el(
       this.doc,
       'fieldset',
       { class: 'cg-field' },
-      el(this.doc, 'legend', {}, 'Color'),
+      this.colorLegend,
       colors,
     );
   }
@@ -405,11 +455,20 @@ export class CreateGamePanel {
   ): HTMLFieldSetElement {
     this.minRating.value = initialMinimum === null ? '' : String(initialMinimum);
     this.maxRating.value = initialMaximum === null ? '' : String(initialMaximum);
+    this.ratingLegend = el(this.doc, 'legend', {}, this.i18n.t('lobby.ratingOpponent'));
+    this.ratingMinSpan = el(this.doc, 'span', {}, this.i18n.t('lobby.ratingMinLabel'));
+    this.ratingMaxSpan = el(this.doc, 'span', {}, this.i18n.t('lobby.ratingMaxLabel'));
+    this.ratingHintEl = el(
+      this.doc,
+      'p',
+      { class: 'cg-hint', id: 'cg-rating-hint' },
+      this.i18n.t('lobby.ratingHint'),
+    );
     return el(
       this.doc,
       'fieldset',
       { class: 'cg-field' },
-      el(this.doc, 'legend', {}, 'Opponent rating'),
+      this.ratingLegend,
       el(
         this.doc,
         'div',
@@ -418,22 +477,17 @@ export class CreateGamePanel {
           this.doc,
           'label',
           { class: 'cg-num' },
-          el(this.doc, 'span', {}, 'Minimum'),
+          this.ratingMinSpan,
           this.minRating,
         ),
         el(
           this.doc,
           'label',
           { class: 'cg-num' },
-          el(this.doc, 'span', {}, 'Maximum'),
+          this.ratingMaxSpan,
           this.maxRating,
         ),
-        el(
-          this.doc,
-          'p',
-          { class: 'cg-hint', id: 'cg-rating-hint' },
-          'Leave blank for no restriction.',
-        ),
+        this.ratingHintEl,
         this.ratingError,
       ),
     );
@@ -723,13 +777,14 @@ export class CreateGamePanel {
     this.moreSummary.textContent = formatMoreOptionsSummary(
       isOfferedVariant(variant) ? variant : DEFAULT_CREATE_GAME_VARIANT,
       rating.ok ? { ok: true, ...rating.value } : { ok: false },
+      this.i18n,
     );
   }
 
   /** Gate the entire flow and collapse it immediately when authentication is lost. */
   setAuthenticated(authenticated: boolean): void {
     this.trigger.disabled = !authenticated;
-    this.trigger.title = authenticated ? '' : (this.i18n?.t('lobby.signInToCreate') ?? 'Sign in to create a seek');
+    this.trigger.title = authenticated ? '' : this.i18n.t('lobby.signInToCreate');
     if (!authenticated && this.expanded) this.setExpanded(false);
   }
 
@@ -749,8 +804,8 @@ export class CreateGamePanel {
     }
     this.syncTimeSelection(false);
     this.submitBtn.textContent = pending
-      ? (this.i18n?.t('common.loading') ?? 'Creating…')
-      : (this.i18n?.t('lobby.createSeekSubmit') ?? 'Create seek');
+      ? this.i18n.t('lobby.creating')
+      : this.i18n.t('lobby.createSeekSubmit');
   }
 
   /** Synchronize custom-field visibility and a stable summary region. */
@@ -768,16 +823,21 @@ export class CreateGamePanel {
     }
     this.clearCustomError();
     if (selected === UNLIMITED_TIME_ID) {
-      this.timeSummary.textContent =
-        `${estimateSpeed(UNLIMITED_TIME_CONTROL)} — no clock, so neither side can run out of time.`;
+      this.timeSummary.textContent = this.i18n.t('lobby.timeUnlimitedSummary', {
+        speed: estimateSpeed(UNLIMITED_TIME_CONTROL),
+      });
       return;
     }
     const preset = CREATE_GAME_PRESETS.find((candidate) => candidate.id === selected);
     if (!preset) return;
     const speed = estimateSpeed(presetToTimeControl(preset.minutes, preset.increment));
-    const minutes = preset.minutes === 1 ? '1 minute' : `${preset.minutes} minutes`;
-    const increment = preset.increment === 0 ? 'no increment' : `${preset.increment} second increment`;
-    this.timeSummary.textContent = `${speed} — ${minutes} per side, ${increment}.`;
+    const minutes = preset.minutes === 1
+      ? this.i18n.t('lobby.oneMinute')
+      : this.i18n.t('lobby.manyMinutes', { count: String(preset.minutes) });
+    const increment = preset.increment === 0
+      ? this.i18n.t('lobby.noIncrement')
+      : this.i18n.t('lobby.secondIncrement', { count: String(preset.increment) });
+    this.timeSummary.textContent = this.i18n.t('lobby.timePresetSummary', { speed, minutes, increment });
   }
 
   /** Surface one custom validation error at the field that needs correction. */

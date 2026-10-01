@@ -117,7 +117,7 @@ export interface GameControllerOptions {
   readonly now?: () => number;
   /** Countdown tick interval in ms (default 100ms). */
   readonly tickIntervalMs?: number;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
   readonly onDispose?: (() => void) | undefined;
 }
 
@@ -136,7 +136,7 @@ export class GameController {
   private readonly _clearInterval: (id: ReturnType<typeof setInterval>) => void;
   private readonly now: () => number;
   private readonly tickIntervalMs: number;
-  private readonly i18n?: I18nManager | undefined;
+  private readonly i18n: I18nManager;
   private readonly onDisposeCallback?: (() => void) | undefined;
   private unsubscribeLocale?: (() => void) | null = null;
   private timerId: ReturnType<typeof setInterval> | null = null;
@@ -163,14 +163,12 @@ export class GameController {
     this.tickIntervalMs = options.tickIntervalMs ?? 100;
     this.i18n = options.i18n;
     this.onDisposeCallback = options.onDispose;
-    if (this.i18n) {
-      this.unsubscribeLocale = this.i18n.onLocaleChange(() => {
-        if (this.lastState) {
-          const statusText = this.statusText(this.lastState);
-          this.callbacks.onStatus(statusText);
-        }
-      });
-    }
+    this.unsubscribeLocale = this.i18n.onLocaleChange(() => {
+      if (this.lastState) {
+        const statusText = this.statusText(this.lastState);
+        this.callbacks.onStatus(statusText);
+      }
+    });
   }
 
   /** Start listening to GameSync state changes. */
@@ -542,93 +540,76 @@ export class GameController {
   }
 
   private statusText(state: GameSyncState): string {
-    const t = this.i18n ? this.i18n.t.bind(this.i18n) : null;
-    if (state.status === null) return t ? t('game.status.waiting') : 'Waiting…';
+    const t = this.i18n.t.bind(this.i18n);
+    if (state.status === null) return t('game.status.waiting');
     if (!state.status.over) {
-      if (state.turn === null) return t ? t('game.status.waiting') : 'Waiting…';
+      if (state.turn === null) return t('game.status.waiting');
       if (awaitingReadiness(state)) return this.readinessText(state);
-      const turnLabel = t
-        ? (state.turn === 'w' ? t('game.player.white') : t('game.player.black'))
-        : (state.turn === 'w' ? 'White' : 'Black');
+      const turnLabel = state.turn === 'w' ? t('game.player.white') : t('game.player.black');
       if (state.myColor === null) {
-        return t ? t('game.status.turnToMove', { color: turnLabel }) : `${turnLabel} to move`;
+        return t('game.status.turnToMove', { color: turnLabel });
       }
       const myTurn = state.turn === state.myColor;
       return myTurn
-        ? (t ? t('game.status.yourTurn') : 'Your move')
-        : (t ? t('game.status.turnToMove', { color: turnLabel }) : `${turnLabel} to move`);
+        ? t('game.status.yourTurn')
+        : t('game.status.turnToMove', { color: turnLabel });
     }
     // Game over
     const { result, termination, winner } = state.status;
-    const winnerLabel = t
-      ? (winner === 'w' ? t('game.player.white') : winner === 'b' ? t('game.player.black') : null)
-      : (winner === 'w' ? 'White' : winner === 'b' ? 'Black' : null);
+    const winnerLabel = winner === 'w' ? t('game.player.white') : winner === 'b' ? t('game.player.black') : null;
     if (termination === 'checkmate' && winnerLabel) {
-      return t
-        ? t('game.status.checkmateWins', { winner: winnerLabel, result })
-        : `Checkmate — ${winnerLabel} wins (${result})`;
+      return t('game.status.checkmateWins', { winner: winnerLabel, result });
     }
     if (termination === 'resignation' && winnerLabel) {
-      return t
-        ? t('game.status.resignationWins', { winner: winnerLabel, result })
-        : `${winnerLabel} wins by resignation (${result})`;
+      return t('game.status.resignationWins', { winner: winnerLabel, result });
     }
     if (termination === 'timeout' && winnerLabel) {
-      return t
-        ? t('game.status.timeoutWins', { winner: winnerLabel, result })
-        : `${winnerLabel} wins on time (${result})`;
+      return t('game.status.timeoutWins', { winner: winnerLabel, result });
     }
     if (termination === 'stalemate') {
-      return t ? t('game.status.stalemateResult', { result }) : `Stalemate (${result})`;
+      return t('game.status.stalemateResult', { result });
     }
     if (termination === 'agreement') {
-      return t ? t('game.status.agreementResult', { result }) : `Draw by agreement (${result})`;
+      return t('game.status.agreementResult', { result });
     }
     if (termination === 'insufficient_material') {
-      return t ? t('game.status.insufficientMaterialResult', { result }) : `Draw — insufficient material (${result})`;
+      return t('game.status.insufficientMaterialResult', { result });
     }
     if (termination === 'fifty_move') {
-      return t ? t('game.status.fiftyMoveResult', { result }) : `Draw — fifty-move rule (${result})`;
+      return t('game.status.fiftyMoveResult', { result });
     }
     if (termination === 'threefold') {
-      return t ? t('game.status.threefoldResult', { result }) : `Draw — threefold repetition (${result})`;
+      return t('game.status.threefoldResult', { result });
     }
     if (termination === 'variant') {
-      return t ? t('game.status.variantResult', { result }) : `Variant end (${result})`;
+      return t('game.status.variantResult', { result });
     }
     if (termination === 'aborted') {
-      return t ? t('game.status.abortedResult') : 'Game aborted';
+      return t('game.status.abortedResult');
     }
     if (termination === 'no_show') {
       if (winnerLabel) {
-        return t
-          ? t('game.status.noShowWins', { winner: winnerLabel, result })
-          : `${winnerLabel} wins — the opponent did not show up (${result})`;
+        return t('game.status.noShowWins', { winner: winnerLabel, result });
       }
-      return t ? t('game.status.notStarted') : 'Not started in time — no result';
+      return t('game.status.notStarted');
     }
     return `${result}`;
   }
 
   /** Who the game is waiting for, from the durable readiness the server reported. */
   private readinessText(state: GameSyncState): string {
-    const t = this.i18n ? this.i18n.t.bind(this.i18n) : null;
+    const t = this.i18n.t.bind(this.i18n);
     const ready = state.ready!;
     if (state.myColor === null) {
       if (!ready.w && !ready.b) {
-        return t ? t('game.status.waitingBoth') : 'Waiting for both players to join';
+        return t('game.status.waitingBoth');
       }
-      const waitingFor = ready.w ? 'Black' : 'White';
-      const colorLabel = t
-        ? (ready.w ? t('game.player.black') : t('game.player.white'))
-        : waitingFor;
-      return t
-        ? t('game.status.waitingPlayer', { color: colorLabel })
-        : `Waiting for ${waitingFor} to join`;
+      const colorLabel = ready.w ? t('game.player.black') : t('game.player.white');
+      return t('game.status.waitingPlayer', { color: colorLabel });
     }
     if (!ready[state.myColor]) {
-      return t ? t('game.status.joining') : 'Joining…';
+      return t('game.status.joining');
     }
-    return t ? t('game.status.waitingOpponent') : 'Waiting for your opponent to join';
+    return t('game.status.waitingOpponent');
   }
 }

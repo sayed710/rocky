@@ -20,14 +20,14 @@ import { renderEmpty } from './render-helpers.js';
 export function renderCourseList(
   container: HTMLElement,
   courses: readonly CourseView[],
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   container.innerHTML = '';
   if (courses.length === 0) {
     renderEmpty(container, {
       mark: '♟',
-      title: i18n ? i18n.t('learning.emptyCoursesTitle') : 'No courses available',
-      body: i18n ? i18n.t('learning.emptyCoursesBody') : 'Check back later for new learning content.',
+      title: i18n.t('learning.emptyCoursesTitle'),
+      body: i18n.t('learning.emptyCoursesBody'),
       inline: true,
     });
     return;
@@ -73,7 +73,7 @@ export function renderCourseDetail(
   course: CourseView,
   lessons: readonly LessonView[],
   progress: CourseProgressSummaryView | null,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   const titleEl = container.querySelector('#course-title');
   const descEl = container.querySelector('#course-description');
@@ -95,8 +95,8 @@ export function renderCourseDetail(
 
   if (lessons.length === 0) {
     renderEmpty(listEl as HTMLElement, {
-      title: i18n ? i18n.t('learning.emptyLessonsTitle') : 'No lessons in this course',
-      body: i18n ? i18n.t('learning.emptyLessonsBody') : 'This course has no lessons yet.',
+      title: i18n.t('learning.emptyLessonsTitle'),
+      body: i18n.t('learning.emptyLessonsBody'),
       inline: true,
     });
     return;
@@ -112,9 +112,7 @@ export function renderCourseDetail(
     const link = document.createElement('a');
     link.href = `/lessons/${encodeURIComponent(lesson.id)}`;
     link.dataset.route = 'lesson';
-    link.textContent = i18n
-      ? i18n.t('learning.step.lessonN', { n: String(lesson.orderIndex + 1), title: lesson.title })
-      : `Lesson ${lesson.orderIndex + 1}: ${lesson.title}`;
+    link.textContent = i18n.t('learning.step.lessonN', { n: String(lesson.orderIndex + 1), title: lesson.title });
     applyAutoDirection(link);
     main.appendChild(link);
     row.appendChild(main);
@@ -133,7 +131,7 @@ export function renderLessonDetail(
   progress: CourseProgressSummaryView | null,
   stepAttempts: ReadonlyMap<string, AttemptResultView>,
   onAttemptSubmit: (stepId: string, input: { san?: string; selectedIndex?: number }) => Promise<void>,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   const titleEl = container.querySelector('#lesson-title');
   const progressEl = container.querySelector('#lesson-progress');
@@ -150,8 +148,8 @@ export function renderLessonDetail(
 
   if (steps.length === 0) {
     renderEmpty(stepListEl as HTMLElement, {
-      title: i18n ? i18n.t('learning.emptyStepsTitle') : 'No steps in this lesson',
-      body: i18n ? i18n.t('learning.emptyStepsBody') : 'This lesson has no steps yet.',
+      title: i18n.t('learning.emptyStepsTitle'),
+      body: i18n.t('learning.emptyStepsBody'),
       inline: true,
     });
     return;
@@ -167,9 +165,7 @@ export function renderLessonDetail(
 
     const numberLabel = document.createElement('span');
     numberLabel.className = 'step-number count';
-    numberLabel.textContent = i18n
-      ? i18n.t('learning.step.stepN', { n: String(step.orderIndex + 1) })
-      : `Step ${step.orderIndex + 1}`;
+    numberLabel.textContent = i18n.t('learning.step.stepN', { n: String(step.orderIndex + 1) });
     header.appendChild(numberLabel);
 
     const statusLabel = document.createElement('span');
@@ -192,7 +188,7 @@ export function renderLessonDetail(
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'step-complete-btn';
-      btn.textContent = i18n ? i18n.t('learning.step.complete') : 'Complete';
+      btn.textContent = i18n.t('learning.step.complete');
       btn.addEventListener('click', () => {
         btn.disabled = true;
         void onAttemptSubmit(step.id, {}).then(() => {
@@ -207,16 +203,12 @@ export function renderLessonDetail(
       boardContainer.setAttribute('role', 'region');
       boardContainer.setAttribute(
         'aria-label',
-        i18n
-          ? i18n.t('learning.step.boardReadOnlyAria', { n: String(step.orderIndex + 1) })
-          : `Chess board position for Step ${step.orderIndex + 1} (read-only)`,
+        i18n.t('learning.step.boardReadOnlyAria', { n: String(step.orderIndex + 1) }),
       );
 
       const boardDesc = document.createElement('p');
       boardDesc.className = 'sr-only';
-      boardDesc.textContent = i18n
-        ? i18n.t('learning.step.boardSrOnly', { fen: step.fen })
-        : `Static chess position FEN: ${step.fen}. Non-interactive board.`;
+      boardDesc.textContent = i18n.t('learning.step.boardSrOnly', { fen: step.fen });
       boardContainer.appendChild(boardDesc);
 
       const boardEl = document.createElement('div');
@@ -243,21 +235,21 @@ export function renderLessonDetail(
       const label = document.createElement('label');
       label.className = 'sr-only';
       label.htmlFor = `san-input-${step.id}`;
-      label.textContent = i18n ? i18n.t('learning.step.sanInputLabel') : 'SAN move';
+      label.textContent = i18n.t('learning.step.sanInputLabel');
       form.appendChild(label);
 
       const input = document.createElement('input');
       input.id = `san-input-${step.id}`;
       input.type = 'text';
       input.className = 'step-san-input';
-      input.placeholder = i18n ? i18n.t('learning.step.sanPlaceholder') : 'e.g. Nf3';
+      input.placeholder = i18n.t('learning.step.sanPlaceholder');
       input.autocomplete = 'off';
       input.required = true;
       form.appendChild(input);
 
       const submitBtn = document.createElement('button');
       submitBtn.type = 'submit';
-      submitBtn.textContent = i18n ? i18n.t('learning.step.submitMove') : 'Submit move';
+      submitBtn.textContent = i18n.t('learning.step.submitMove');
       form.appendChild(submitBtn);
 
       form.addEventListener('submit', (e) => {

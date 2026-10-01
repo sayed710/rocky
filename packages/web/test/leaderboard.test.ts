@@ -7,8 +7,11 @@ import { LeaderboardController } from '../src/app/leaderboard-controller.js';
 import { bindSpeedSelector, bindVariantSelector, renderChooseSpeed, renderLeaderboard, renderSpeedSelector, renderVariantSelector } from '../src/app/leaderboard-view.js';
 import { OFFERED_VARIANTS, SPEEDS } from '../src/api/models.js';
 import { SPEED_LABELS, VARIANT_LABELS } from '../src/app/variant-labels.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { LeaderboardEntry, Speed, Variant, SocialPlayer } from '../src/api/models.js';
 import type { GambitClient } from '../src/api/client.js';
+
+const testI18n = createI18nManager();
 
 const HTML_TEMPLATE = readFileSync(
   resolve(process.cwd(), 'index.html'),
@@ -418,7 +421,7 @@ test('renderLeaderboard renders rows with rank, player handle link, rating, and 
     ['user_1', { id: 'user_1', handle: 'magnus' }],
   ]);
 
-  renderLeaderboard(container, entries, names);
+  renderLeaderboard(container, entries, names, testI18n);
 
   const fakeContainer = container as unknown as FakeElement;
   const rows = fakeContainer.querySelectorAll('.panel-row');
@@ -451,7 +454,7 @@ test('renderLeaderboard renders empty state when entries list is empty', () => {
   const doc = createFakeDoc();
   const container = doc.createElement('div') as unknown as HTMLElement;
 
-  renderLeaderboard(container, [], new Map());
+  renderLeaderboard(container, [], new Map(), testI18n);
 
   const fakeContainer = container as unknown as FakeElement;
   assert.ok(fakeContainer.querySelector('.empty'), 'Empty state element rendered');
@@ -462,7 +465,7 @@ test('renderVariantSelector renders one option per OFFERED_VARIANTS entry', () =
   const doc = createFakeDoc();
   const select = doc.createElement('select') as unknown as HTMLSelectElement;
 
-  renderVariantSelector(select, 'atomic');
+  renderVariantSelector(select, 'atomic', testI18n);
 
   const fakeSelect = select as unknown as FakeElement;
   const options = fakeSelect.querySelectorAll('option');
@@ -548,13 +551,13 @@ test('bindVariantSelector fires onChange for valid variants and unbind removes l
 test('renderSpeedSelector offers every speed and, with none chosen, selects only a prompt', () => {
   const doc = createFakeDoc();
   const select = doc.createElement('select') as unknown as HTMLSelectElement;
-  renderSpeedSelector(select, null);
+  renderSpeedSelector(select, null, testI18n);
   const options = (select as unknown as FakeElement).querySelectorAll('option');
   assert.deepEqual(options.map((o) => o.getAttribute('value')), ['', ...SPEEDS]);
   assert.equal(options[0]?.getAttribute('disabled'), '', 'the prompt cannot itself be chosen');
   assert.deepEqual(options.filter((o) => o.selected).map((o) => o.getAttribute('value')), ['']);
 
-  renderSpeedSelector(select, 'correspondence');
+  renderSpeedSelector(select, 'correspondence', testI18n);
   const again = (select as unknown as FakeElement).querySelectorAll('option');
   const chosen = again.filter((o) => o.selected);
   assert.deepEqual(chosen.map((o) => o.getAttribute('value')), ['correspondence']);
@@ -579,7 +582,7 @@ test('bindSpeedSelector reports only real speeds and stops after unbind', () => 
 test('renderChooseSpeed asks for a time control instead of showing a default pool', () => {
   const doc = createFakeDoc();
   const container = doc.createElement('div') as unknown as HTMLElement;
-  renderChooseSpeed(container);
+  renderChooseSpeed(container, testI18n);
   assert.equal(container.getAttribute('role'), 'status');
   assert.ok((container as unknown as FakeElement).textContent.includes('Choose a time control'));
 });

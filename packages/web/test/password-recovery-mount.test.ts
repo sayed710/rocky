@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GambitClient } from '../src/api/client.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { mountPasswordRecovery } from '../src/app/password-recovery-mount.js';
+
+const defaultI18n = createI18nManager();
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { FakeTransport, empty, json } from './support/fake-transport.js';
 
@@ -84,6 +87,7 @@ test('successful confirmation releases the token and clears the local session on
     client: passwordRecoveryClient(transport),
     resetToken: 'secret-token',
     onSessionInvalidated: () => { sessionInvalidations += 1; },
+    i18n: defaultI18n,
   });
 
   assert.equal(surface.element('password-reset-request-view').hidden, true);
@@ -121,6 +125,7 @@ test('invalid confirmation keeps the token and entered passwords available for r
     client: passwordRecoveryClient(transport),
     resetToken: 'expired-token',
     onSessionInvalidated: () => { sessionInvalidations += 1; },
+    i18n: defaultI18n,
   });
 
   surface.element('password-reset-confirm-password').value = 'newpassword123';
@@ -160,6 +165,7 @@ test('disposing a pending request restores idle controls and suppresses stale co
     client: passwordRecoveryClient(transport),
     resetToken: null,
     onSessionInvalidated: () => undefined,
+    i18n: defaultI18n,
   });
 
   assert.equal(surface.element('password-reset-request-form').attributes.get('aria-busy'), 'false');

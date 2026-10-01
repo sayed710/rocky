@@ -15,14 +15,14 @@ export function renderThreadList(
   slug: string,
   threads: readonly ForumThread[],
   names: ReadonlyMap<string, SocialPlayer>,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (threads.length === 0) {
     renderEmpty(container, {
       mark: '♞',
-      title: i18n ? i18n.t('community.forum.emptyThreadsTitle') : 'No threads yet',
-      body: i18n ? i18n.t('community.forum.emptyThreadsBody') : 'Start the first conversation in this team.',
+      title: i18n.t('community.forum.emptyThreadsTitle'),
+      body: i18n.t('community.forum.emptyThreadsBody'),
     });
     return;
   }
@@ -51,8 +51,8 @@ export function renderThreadList(
 
     // Only states that change what you can do earn a tag; "unlocked" and "unpinned" are the norm.
     const tags: string[] = [];
-    if (thread.pinned) tags.push(i18n ? i18n.t('community.forum.tagPinned') : 'pinned');
-    if (thread.locked) tags.push(i18n ? i18n.t('community.forum.tagLocked') : 'locked');
+    if (thread.pinned) tags.push(i18n.t('community.forum.tagPinned'));
+    if (thread.locked) tags.push(i18n.t('community.forum.tagLocked'));
     if (tags.length > 0) {
       row.appendChild(el(doc, 'span', { class: 'count' }, tags.join(' · ')));
     }
@@ -66,13 +66,13 @@ export function renderPosts(
   posts: readonly ForumPost[],
   names: ReadonlyMap<string, SocialPlayer>,
   viewerId: string | null,
-  i18n?: I18nManager,
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (posts.length === 0) {
     renderEmpty(container, {
-      title: i18n ? i18n.t('community.forum.emptyPostsTitle') : 'No posts',
-      body: i18n ? i18n.t('community.forum.emptyPostsBody') : 'This thread has no posts yet.',
+      title: i18n.t('community.forum.emptyPostsTitle'),
+      body: i18n.t('community.forum.emptyPostsBody'),
       inline: true,
     });
     return;
@@ -86,12 +86,12 @@ export function renderPosts(
 
     const meta: (Node | string)[] = [
       senderEl,
-      el(doc, 'span', { class: 'count' }, formatPostTime(post.createdAt, i18n?.locale)),
+      el(doc, 'span', { class: 'count' }, formatPostTime(post.createdAt, i18n.locale)),
     ];
     // An edit is a fact about the post that changes how to read it; it is not an emphasis, so it
     // sits in the same muted meta line rather than getting a treatment of its own.
     if (post.editedAt !== null && post.deletedAt === null) {
-      meta.push(el(doc, 'span', { class: 'count' }, i18n ? i18n.t('community.forum.tagEdited') : 'edited'));
+      meta.push(el(doc, 'span', { class: 'count' }, i18n.t('community.forum.tagEdited')));
     }
 
     const isTombstone = post.deletedAt !== null;

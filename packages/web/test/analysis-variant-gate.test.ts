@@ -65,6 +65,7 @@ async function mountWithVariant(variant: string) {
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   await new Promise((r) => setTimeout(r, 0));

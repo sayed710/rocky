@@ -16,7 +16,7 @@ interface StudiesListMountDependencies {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly surface: HTMLElement;
-  readonly i18n?: I18nManager | undefined;
+  readonly i18n: I18nManager;
 }
 
 interface StudyDetailMountDependencies extends StudiesListMountDependencies {
@@ -57,11 +57,11 @@ interface StudyChapterElements {
   readonly error: HTMLElement | null;
 }
 
-function renderUnavailable(doc: Document, surface: HTMLElement, i18n?: I18nManager): void {
+function renderUnavailable(doc: Document, surface: HTMLElement, i18n: I18nManager): void {
   surface.replaceChildren();
   const message = doc.createElement('p');
   message.className = 'count';
-  message.textContent = i18n ? i18n.t('learning.studies.serviceUnavailable') : 'Studies service unavailable.';
+  message.textContent = i18n.t('learning.studies.serviceUnavailable');
   surface.appendChild(message);
 }
 
@@ -76,7 +76,7 @@ function studiesListElements(doc: Document): StudiesListElements {
 function createStudiesListCallbacks(
   elements: StudiesListElements,
   showUnavailable: () => void,
-  i18n?: I18nManager,
+  i18n: I18nManager,
   onListLoaded?: (studies: readonly StudyView[]) => void,
 ): StudiesCallbacks {
   return {
@@ -137,7 +137,7 @@ export function mountStudiesList({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastStudies && elements.list) {
       renderStudyList(elements.list, lastStudies, i18n);
     }
@@ -163,7 +163,7 @@ function studyDetailElements(doc: Document): StudyDetailElements {
 function createStudyDetailCallbacks(
   elements: StudyDetailElements,
   showUnavailable: () => void,
-  i18n?: I18nManager,
+  i18n: I18nManager,
   onStudyLoaded?: (state: {
     study: StudyView;
     chapters: readonly ChapterView[];
@@ -222,7 +222,7 @@ export function mountStudyDetail({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastStudyState) {
       renderStudyDetail(
         elements,
@@ -254,7 +254,7 @@ function createStudyChapterCallbacks(
   elements: StudyChapterElements,
   board: MountedBoard | null,
   showUnavailable: () => void,
-  i18n?: I18nManager,
+  i18n: I18nManager,
   onChapterLoaded?: (state: {
     study: StudyView;
     chapter: ChapterView;
@@ -331,7 +331,7 @@ export function mountStudyChapter({
     },
   });
 
-  unsubscribeLocale = i18n?.onLocaleChange(() => {
+  unsubscribeLocale = i18n.onLocaleChange(() => {
     if (lastChapterState) {
       renderChapterDetail(
         elements,

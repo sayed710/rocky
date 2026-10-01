@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { teamAction, membershipOf, actionExplanation, createJoinRequestQueue } from '../src/app/teams-helpers.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { TeamMembership, TeamView } from '../src/api/models.js';
+
+const testI18n = createI18nManager();
 
 function team(visibility: 'public' | 'private'): TeamView {
   return {
@@ -24,7 +27,7 @@ function member(playerId: string, role: 'owner' | 'admin' | 'member'): TeamMembe
 test('a signed-out viewer is offered nothing and told why', () => {
   const action = teamAction(team('public'), null, null);
   assert.deepEqual(action, { kind: 'none', reason: 'signed-out' });
-  assert.match(actionExplanation('signed-out'), /sign in/i);
+  assert.match(actionExplanation('signed-out', testI18n), /sign in/i);
 });
 
 test('a non-member can join a public team', () => {
@@ -36,7 +39,7 @@ test('a non-member is not offered join on a private team', () => {
   // always fail. Join requests are a separate feature that does not exist yet.
   const action = teamAction(team('private'), null, 'u-me');
   assert.deepEqual(action, { kind: 'none', reason: 'by-request' });
-  assert.match(actionExplanation('by-request'), /request/i);
+  assert.match(actionExplanation('by-request', testI18n), /request/i);
 });
 
 test('an ordinary member can leave, on a public or a private team', () => {
@@ -55,7 +58,7 @@ test('the owner is not offered leave, and ownership is read from the role not cr
   // here while the viewer is the actual owner, so a check against createdBy would offer Leave to
   // the one person the server refuses.
   assert.deepEqual(teamAction(team('public'), 'owner', 'u-me'), { kind: 'none', reason: 'owner' });
-  assert.match(actionExplanation('owner'), /transfer/i);
+  assert.match(actionExplanation('owner', testI18n), /transfer/i);
 
   // And the founder, now a plain member, can leave.
   assert.deepEqual(teamAction(team('public'), 'member', 'u-founder'), { kind: 'leave' });
