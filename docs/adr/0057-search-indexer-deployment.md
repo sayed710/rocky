@@ -1,5 +1,7 @@
 # ADR-0057 — Dedicated Single-Replica Deployment for the Search Indexer
 
+> **Superseded in part by [ADR-0152](0152-moderation-and-trust-operations.md):** the bot and anti-cheat analyzers no longer remain gateway flags; they moved to the trust worker.
+
 | Field      | Value                                                            |
 |------------|------------------------------------------------------------------|
 | **Status** | Accepted                                                         |

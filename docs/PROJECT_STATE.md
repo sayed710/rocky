@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-09-30 — M15 Increment 79: Community write abuse admission._
+_Last updated: 2026-10-01 — M15 Increment 80: Moderation and trust operations: player reports, first admin, trust worker._
+
+Prior: _Last updated: 2026-09-30 — M15 Increment 79: Community write abuse admission._
 
 Prior: _Last updated: 2026-09-30 — M15 Increment 78: Durable, exactly-once ratings with explicit variant × speed pools._
 
@@ -4570,3 +4572,92 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Falsification on the final code: 23 disposable mutations were each caught, with sources restored byte-identical from a disk backup. The mutations were: remove admission; key the account bucket by the target; key the IP bucket by the caller; split into two sequential admissions; drop an IP bucket; key the join bucket by the team; move admission after the write; remove thread admission; meter block; ignore `enabled`; stop validating a category; charge before the self check; compare self case-sensitively; drop the slug pre-check; drop the post-body pre-check; drop the pair bucket; keep the recipient's case in the pair key; key the pair by the recipient alone; key it by the sender alone; stop validating `friendRequestRepeat`; key the join bucket by the team at its final placement; move the join-request admission after the write.
 - Delegated read-only reviews: the architecture, security and test-quality reviews ran on Gemini 3.8 Flash High, and the concurrency review on Claude Sonnet 4.6. Gemini's first run hit its individual quota, and three of the Sonnet runs hit the 30-minute print timeout. The pre-charge validation, the join race, the Retry-After and 404 docs and five test-strength gaps they raised are fixed. Not changed, as pre-existing and outside this scope: `PgRateLimiter` measuring every bucket before rollback (deliberate, documented), the shared `unknown` address bucket when a proxy drops `X-Forwarded-For`, `editPost` taking the team advisory lock, and the unmetered `POST /v1/studies/:id/collaborators`.
 - Both join routes now admit inside their `try` like the other five, a consistency point from the exact-head independent review. Validation: build, lint, API unit 1143 with zero skips, the 19 hermetic workspaces (3,609 tests) with zero skips, every `check:*` guard, and the API PostgreSQL suite (65) against fresh pgvector PostgreSQL 16.
+
+## M15 Increment 80 — Moderation and trust operations: player reports, first admin, trust worker (2026-10-01)
+
+- Addresses the `FABLE_ASTRA_FULL_AUDIT.md` gaps around the moderator report flow, first-admin bootstrap, production activation of the trust workers and tournament-reporter readiness, all reverified on `origin/main` `0639043`. Moderators had evidence routes but players could not report anyone. No path could create the first admin. `BOT_AUTO_ANALYZE` and `ANTICHEAT_AUTO_ANALYZE` were set nowhere in Compose or Helm, so neither analyzer ran in any shipped deployment, and on the two-replica Helm gateway they would have run once per replica. The Helm tournament reporter was off by default while Compose had it on. ADR-0152.
+- **Player reports**:
+  - `POST /v1/reports` accepts a subject, an optional game, a reason (`cheating | harassment | spam | other`) and optional plain-text detail of at most 1000 characters. The reporter comes from authentication only, and the reply echoes only the submission.
+  - Self-reports in any UUID case get 422, and unknown subjects get 404. A game must be one the subject played, according to the event log rather than the projection.
+  - Migration `0047_player_reports.sql` adds CHECK-constrained reasons and statuses, status-coupled assignee and `closed_at` columns, and a `version`. Its two indexes are `(status, id)` and `(subject_id, status, id)`. User foreign keys deliberately take no ON DELETE action, so deleting an account cannot erase evidence.
+- **Admission**: the route makes one atomic admission, after cheap validation and before any repository call, of four buckets:
+  - `player-report:user:` 5/h
+  - `player-report:user-day:` 20/24 h
+  - `player-report:ip:` 50/h
+  - `player-report:pair:<reporter>:<subject>` 3/24 h
+
+  None of these buckets is keyed by the subject alone. They are validated at startup, pinned by the AST structure test, and keep the fail-closed and `Retry-After` contracts.
+- **Moderator queue** (`MODERATION`), under `/v1/moderation/player-reports`:
+  - The list is keyset-paged, oldest first, filtered by status and optionally subject. Rows carry no text or note, and the list is audited.
+  - The detail view writes its audit row before it reads.
+  - Transitions are `claim` (open→reviewing), then `resolve` or `dismiss` (assignee or admin only, with an optional internal note). Terminal states are final.
+  - One shared rule decides refusals: a party to the report gets 403 (admins included), a stale `expectedVersion` gets 409 (checked before state), a wrong state gets 409, and a non-assignee gets 403.
+  - PostgreSQL locks the row and writes the update and its `audit_log` row in one transaction. Audit metadata holds identifiers, the state change and the previous assignee, never report or note text. Moderators never see reports about themselves.
+- **First admin**: `npm run admin:bootstrap --workspace @chess-platform/persistence -- <user-id> <operator>` is an operator CLI with no HTTP surface. It runs one transaction with a 5 s `lock_timeout` and `LOCK TABLE roles IN SHARE ROW EXCLUSIVE MODE`. It refuses if any admin exists, and requires an existing non-bot account. It writes the role and a `roles.bootstrap_first_admin` audit row together (actor NULL; operator, `current_user` and `current_database()` in meta). It prints only `{granted, userId}`, exits 1 on any refusal, and has no force option.
+- **Trust worker**:
+  - `services/gateway/src/trust-worker.ts` is a thin entrypoint in the gateway image. It composes `startTrustAnalyzers` (`packages/api/src/trust-analyzers.ts`, the existing durable reconciler consumers, unchanged) and starts no WebSocket server, authority, ownership or engine bot. It serves `/health` and a DB-only `/ready`.
+  - Configuration is strict: `DATABASE_URL` is required, each flag must be exactly `"0"` or `"1"` with at least one `"1"`, and anti-cheat requires `STOCKFISH_PATH`.
+  - Shutdown is graceful: `TerminalEventReconciler.stop()` now stops taking games and awaits the one in progress.
+  - The gateway refuses the analyzer flags (any value but `"0"`).
+  - Compose adds a `trust-worker` service. Helm adds `templates/trust-worker.yaml`:
+    - a hard-coded single replica with RollingUpdate 1/0
+    - no Service, no Ingress, and a NetworkPolicy that admits nothing
+    - no token secret
+    - a 300 s grace period
+    - 250m/256Mi requests and 1 CPU/1Gi limits
+    - typed `trustWorker.{enabled,botAnalysis,antiCheatAnalysis}`, with both-off refused
+  - The first rollout backfills existing history once, which is documented.
+- **Tournament reporter**: the delegated architecture review challenged the topology and approved it. The reporter stays on every gateway replica, where duplicates are idempotent under the version CAS, and Helm now defaults it on with a typed boolean kill switch. The review also found a pre-existing race that the default made easier to reach: the launch id names the pairing slot but not its players, so two operations from one tournament version could link one game under the wrong players. `DurableGameLauncher` now refuses an existing game whose players, variant or time control differ, comparing key-order-insensitively because JSONB reorders keys.
+- **RED before the change**:
+  - `player-reports.test.ts` failed 7/7 against `main` (404 where 201, 401, 403 or 200 were expected).
+  - `player-reports.integration.test.ts` failed 5/5 (`relation "player_reports" does not exist`).
+  - The first-admin suite failed because main has no bootstrap path.
+  - The gateway test failed 4/4: with `BOT_AUTO_ANALYZE=1`, main's gateway kept running.
+  - Helm had 18 new checks failing.
+  - The launcher mismatch test failed.
+- **Falsification**: 27 disposable mutations were each caught, with sources backed up to disk and restored byte-identical:
+  - remove admission
+  - key by target
+  - admit after the write
+  - allow self-report
+  - skip the subject check
+  - skip the game check
+  - expose the note
+  - drop MODERATION
+  - drop the view audit
+  - drop the CAS check
+  - let both claims win
+  - drop the bootstrap lock
+  - bootstrap past an existing admin
+  - promote a bot
+  - gateway hosting again
+  - an analyzer flag in the gateway Helm env
+  - no startup scan
+  - drop the engine requirement
+  - a Service for the worker
+  - worker replicas 2
+  - reporter off in Helm
+  - launcher accepting another pairing
+  - no conflict-of-interest refusal
+  - drop the daily bucket
+  - JSON-text time-control comparison
+  - list reports about the reader
+  - note text in audit meta
+- **Delegated read-only reviews** (`agy-delegate`):
+  - Gemini 3.8 Flash High hit its individual quota (429) on all five briefs. The owner's fallback, Claude Sonnet 4.6 via agy, hit its quota as well.
+  - The five reviews (architecture, security, persistence/concurrency, deployment, test quality) then ran as read-only Claude subagents over the design and the implementation patch. All approved with changes and found no blocker.
+  - Fixed from them: conflict of interest, the daily bucket, FK retention, the launcher race, the route and audit rename, the grace period, DB-only readiness, a tolerated leftover `"0"`, the previous assignee in audit, lock timeout, `FOR KEY SHARE`, a `stopping` check per page, and nine added Postgres, entrypoint and Helm tests.
+- **Validation**:
+  - build and lint
+  - every `check:*` guard
+  - `test:scripts` (312)
+  - the 19 hermetic workspaces (3,623, zero skips)
+  - Helm snapshot (140), `helm lint`, and kubeconform in three modes
+  - PostgreSQL suites against pgvector PostgreSQL 16: persistence 187, API 77
+  - in a Linux container: pinned Stockfish 16 / Fairy-Stockfish 14 `test:analysis-smoke` (9, including the real-engine anti-cheat consumer) and the gateway suite with Redis and PostgreSQL (86, including SIGTERM shutdown of the real entrypoint)
+- `packages/web` is untouched; reporting and queue UI are a later web PR.
+- Follow-ups:
+  - report retention on account deletion
+  - arena deadline decided by each replica's clock
+  - poison-game retry backoff in the reconciler
+  - Compose building the gateway image twice
