@@ -1,5 +1,5 @@
 /**
- * Tests for `resolveConfig`: messaging admission budgets, CORS invariants,
+ * Tests for `resolveConfig`: messaging and community admission budgets, CORS invariants,
  * refresh-cookie transport policy, and trusted proxy configuration.
  */
 
@@ -37,6 +37,76 @@ describe('resolveConfig messaging admission', () => {
     };
     assert.throws(() => resolveConfig({ accessTokenSecret: SECRET, rateLimit }),
       /rateLimit.conversationCreation.perIp/);
+  });
+});
+
+describe('resolveConfig community admission', () => {
+  const USER_AND_IP = ['perUser', 'perIp'] as const;
+  const WRITE_BUDGETS: ReadonlyArray<readonly [keyof typeof DEFAULT_RATE_LIMIT, readonly string[]]> = [
+    ['seekCreation', USER_AND_IP], ['conversationCreation', USER_AND_IP], ['messageSend', USER_AND_IP],
+    ['socialInitiation', USER_AND_IP], ['teamCreation', USER_AND_IP], ['teamJoin', USER_AND_IP],
+    ['forumThreadCreation', USER_AND_IP], ['forumPostCreation', USER_AND_IP], ['friendRequestRepeat', ['perPair']],
+  ];
+
+  it('defaults every community budget to its account limit with a 10-account address margin', () => {
+    const rateLimit = resolveConfig({ accessTokenSecret: SECRET }).rateLimit;
+    const FIVE_MIN = 300_000;
+    assert.deepEqual(rateLimit.socialInitiation, {
+      perUser: { maxRequests: 20, windowMs: FIVE_MIN }, perIp: { maxRequests: 200, windowMs: FIVE_MIN },
+    });
+    assert.deepEqual(rateLimit.teamCreation, {
+      perUser: { maxRequests: 5, windowMs: 3_600_000 }, perIp: { maxRequests: 50, windowMs: 3_600_000 },
+    });
+    assert.deepEqual(rateLimit.teamJoin, {
+      perUser: { maxRequests: 20, windowMs: FIVE_MIN }, perIp: { maxRequests: 200, windowMs: FIVE_MIN },
+    });
+    assert.deepEqual(rateLimit.forumThreadCreation, {
+      perUser: { maxRequests: 20, windowMs: FIVE_MIN }, perIp: { maxRequests: 200, windowMs: FIVE_MIN },
+    });
+    assert.deepEqual(rateLimit.forumPostCreation, {
+      perUser: { maxRequests: 30, windowMs: 60_000 }, perIp: { maxRequests: 300, windowMs: 60_000 },
+    });
+    assert.deepEqual(rateLimit.friendRequestRepeat, { perPair: { maxRequests: 3, windowMs: 86_400_000 } });
+  });
+
+  it('refuses at startup any write budget that is missing, malformed or out of range', () => {
+    const badLimits: unknown[] = [
+      undefined, null, 'x', {},
+      { maxRequests: 0, windowMs: 60_000 }, { maxRequests: -1, windowMs: 60_000 },
+      { maxRequests: 1.5, windowMs: 60_000 }, { maxRequests: Number.NaN, windowMs: 60_000 },
+      { maxRequests: Number.POSITIVE_INFINITY, windowMs: 60_000 }, { maxRequests: 2 ** 31, windowMs: 60_000 },
+      { maxRequests: '5', windowMs: 60_000 }, { maxRequests: 5 },
+      { maxRequests: 5, windowMs: 0 }, { maxRequests: 5, windowMs: -60_000 }, { maxRequests: 5, windowMs: 0.5 },
+      { maxRequests: 5, windowMs: Number.MAX_SAFE_INTEGER + 1 }, { maxRequests: 5, windowMs: '60000' },
+    ];
+    for (const [name, dimensions] of WRITE_BUDGETS) {
+      for (const dimension of dimensions) {
+        for (const bad of badLimits) {
+          const rateLimit = {
+            ...DEFAULT_RATE_LIMIT,
+            [name]: { ...(DEFAULT_RATE_LIMIT[name] as object), [dimension]: bad },
+          } as unknown as typeof DEFAULT_RATE_LIMIT;
+          assert.throws(() => resolveConfig({ accessTokenSecret: SECRET, rateLimit }),
+            new RegExp(`rateLimit\\.${name}\\.${dimension} must`), `${name}.${dimension} = ${JSON.stringify(bad)}`);
+        }
+      }
+      for (const policy of [undefined, null, 7, 'policy', []]) {
+        const rateLimit = { ...DEFAULT_RATE_LIMIT, [name]: policy } as unknown as typeof DEFAULT_RATE_LIMIT;
+        assert.throws(() => resolveConfig({ accessTokenSecret: SECRET, rateLimit }),
+          new RegExp(`rateLimit\\.${name}\\.${dimensions[0]} must`), `${name} = ${JSON.stringify(policy)}`);
+      }
+    }
+  });
+
+  it('accepts the defaults and a valid override, and keeps the disabled switch', () => {
+    const rateLimit = {
+      ...DEFAULT_RATE_LIMIT,
+      enabled: false,
+      forumPostCreation: { perUser: { maxRequests: 1, windowMs: 1 }, perIp: { maxRequests: 2_147_483_647, windowMs: 2_147_483_647 } },
+    };
+    const resolved = resolveConfig({ accessTokenSecret: SECRET, rateLimit }).rateLimit;
+    assert.equal(resolved.enabled, false);
+    assert.deepEqual(resolved.forumPostCreation, rateLimit.forumPostCreation);
   });
 });
 
