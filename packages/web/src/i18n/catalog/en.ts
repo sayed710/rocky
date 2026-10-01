@@ -902,6 +902,8 @@ export const enMessages = {
   'ai.puzzle.distanceGap': '{relation} · {count} {unit}',
 
   // Board Status Messages
+  'board.status.played': 'Played {move}.',
+  'board.status.premoveSet': 'Premove set: {move}.',
   'board.played': 'Played {move}.',
   'board.premoveSet': 'Premove set: {move}.',
 

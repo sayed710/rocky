@@ -716,7 +716,7 @@ export function bootstrap(
   const statusEl = doc.getElementById('status');
   const flipEl = doc.getElementById('flip');
   const board = boardEl
-    ? mountBoard({ boardEl, statusEl, flipEl })
+    ? mountBoard({ boardEl, statusEl, flipEl }, { i18n: app.i18n })
     : null;
 
   return createBootstrapped(app, auth, theme, shellLocalization, { board });

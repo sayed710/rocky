@@ -49,8 +49,8 @@ export function renderInbox(
     }
 
     const timeStr = item.lastMessage
-      ? formatInboxTimestamp(item.lastMessage.sentAt)
-      : formatInboxTimestamp(item.conversation.lastMessageAt);
+      ? formatInboxTimestamp(item.lastMessage.sentAt, Date.now(), i18n.locale)
+      : formatInboxTimestamp(item.conversation.lastMessageAt, Date.now(), i18n.locale);
 
     const detailsText = previewText ? `${previewText} · ${timeStr}` : timeStr;
     const infoSpan = el(doc, 'span', { class: 'count' }, detailsText);
@@ -92,7 +92,7 @@ export function renderThread(
   for (const m of messages) {
     const isOwn = currentUserId !== null && m.senderId === currentUserId;
     const senderHandle = names.get(m.senderId)?.handle ?? shortId(m.senderId);
-    const timeStr = formatTimestamp(m.sentAt);
+    const timeStr = formatTimestamp(m.sentAt, i18n.locale);
 
     const senderSpan = el(doc, 'span', { class: 'message-sender' }, senderHandle);
     applyAutoDirection(senderSpan);
@@ -112,17 +112,17 @@ export function renderThread(
   }
 }
 
-export function formatTimestamp(iso: string): string {
+export function formatTimestamp(iso: string, locale?: string): string {
   try {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleTimeString(locale ?? 'en', { hour: '2-digit', minute: '2-digit' });
   } catch {
     return iso;
   }
 }
 
-export function formatInboxTimestamp(iso: string, nowMs = Date.now()): string {
+export function formatInboxTimestamp(iso: string, nowMs = Date.now(), locale?: string): string {
   try {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return iso;
@@ -133,10 +133,11 @@ export function formatInboxTimestamp(iso: string, nowMs = Date.now()): string {
       d.getMonth() === now.getMonth() &&
       d.getDate() === now.getDate();
 
+    const targetLocale = locale ?? 'en';
     if (isToday) {
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return d.toLocaleTimeString(targetLocale, { hour: '2-digit', minute: '2-digit' });
     }
-    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    return d.toLocaleDateString(targetLocale, { month: 'short', day: 'numeric' });
   } catch {
     return iso;
   }

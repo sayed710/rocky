@@ -41,7 +41,7 @@ import {
   type SeekMode,
 } from './create-game-prefs.js';
 import { el } from './dom.js';
-import { VARIANT_LABELS, getVariantLabel } from './variant-labels.js';
+import { getSpeedLabel, getVariantLabel } from './variant-labels.js';
 
 const CREATE_GAME_COLORS: readonly SeekColor[] = [
   DEFAULT_CREATE_GAME_COLOR,
@@ -268,6 +268,48 @@ export class CreateGamePanel {
       if (this.ratingMaxSpan) this.ratingMaxSpan.textContent = this.i18n.t('lobby.ratingMaxLabel');
       if (this.ratingHintEl) this.ratingHintEl.textContent = this.i18n.t('lobby.ratingHint');
       if (this.moreLabelEl) this.moreLabelEl.textContent = this.i18n.t('lobby.moreOptions');
+
+      // Retranslate time preset speed chips and labels without disturbing checked radio
+      for (const preset of CREATE_GAME_PRESETS) {
+        const radio = this.form.querySelector<HTMLInputElement>(`input[name="cg-time"][value="${preset.id}"]`);
+        const speedSpan = radio?.closest('label')?.querySelector('.cg-chip-speed');
+        if (speedSpan) {
+          const speed = estimateSpeed(presetToTimeControl(preset.minutes, preset.increment));
+          speedSpan.textContent = getSpeedLabel(speed, this.i18n);
+        }
+      }
+      const unlRadio = this.form.querySelector<HTMLInputElement>(`input[name="cg-time"][value="${UNLIMITED_TIME_ID}"]`);
+      const unlSpeedSpan = unlRadio?.closest('label')?.querySelector('.cg-chip-speed');
+      if (unlSpeedSpan) {
+        unlSpeedSpan.textContent = getSpeedLabel(estimateSpeed(UNLIMITED_TIME_CONTROL), this.i18n);
+      }
+      const unlLabelSpan = unlRadio?.closest('label')?.querySelector('.cg-chip-label');
+      if (unlLabelSpan) {
+        unlLabelSpan.textContent = this.i18n.t('lobby.timeUnlimited');
+      }
+      const customRadio = this.form.querySelector<HTMLInputElement>(`input[name="cg-time"][value="${CUSTOM_PRESET_ID}"]`);
+      const customLabelSpan = customRadio?.closest('label')?.querySelector('.cg-chip-label');
+      if (customLabelSpan) {
+        customLabelSpan.textContent = this.i18n.t('lobby.timeCustom');
+      }
+
+      // Retranslate variant, mode, and color option labels
+      for (const v of OFFERED_VARIANTS) {
+        const radio = this.form.querySelector<HTMLInputElement>(`input[name="cg-variant"][value="${v}"]`);
+        const labelSpan = radio?.closest('label')?.querySelector('.cg-chip-label');
+        if (labelSpan) labelSpan.textContent = getVariantLabel(v, this.i18n);
+      }
+      for (const m of ['casual', 'rated'] as const) {
+        const radio = this.form.querySelector<HTMLInputElement>(`input[name="cg-mode"][value="${m}"]`);
+        const labelSpan = radio?.closest('label')?.querySelector('.cg-seg-label');
+        if (labelSpan) labelSpan.textContent = this.i18n.t(m === 'casual' ? 'lobby.mode.casual' : 'lobby.mode.rated');
+      }
+      for (const c of CREATE_GAME_COLORS) {
+        const radio = this.form.querySelector<HTMLInputElement>(`input[name="cg-color"][value="${c}"]`);
+        const labelSpan = radio?.closest('label')?.querySelector('.cg-seg-label');
+        if (labelSpan) labelSpan.textContent = this.getColorLabel(c);
+      }
+
       this.syncTimeSelection(false);
       this.syncAdvancedSummary();
       this.refreshRatingError();
@@ -297,7 +339,7 @@ export class CreateGamePanel {
     const presets = el(this.doc, 'div', { class: 'cg-presets' });
     for (const preset of CREATE_GAME_PRESETS) {
       const speed = estimateSpeed(presetToTimeControl(preset.minutes, preset.increment));
-      presets.append(this.radio('cg-time', preset.id, preset.id, preset.id === initialTimeId, speed));
+      presets.append(this.radio('cg-time', preset.id, preset.id, preset.id === initialTimeId, getSpeedLabel(speed, this.i18n)));
     }
     presets.append(
       this.radio(
@@ -305,7 +347,7 @@ export class CreateGamePanel {
         UNLIMITED_TIME_ID,
         this.i18n.t('lobby.timeUnlimited'),
         initialTimeId === UNLIMITED_TIME_ID,
-        estimateSpeed(UNLIMITED_TIME_CONTROL),
+        getSpeedLabel(estimateSpeed(UNLIMITED_TIME_CONTROL), this.i18n),
       ),
       this.radio('cg-time', CUSTOM_PRESET_ID, this.i18n.t('lobby.timeCustom'), initialTimeId === CUSTOM_PRESET_ID),
     );
@@ -843,13 +885,13 @@ export class CreateGamePanel {
     this.clearCustomError();
     if (selected === UNLIMITED_TIME_ID) {
       this.timeSummary.textContent = this.i18n.t('lobby.timeUnlimitedSummary', {
-        speed: estimateSpeed(UNLIMITED_TIME_CONTROL),
+        speed: getSpeedLabel(estimateSpeed(UNLIMITED_TIME_CONTROL), this.i18n),
       });
       return;
     }
     const preset = CREATE_GAME_PRESETS.find((candidate) => candidate.id === selected);
     if (!preset) return;
-    const speed = estimateSpeed(presetToTimeControl(preset.minutes, preset.increment));
+    const speed = getSpeedLabel(estimateSpeed(presetToTimeControl(preset.minutes, preset.increment)), this.i18n);
     const minutes = preset.minutes === 1
       ? this.i18n.t('lobby.oneMinute')
       : this.i18n.t('lobby.manyMinutes', { count: String(preset.minutes) });

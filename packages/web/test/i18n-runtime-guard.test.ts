@@ -9,7 +9,7 @@
  * - Every file is strictly classified: either UI-bearing (scanned) or technical/headless
  *   (documented in `NON_UI_TECHNICAL_FILES` with an architectural justification).
  * - New files cannot silently escape the guard: unclassified files fail the test immediately.
- * - Inspects:
+ * - Statically inspects known DOM presentation sinks and helpers:
  *   - .textContent, .innerHTML, .innerText assignments (literals, templates, ternaries)
  *   - .title and .placeholder DOM property assignments
  *   - setAttribute('aria-label' | 'title' | 'placeholder', ...)
@@ -17,8 +17,10 @@
  *   - renderEmpty(container, { title, body, cta: { label } }) calls
  *   - Option tables with { label: '...' }
  *   - Validation results with { message: '...' }
- *   - Technical protocol values (e.g. 'white', 'black', 'rated') are NOT allowlisted as copy strings
- *     when flowing into user-visible DOM locations.
+ *   - Status helper calls (setStatus, renderStatus, showStatus, updateStatus)
+ * - Scope note: This AST guard statically enforces that known DOM and presentation sinks do not
+ *   receive raw English copy strings; dynamic dataflow (e.g. mapping technical tokens like Speed
+ *   to translated labels, live locale switching) is rigorously proven by runtime relocalization tests.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,6 +28,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { estimateSpeed, presetToTimeControl } from '../src/app/time-presets.js';
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const APP_DIR = resolve(PACKAGE_ROOT, 'src', 'app');
@@ -285,6 +288,16 @@ export function scanSourceForViolations(fileName: string, sourceCode: string): A
       }
     }
 
+    // 6. Status helper calls: setStatus, renderStatus, showStatus, updateStatus
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const fnName = node.expression.text;
+      if (['setStatus', 'renderStatus', 'showStatus', 'updateStatus'].includes(fnName)) {
+        for (const arg of node.arguments) {
+          checkExpressionForCopy(arg, `${fnName}(arg)`);
+        }
+      }
+    }
+
     ts.forEachChild(node, walk);
   }
 
@@ -366,11 +379,12 @@ test('i18n AST guard falsification: comprehensive check of real application call
     '  btn.setAttribute("title", "Click to submit");',
     '  btn.title = session === null ? "Sign in to play the computer" : "";',
     '  input.placeholder = "e.g. Nf3";',
+    '  setStatus(`Played ${move.from}–${move.to}.`);',
     '}',
   ].join('\n');
 
   const violations = scanSourceForViolations('synthetic-test.ts', syntheticSnippet);
-  assert.ok(violations.length >= 12, `expected at least 12 synthetic violations, got ${violations.length}`);
+  assert.ok(violations.length >= 13, `expected at least 13 synthetic violations, got ${violations.length}`);
 
   const types = violations.map((v) => v.type);
   assert.ok(types.includes('option.label'), 'must catch option.label');
@@ -386,6 +400,7 @@ test('i18n AST guard falsification: comprehensive check of real application call
   assert.ok(types.includes('setAttribute(title)'), 'must catch setAttribute(title)');
   assert.ok(types.includes('title-ternary-true'), 'must catch DOM property title = ternary');
   assert.ok(types.includes('placeholder'), 'must catch DOM property placeholder =');
+  assert.ok(types.includes('setStatus(arg)-template'), 'must catch setStatus template literal');
 });
 
 test('i18n AST guard falsification: proves individual real mutations fail the guard', () => {
@@ -462,4 +477,53 @@ test('i18n AST guard falsification: proves individual real mutations fail the gu
   const unclassified = fakeFileList.filter((f) => !classified.has(f));
   assert.equal(unclassified.length, 1);
   assert.equal(unclassified[0], 'unclassified-feature-view.ts');
+
+  // Mutation 9: setStatus called with interpolated English copy template
+  const m9 = `
+    setStatus(\`Played \${move.from}–\${move.to}.\`);
+  `;
+  const v9 = scanSourceForViolations('mutation-9.ts', m9);
+  assert.ok(v9.length >= 1, 'must catch setStatus template literal');
+  assert.equal(v9[0]?.type, 'setStatus(arg)-template');
+  assert.equal(v9[0]?.text, 'Played ');
+
+  // Mutation 10: setStatus called with raw English copy string literal
+  const m10 = `
+    setStatus('Premove set: e2–e4.');
+  `;
+  const v10 = scanSourceForViolations('mutation-10.ts', m10);
+  assert.equal(v10.length, 1, 'must catch setStatus string literal');
+  assert.equal(v10[0]?.type, 'setStatus(arg)');
+  assert.equal(v10[0]?.text, 'Premove set: e2–e4.');
+});
+
+test('time-presets: estimateSpeed returns technical domain tokens, not English display labels', () => {
+  const speeds = [
+    estimateSpeed({ initialMs: 30_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' }),
+    estimateSpeed(presetToTimeControl(1, 0)),
+    estimateSpeed(presetToTimeControl(3, 2)),
+    estimateSpeed(presetToTimeControl(10, 0)),
+    estimateSpeed(presetToTimeControl(30, 20)),
+    estimateSpeed({ initialMs: 0, incrementMs: 0, delayMs: 0, kind: 'unlimited' }),
+  ];
+
+  const validTechnicalSpeeds = new Set([
+    'ultrabullet',
+    'bullet',
+    'blitz',
+    'rapid',
+    'classical',
+    'correspondence',
+  ]);
+
+  for (const s of speeds) {
+    assert.ok(validTechnicalSpeeds.has(s), `expected technical speed token, got: ${s}`);
+    assert.equal(s, s.toLowerCase(), `technical speed token must be lowercase, got: ${s}`);
+    // Structural assertion: MUST NOT be English display copy
+    assert.notEqual(s, 'Bullet');
+    assert.notEqual(s, 'Blitz');
+    assert.notEqual(s, 'Rapid');
+    assert.notEqual(s, 'Classical');
+    assert.notEqual(s, 'Correspondence');
+  }
 });

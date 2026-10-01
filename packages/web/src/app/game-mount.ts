@@ -1141,6 +1141,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       onMove: (uci: string) => {
         controller.submitMove(uci);
       },
+      i18n,
     },
   );
 

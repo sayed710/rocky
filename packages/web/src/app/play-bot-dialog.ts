@@ -13,6 +13,7 @@ import type { I18nManager } from '../i18n/manager.js';
 import { el } from './dom.js';
 import { BOT_LEVELS, DEFAULT_BOT_LEVEL, parseBotLevel } from './bot-levels.js';
 import { TIME_PRESETS, DEFAULT_PRESET_ID, presetToTimeControl, estimateSpeed } from './time-presets.js';
+import { getSpeedLabel } from './variant-labels.js';
 
 export interface CreateBotGameParams {
   readonly level: BotLevel;
@@ -134,7 +135,7 @@ export class PlayBotDialog {
     for (const p of TIME_PRESETS) {
       const speed = estimateSpeed(presetToTimeControl(p.minutes, p.increment));
       presets.append(
-        this.chip('pb-time', p.id, p.id, p.id === DEFAULT_PRESET_ID, speed),
+        this.chip('pb-time', p.id, p.id, p.id === DEFAULT_PRESET_ID, getSpeedLabel(speed, this.i18n)),
       );
     }
     this.timeLegend = el(d, 'legend', {}, this.i18n.t('bot.timeControl'));
@@ -353,6 +354,16 @@ export class PlayBotDialog {
           el(this.doc, 'span', { class: 'cg-seg-glyph', 'aria-hidden': 'true' }, c.glyph),
           this.doc.createTextNode(this.i18n.t(c.labelKey)),
         );
+      }
+    }
+
+    // Retranslate time preset speed chips without disturbing checked radio states
+    for (const p of TIME_PRESETS) {
+      const radio = this.form.querySelector<HTMLInputElement>(`input[name="pb-time"][value="${p.id}"]`);
+      const speedSpan = radio?.closest('label')?.querySelector('.cg-chip-speed');
+      if (speedSpan) {
+        const speed = estimateSpeed(presetToTimeControl(p.minutes, p.increment));
+        speedSpan.textContent = getSpeedLabel(speed, this.i18n);
       }
     }
 

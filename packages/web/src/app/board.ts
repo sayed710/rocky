@@ -20,6 +20,7 @@ import type { LegalMoveOracle } from '../ports/move-oracle.js';
 import { applyMove } from '../core/mover.js';
 import { STARTING_FEN } from '../core/position.js';
 import type { Premove } from '../core/premove.js';
+import { createI18nManager, type I18nManager } from '../i18n/manager.js';
 
 /**
  * DOM elements the board binds to.
@@ -52,6 +53,8 @@ export interface MountBoardOptions {
    * moves optimistically itself.
    */
   readonly onMove?: (uci: string) => void;
+  /** Localization manager for board status copy; optional for test resilience. */
+  readonly i18n?: I18nManager;
 }
 
 /** Handle to the mounted board. */
@@ -122,9 +125,27 @@ export function mountBoard(
   const onMove = options?.onMove;
   const interaction = new BoardInteraction({ oracle, myTurn: true });
 
-  const setStatus = (msg: string): void => {
-    if (statusEl) statusEl.textContent = msg;
+  const i18n = options?.i18n ?? createI18nManager();
+  type StatusKey = 'board.status.played' | 'board.status.premoveSet';
+  interface StatusState {
+    key: StatusKey;
+    move: string;
+  }
+  let currentStatus: StatusState | null = null;
+
+  const renderStatus = (): void => {
+    if (!statusEl || !currentStatus) return;
+    statusEl.textContent = i18n.t(currentStatus.key, { move: currentStatus.move });
   };
+
+  const setStatus = (key: StatusKey, move: string): void => {
+    currentStatus = { key, move };
+    renderStatus();
+  };
+
+  const unsubscribeLocale = options?.i18n?.onLocaleChange(() => {
+    renderStatus();
+  });
 
   const view = new BoardView(boardEl, {
     interaction,
@@ -140,11 +161,12 @@ export function mountBoard(
           view.setPosition(fen);
           view.setLastMove(r.move.from, r.move.to);
           setStatus(
-            `Played ${r.move.from}\u2013${r.move.to}${r.move.promotion ? `=${r.move.promotion.toUpperCase()}` : ''}.`,
+            'board.status.played',
+            `${r.move.from}\u2013${r.move.to}${r.move.promotion ? `=${r.move.promotion.toUpperCase()}` : ''}`,
           );
         }
       } else {
-        setStatus(`Premove set: ${r.premove.from}\u2013${r.premove.to}.`);
+        setStatus('board.status.premoveSet', `${r.premove.from}\u2013${r.premove.to}`);
       }
     },
   });
@@ -157,6 +179,7 @@ export function mountBoard(
   flipEl?.addEventListener('click', onFlip);
 
   const teardown = (): void => {
+    unsubscribeLocale?.();
     flipEl?.removeEventListener('click', onFlip);
     view.destroy();
     if (mountedTeardowns.get(boardEl) === teardown) mountedTeardowns.delete(boardEl);

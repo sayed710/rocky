@@ -41,6 +41,8 @@ import type {
   TeamView,
   TournamentDetail,
   UserProfile,
+  MessageView,
+  SocialPlayer,
 } from '../src/api/models.js';
 import { PlayBotDialog } from '../src/app/play-bot-dialog.js';
 import { CreateGamePanel } from '../src/app/create-game-panel.js';
@@ -49,6 +51,11 @@ import { coachMessage, omissionReasonLabel } from '../src/app/coach-view.js';
 import { explainMessage, describeOutcome } from '../src/app/explain-view.js';
 import { openingMessage, plies } from '../src/app/opening-view.js';
 import { puzzleMessage } from '../src/app/puzzle-view.js';
+import { mountBoard } from '../src/app/board.js';
+import { formatTimestamp, formatInboxTimestamp, renderThread, renderInbox } from '../src/app/messages-view.js';
+import { TIME_PRESETS, presetToTimeControl } from '../src/app/time-presets.js';
+import { STARTING_FEN } from '../src/core/position.js';
+import { StaticMoveOracle } from '../src/ports/move-oracle.js';
 
 // DOM test double capable of handling all mount and renderer operations
 class FakeElement {
@@ -319,7 +326,13 @@ class FakeElement {
     this.listeners[type] = this.listeners[type].filter((cb) => cb !== fn);
   }
 
-  dispatchEvent(event: { type: string; target?: unknown; preventDefault?: () => void }): boolean {
+  dispatchEvent(event: {
+    type: string;
+    target?: unknown;
+    preventDefault?: () => void;
+    clientX?: number;
+    clientY?: number;
+  }): boolean {
     if (!event.preventDefault) {
       event.preventDefault = () => {};
     }
@@ -344,6 +357,9 @@ class FakeElement {
   contains(node: unknown): boolean {
     if (node === this) return true;
     return this.children.some((c) => c.contains(node));
+  }
+  getBoundingClientRect() {
+    return { width: 512, height: 512, left: 0, top: 0, right: 512, bottom: 512 };
   }
 }
 
@@ -419,8 +435,12 @@ const testArabicCatalog: Partial<MessagesCatalog> = {
   // Variant & Speed
   'variant.standard': 'قياسي',
   'variant.crazyhouse': 'كレイزي هاوس',
+  'speed.ultrabullet': 'فائق السرعة',
+  'speed.bullet': 'رصاصة',
   'speed.blitz': 'خاطف',
   'speed.rapid': 'سريع',
+  'speed.classical': 'كلاسيكي',
+  'speed.correspondence': 'مراسلة',
   // Game
   'game.player.white': 'الأبيض',
   'game.player.whiteYou': 'الأبيض (أنت)',
@@ -532,6 +552,15 @@ const testArabicCatalog: Partial<MessagesCatalog> = {
   'common.cancel': 'إلغاء',
   'shell.authStatus.signedIn': 'مسجل كـ {handle}',
   'shell.authStatus.notSignedIn': 'غير مسجل الدخول',
+
+  // Summaries
+  'lobby.timePresetSummary': '{speed} · {time}',
+  'lobby.timeUnlimitedSummary': '{speed}',
+
+  // Board Status Messages
+  'board.status.played': 'تم لعب {move}.',
+  'board.status.premoveSet': 'تم تحديد النقلة المسبقة: {move}.',
+
   // AI Move Assessment
   'ai.assess.idle': 'قيّم النقلة الأخيرة.',
   'ai.assess.noMove': 'لا توجد نقلة للتقييم بعد.',
@@ -1808,6 +1837,235 @@ describe('AI views (assess, coach, explain, opening, puzzle): representative cop
       mounted.connectivity.dispose();
       app.dispose();
     }
+  });
+
+  it('speed labels: CreateGamePanel relocalizes speed chips and summaries from preserved selection and unsubscribes on dispose', () => {
+    const doc = createFakeDoc(new Map());
+    const mount = new FakeElement('div', 'create-seek-mount');
+    mount.ownerDocument = doc;
+    const i18n = createTestI18n();
+
+    const panel = new CreateGamePanel({
+      doc,
+      mount: mount as unknown as HTMLElement,
+      callbacks: {
+        onSubmit: async () => true,
+        onError: () => {},
+      },
+      initialAuthenticated: true,
+      i18n,
+    });
+
+    try {
+      // 1. In English: check speed chips
+      const chips = mount.querySelectorAll('.cg-chip-speed');
+      assert.ok(chips.length >= 10, 'must render speed chips for presets');
+      const blitzChip = mount.querySelector('input[name="cg-time"][value="3+0"]')
+        ?.closest('label')?.querySelector('.cg-chip-speed');
+      const rapidChip = mount.querySelector('input[name="cg-time"][value="10+0"]')
+        ?.closest('label')?.querySelector('.cg-chip-speed');
+      assert.equal(blitzChip?.textContent, 'Blitz');
+      assert.equal(rapidChip?.textContent, 'Rapid');
+
+      // Select 3+0 preset
+      const radio3plus0 = mount.querySelector('input[name="cg-time"][value="3+0"]')!;
+      radio3plus0.checked = true;
+      radio3plus0.dispatchEvent({ type: 'change' });
+
+      // Verify time summary in English
+      const timeSummary = mount.querySelector('.cg-time-summary')!;
+      assert.ok(timeSummary.textContent.includes('Blitz'));
+
+      // 2. Switch locale to Arabic
+      i18n.setLocale('ar');
+
+      // 3. Chips update to Arabic translations
+      assert.equal(blitzChip?.textContent, 'خاطف');
+      assert.equal(rapidChip?.textContent, 'سريع');
+
+      // 4. Selected radio value remains unchanged
+      assert.equal(radio3plus0.checked, true);
+      const selectedRadio = mount.querySelector('input[name="cg-time"]:checked') as FakeElement | null;
+      assert.equal(selectedRadio?.value, '3+0');
+
+      // 5. Time summary updates to translated Arabic speed name
+      assert.ok(timeSummary.textContent.includes('خاطف'));
+
+      // 6. Dispose panel
+      panel.dispose();
+
+      // 7. Switch locale back to English
+      i18n.setLocale('en');
+
+      // 8. Disposed panel does NOT react
+      assert.equal(blitzChip?.textContent, 'خاطف');
+      assert.equal(rapidChip?.textContent, 'سريع');
+      assert.ok(timeSummary.textContent.includes('خاطف'));
+    } finally {
+      panel.dispose();
+    }
+  });
+
+  it('speed labels: PlayBotDialog relocalizes speed chips while preserving checked time selection', () => {
+    const doc = createFakeDoc(new Map());
+    const mount = new FakeElement('div', 'play-bot-mount');
+    mount.ownerDocument = doc;
+    const i18n = createTestI18n();
+
+    const dialog = new PlayBotDialog({
+      doc,
+      mount: mount as unknown as HTMLElement,
+      callbacks: {
+        onSubmit: async () => 'g-bot-1',
+      },
+      initialAuthenticated: true,
+      i18n,
+    });
+
+    try {
+      // 1. Initial English speed chips
+      const blitzChip = mount.querySelector('input[name="pb-time"][value="3+0"]')
+        ?.closest('label')?.querySelector('.cg-chip-speed');
+      const rapidChip = mount.querySelector('input[name="pb-time"][value="10+0"]')
+        ?.closest('label')?.querySelector('.cg-chip-speed');
+      assert.equal(blitzChip?.textContent, 'Blitz');
+      assert.equal(rapidChip?.textContent, 'Rapid');
+
+      // Select 3+0 preset
+      const radio3plus0 = mount.querySelector('input[name="pb-time"][value="3+0"]')!;
+      radio3plus0.checked = true;
+      radio3plus0.dispatchEvent({ type: 'change' });
+
+      // 2. Switch locale to Arabic
+      i18n.setLocale('ar');
+
+      // 3. Chips update to Arabic translations
+      assert.equal(blitzChip?.textContent, 'خاطف');
+      assert.equal(rapidChip?.textContent, 'سريع');
+
+      // 4. Selected radio input value is preserved
+      assert.equal(radio3plus0.checked, true);
+
+      // 5. Dispose dialog
+      dialog.dispose();
+
+      // 6. Switch locale back to English
+      i18n.setLocale('en');
+
+      // 7. Disposed dialog does NOT react
+      assert.equal(blitzChip?.textContent, 'خاطف');
+      assert.equal(rapidChip?.textContent, 'سريع');
+    } finally {
+      dialog.dispose();
+    }
+  });
+
+  it('board mount: status copy relocalizes dynamically, preserves technical move tokens, and disposes without leaks', () => {
+    const doc = createFakeDoc(new Map());
+    const boardEl = new FakeElement('div', 'board');
+    boardEl.ownerDocument = doc;
+    const statusEl = new FakeElement('div', 'status');
+    const i18n = createTestI18n();
+
+    const board = mountBoard(
+      {
+        boardEl: boardEl as unknown as HTMLElement,
+        statusEl: statusEl as unknown as HTMLElement,
+      },
+      {
+        oracle: new StaticMoveOracle({ [STARTING_FEN]: { e2: ['e4'] } }),
+        i18n,
+      },
+    );
+
+    try {
+      // 1. Simulate playing move e2-e4 in standalone mode via click gestures
+      // e2 click: clientX=288, clientY=416
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 416 });
+      // e4 click: clientX=288, clientY=288
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 288 });
+
+      // 2. Status in English
+      assert.equal(statusEl.textContent, 'Played e2–e4.');
+
+      // 3. Switch locale to Arabic
+      i18n.setLocale('ar');
+
+      // 4. Status dynamically relocalizes to Arabic while keeping move token e2–e4 intact
+      assert.equal(statusEl.textContent, 'تم لعب e2–e4.');
+
+      // 5. Simulate premove: reset to starting position and set turn false
+      board.setPosition(STARTING_FEN);
+      board.setTurn(false);
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 416 });
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 288 });
+      assert.equal(statusEl.textContent, 'تم تحديد النقلة المسبقة: e2–e4.');
+
+      // Switch back to English to verify premove English copy
+      i18n.setLocale('en');
+      assert.equal(statusEl.textContent, 'Premove set: e2–e4.');
+
+      // 6. Dispose board
+      board.dispose();
+
+      // 7. Switch locale again
+      i18n.setLocale('ar');
+
+      // 8. Disposed board ceases reacting
+      assert.equal(statusEl.textContent, 'Premove set: e2–e4.');
+    } finally {
+      board.dispose();
+    }
+  });
+
+  it('message timestamps: formats with active i18n locale and relocalizes dynamic mounts without altering message content', () => {
+    const timestampIso = '2026-08-04T10:30:00Z';
+    const enTime = formatTimestamp(timestampIso, 'en');
+    const arTime = formatTimestamp(timestampIso, 'ar');
+    assert.ok(enTime.length > 0);
+    assert.ok(arTime.length > 0);
+    assert.notEqual(enTime, arTime, 'Arabic timestamp format should differ from English');
+
+    const doc = createFakeDoc(new Map());
+    const container = new FakeElement('div', 'conversation-thread');
+    container.ownerDocument = doc;
+    const messages: MessageView[] = [
+      {
+        id: 'm-1',
+        conversationId: 'c-1',
+        senderId: 'u-other',
+        body: 'Hello world!',
+        sentAt: timestampIso,
+        editedAt: null,
+        deletedAt: null,
+      },
+    ];
+    const names = new Map<string, SocialPlayer>([
+      ['u-other', { id: 'u-other', handle: 'GrandmasterAlice' }],
+    ]);
+
+    const i18n = createTestI18n();
+
+    // 1. Initial render in English
+    renderThread(container as unknown as HTMLElement, messages, names, 'u-me', i18n);
+    const sender = container.querySelector('.message-sender')!;
+    const body = container.querySelector('.message-body')!;
+    const time = container.querySelector('.count')!;
+    assert.equal(sender.textContent, 'GrandmasterAlice');
+    assert.equal(body.textContent, 'Hello world!');
+    assert.equal(time.textContent, enTime);
+
+    // 2. Switch locale to Arabic
+    i18n.setLocale('ar');
+    renderThread(container as unknown as HTMLElement, messages, names, 'u-me', i18n);
+
+    // 3. User content (handle, body, id) is preserved, timestamp reflects Arabic locale
+    const updatedSender = container.querySelector('.message-sender')!;
+    const updatedBody = container.querySelector('.message-body')!;
+    const updatedTime = container.querySelector('.count')!;
+    assert.equal(updatedSender.textContent, 'GrandmasterAlice');
+    assert.equal(updatedBody.textContent, 'Hello world!');
+    assert.equal(updatedTime.textContent, arTime);
   });
 });
 
