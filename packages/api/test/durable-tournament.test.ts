@@ -5,6 +5,7 @@ import { InMemoryEventStore } from '@chess-platform/persistence';
 import { InMemoryTournamentsRepository } from '../src/fakes';
 import { DurableGameLauncher, launchGameId } from '../src/tournament/durable-launcher';
 import { DurableTournamentLiveView } from '../src/tournament/durable-live-view';
+import { TournamentService } from '../src/tournament/service';
 import type { LaunchInput } from '../src/tournament/launcher';
 
 const input: LaunchInput = {
@@ -120,4 +121,35 @@ test('a launch never reuses an ended game, even one of the same pairing', async 
   assert.notEqual(relaunched, first, 'the aborted game is not linked again');
   assert.equal(relaunched, launchGameId({ ...input, attempt: 2 }));
   assert.deepEqual(await new DurableGameLauncher(events, { now: () => 9 }).launch({ ...input, attempt: 1 }), { gameId: relaunched }, 'replicas converge on the fresh game');
+});
+
+/**
+ * The same, end to end through the tournament service: the round's game lands on attempt 1 because
+ * attempt 0 of its slot is held, the game is aborted, and the committed abort relaunches the pairing.
+ * The relaunch must be a fresh, live game, not the aborted one linked again.
+ */
+test('an aborted tournament game is replaced by a fresh game even when its slot was probed', async () => {
+  const events = new InMemoryEventStore();
+  const launcher = new DurableGameLauncher(events, { now: () => 1234 });
+  const service = new TournamentService(new InMemoryTournamentsRepository(), launcher);
+  await service.create({ id: 'probed', name: 'Probed', format: 'round_robin', variant: 'standard', timeControl: input.timeControl as never });
+  await launcher.launch({ ...input, tournamentId: 'probed', matchId: '0-0', white: 'x', black: 'y' }); // holds attempt 0
+  for (const player of ['alice', 'bob']) await service.register('probed', player);
+  const started = await service.start('probed');
+  const aborted = started.gameIdFor(0, 0)!;
+  assert.ok(aborted);
+  const stored = await events.load(aborted);
+  const { events: ending } = Game.fromEvents(stored.map((e) => e.event)).abort(2000);
+  await events.append(aborted, stored.length - 1, ending);
+
+  const after = await service.recordCommittedOutcome('probed', aborted, '*');
+  const replacement = after.gameIdFor(0, 0)!;
+  assert.ok(replacement);
+  assert.notEqual(replacement, aborted, 'the aborted game is not linked again');
+  const log = await events.load(replacement);
+  assert.ok(!log.some(({ event }) => event.type === 'GameEnded'), 'the replacement is a live game');
+  const created = log[0]!.event;
+  const pairing = after.getRounds()[0]!.pairings[0]!;
+  assert.ok(created.type === 'GameCreated' && pairing.kind === 'game');
+  assert.deepEqual([created.players.white, created.players.black], [pairing.white, pairing.black]);
 });
