@@ -1988,7 +1988,7 @@
             }
           }
         },
-        "description": "Reports about the caller are never listed. Re-read from the first page on each visit: the queue is keyset-paged by time-ordered id, so a report committed late behind a cursor shows up on the next pass from the head.",
+        "description": "Reports the caller filed or is the subject of are never listed. Re-read from the first page on each visit: the queue is keyset-paged by time-ordered id, so a report committed late behind a cursor shows up on the next pass from the head.",
         "security": [
           {
             "bearerAuth": []
@@ -2083,7 +2083,7 @@
             }
           },
           "403": {
-            "description": "Not a moderator or admin, or the report is about you",
+            "description": "Not a moderator or admin, or you filed the report or are its subject",
             "content": {
               "application/json": {
                 "schema": {

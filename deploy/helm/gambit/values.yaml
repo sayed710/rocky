@@ -132,7 +132,7 @@ gateway:
   # records committed game results and launches the next round. On by default:
   # the chart serves tournaments, and without a reporter their rounds never
   # advance. EVERY gateway replica runs one — launch ids are deterministic, a
-  # launch refuses a slot holding another pairing's game, and the tournaments
+  # launch never links another pairing's game (it takes the next slot), and the tournaments
   # table is version-CAS'd, so a duplicate attempt changes nothing. It stays on
   # the replicated gateway rather than a singleton so results keep flowing
   # through a pod restart or rollout, with no single point to lose.

@@ -40,7 +40,7 @@ No bucket is keyed by the subject alone, so nobody can spend a victim's ability 
 The queue routes are under `/v1/moderation/player-reports`. They are named apart from the anti-cheat "reports" and use the existing `MODERATION` policy (moderator or admin).
 
 - The list is keyset-paged by the time-ordered id, oldest first, filtered by status and optionally by subject. List rows carry no report text and no note.
-- A moderator never sees reports about themselves, and asking for them is a 403. Pages are stable within a snapshot. A report committed late behind a cursor is seen on the next pass from the head, which is how the queue is meant to be read.
+- A moderator never sees reports they filed or are the subject of, and asking for one is a 403. Pages are stable within a snapshot. A report committed late behind a cursor is seen on the next pass from the head, which is how the queue is meant to be read.
 - `GET /v1/moderation/player-reports/:id` writes its audit row before reading (the ADR-0033 pattern).
 
 `POST /v1/moderation/player-reports/:id/transition` with `{action, expectedVersion, note?}` follows this state machine:
@@ -97,7 +97,7 @@ On an installation with history, the first rollout backfills every past ending, 
 
 The architecture review challenged a move to the singleton and rejected it. The reporter needs only the event store, the tournaments repository and the launcher, so the move would work. But it would put tournament progression on one pod and buy nothing. Duplicates across replicas are harmless: `recordCommittedOutcome` (round-based and arena) is idempotent under the tournaments version CAS.
 
-The review found one real gap, which predates this change and which the default made easier to reach. The launch id is derived from `(tournament, match, attempt)` and does not include the players. Two operations racing from one tournament version could pair the same slot differently, and the loser linked the winner's game under the wrong players. `DurableGameLauncher.launch` now refuses an existing game whose players, variant or time control differ. The loser's update then fails before it is saved, and its retry recomputes from the winner's version. Helm `gateway.tournamentReporter.enabled` now defaults to `true` and must be a boolean; `false` remains the explicit operator kill switch.
+The review found one real gap, which predates this change and which the default made easier to reach. The launch id is derived from `(tournament, match, attempt)` and does not include the players. Two operations racing from one tournament version could pair the same slot differently, and the loser linked the winner's game under the wrong players. `DurableGameLauncher.launch` no longer links a game whose players, variant or time control differ. A plain refusal would wedge the pairing forever when a lost race leaves an unlinked game in the slot (raised on PR #83 by Greptile and Qodo). Instead the launcher walks `attempt, attempt+1, …` (at most 8) and takes the first slot that is free or holds this exact pairing. Every replica walks the same sequence, so they converge, and the tournament's version CAS still decides which link is kept. An unlinked game is never started, and its no-show deadline ends it. Helm `gateway.tournamentReporter.enabled` now defaults to `true` and must be a boolean; `false` remains the explicit operator kill switch.
 
 ## Consequences
 

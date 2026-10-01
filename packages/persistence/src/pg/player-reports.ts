@@ -37,9 +37,9 @@ export class PgPlayerReportsRepository implements PlayerReportsRepository {
     const { rows } = await this.pool.query<PlayerReportRow>(
       `SELECT ${COLUMNS} FROM player_reports
        WHERE status = $1 AND ($2::uuid IS NULL OR subject_id = $2) AND ($3::uuid IS NULL OR id > $3)
-         AND subject_id <> $5
+         AND subject_id <> $5 AND reporter_id <> $5
        ORDER BY id LIMIT $4`,
-      [query.status, query.subjectId, query.after, query.limit, query.excludeSubjectId],
+      [query.status, query.subjectId, query.after, query.limit, query.excludeParty],
     );
     return rows;
   }

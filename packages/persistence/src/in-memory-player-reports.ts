@@ -38,7 +38,7 @@ export class InMemoryPlayerReportsRepository implements PlayerReportsRepository 
     return [...this.rows.values()]
       .filter((row) => row.status === query.status
         && (query.subjectId === null || row.subjectId === query.subjectId)
-        && row.subjectId !== query.excludeSubjectId
+        && row.subjectId !== query.excludeParty && row.reporterId !== query.excludeParty
         && (query.after === null || row.id > query.after))
       .sort((a, b) => (a.id < b.id ? -1 : 1))
       .slice(0, query.limit);

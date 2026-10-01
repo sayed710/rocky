@@ -4,12 +4,12 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { migrate, PostgresEventStore } from '@chess-platform/persistence/pg';
 import { withTestDatabase } from '@chess-platform/persistence/test-support';
-import { DurableGameLauncher } from '../src/tournament/durable-launcher';
+import { DurableGameLauncher, launchGameId } from '../src/tournament/durable-launcher';
 import type { LaunchInput } from '../src/tournament/launcher';
 
 const skip = process.env['DATABASE_URL'] ? false : 'DATABASE_URL not set';
 
-test('a stored launch is recognized after a JSONB round trip, and another pairing cannot take its slot', { skip }, async () => {
+test('a stored launch is recognized after a JSONB round trip, and another pairing takes the next attempt instead of it', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, join(process.cwd(), '../persistence/migrations'));
     const events = new PostgresEventStore(pool);
@@ -24,9 +24,9 @@ test('a stored launch is recognized after a JSONB round trip, and another pairin
     ]);
     assert.equal(a.gameId, b.gameId);
     assert.deepEqual(await new DurableGameLauncher(events, { now: () => 2 }).launch(input), a);
-    await assert.rejects(
-      new DurableGameLauncher(events, { now: () => 2 }).launch({ ...input, white: '00000000-0000-7000-8000-00000000000c' }),
-      /different game/,
-    );
+    const other = { ...input, white: '00000000-0000-7000-8000-00000000000c' };
+    const moved = await new DurableGameLauncher(events, { now: () => 2 }).launch(other);
+    assert.equal(moved.gameId, launchGameId({ ...other, attempt: 1 }));
+    assert.deepEqual(await new DurableGameLauncher(events, { now: () => 3 }).launch(other), moved);
   });
 });

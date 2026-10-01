@@ -1302,7 +1302,7 @@ export function buildRouter(deps: RouteDeps): Router {
     '/v1/moderation/player-reports',
     doc({
       summary: 'List player reports in one status, oldest first',
-      description: 'Reports about the caller are never listed. Re-read from the first page on each visit: the queue is keyset-paged by time-ordered id, so a report committed late behind a cursor shows up on the next pass from the head.',
+      description: 'Reports the caller filed or is the subject of are never listed. Re-read from the first page on each visit: the queue is keyset-paged by time-ordered id, so a report committed late behind a cursor shows up on the next pass from the head.',
       tags: ['moderation', 'player-reports'],
       security: 'bearer',
       params: [
@@ -1333,8 +1333,9 @@ export function buildRouter(deps: RouteDeps): Router {
         actorId: actor.userId, action: 'player_reports.list', target: subjectId, meta: { status },
         requestId: ctx.requestId, traceId: ctx.traceId, ip: ctx.ip, userAgent: ctx.userAgent, at: clock.now(),
       });
-      // Nobody sees the reports about themselves, so a reported moderator cannot learn who reported them.
-      const rows = await repos.playerReports.list({ status, subjectId, after, limit: limit + 1, excludeSubjectId: actor.userId.toLowerCase() });
+      // A moderator never sees a report they are party to: not who reported them, and not the state
+      // or handling of a report they filed.
+      const rows = await repos.playerReports.list({ status, subjectId, after, limit: limit + 1, excludeParty: actor.userId.toLowerCase() });
       const items = rows.slice(0, limit);
       return json(200, {
         items: items.map(moderationReportSummaryView),
@@ -1353,7 +1354,7 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['ModerationReport', 'The report'],
         401: ['Error', 'Not signed in'],
-        403: ['Error', 'Not a moderator or admin, or the report is about you'],
+        403: ['Error', 'Not a moderator or admin, or you filed the report or are its subject'],
         404: ['Error', 'No such report'],
         422: ['Error', 'Malformed report ID'],
       },
@@ -1369,7 +1370,9 @@ export function buildRouter(deps: RouteDeps): Router {
       });
       const report = await repos.playerReports.findById(id);
       if (!report) throw HttpError.notFound('report not found');
-      if (report.subjectId === actor.userId.toLowerCase()) throw HttpError.forbidden('reports about you are handled by other moderators');
+      if (report.subjectId === actor.userId.toLowerCase() || report.reporterId === actor.userId.toLowerCase()) {
+        throw HttpError.forbidden('reports you filed or that are about you are handled by other moderators');
+      }
       return json(200, moderationReportView(report));
     },
   );

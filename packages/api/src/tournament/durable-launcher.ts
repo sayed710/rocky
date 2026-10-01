@@ -20,7 +20,29 @@ export class DurableGameLauncher implements GameLauncher {
     private readonly noShowAfterMs: number = DEFAULT_NO_SHOW_DEADLINES.tournamentMs,
   ) {}
 
+  /**
+   * Launch this pairing's game, or return it if it already exists.
+   *
+   * The launch identity names a pairing slot, not who plays in it. Two operations racing from one
+   * tournament version can pair the same slot differently, and an operation that created a game but
+   * lost its version CAS leaves that game unlinked in the slot; its retry may then pair the slot
+   * differently again. So a slot holding another pairing's game is never linked under these players
+   * (the tournament and the event log would disagree about who played) and never refused either (the
+   * pairing would be wedged forever). The launch moves on to the next attempt of the same slot.
+   * Every replica walks the same sequence, so they still converge on one game per pairing, and the
+   * tournament's version CAS still decides which link is kept. A game left unlinked by a lost race
+   * is never started; the no-show deadline ends it. ADR-0152.
+   */
   async launch(input: LaunchInput): Promise<{ gameId: string }> {
+    for (let probe = 0; probe < MAX_SLOT_PROBES; probe += 1) {
+      const launched = await this.launchAt({ ...input, attempt: input.attempt + probe });
+      if (launched) return launched;
+    }
+    throw new Error(`launch slots ${input.tournamentId}/${input.matchId}#${input.attempt}+${MAX_SLOT_PROBES} all hold other pairings' games`);
+  }
+
+  /** Create or find this pairing's game at exactly this attempt; null when another pairing holds it. */
+  private async launchAt(input: LaunchInput): Promise<{ gameId: string } | null> {
     const gameId = launchGameId(input);
     if (await this.events.exists(gameId)) return this.existing(gameId, input);
 
@@ -42,23 +64,15 @@ export class DurableGameLauncher implements GameLauncher {
       await this.events.append(gameId, -1, events);
     } catch (error) {
       // A concurrent replica may have won the deterministic-id race. Only
-      // accept that failure when the exact game now exists durably.
+      // accept that failure when a game now exists durably at this id.
       if (!(await this.events.exists(gameId))) throw error;
       return this.existing(gameId, input);
     }
     return { gameId };
   }
 
-  /**
-   * Accept a game already stored under this launch identity only if it is this pairing's game.
-   *
-   * The identity names the pairing slot, not who plays in it, so two operations racing from one
-   * tournament version (a reporter recording a result, an API registration) can pair the same slot
-   * differently. Linking the winner's game under the loser's players would make the tournament and
-   * the event log disagree about who played; refusing fails the loser's update before it is saved,
-   * and its retry recomputes the pairing from the version the winner wrote. ADR-0152.
-   */
-  private async existing(gameId: string, input: LaunchInput): Promise<{ gameId: string }> {
+  /** The stored game if it is this pairing's, or null if another pairing holds the slot. */
+  private async existing(gameId: string, input: LaunchInput): Promise<{ gameId: string } | null> {
     const created = (await this.events.load(gameId))[0]?.event;
     const same = created?.type === 'GameCreated'
       && created.players.white === input.white
@@ -66,10 +80,16 @@ export class DurableGameLauncher implements GameLauncher {
       && created.variant === input.variant
       // Key order is not compared: PostgreSQL stores the payload as JSONB, which reorders keys.
       && isDeepStrictEqual(created.timeControl, input.timeControl);
-    if (!same) throw new Error(`launch slot ${input.tournamentId}/${input.matchId}#${input.attempt} already holds a different game`);
-    return { gameId };
+    return same ? { gameId } : null;
   }
 }
+
+/**
+ * How many consecutive attempts of one slot a launch walks past. Each occupied attempt is a lost
+ * race whose game was left unlinked, so eight in a row does not happen in practice; failing after
+ * them leaves the operation to its caller's retry instead of looping.
+ */
+const MAX_SLOT_PROBES = 8;
 
 /** SHA-256 of the launch identity. Both the game id and the Chess960 start position derive from it. */
 function launchDigest(input: LaunchInput): Buffer {

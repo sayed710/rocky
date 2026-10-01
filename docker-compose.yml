@@ -139,6 +139,7 @@ services:
       NODE_ENV: production
       BOT_AUTO_ANALYZE: ${BOT_AUTO_ANALYZE:-1}
       ANTICHEAT_AUTO_ANALYZE: ${ANTICHEAT_AUTO_ANALYZE:-1}
+      TRUST_SCAN_MS: ${TRUST_SCAN_MS:-30000}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4176/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s

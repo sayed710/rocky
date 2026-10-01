@@ -47,55 +47,67 @@ async function main(): Promise<void> {
     closePubSub = redis.close;
   }
 
-  const analyzers = await startTrustAnalyzers({ config, pool, eventStore: new PostgresEventStore(pool), pubsub, logger, scanIntervalMs });
-  logger.info('Trust worker started', { ...config, scanIntervalMs, wakeups: redisUrl ? 'redis' : 'none (periodic scan only)' });
-
-  const health = createServer((req, res) => {
-    if (req.url === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', service: 'trust-worker' }));
-      return;
-    }
-    if (req.url === '/ready') {
-      // The database only: Redis merely wakes the worker early, so its outage must not block a rollout.
-      void pool.query('SELECT 1').then(() => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ready', service: 'trust-worker' }));
-      }).catch((error: unknown) => {
-        logger.warn('readiness check failed', { error: String(error) });
-        res.writeHead(503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ status: 'unavailable', service: 'trust-worker' }));
-      });
-      return;
-    }
-    res.writeHead(404);
-    res.end();
-  });
-  await new Promise<void>((resolve, reject) => {
-    health.once('error', reject);
-    health.listen(healthPort, host, () => resolve());
-  });
-
+  // Signals are handled from here on, whatever startup step is in flight: shutdown stops only
+  // what has started, and a signal during startup ends the process once that cleanup is done.
+  let analyzers: Awaited<ReturnType<typeof startTrustAnalyzers>> | undefined;
+  let health: ReturnType<typeof createServer> | undefined;
   let shuttingDown = false;
-  const shutdown = (): void => {
-    if (shuttingDown) return;
+  const shutdown = async (code: number): Promise<never> => {
     shuttingDown = true;
-    logger.info('Shutdown signal received; finishing the game in progress');
-    void (async () => {
-      try {
-        await analyzers.stop();
-        await new Promise<void>((resolve) => health.close(() => resolve()));
-        await closePubSub?.();
-        await pool.end();
-      } catch (error) {
-        logger.error('Trust worker shutdown failed', { error: String(error) });
-        process.exitCode = 1;
-      }
-      process.exit();
-    })();
+    try {
+      await analyzers?.stop();
+      if (health?.listening) await new Promise<void>((resolve) => health!.close(() => resolve()));
+      await closePubSub?.();
+      await pool.end();
+    } catch (error) {
+      logger.error('Trust worker shutdown failed', { error: String(error) });
+      code = 1;
+    }
+    process.exit(code);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  const onSignal = (): void => {
+    if (shuttingDown) return;
+    logger.info('Shutdown signal received; finishing the game in progress');
+    void shutdown(0);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
+  try {
+    // Health first, so a port conflict fails the start before any analysis begins.
+    health = createServer((req, res) => {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', service: 'trust-worker' }));
+        return;
+      }
+      if (req.url === '/ready') {
+        // The database only: Redis merely wakes the worker early, so its outage must not block a rollout.
+        void pool.query('SELECT 1').then(() => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ready', service: 'trust-worker' }));
+        }).catch((error: unknown) => {
+          logger.warn('readiness check failed', { error: String(error) });
+          res.writeHead(503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+          res.end(JSON.stringify({ status: 'unavailable', service: 'trust-worker' }));
+        });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    const server = health;
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(healthPort, host, () => resolve());
+    });
+    if (shuttingDown) return;
+    analyzers = await startTrustAnalyzers({ config, pool, eventStore: new PostgresEventStore(pool), pubsub, logger, scanIntervalMs });
+    logger.info('Trust worker started', { ...config, scanIntervalMs, wakeups: redisUrl ? 'redis' : 'none (periodic scan only)' });
+  } catch (error) {
+    logger.error('Failed to start trust worker', { error: error instanceof Error ? error.message : String(error) });
+    if (!shuttingDown) await shutdown(1);
+  }
 }
 
 void main().catch((error: unknown) => {

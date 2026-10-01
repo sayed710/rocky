@@ -4592,7 +4592,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - The detail view writes its audit row before it reads.
   - Transitions are `claim` (open→reviewing), then `resolve` or `dismiss` (assignee or admin only, with an optional internal note). Terminal states are final.
   - One shared rule decides refusals: a party to the report gets 403 (admins included), a stale `expectedVersion` gets 409 (checked before state), a wrong state gets 409, and a non-assignee gets 403.
-  - PostgreSQL locks the row and writes the update and its `audit_log` row in one transaction. Audit metadata holds identifiers, the state change and the previous assignee, never report or note text. Moderators never see reports about themselves.
+  - PostgreSQL locks the row and writes the update and its `audit_log` row in one transaction. Audit metadata holds identifiers, the state change and the previous assignee, never report or note text. Moderators never see reports they filed or are the subject of.
 - **First admin**: `npm run admin:bootstrap --workspace @chess-platform/persistence -- <user-id> <operator>` is an operator CLI with no HTTP surface. It runs one transaction with a 5 s `lock_timeout` and `LOCK TABLE roles IN SHARE ROW EXCLUSIVE MODE`. It refuses if any admin exists, and requires an existing non-bot account. It writes the role and a `roles.bootstrap_first_admin` audit row together (actor NULL; operator, `current_user` and `current_database()` in meta). It prints only `{granted, userId}`, exits 1 on any refusal, and has no force option.
 - **Trust worker**:
   - `services/gateway/src/trust-worker.ts` is a thin entrypoint in the gateway image. It composes `startTrustAnalyzers` (`packages/api/src/trust-analyzers.ts`, the existing durable reconciler consumers, unchanged) and starts no WebSocket server, authority, ownership or engine bot. It serves `/health` and a DB-only `/ready`.
@@ -4607,7 +4607,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
     - 250m/256Mi requests and 1 CPU/1Gi limits
     - typed `trustWorker.{enabled,botAnalysis,antiCheatAnalysis}`, with both-off refused
   - The first rollout backfills existing history once, which is documented.
-- **Tournament reporter**: the delegated architecture review challenged the topology and approved it. The reporter stays on every gateway replica, where duplicates are idempotent under the version CAS, and Helm now defaults it on with a typed boolean kill switch. The review also found a pre-existing race that the default made easier to reach: the launch id names the pairing slot but not its players, so two operations from one tournament version could link one game under the wrong players. `DurableGameLauncher` now refuses an existing game whose players, variant or time control differ, comparing key-order-insensitively because JSONB reorders keys.
+- **Tournament reporter**: the delegated architecture review challenged the topology and approved it. The reporter stays on every gateway replica, where duplicates are idempotent under the version CAS, and Helm now defaults it on with a typed boolean kill switch. The review also found a pre-existing race that the default made easier to reach: the launch id names the pairing slot but not its players, so two operations from one tournament version could link one game under the wrong players. `DurableGameLauncher` no longer links a game whose players, variant or time control differ (compared key-order-insensitively, because JSONB reorders keys). Instead it walks the slot's attempts and takes the first one that is free or holds this exact pairing. Every replica takes the same one. A plain refusal, the first version on PR #83, would have wedged a pairing behind a game left by a lost race (Greptile and Qodo exact-head findings).
 - **RED before the change**:
   - `player-reports.test.ts` failed 7/7 against `main` (404 where 201, 401, 403 or 200 were expected).
   - `player-reports.integration.test.ts` failed 5/5 (`relation "player_reports" does not exist`).
@@ -4615,7 +4615,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - The gateway test failed 4/4: with `BOT_AUTO_ANALYZE=1`, main's gateway kept running.
   - Helm had 18 new checks failing.
   - The launcher mismatch test failed.
-- **Falsification**: 27 disposable mutations were each caught, with sources backed up to disk and restored byte-identical:
+- **Falsification**: 32 disposable mutations were each caught, with sources backed up to disk and restored byte-identical:
   - remove admission
   - key by target
   - admit after the write
@@ -4643,10 +4643,15 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - JSON-text time-control comparison
   - list reports about the reader
   - note text in audit meta
+  - (after the exact-head review) the launcher linking another pairing's game
+  - the launcher refusing instead of probing
+  - the queue showing reports the reader filed (in-memory and SQL)
+  - the detail view open to the filer
 - **Delegated read-only reviews** (`agy-delegate`):
   - Gemini 3.8 Flash High hit its individual quota (429) on all five briefs. The owner's fallback, Claude Sonnet 4.6 via agy, hit its quota as well.
   - The five reviews (architecture, security, persistence/concurrency, deployment, test quality) then ran as read-only Claude subagents over the design and the implementation patch. All approved with changes and found no blocker.
   - Fixed from them: conflict of interest, the daily bucket, FK retention, the launcher race, the route and audit rename, the grace period, DB-only readiness, a tolerated leftover `"0"`, the previous assignee in audit, lock timeout, `FOR KEY SHARE`, a `stopping` check per page, and nine added Postgres, entrypoint and Helm tests.
+- **Exact-head review of `68da365`**: all CI checks green. Greptile, Qodo and CodeRabbit raised four valid findings, all fixed: the launcher wedge, a filer reading a report's state and note, `TRUST_SCAN_MS` missing from Compose, and worker signal handling during startup.
 - **Validation**:
   - build and lint
   - every `check:*` guard

@@ -80,8 +80,8 @@ export type PlayerReportTransitionResult =
 export interface PlayerReportQuery {
   readonly status: PlayerReportStatus;
   readonly subjectId: string | null;
-  /** Leave out reports about this player: the moderator reading the queue. */
-  readonly excludeSubjectId: string;
+  /** Leave out reports this player filed or is the subject of: the moderator reading the queue. */
+  readonly excludeParty: string;
   /** Keyset cursor: return reports with an id greater than this one. */
   readonly after: string | null;
   readonly limit: number;

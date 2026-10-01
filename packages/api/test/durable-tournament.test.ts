@@ -56,26 +56,46 @@ test('durable live view reconstructs linked active games from the event log', as
 
 /**
  * The launch identity names the pairing slot, not the players: two operations racing from one
- * tournament version can pair the same slot differently (a reporter recording a result and an API
- * registration, say). The loser must refuse the winner's game, not link it under the wrong players.
+ * tournament version can pair the same slot differently, and a game left by an operation that lost
+ * its version CAS stays in the slot. A launch must neither link that game under other players nor
+ * be refused (which would wedge the pairing): it takes the next attempt of the slot, and every
+ * launcher computing the same pairing takes the same one.
  */
-test('a launch refuses an existing game for its slot that was created for other players', async () => {
+async function playersOf(events: InMemoryEventStore, gameId: string) {
+  const created = (await events.load(gameId))[0]?.event;
+  assert.ok(created?.type === 'GameCreated');
+  return { white: created.players.white, black: created.players.black, variant: created.variant, timeControl: created.timeControl };
+}
+
+test('a slot held by a game of another pairing moves the launch to the next attempt, never to the wrong game', async () => {
   const events = new InMemoryEventStore();
   const launcher = new DurableGameLauncher(events, { now: () => 1234 });
-  const { gameId } = await launcher.launch(input);
-  assert.deepEqual(await launcher.launch(input), { gameId }, 'the same pairing still converges');
-  for (const other of [
+  const { gameId: held } = await launcher.launch(input);
+  assert.deepEqual(await launcher.launch(input), { gameId: held }, 'the same pairing still converges');
+  for (const [i, other] of [
     { ...input, white: 'carol' },
     { ...input, black: 'carol' },
     { ...input, white: 'bob', black: 'alice' },
     { ...input, variant: 'chess960' },
     { ...input, timeControl: { initialMs: 30_000, incrementMs: 0, delayMs: 0, kind: 'increment' } },
-  ]) {
-    await assert.rejects(launcher.launch(other), /different game/, JSON.stringify(other));
+  ].entries()) {
+    const { gameId } = await launcher.launch(other);
+    assert.notEqual(gameId, held, JSON.stringify(other));
+    assert.deepEqual(await playersOf(events, gameId), { white: other.white, black: other.black, variant: other.variant, timeControl: other.timeControl });
+    // Each earlier pairing in this loop already holds an attempt, so this one takes the first free one.
+    assert.equal(gameId, launchGameId({ ...other, attempt: other.attempt + i + 1 }), 'the first free attempt of the same slot');
+    assert.deepEqual(await new DurableGameLauncher(events, { now: () => 9 }).launch(other), { gameId }, 'another replica converges on it');
   }
-  const racing = await Promise.allSettled([
-    new DurableGameLauncher(events, { now: () => 1 }).launch({ ...input, matchId: 'a:7', white: 'ivan', black: 'pat' }),
-    new DurableGameLauncher(events, { now: () => 1 }).launch({ ...input, matchId: 'a:7' }),
-  ]);
-  assert.deepEqual(racing.map((r) => r.status).sort(), ['fulfilled', 'rejected'], 'one pairing wins the slot; the other is refused');
+  assert.deepEqual(await playersOf(events, held), { white: 'alice', black: 'bob', variant: 'standard', timeControl: input.timeControl }, 'the held game is untouched');
+});
+
+test('two pairings racing for one slot each get their own game', async () => {
+  const events = new InMemoryEventStore();
+  const pairings = [{ ...input, matchId: 'a:7', white: 'ivan', black: 'pat' }, { ...input, matchId: 'a:7' }];
+  const launched = await Promise.all(pairings.map((p) => new DurableGameLauncher(events, { now: () => 1 }).launch(p)));
+  assert.notEqual(launched[0]!.gameId, launched[1]!.gameId);
+  for (const [i, p] of pairings.entries()) {
+    const stored = await playersOf(events, launched[i]!.gameId);
+    assert.deepEqual([stored.white, stored.black], [p.white, p.black]);
+  }
 });

@@ -262,6 +262,10 @@ test('nobody triages a report they are party to, admins included', async () => {
     const listed = await h.json('GET', '/v1/moderation/player-reports?status=open', { token: modSubject.token });
     assert.ok(!listed.body.items.some((r: { id: string }) => r.id === aboutMod), 'a moderator never sees the queue entries about them');
     assert.ok(listed.body.items.some((r: { id: string }) => r.id === byMod));
+    // Nor does a moderator who filed a report see its state or the internal note.
+    assert.equal((await h.json('GET', `/v1/moderation/player-reports/${byMod}`, { token: modReporter.token })).status, 403);
+    const filerView = await h.json('GET', '/v1/moderation/player-reports?status=open', { token: modReporter.token });
+    assert.ok(!filerView.body.items.some((r: { id: string }) => r.id === byMod), 'a moderator does not see the reports they filed');
 
     // Someone else can, and an admin closing another moderator's claim is recorded as an override.
     assert.equal((await claim(other.token, aboutMod)).status, 200);

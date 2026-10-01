@@ -205,6 +205,13 @@ test('on PostgreSQL, a report is never read without its audit row, and parties c
 
     assert.equal((await call(a, 'POST', `/v1/moderation/player-reports/${id}/transition`, { token: modSubject.token, body: { action: 'claim', expectedVersion: 1 } })).status, 403);
     assert.equal((await call(a, 'GET', `/v1/moderation/player-reports/${id}`, { token: modSubject.token })).status, 403);
+    // In the SQL queue too, nobody sees a report they are party to, as subject or as filer.
+    const modFiler = await makeUser('modfiler', ['moderator']);
+    const filed = (await call(a, 'POST', '/v1/reports', { token: modFiler.token, body: { subjectId: reporter.userId, reason: 'spam' } })).body.id;
+    const queueOf = async (token: string) => (await call(a, 'GET', '/v1/moderation/player-reports?status=open', { token })).body.items.map((r: { id: string }) => r.id);
+    assert.ok(!(await queueOf(modSubject.token)).includes(id), 'the subject does not see it');
+    assert.ok(!(await queueOf(modFiler.token)).includes(filed), 'the filer does not see it');
+    assert.deepEqual((await queueOf(mod.token)).sort(), [id, filed].sort(), 'an uninvolved moderator sees both');
 
     await pool.query(`CREATE FUNCTION refuse_view_audit() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN IF NEW.action = 'player_reports.view' THEN RAISE EXCEPTION 'audit unavailable'; END IF; RETURN NEW; END $$`);
