@@ -152,11 +152,14 @@ spec:
                 configMapKeyRef:
                   name: {{ include "gambit.configMapName" . }}
                   key: TRUST_PROXY
+            {{- if not (kindIs "bool" .Values.gateway.tournamentReporter.enabled) }}
+            {{- fail "gateway.tournamentReporter.enabled must be a boolean: a quoted string such as \"false\" is truthy" }}
+            {{- end }}
             {{- if .Values.gateway.tournamentReporter.enabled }}
-            # M9 inc 13 (ADR-0025): tournament result reporter. Every gateway
-            # replica runs one when enabled; version CAS on the tournaments
-            # table makes duplicate recording attempts safe (loser logs a
-            # benign already-recorded error and moves on).
+            # M9 inc 13 (ADR-0025, ADR-0152): tournament result reporter, on by
+            # default so a release that serves tournaments records their results.
+            # Every gateway replica runs one: launch ids are deterministic and the
+            # tournaments table is version-CAS'd, so a duplicate attempt is a no-op.
             - name: TOURNAMENT_REPORTER
               value: "1"
             - name: TOURNAMENT_REPORTER_SCAN_MS

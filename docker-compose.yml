@@ -101,8 +101,8 @@ services:
       # Redis pub/sub for multi-node fanout (M14 inc 3, ADR-0008).
       REDIS_URL: redis://redis:6379
       # Tournament result reporter (M9 inc 13, ADR-0025): records tournament
-      # and arena results from ended-game broadcasts. Single gateway node in
-      # compose, so exactly one reporter instance runs.
+      # and arena results from committed endings, and advances rounds. On by
+      # default here and in Helm (ADR-0152); set 0 only to turn it off on purpose.
       TOURNAMENT_REPORTER: ${TOURNAMENT_REPORTER:-1}
       # "Play vs Computer" (M14 inc 13, ADR-0080). The gateway builds an EngineBotMover only when
       # this is "1" and STOCKFISH_PATH points at a real binary — the image installs Stockfish and
@@ -110,6 +110,37 @@ services:
       ENGINE_BOT: ${ENGINE_BOT:-1}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4176/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # The one host of bot-timing and engine anti-cheat analysis of finished games (ADR-0152). Same
+  # image as the gateway (it ships Stockfish and sets STOCKFISH_PATH), thin entrypoint: no WebSocket
+  # server, no game authority, no ports. It works from the durable terminal-event inbox, so it
+  # catches up on anything that finished while it was down; Redis only wakes it early. The gateway
+  # refuses BOT_AUTO_ANALYZE / ANTICHEAT_AUTO_ANALYZE, so no second copy can run there.
+  trust-worker:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    command: ["node", "services/gateway/dist/trust-worker.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://gambit:${POSTGRES_PASSWORD:-gambit_dev}@postgres:5432/gambit
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      BOT_AUTO_ANALYZE: ${BOT_AUTO_ANALYZE:-1}
+      ANTICHEAT_AUTO_ANALYZE: ${ANTICHEAT_AUTO_ANALYZE:-1}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4176/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10

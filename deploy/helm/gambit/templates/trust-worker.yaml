@@ -1,0 +1,128 @@
+{{/*
+Trust worker Deployment (ADR-0152).
+
+The one host of bot-timing and engine anti-cheat analysis of finished games.
+A Deployment cannot vary env per pod, so analysis hosted on the scalable
+gateway would run once per replica; the gateway now refuses the analyzer flags
+and this single-replica Deployment owns them.
+
+Notes:
+- `replicas: 1` is hard-coded, not a value, like the search indexer's.
+- The thin `trust-worker.js` entrypoint runs no WebSocket server, game
+  authority, ownership registry or engine bot. It needs no access-token secret.
+- No Service and no Ingress; the NetworkPolicy admits no inbound traffic. The
+  only port is the health port the kubelet probes.
+- Work comes from the durable terminal-event inbox (committed GameEnded rows
+  plus per-consumer receipts), rescanned on start and periodically; Redis only
+  wakes it early. So RollingUpdate with maxSurge 1 / maxUnavailable 0 is safe:
+  the brief overlap repeats at most an idempotent analysis, and no gap loses a
+  game either way.
+- Not part of rollout.strategy: blue/green and canary apply to api and web.
+*/}}
+{{- range $key := list "enabled" "botAnalysis" "antiCheatAnalysis" }}
+{{- if not (kindIs "bool" (index $.Values.trustWorker $key)) }}
+{{- fail (printf "trustWorker.%s must be a boolean: a quoted string such as \"false\" is truthy" $key) }}
+{{- end }}
+{{- end }}
+{{- if .Values.trustWorker.enabled }}
+{{- if not (or .Values.trustWorker.botAnalysis .Values.trustWorker.antiCheatAnalysis) }}
+{{- fail "trustWorker has both analyzers off; set trustWorker.enabled=false instead" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gambit.fullname" . }}-trust-worker
+  labels:
+    {{- include "gambit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trust-worker
+spec:
+  # Pinned to 1 on purpose — see the header comment. Do not parameterize.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "gambit.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: trust-worker
+  template:
+    metadata:
+      labels:
+        {{- include "gambit.labels" . | nindent 8 }}
+        app.kubernetes.io/component: trust-worker
+    spec:
+      # Shutdown lets the game in progress finish. A long game's engine analysis at one CPU can run
+      # for minutes; one cut short is simply redone (it was never acknowledged), so this only bounds
+      # wasted work, never correctness.
+      terminationGracePeriodSeconds: 300
+      initContainers:
+        {{- /* The API runs migrations in its init container; Ready means the schema exists. */}}
+        - name: wait-for-api
+          image: "{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
+          imagePullPolicy: {{ .Values.images.api.pullPolicy | quote }}
+          command:
+            - sh
+            - -c
+            - 'until node -e "fetch(''http://{{ include "gambit.fullname" . }}-api:{{ .Values.api.port }}/v1/ready'').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; do echo "Waiting for API readiness..."; sleep 2; done'
+      containers:
+        - name: trust-worker
+          image: "{{ .Values.images.gateway.repository }}:{{ .Values.images.gateway.tag }}"
+          imagePullPolicy: {{ .Values.images.gateway.pullPolicy | quote }}
+          command: ["node", "services/gateway/dist/trust-worker.js"]
+          ports:
+            - name: health
+              containerPort: {{ .Values.gateway.healthPort }}
+              protocol: TCP
+          env:
+            {{- if .Values.postgres.enabled }}
+            # POSTGRES_PASSWORD MUST appear before DATABASE_URL so $(POSTGRES_PASSWORD)
+            # expands correctly.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gambit.secretName" . }}
+                  key: POSTGRES_PASSWORD
+            {{- end }}
+            - name: DATABASE_URL
+              value: {{ include "gambit.databaseUrl" . | quote }}
+            - name: REDIS_URL
+              value: {{ include "gambit.redisUrl" . | quote }}
+            - name: HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "gambit.configMapName" . }}
+                  key: GATEWAY_HOST
+            - name: HEALTH_PORT
+              value: {{ .Values.gateway.healthPort | quote }}
+            - name: NODE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "gambit.configMapName" . }}
+                  key: NODE_ENV
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: BOT_AUTO_ANALYZE
+              value: {{ ternary "1" "0" .Values.trustWorker.botAnalysis | quote }}
+            - name: ANTICHEAT_AUTO_ANALYZE
+              value: {{ ternary "1" "0" .Values.trustWorker.antiCheatAnalysis | quote }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.trustWorker.resources | nindent 12 }}
+{{- end }}
