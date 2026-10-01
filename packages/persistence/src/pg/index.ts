@@ -27,4 +27,6 @@ export * from './achievements-game-source';
 export * from './studies';
 export * from './learning';
 export * from './study-partner';
+export * from './player-reports';
+export * from './first-admin';
 export * from './analysis-cache';
