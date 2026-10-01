@@ -5,7 +5,7 @@
  * emit exactly these shapes and the spec builder references them by name.
  */
 
-import { SPEEDS } from '@chess-platform/persistence';
+import { PLAYER_REPORT_ACTIONS, PLAYER_REPORT_DETAIL_MAX, PLAYER_REPORT_NOTE_MAX, PLAYER_REPORT_REASONS, PLAYER_REPORT_STATUSES, SPEEDS } from '@chess-platform/persistence';
 import { ROLES, SEEK_COLORS, TIME_CONTROL_KINDS, VARIANTS, CREATABLE_VARIANTS } from '../domain';
 import { DEFAULT_ANALYSIS_LIMITS } from '../analysis/limits';
 import { MAX_EXPLORED_PLIES } from '../openings/opening-exploration-service';
@@ -1049,6 +1049,103 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
       total: { type: 'integer' },
       items: { type: 'array', items: { $ref: '#/components/schemas/BlockEdgeView' } },
     },
+  },
+
+  // --- Player reports (ADR-0152) ---
+  CreatePlayerReportRequest: {
+    type: 'object',
+    required: ['subjectId', 'reason'],
+    properties: {
+      subjectId: { type: 'string', format: 'uuid' },
+      gameId: { type: 'string', format: 'uuid', description: 'A game the reported player played in.' },
+      reason: { type: 'string', enum: [...PLAYER_REPORT_REASONS] },
+      detail: {
+        type: 'string',
+        maxLength: PLAYER_REPORT_DETAIL_MAX,
+        description: 'Plain text, trimmed. Never interpreted as HTML.',
+      },
+    },
+    additionalProperties: false,
+  },
+
+  PlayerReportReceipt: {
+    type: 'object',
+    description: 'What the reporter submitted. Carries no moderation state.',
+    required: ['id', 'subjectId', 'gameId', 'reason', 'detail', 'createdAt'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      subjectId: { type: 'string', format: 'uuid' },
+      gameId: nullable({ type: 'string', format: 'uuid' }),
+      reason: { type: 'string', enum: [...PLAYER_REPORT_REASONS] },
+      detail: nullable({ type: 'string', description: 'Plain text.' }),
+      createdAt: dateTime,
+    },
+    additionalProperties: false,
+  },
+
+  ModerationReportSummary: {
+    type: 'object',
+    description: 'A queue row. Omits the report text and the moderator note.',
+    required: ['id', 'reporterId', 'subjectId', 'gameId', 'reason', 'status', 'assignedTo', 'version', 'createdAt', 'closedAt'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      reporterId: { type: 'string', format: 'uuid' },
+      subjectId: { type: 'string', format: 'uuid' },
+      gameId: nullable({ type: 'string', format: 'uuid' }),
+      reason: { type: 'string', enum: [...PLAYER_REPORT_REASONS] },
+      status: { type: 'string', enum: [...PLAYER_REPORT_STATUSES] },
+      assignedTo: nullable({ type: 'string', format: 'uuid' }),
+      version: { type: 'integer', minimum: 1, description: 'The compare-and-set token for the next transition.' },
+      createdAt: dateTime,
+      closedAt: nullable(dateTime),
+    },
+    additionalProperties: false,
+  },
+
+  ModerationReportPage: {
+    type: 'object',
+    required: ['items', 'nextAfter'],
+    properties: {
+      items: { type: 'array', items: { $ref: '#/components/schemas/ModerationReportSummary' } },
+      nextAfter: nullable({ type: 'string', format: 'uuid', description: 'Pass as `after` for the next page; null on the last.' }),
+    },
+    additionalProperties: false,
+  },
+
+  ModerationReport: {
+    type: 'object',
+    description: 'The full report, for moderators and admins only. Reading it is audited.',
+    required: ['id', 'reporterId', 'subjectId', 'gameId', 'reason', 'status', 'assignedTo', 'version', 'createdAt', 'closedAt', 'detail', 'moderatorNote'],
+    properties: {
+      id: { type: 'string', format: 'uuid' },
+      reporterId: { type: 'string', format: 'uuid' },
+      subjectId: { type: 'string', format: 'uuid' },
+      gameId: nullable({ type: 'string', format: 'uuid' }),
+      reason: { type: 'string', enum: [...PLAYER_REPORT_REASONS] },
+      status: { type: 'string', enum: [...PLAYER_REPORT_STATUSES] },
+      assignedTo: nullable({ type: 'string', format: 'uuid' }),
+      version: { type: 'integer', minimum: 1 },
+      createdAt: dateTime,
+      closedAt: nullable(dateTime),
+      detail: nullable({ type: 'string', description: 'Plain text written by the reporter.' }),
+      moderatorNote: nullable({ type: 'string', description: 'Internal; never shown to players.' }),
+    },
+    additionalProperties: false,
+  },
+
+  ModerationReportTransitionRequest: {
+    type: 'object',
+    required: ['action', 'expectedVersion'],
+    properties: {
+      action: { type: 'string', enum: [...PLAYER_REPORT_ACTIONS] },
+      expectedVersion: { type: 'integer', minimum: 1, maximum: 2147483647 },
+      note: {
+        type: 'string',
+        maxLength: PLAYER_REPORT_NOTE_MAX,
+        description: 'Internal note, on resolve or dismiss only. Plain text.',
+      },
+    },
+    additionalProperties: false,
   },
 
   SendFriendRequestRequest: {

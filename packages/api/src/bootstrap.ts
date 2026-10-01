@@ -35,6 +35,7 @@ import {
   PgStudiesRepository,
   PgLearningRepository,
   PgStudyPartnerRepository,
+  PgPlayerReportsRepository,
   missingMigrations,
 } from '@chess-platform/persistence/pg';
 import { HashingEmbeddingProvider, SEARCH_EMBEDDING_DIMENSIONS } from '@chess-platform/search';
@@ -156,6 +157,7 @@ export function createPgRepositories(
     antiCheat: new PgAntiCheatReportRepository(pool),
     botReports: new PgBotBehaviorReportRepository(pool),
     studyPartner: new PgStudyPartnerRepository(pool),
+    playerReports: new PgPlayerReportsRepository(pool),
   };
 }
 

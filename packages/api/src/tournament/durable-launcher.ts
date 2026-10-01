@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { CHESS960_POSITIONS, type Variant } from '@chess-platform/core';
 import { Game, type TimeControl } from '@chess-platform/game';
 import type { EventStore } from '@chess-platform/persistence';
@@ -21,7 +22,7 @@ export class DurableGameLauncher implements GameLauncher {
 
   async launch(input: LaunchInput): Promise<{ gameId: string }> {
     const gameId = launchGameId(input);
-    if (await this.events.exists(gameId)) return { gameId };
+    if (await this.events.exists(gameId)) return this.existing(gameId, input);
 
     const variant = input.variant as Variant;
     const { events } = Game.create({
@@ -43,7 +44,29 @@ export class DurableGameLauncher implements GameLauncher {
       // A concurrent replica may have won the deterministic-id race. Only
       // accept that failure when the exact game now exists durably.
       if (!(await this.events.exists(gameId))) throw error;
+      return this.existing(gameId, input);
     }
+    return { gameId };
+  }
+
+  /**
+   * Accept a game already stored under this launch identity only if it is this pairing's game.
+   *
+   * The identity names the pairing slot, not who plays in it, so two operations racing from one
+   * tournament version (a reporter recording a result, an API registration) can pair the same slot
+   * differently. Linking the winner's game under the loser's players would make the tournament and
+   * the event log disagree about who played; refusing fails the loser's update before it is saved,
+   * and its retry recomputes the pairing from the version the winner wrote. ADR-0152.
+   */
+  private async existing(gameId: string, input: LaunchInput): Promise<{ gameId: string }> {
+    const created = (await this.events.load(gameId))[0]?.event;
+    const same = created?.type === 'GameCreated'
+      && created.players.white === input.white
+      && created.players.black === input.black
+      && created.variant === input.variant
+      // Key order is not compared: PostgreSQL stores the payload as JSONB, which reorders keys.
+      && isDeepStrictEqual(created.timeControl, input.timeControl);
+    if (!same) throw new Error(`launch slot ${input.tournamentId}/${input.matchId}#${input.attempt} already holds a different game`);
     return { gameId };
   }
 }

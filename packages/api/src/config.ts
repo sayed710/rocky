@@ -192,6 +192,20 @@ export interface RateLimitConfig {
   readonly friendRequestRepeat: {
     readonly perPair: RateLimitEndpointConfig;
   };
+  /**
+   * Reporting a player to the moderators. Keyed by the reporter and the reporter's address, never
+   * by the reported player, so nobody can spend a victim's ability to report or be protected.
+   */
+  readonly playerReport: {
+    readonly perUser: RateLimitEndpointConfig;
+    /** The same reporter over a day, so the hourly budget cannot be spent around the clock. */
+    readonly perUserDaily: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
+  /** Reports from one reporter about one player, charged alongside `playerReport`; reporter first. */
+  readonly playerReportRepeat: {
+    readonly perPair: RateLimitEndpointConfig;
+  };
   readonly analysis: {
     readonly perUser: RateLimitEndpointConfig;
     readonly perIp: RateLimitEndpointConfig;
@@ -331,6 +345,22 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   friendRequestRepeat: {
     perPair: { maxRequests: 3, windowMs: 24 * 60 * 60 * 1000 }, // 3 / 24 h per sender → recipient
   },
+  // A report lands in a human moderator's queue, and an honest player files a handful, not a
+  // stream: the hourly shape of the other rarely-repeated creations (`register`, `teamCreation`),
+  // with the same 10-account margin on the address for a shared NAT.
+  // The hourly budget alone still lets one account file 120 reports a day against 120 players, a
+  // mass-reporting campaign in its own right; a day holds four hours of the hourly allowance.
+  playerReport: {
+    perUser: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
+    perUserDaily: { maxRequests: 20, windowMs: 24 * 60 * 60 * 1000 }, // 20 / 24 h
+    perIp: { maxRequests: 50, windowMs: 60 * 60 * 1000 }, // 50 / 60 min
+  },
+  // Reporting the same player again is the repeat `friendRequestRepeat` bounds: here the reported
+  // player and the moderators bear the cost, so the same 3 a day — enough to report a second and
+  // third game against the same opponent.
+  playerReportRepeat: {
+    perPair: { maxRequests: 3, windowMs: 24 * 60 * 60 * 1000 }, // 3 / 24 h per reporter → subject
+  },
   // Analysis is a CPU-amplification surface, so it is limited more tightly than a read endpoint.
   analysis: {
     perUser: { maxRequests: 30, windowMs: 60 * 1000 }, // 30 / min
@@ -450,6 +480,8 @@ const WRITE_RATE_LIMITS = {
   forumThreadCreation: USER_AND_IP,
   forumPostCreation: USER_AND_IP,
   friendRequestRepeat: ['perPair'],
+  playerReport: ['perUser', 'perUserDaily', 'perIp'],
+  playerReportRepeat: ['perPair'],
 } as const;
 
 /** Fail startup on missing or unusable write budgets, including untyped runtime input. */

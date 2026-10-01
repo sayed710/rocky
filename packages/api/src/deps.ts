@@ -20,6 +20,7 @@ import type {
   WebAuthnCredentialsRepository,
   WebAuthnLoginChallengesRepository,
   StudyPartnerRepository,
+  PlayerReportsRepository,
   EventStore,
 } from '@chess-platform/persistence';
 import type { PasswordHasher } from './auth/password';
@@ -62,6 +63,7 @@ export interface Repositories {
   readonly antiCheat: AntiCheatReportRepository;
   readonly botReports: BotBehaviorReportRepository;
   readonly studyPartner: StudyPartnerRepository;
+  readonly playerReports: PlayerReportsRepository;
 }
 
 /** Everything `createApiServer` needs to construct the service. */

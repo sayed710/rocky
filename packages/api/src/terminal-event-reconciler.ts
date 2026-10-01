@@ -16,6 +16,8 @@ export class TerminalEventReconciler {
   private cursor: { gameId: string; seq: number } | null = null;
   /** Independent descending sweep of the finite range below a busy forward cursor. */
   private reverseCursor: { gameId: string; seq: number } | undefined;
+  /** Set by stop(): no further game is started, so shutdown waits for at most the current one. */
+  private stopping = false;
 
   constructor(
     private readonly pubsub: PubSub,
@@ -27,6 +29,7 @@ export class TerminalEventReconciler {
 
   async start(): Promise<void> {
     if (this.unsubscribe) return;
+    this.stopping = false;
     this.unsubscribe = this.pubsub.subscribe(gamesEndedChannel(), (message) => {
       if (message.t === 'ended') void this.scan().catch((error) => this.report('', error));
     });
@@ -54,6 +57,7 @@ export class TerminalEventReconciler {
   private async scanNow(): Promise<void> {
     await this.scanOlderWork();
     for (let pages = 0; pages < 10; pages += 1) {
+      if (this.stopping) return;
       const page = await this.inbox.pendingAfter(this.consumer, this.cursor, 100);
       if (page.length === 0) {
         this.cursor = null;
@@ -61,6 +65,7 @@ export class TerminalEventReconciler {
         return;
       }
       for (const work of page) {
+        if (this.stopping) return;
         const gameId = 'stored' in work ? work.stored.gameId : work.gameId;
         const seq = 'stored' in work ? work.stored.seq : work.seq;
         this.cursor = { gameId, seq };
@@ -78,6 +83,7 @@ export class TerminalEventReconciler {
       return;
     }
     for (const work of page) {
+      if (this.stopping) return;
       this.reverseCursor = {
         gameId: 'stored' in work ? work.stored.gameId : work.gameId,
         seq: 'stored' in work ? work.stored.seq : work.seq,
@@ -99,11 +105,17 @@ export class TerminalEventReconciler {
     }
   }
 
-  stop(): void {
+  /**
+   * Stop waking and scanning, and resolve once the game being processed, if any, has finished.
+   * An interrupted game was never acknowledged, so the next start processes it again.
+   */
+  async stop(): Promise<void> {
+    this.stopping = true;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    await this.scanInFlight?.catch(() => undefined);
   }
 
   private report(gameId: string, error: unknown): void {

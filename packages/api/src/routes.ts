@@ -9,7 +9,18 @@
 import { FenError } from '@chess-platform/core';
 import { coreFenValidator } from './analysis/fen-validator.js';
 import type { TiebreakKey } from '@chess-platform/tournament';
-import { DEFAULT_RATING, PlayerLockUnavailableError, type RatingRow, type TournamentsRepository } from '@chess-platform/persistence';
+import {
+  DEFAULT_RATING,
+  PLAYER_REPORT_ACTIONS,
+  PLAYER_REPORT_DETAIL_MAX,
+  PLAYER_REPORT_NOTE_MAX,
+  PLAYER_REPORT_REASONS,
+  PLAYER_REPORT_STATUSES,
+  PlayerLockUnavailableError,
+  type RatingRow,
+  type TournamentsRepository,
+} from '@chess-platform/persistence';
+import { moderationReportSummaryView, moderationReportView, playerReportReceiptView } from './moderation/report-presenters';
 import { AuthService } from './auth/service';
 import type { RequestMeta } from './auth/service';
 import { EMAIL_ADDRESS_PATTERN } from './email/address.js';
@@ -1230,6 +1241,191 @@ export function buildRouter(deps: RouteDeps): Router {
       return json(200, botGameAnalysisView(report));
     },
 
+  );
+
+  // --- Player reports (ADR-0152) -------------------------------------------
+  // Intake and human triage only: a report never bans, scores or resolves anyone by itself, and
+  // engine evidence (the anti-cheat and bot-detection routes above) informs a moderator, never a
+  // verdict. The reporter's text is plain text, and it never reaches the audit log.
+  router.post(
+    '/v1/reports',
+    doc({
+      summary: 'Report a player to the moderators',
+      description: 'Plain-text `detail` is stored verbatim (trimmed) and never interpreted as HTML. The response carries only what the reporter submitted.',
+      tags: ['player-reports'],
+      security: 'bearer',
+      requestSchema: 'CreatePlayerReportRequest',
+      responses: {
+        201: ['PlayerReportReceipt', 'Report filed'],
+        401: ['Error', 'Not signed in'],
+        404: ['Error', 'No such player'],
+        422: ['Error', 'Malformed request, self-report, or a game the reported player did not play'],
+        429: ['Error', 'Rate limit exceeded', RETRY_AFTER_HEADER],
+      },
+    }),
+    AUTHED,
+    async (ctx) => {
+      const actorId = requireAuth(ctx).userId;
+      const body = strictObject(ctx.body, ['subjectId', 'gameId', 'reason', 'detail']);
+      const subjectId = parseUuid(reqString(body, 'subjectId'), 'subjectId').toLowerCase();
+      const rawGameId = optString(body, 'gameId');
+      const gameId = rawGameId === undefined ? null : parseUuid(rawGameId, 'gameId').toLowerCase();
+      const reason = oneOf(reqString(body, 'reason'), PLAYER_REPORT_REASONS, 'reason');
+      const detail = optString(body, 'detail', { trim: true, max: PLAYER_REPORT_DETAIL_MAX }) || null;
+      if (subjectId === actorId.toLowerCase()) {
+        throw HttpError.validation('you cannot report yourself', { subjectId: 'must be another player' });
+      }
+      // Keyed by the reporter and their address, and the pair names the reporter first: no request
+      // anyone else sends can spend a victim's ability to report, or to be reported.
+      await admit([
+        { key: `player-report:user:${actorId}`, limit: config.rateLimit.playerReport.perUser },
+        { key: `player-report:user-day:${actorId}`, limit: config.rateLimit.playerReport.perUserDaily },
+        { key: `player-report:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.playerReport.perIp },
+        { key: `player-report:pair:${actorId}:${subjectId}`, limit: config.rateLimit.playerReportRepeat.perPair },
+      ]);
+      if (!(await repos.users.findById(subjectId))) throw HttpError.notFound('user not found');
+      if (gameId !== null) {
+        // The event log, not the rebuildable `games` projection, says who played.
+        const created = (await repos.events.load(gameId))[0]?.event;
+        const played = created?.type === 'GameCreated'
+          && (created.players.white === subjectId || created.players.black === subjectId);
+        if (!played) throw HttpError.validation('the reported player did not play that game', { gameId: 'not a game of this player' });
+      }
+      const report = await repos.playerReports.create({
+        id: ids.next(), reporterId: actorId, subjectId, gameId, reason, detail, createdAt: new Date(clock.now()),
+      });
+      return json(201, playerReportReceiptView(report));
+    },
+  );
+
+  router.get(
+    '/v1/moderation/player-reports',
+    doc({
+      summary: 'List player reports in one status, oldest first',
+      description: 'Reports about the caller are never listed. Re-read from the first page on each visit: the queue is keyset-paged by time-ordered id, so a report committed late behind a cursor shows up on the next pass from the head.',
+      tags: ['moderation', 'player-reports'],
+      security: 'bearer',
+      params: [
+        { name: 'status', in: 'query', required: true, description: 'Queue to list.', schema: { type: 'string', enum: [...PLAYER_REPORT_STATUSES] } },
+        { name: 'subjectId', in: 'query', required: false, description: 'Only reports about this player.', schema: { type: 'string', format: 'uuid' } },
+        { name: 'after', in: 'query', required: false, description: 'Keyset cursor: the `nextAfter` of the previous page.', schema: { type: 'string', format: 'uuid' } },
+        limitParam(),
+      ],
+      responses: {
+        200: ['ModerationReportPage', 'One page of reports, without report text'],
+        401: ['Error', 'Not signed in'],
+        403: ['Error', 'Not a moderator or admin, or asking for reports about yourself'],
+        422: ['Error', 'Missing or malformed status, subject, cursor or limit'],
+      },
+    }),
+    MODERATION,
+    async (ctx) => {
+      const actor = requireAuth(ctx);
+      const status = oneOf(ctx.query.get('status') ?? '', PLAYER_REPORT_STATUSES, 'status');
+      const rawSubject = ctx.query.get('subjectId');
+      const subjectId = rawSubject === null ? null : parseUuid(rawSubject, 'subjectId').toLowerCase();
+      const rawAfter = ctx.query.get('after');
+      const after = rawAfter === null ? null : parseUuid(rawAfter, 'after').toLowerCase();
+      const limit = parseLimit(ctx.query, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
+      if (subjectId === actor.userId.toLowerCase()) throw HttpError.forbidden('reports about you are handled by other moderators');
+      // The queue names who reported whom, so reading it is audited like reading a report.
+      await repos.audit.record({
+        actorId: actor.userId, action: 'player_reports.list', target: subjectId, meta: { status },
+        requestId: ctx.requestId, traceId: ctx.traceId, ip: ctx.ip, userAgent: ctx.userAgent, at: clock.now(),
+      });
+      // Nobody sees the reports about themselves, so a reported moderator cannot learn who reported them.
+      const rows = await repos.playerReports.list({ status, subjectId, after, limit: limit + 1, excludeSubjectId: actor.userId.toLowerCase() });
+      const items = rows.slice(0, limit);
+      return json(200, {
+        items: items.map(moderationReportSummaryView),
+        nextAfter: rows.length > limit ? items[items.length - 1]!.id : null,
+      });
+    },
+  );
+
+  router.get(
+    '/v1/moderation/player-reports/:id',
+    doc({
+      summary: 'Read one player report, including its text and the moderator note',
+      tags: ['moderation', 'player-reports'],
+      security: 'bearer',
+      params: [pathParam('id', 'Report ID (UUID)')],
+      responses: {
+        200: ['ModerationReport', 'The report'],
+        401: ['Error', 'Not signed in'],
+        403: ['Error', 'Not a moderator or admin, or the report is about you'],
+        404: ['Error', 'No such report'],
+        422: ['Error', 'Malformed report ID'],
+      },
+    }),
+    MODERATION,
+    async (ctx) => {
+      const actor = requireAuth(ctx);
+      const id = parseUuid(ctx.params['id']!, 'id').toLowerCase();
+      // Audit the access before reading, so nobody sees a report without a row saying so (ADR-0033).
+      await repos.audit.record({
+        actorId: actor.userId, action: 'player_reports.view', target: id,
+        requestId: ctx.requestId, traceId: ctx.traceId, ip: ctx.ip, userAgent: ctx.userAgent, at: clock.now(),
+      });
+      const report = await repos.playerReports.findById(id);
+      if (!report) throw HttpError.notFound('report not found');
+      if (report.subjectId === actor.userId.toLowerCase()) throw HttpError.forbidden('reports about you are handled by other moderators');
+      return json(200, moderationReportView(report));
+    },
+  );
+
+  router.post(
+    '/v1/moderation/player-reports/:id/transition',
+    doc({
+      summary: 'Claim, resolve or dismiss a player report',
+      description: 'Compare-and-set on `expectedVersion`. `claim` takes an open report; `resolve` and `dismiss` close one under review and may carry an internal note. Only the moderator who claimed a report, or an admin, may close it. Resolved and dismissed are final.',
+      tags: ['moderation', 'player-reports'],
+      security: 'bearer',
+      params: [pathParam('id', 'Report ID (UUID)')],
+      requestSchema: 'ModerationReportTransitionRequest',
+      responses: {
+        200: ['ModerationReport', 'The report after the transition'],
+        401: ['Error', 'Not signed in'],
+        403: ['Error', 'Not a moderator or admin, a party to the report, or closing a report someone else claimed'],
+        404: ['Error', 'No such report'],
+        409: ['Error', 'Stale expectedVersion, or the report is not in a state that allows this action'],
+        422: ['Error', 'Malformed request'],
+      },
+    }),
+    MODERATION,
+    async (ctx) => {
+      const actor = requireAuth(ctx);
+      const id = parseUuid(ctx.params['id']!, 'id').toLowerCase();
+      const body = strictObject(ctx.body, ['action', 'expectedVersion', 'note']);
+      const action = oneOf(reqString(body, 'action'), PLAYER_REPORT_ACTIONS, 'action');
+      const expectedVersion = optInt(body, 'expectedVersion', { min: 1, max: 2_147_483_647 });
+      if (expectedVersion === undefined) {
+        throw HttpError.validation('"expectedVersion" is required', { expectedVersion: 'must be an integer' });
+      }
+      const note = optString(body, 'note', { trim: true, max: PLAYER_REPORT_NOTE_MAX }) || null;
+      if (action === 'claim' && note !== null) {
+        throw HttpError.validation('a claim carries no note', { note: 'only resolve and dismiss take a note' });
+      }
+      const result = await repos.playerReports.transition({
+        id, action, actorId: actor.userId, actorIsAdmin: actor.roles.includes('admin'), expectedVersion, note,
+        at: new Date(clock.now()),
+        audit: { id: ids.next(), requestId: ctx.requestId, traceId: ctx.traceId, ip: ctx.ip, userAgent: ctx.userAgent },
+      });
+      switch (result.kind) {
+        case 'applied':
+          return json(200, moderationReportView(result.report));
+        case 'not_found':
+          throw HttpError.notFound('report not found');
+        case 'not_assignee':
+          throw HttpError.forbidden('only the moderator who claimed this report, or an admin, can close it');
+        case 'conflict_of_interest':
+          throw HttpError.forbidden('you filed this report or it is about you; another moderator must handle it');
+        case 'version_conflict':
+          throw HttpError.conflict('the report changed since you read it', { status: result.current.status, version: result.current.version });
+        case 'invalid_transition':
+          throw HttpError.conflict(`a ${result.current.status} report does not allow ${action}`, { status: result.current.status, version: result.current.version });
+      }
+    },
   );
 
   // --- Ratings / leaderboard ----------------------------------------------
