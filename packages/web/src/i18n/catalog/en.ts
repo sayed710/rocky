@@ -11,6 +11,8 @@ export const enMessages = {
   'shell.brand': 'Rookzen',
   'shell.skipBoard': 'Skip to board',
   'shell.themeToggle': 'Toggle light/dark theme',
+  'shell.themeToggle.toLight': 'Switch to light theme',
+  'shell.themeToggle.toDark': 'Switch to dark theme',
   'shell.flipBoard': 'Flip',
   'shell.flipBoardAria': 'Flip board',
   'shell.authStatus.notSignedIn': 'Not signed in',
@@ -688,6 +690,7 @@ export const enMessages = {
   'learning.studies.startPositionAria': 'Reset to starting position',
   'learning.studies.visibility': 'Visibility: {visibility}',
   'learning.studies.serviceUnavailable': 'Studies service unavailable.',
+  'learning.studies.moveAria': 'Move {fullmove} {turn} {san}{nags}',
 
   // Teams & Forum
   'community.teams.emptySearchTitle': 'No teams match that search',

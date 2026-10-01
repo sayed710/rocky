@@ -50,6 +50,7 @@ export function localizeShell(doc: Document, i18n: I18n): LocalizedShellHandle {
     // 2. Aria-label
     const ariaEls = doc.querySelectorAll<HTMLElement>('[data-i18n-aria-label]');
     for (const el of ariaEls) {
+      if (el.id === 'theme-toggle') continue;
       const key = el.dataset.i18nAriaLabel;
       if (key && isMessageKey(key)) {
         el.setAttribute('aria-label', i18n.t(key));
@@ -68,6 +69,7 @@ export function localizeShell(doc: Document, i18n: I18n): LocalizedShellHandle {
     // 4. Title
     const titleEls = doc.querySelectorAll<HTMLElement>('[data-i18n-title]');
     for (const el of titleEls) {
+      if (el.id === 'theme-toggle') continue;
       const key = el.dataset.i18nTitle;
       if (key && isMessageKey(key)) {
         el.setAttribute('title', i18n.t(key));

@@ -314,7 +314,12 @@ function renderBranchNodes(
     const playerTurn = item.turn === 'w' ? i18n.t('game.player.white') : i18n.t('game.player.black');
     btn.setAttribute(
       'aria-label',
-      `${playerTurn} ${item.fullmove} ${node.san}${nagsStr}`,
+      i18n.t('learning.studies.moveAria', {
+        fullmove: String(item.fullmove),
+        turn: playerTurn,
+        san: node.san,
+        nags: nagsStr,
+      }),
     );
 
     if (prefix) {

@@ -223,9 +223,10 @@ export function bootstrap(
         doc.documentElement.classList.toggle('dark', t === 'dark');
         doc.documentElement.classList.toggle('light', t === 'light');
         if (themeButtonEl) {
+          const labelKey = t === 'dark' ? 'shell.themeToggle.toLight' : 'shell.themeToggle.toDark';
           themeButtonEl.textContent = t === 'dark' ? '☀️' : '🌙';
-          themeButtonEl.setAttribute('aria-label', app.i18n.t('shell.themeToggle'));
-          themeButtonEl.setAttribute('title', app.i18n.t('shell.themeToggle'));
+          themeButtonEl.setAttribute('aria-label', app.i18n.t(labelKey));
+          themeButtonEl.setAttribute('title', app.i18n.t(labelKey));
         }
         if ('querySelector' in doc && typeof doc.querySelector === 'function') {
           const themeColor = doc.querySelector('meta[name="theme-color"]');
@@ -236,6 +237,9 @@ export function bootstrap(
     ...(deps?.storage !== undefined ? { storage: deps.storage } : typeof localStorage !== 'undefined' ? { storage: localStorage } : {}),
   });
   theme.emit();
+  const unsubThemeLocale = app.i18n.onLocaleChange(() => {
+    theme.emit();
+  });
 
   // --- Auth controller (always wired) ---
   const authErrorEl = doc.getElementById('auth-error');
@@ -271,6 +275,7 @@ export function bootstrap(
   const shellLocalization = {
     dispose: () => {
       unsubAuthLocale();
+      unsubThemeLocale();
       shellLocalizationHandle.dispose();
     },
   };
