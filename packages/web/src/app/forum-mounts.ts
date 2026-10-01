@@ -124,6 +124,13 @@ function renderForumIdentity(
   }
 }
 
+function renderForumNotFound(elements: ForumElements, i18n: I18nManager): void {
+  if (elements.title) elements.title.textContent = i18n.t('community.teams.notFoundTitle');
+  if (elements.list) elements.list.replaceChildren();
+  if (elements.form) elements.form.hidden = true;
+  if (elements.note) elements.note.textContent = i18n.t('community.teams.notFoundBody');
+}
+
 function createForumCallbacks(
   dependencies: ForumRenderDependencies,
   onThreadsLoaded?: (state: {
@@ -132,6 +139,7 @@ function createForumCallbacks(
     members: readonly TeamMembership[];
     names: ReadonlyMap<string, SocialPlayer>;
   }) => void,
+  onNotFoundTriggered?: () => void,
 ): ForumCallbacks {
   const { elements, slug, viewerId, setTeamId, i18n } = dependencies;
   return {
@@ -148,10 +156,8 @@ function createForumCallbacks(
       if (elements.error) elements.error.textContent = message;
     },
     onNotFound: () => {
-      if (elements.title) elements.title.textContent = i18n.t('community.teams.notFoundTitle');
-      if (elements.list) elements.list.replaceChildren();
-      if (elements.form) elements.form.hidden = true;
-      if (elements.note) elements.note.textContent = i18n.t('community.teams.notFoundBody');
+      onNotFoundTriggered?.();
+      renderForumNotFound(elements, i18n);
     },
   };
 }
@@ -214,9 +220,17 @@ function renderThreadDetail(
   }
 }
 
+function renderThreadNotFound(elements: ThreadElements, i18n: I18nManager): void {
+  if (elements.title) elements.title.textContent = i18n.t('community.forum.threadNotFoundTitle');
+  if (elements.posts) elements.posts.replaceChildren();
+  if (elements.form) elements.form.hidden = true;
+  if (elements.note) elements.note.textContent = i18n.t('community.forum.threadNotFoundBody');
+}
+
 function createThreadCallbacks(
   dependencies: ThreadRenderDependencies,
   onThreadLoaded?: (data: ThreadRenderData) => void,
+  onNotFoundTriggered?: () => void,
 ): ForumCallbacks {
   const { elements, viewerId, setTeamId, i18n } = dependencies;
   return {
@@ -234,10 +248,8 @@ function createThreadCallbacks(
       if (elements.error) elements.error.textContent = message;
     },
     onNotFound: () => {
-      if (elements.title) elements.title.textContent = i18n.t('community.forum.threadNotFoundTitle');
-      if (elements.posts) elements.posts.replaceChildren();
-      if (elements.form) elements.form.hidden = true;
-      if (elements.note) elements.note.textContent = i18n.t('community.forum.threadNotFoundBody');
+      onNotFoundTriggered?.();
+      renderThreadNotFound(elements, i18n);
     },
   };
 }
@@ -279,6 +291,7 @@ export function mountForum({
 }: ForumMountDependencies): ForumController {
   const elements = forumElements(doc);
   let teamId: string | null = null;
+  let isNotFound = false;
   let lastThreadsState: {
     team: TeamView;
     threads: readonly ForumThread[];
@@ -300,7 +313,11 @@ export function mountForum({
         i18n,
       },
       (state) => {
+        isNotFound = false;
         lastThreadsState = state;
+      },
+      () => {
+        isNotFound = true;
       },
     ),
     onDispose: () => {
@@ -309,7 +326,9 @@ export function mountForum({
   });
 
   unsubscribeLocale = i18n.onLocaleChange(() => {
-    if (lastThreadsState) {
+    if (isNotFound) {
+      renderForumNotFound(elements, i18n);
+    } else if (lastThreadsState) {
       renderForumIdentity(
         elements,
         slug,
@@ -339,6 +358,7 @@ export function mountForumThread({
 }: ThreadMountDependencies): ForumController {
   const elements = threadElements(doc);
   let teamId: string | null = null;
+  let isNotFound = false;
   let lastThreadData: ThreadRenderData | null = null;
   let unsubscribeLocale: (() => void) | undefined;
 
@@ -354,7 +374,11 @@ export function mountForumThread({
         i18n,
       },
       (data) => {
+        isNotFound = false;
         lastThreadData = data;
+      },
+      () => {
+        isNotFound = true;
       },
     ),
     onDispose: () => {
@@ -363,7 +387,9 @@ export function mountForumThread({
   });
 
   unsubscribeLocale = i18n.onLocaleChange(() => {
-    if (lastThreadData) {
+    if (isNotFound) {
+      renderThreadNotFound(elements, i18n);
+    } else if (lastThreadData) {
       renderThreadDetail(
         elements,
         lastThreadData,

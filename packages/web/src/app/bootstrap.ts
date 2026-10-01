@@ -52,7 +52,7 @@ import type { TeamsController } from './teams-controller.js';
 import type { MessagesController } from './messages-controller.js';
 import { ThemeToggle } from './theme-toggle.js';
 import { AuthController } from './auth-controller.js';
-import type { AuthSession } from './auth-controller.js';
+import type { AuthErrorInfo, AuthSession } from './auth-controller.js';
 import { mountPasswordRecovery } from './password-recovery-mount.js';
 import { mountEmailVerification } from './email-verification-mount.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
@@ -263,6 +263,7 @@ export function bootstrap(
   const authSectionEl = doc.getElementById('auth');
 
   let currentAuthSession: AuthSession | null = null;
+  let currentAuthError: AuthErrorInfo | null = null;
   const updateAuthStatus = (): void => {
     if (authStatusEl) {
       authStatusEl.textContent = currentAuthSession
@@ -277,9 +278,15 @@ export function bootstrap(
       playBotBtn.title = currentAuthSession === null ? app.i18n.t('bot.signInToPlay') : '';
     }
   };
+  const updateAuthError = (): void => {
+    if (authErrorEl && currentAuthError) {
+      authErrorEl.textContent = app.i18n.t(currentAuthError.key, currentAuthError.params);
+    }
+  };
   const unsubAuthLocale = app.i18n.onLocaleChange(() => {
     updateAuthStatus();
     updatePlayBotButton();
+    updateAuthError();
   });
   updateAuthStatus();
   updatePlayBotButton();
@@ -305,6 +312,10 @@ export function bootstrap(
     callbacks: {
       onSessionChange: (session) => {
         currentAuthSession = session;
+        if (session !== null) {
+          currentAuthError = null;
+          if (authErrorEl) authErrorEl.textContent = '';
+        }
         updateAuthStatus();
         updatePlayBotButton();
         // Show/hide the sign-in surface vs the logout button. The section is what hides, not just
@@ -320,6 +331,10 @@ export function bootstrap(
         commentarySessionHandler?.(session !== null);
       },
       onPending: (pending) => {
+        if (pending) {
+          currentAuthError = null;
+          if (authErrorEl) authErrorEl.textContent = '';
+        }
         if (authSubmitEl instanceof HTMLButtonElement) {
           authSubmitEl.disabled = pending;
         }
@@ -330,7 +345,8 @@ export function bootstrap(
           authPasskeyEl.disabled = pending;
         }
       },
-      onError: (msg) => {
+      onError: (msg, errorInfo) => {
+        currentAuthError = errorInfo ?? null;
         if (authErrorEl) authErrorEl.textContent = msg;
       },
       onStepUp: showStepUp,

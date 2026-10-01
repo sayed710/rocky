@@ -9,11 +9,13 @@ import type { GambitClient } from '../api/client.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { UnauthorizedError } from '../net/errors.js';
 
+export type EmailVerificationErrorKey = 'needsLink' | 'linkInvalid' | 'couldNotVerify';
+
 export interface EmailVerificationCallbacks {
   /** Called when an operation is in-flight (for UI spinner / disabled / aria-busy state). */
   onPending: (pending: boolean) => void;
   /** Called when an error occurs (for UI error display). */
-  onError: (message: string | null) => void;
+  onError: (message: string | null, errorKey?: EmailVerificationErrorKey | null) => void;
   /** Called when a success status message should be displayed. */
   onSuccess: (message: string | null) => void;
   /** Whether the surface should offer a retry control for the state just reported. */
@@ -54,6 +56,7 @@ export class EmailVerificationController {
       this.terminal = true;
       this.callbacks.onError(
         this.i18n.t('emailVerification.needsLink'),
+        'needsLink',
       );
       this.callbacks.onSuccess(null);
       this.callbacks.onRetryable(false);
@@ -62,7 +65,7 @@ export class EmailVerificationController {
 
     const generation = ++this.requestGeneration;
     const pendingGen = this.beginPending();
-    this.callbacks.onError(null);
+    this.callbacks.onError(null, null);
     this.callbacks.onSuccess(null);
     this.callbacks.onRetryable(false);
 
@@ -81,12 +84,14 @@ export class EmailVerificationController {
         if (err instanceof UnauthorizedError) {
           this.callbacks.onError(
             this.i18n.t('emailVerification.linkInvalid'),
+            'linkInvalid',
           );
           this.callbacks.onRetryable(false);
           this.terminal = true;
         } else {
           this.callbacks.onError(
             this.i18n.t('emailVerification.couldNotVerify'),
+            'couldNotVerify',
           );
           this.callbacks.onRetryable(true);
         }

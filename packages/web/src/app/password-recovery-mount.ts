@@ -1,7 +1,11 @@
 import type { GambitClient } from '../api/client.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { PasswordResetController } from './password-reset-controller.js';
-import type { PasswordResetCallbacks } from './password-reset-controller.js';
+import type {
+  PasswordResetCallbacks,
+  PasswordResetErrorKey,
+  PasswordResetStatusKey,
+} from './password-reset-controller.js';
 
 interface PasswordRecoveryElements {
   readonly requestView: HTMLElement | null;
@@ -87,19 +91,24 @@ function createPasswordResetCallbacks(
   onSessionInvalidated: () => void,
   i18n: I18nManager,
   recordPending?: (pending: boolean) => void,
-  recordFeedback?: (status: string | null, error: string | null) => void,
+  recordFeedback?: (
+    status: string | null,
+    error: string | null,
+    statusKey?: PasswordResetStatusKey | null,
+    errorKey?: PasswordResetErrorKey | null,
+  ) => void,
 ): PasswordResetCallbacks {
   return {
     onPending: (pending) => {
       recordPending?.(pending);
       setPasswordRecoveryPending(elements, pending, i18n);
     },
-    onError: (message) => {
-      recordFeedback?.(null, message);
+    onError: (message, key) => {
+      recordFeedback?.(null, message, null, key ?? null);
       if (elements.error) elements.error.textContent = message ?? '';
     },
-    onSuccess: (message) => {
-      recordFeedback?.(message, null);
+    onSuccess: (message, key) => {
+      recordFeedback?.(message, null, key ?? null, null);
       if (elements.status) elements.status.textContent = message ?? '';
       if (!message || state.resetToken === null) return;
       state.resetToken = null;
@@ -151,8 +160,8 @@ export function mountPasswordRecovery(
 ): { dispose: () => void } {
   let disposed = false;
   let isPending = false;
-  let lastStatus: string | null = null;
-  let lastError: string | null = null;
+  let lastStatusKey: PasswordResetStatusKey | null = null;
+  let lastErrorKey: PasswordResetErrorKey | null = null;
 
   const elements = passwordRecoveryElements(options.doc);
   const state: PasswordRecoveryState = { resetToken: options.resetToken };
@@ -166,9 +175,9 @@ export function mountPasswordRecovery(
       options.onSessionInvalidated,
       options.i18n,
       (pending) => { isPending = pending; },
-      (status, error) => {
-        lastStatus = status;
-        lastError = error;
+      (_status, _error, statusKey, errorKey) => {
+        lastStatusKey = statusKey ?? null;
+        lastErrorKey = errorKey ?? null;
       },
     ),
     i18n: options.i18n,
@@ -177,23 +186,11 @@ export function mountPasswordRecovery(
 
   const unsubscribeLocale = options.i18n.onLocaleChange(() => {
     setPasswordRecoveryPending(elements, isPending, options.i18n);
-    if (lastStatus && elements.status) {
-      if (lastStatus === options.i18n.t('passwordRecovery.resetSuccess')) {
-        elements.status.textContent = options.i18n.t('passwordRecovery.resetSuccess');
-      } else {
-        elements.status.textContent = options.i18n.t('passwordRecovery.sentInstructions');
-      }
+    if (lastStatusKey && elements.status) {
+      elements.status.textContent = options.i18n.t(lastStatusKey);
     }
-    if (lastError && elements.error) {
-      if (lastError === options.i18n.t('passwordRecovery.enterHandleOrEmail')) {
-        elements.error.textContent = options.i18n.t('passwordRecovery.enterHandleOrEmail');
-      } else if (lastError === options.i18n.t('passwordRecovery.linkInvalid')) {
-        elements.error.textContent = options.i18n.t('passwordRecovery.linkInvalid');
-      } else if (lastError === options.i18n.t('passwordRecovery.passwordLength')) {
-        elements.error.textContent = options.i18n.t('passwordRecovery.passwordLength');
-      } else if (lastError === options.i18n.t('passwordRecovery.passwordsDoNotMatch')) {
-        elements.error.textContent = options.i18n.t('passwordRecovery.passwordsDoNotMatch');
-      }
+    if (lastErrorKey && elements.error) {
+      elements.error.textContent = options.i18n.t(lastErrorKey);
     }
   });
 

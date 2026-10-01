@@ -271,6 +271,7 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
       routeActive = false;
       seekListEl?.removeEventListener('click', handleSeekAction);
       panel?.dispose();
+      playBotDialog?.dispose();
       unsubscribeLocale?.();
     },
   });

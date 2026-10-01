@@ -182,6 +182,7 @@ export function renderChapterDetail(
   exportUrl: string,
   onNodeSelect: (fenAfter: string, nodeId: string | null) => void,
   i18n: I18nManager,
+  selectedNodeId?: string | null,
 ): void {
   if (elements.studyLinkEl) {
     elements.studyLinkEl.href = `/studies/${study.id}`;
@@ -228,10 +229,15 @@ export function renderChapterDetail(
 
   // Render Notation Pane
   if (elements.treeEl) {
+    const existingActiveId =
+      elements.treeEl.querySelector('[aria-current="true"]')?.getAttribute('data-node-id')
+      ?? elements.treeEl.querySelector('.active')?.getAttribute('data-node-id')
+      ?? elements.treeEl.querySelector('.notation-move.active')?.getAttribute('data-node-id')
+      ?? null;
     elements.treeEl.replaceChildren();
 
     const tree = buildMoveTree(flatTree, chapter.startingFen, study.variant);
-    let activeNodeId: string | null = null;
+    let activeNodeId: string | null = selectedNodeId !== undefined ? selectedNodeId : existingActiveId;
 
     const updateActiveButton = (selectedId: string | null): void => {
       activeNodeId = selectedId;
@@ -285,6 +291,9 @@ export function renderChapterDetail(
     );
 
     elements.treeEl.appendChild(container);
+    if (activeNodeId) {
+      updateActiveButton(activeNodeId);
+    }
   }
 }
 

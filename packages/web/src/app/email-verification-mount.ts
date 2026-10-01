@@ -1,7 +1,7 @@
 import type { GambitClient } from '../api/client.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { EmailVerificationController } from './email-verification-controller.js';
-import type { EmailVerificationCallbacks } from './email-verification-controller.js';
+import type { EmailVerificationCallbacks, EmailVerificationErrorKey } from './email-verification-controller.js';
 
 interface EmailVerificationElements {
   readonly section: HTMLElement | null;
@@ -59,7 +59,7 @@ function createEmailVerificationCallbacks(
   elements: EmailVerificationElements,
   state: EmailVerificationState,
   i18n: I18nManager,
-  recordStatus?: (status: string | null, error: string | null) => void,
+  recordStatus?: (hasSuccess: boolean, errorKey: EmailVerificationErrorKey | null) => void,
 ): EmailVerificationCallbacks {
   let wasRetryable = false;
 
@@ -68,14 +68,14 @@ function createEmailVerificationCallbacks(
       setEmailVerificationPending(elements, pending, i18n);
       if (pending) {
         wasRetryable = false;
-        recordStatus?.(null, null);
+        recordStatus?.(false, null);
         if (elements.error) elements.error.textContent = '';
       } else if (!wasRetryable) {
         state.token = null;
       }
     },
-    onError: (message) => {
-      recordStatus?.(null, message);
+    onError: (message, errorKey) => {
+      recordStatus?.(false, errorKey ?? null);
       if (elements.error) elements.error.textContent = message ?? '';
       if (message && elements.status) {
         elements.status.textContent = '';
@@ -83,7 +83,7 @@ function createEmailVerificationCallbacks(
     },
     onSuccess: (message) => {
       if (message) {
-        recordStatus?.(message, null);
+        recordStatus?.(true, null);
         if (elements.status) elements.status.textContent = message;
         if (elements.error) elements.error.textContent = '';
         state.token = null;
@@ -129,14 +129,14 @@ export function mountEmailVerification(
   const state: EmailVerificationState = { token: options.verificationToken };
   resetEmailVerificationSurface(elements, options.i18n);
 
-  let lastStatus: string | null = null;
-  let lastError: string | null = null;
+  let hasSuccess = false;
+  let lastErrorKey: EmailVerificationErrorKey | null = null;
 
   const controller = new EmailVerificationController({
     client: options.client,
-    callbacks: createEmailVerificationCallbacks(elements, state, options.i18n, (status, error) => {
-      lastStatus = status;
-      lastError = error;
+    callbacks: createEmailVerificationCallbacks(elements, state, options.i18n, (success, errorKey) => {
+      hasSuccess = success;
+      lastErrorKey = errorKey;
     }),
     i18n: options.i18n,
   });
@@ -145,17 +145,11 @@ export function mountEmailVerification(
 
   const unsubscribeLocale = options.i18n.onLocaleChange(() => {
     if (elements.retry) elements.retry.textContent = options.i18n.t('emailVerification.retry');
-    if (lastStatus && elements.status) {
+    if (hasSuccess && elements.status) {
       elements.status.textContent = options.i18n.t('emailVerification.verified');
     }
-    if (lastError && elements.error) {
-      if (lastError === options.i18n.t('emailVerification.needsLink')) {
-        elements.error.textContent = options.i18n.t('emailVerification.needsLink');
-      } else if (lastError === options.i18n.t('emailVerification.linkInvalid')) {
-        elements.error.textContent = options.i18n.t('emailVerification.linkInvalid');
-      } else {
-        elements.error.textContent = options.i18n.t('emailVerification.couldNotVerify');
-      }
+    if (lastErrorKey && elements.error) {
+      elements.error.textContent = options.i18n.t(`emailVerification.${lastErrorKey}`);
     }
   });
 

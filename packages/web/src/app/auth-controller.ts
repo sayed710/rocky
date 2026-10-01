@@ -31,6 +31,21 @@ import type { WebAuthnAdapter } from '../ports/webauthn.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { createI18nManager } from '../i18n/index.js';
 
+export type AuthErrorMessageKey =
+  | 'auth.error.stepUpRequired'
+  | 'auth.error.emailUnverified'
+  | 'auth.error.handleRequiredPasskey'
+  | 'auth.error.passkeyUnsupported'
+  | 'auth.error.passkeyFailed'
+  | 'auth.error.emailRequired'
+  | 'auth.error.handleOrEmailRequired'
+  | 'auth.notice.verificationSent';
+
+export interface AuthErrorInfo {
+  readonly key: AuthErrorMessageKey;
+  readonly params?: Record<string, string>;
+}
+
 /** Callbacks the bootstrap wires to DOM elements. */
 export interface AuthCallbacks {
   /** Called when the session state changes (login, logout, restore). */
@@ -38,7 +53,7 @@ export interface AuthCallbacks {
   /** Called when an auth action is pending (for UI spinner/disabled state). */
   onPending: (pending: boolean) => void;
   /** Called when an error occurs (for UI error display). */
-  onError: (message: string) => void;
+  onError: (message: string, errorInfo?: AuthErrorInfo | null) => void;
   /**
    * Called with `true` when sign-in needs the emailed code as well as the password, and with
    * `false` once it is no longer needed. Optional: without it the error message still explains.
@@ -65,6 +80,17 @@ function signInError(err: unknown, i18n: I18nManager): string {
       return i18n.t('auth.error.emailUnverified');
     default:
       return err instanceof Error ? err.message : String(err);
+  }
+}
+
+function signInErrorInfo(err: unknown): AuthErrorInfo | null {
+  switch (refusalReason(err)) {
+    case 'step_up_required':
+      return { key: 'auth.error.stepUpRequired' };
+    case 'email_unverified':
+      return { key: 'auth.error.emailUnverified' };
+    default:
+      return null;
   }
 }
 
@@ -245,7 +271,7 @@ export class AuthController {
     } catch (err) {
       if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
       if (refusalReason(err) === 'step_up_required') this.callbacks.onStepUp?.(true);
-      this.callbacks.onError(signInError(err, this.i18n));
+      this.callbacks.onError(signInError(err, this.i18n), signInErrorInfo(err));
       return null;
     } finally {
       this.finishPendingOperation();
@@ -257,11 +283,11 @@ export class AuthController {
     if (this.disposed) return null;
     const trimmed = handle.trim();
     if (!trimmed) {
-      this.callbacks.onError(this.i18n.t('auth.error.handleRequiredPasskey'));
+      this.callbacks.onError(this.i18n.t('auth.error.handleRequiredPasskey'), { key: 'auth.error.handleRequiredPasskey' });
       return null;
     }
     if (!this.webauthnAdapter.isSupported()) {
-      this.callbacks.onError(this.i18n.t('auth.error.passkeyUnsupported'));
+      this.callbacks.onError(this.i18n.t('auth.error.passkeyUnsupported'), { key: 'auth.error.passkeyUnsupported' });
       return null;
     }
     const managerGeneration = this.client.session.captureGeneration();
@@ -278,7 +304,7 @@ export class AuthController {
     } catch (err) {
       if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
       // Do not expose account-existence details in client error copy.
-      this.callbacks.onError(this.i18n.t('auth.error.passkeyFailed'));
+      this.callbacks.onError(this.i18n.t('auth.error.passkeyFailed'), { key: 'auth.error.passkeyFailed' });
       return null;
     } finally {
       this.finishPendingOperation();
@@ -295,7 +321,7 @@ export class AuthController {
     if (this.disposed) return null;
     const trimmed = email?.trim() ?? '';
     if (!trimmed) {
-      this.callbacks.onError(this.i18n.t('auth.error.emailRequired'));
+      this.callbacks.onError(this.i18n.t('auth.error.emailRequired'), { key: 'auth.error.emailRequired' });
       return null;
     }
     const managerGeneration = this.client.session.captureGeneration();
@@ -323,7 +349,7 @@ export class AuthController {
     if (this.disposed) return;
     const trimmed = handleOrEmail.trim();
     if (!trimmed) {
-      this.callbacks.onError(this.i18n.t('auth.error.handleOrEmailRequired'));
+      this.callbacks.onError(this.i18n.t('auth.error.handleOrEmailRequired'), { key: 'auth.error.handleOrEmailRequired' });
       return;
     }
     this.beginPendingOperation();
@@ -331,6 +357,7 @@ export class AuthController {
       await this.client.auth.resendEmailVerification({ handleOrEmail: trimmed });
       this.callbacks.onError(
         this.i18n.t('auth.notice.verificationSent'),
+        { key: 'auth.notice.verificationSent' },
       );
     } catch (err) {
       this.callbacks.onError(err instanceof Error ? err.message : String(err));

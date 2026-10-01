@@ -262,12 +262,14 @@ function createStudyChapterCallbacks(
     chapters: readonly ChapterView[];
     exportUrl: string;
   }) => void,
+  onNodeSelected?: (nodeId: string | null) => void,
 ): StudiesCallbacks {
   return {
     onStudyList: () => {},
     onStudy: () => {},
     onChapterDetail: (study, chapter, tree, chapters, exportUrl) => {
       onChapterLoaded?.({ study, chapter, tree, chapters, exportUrl });
+      onNodeSelected?.(null);
       if (elements.error) elements.error.textContent = '';
       board?.setPosition(chapter.startingFen);
       renderChapterDetail(
@@ -277,10 +279,12 @@ function createStudyChapterCallbacks(
         tree,
         chapters,
         exportUrl,
-        (fenAfter) => {
+        (fenAfter, nodeId) => {
+          onNodeSelected?.(nodeId);
           board?.setPosition(fenAfter);
         },
         i18n,
+        null,
       );
     },
     onLoading: (loading) => {
@@ -313,6 +317,7 @@ export function mountStudyChapter({
     chapters: readonly ChapterView[];
     exportUrl: string;
   } | null = null;
+  let selectedNodeId: string | null = null;
   let unsubscribeLocale: (() => void) | undefined;
 
   const controller = new StudiesController({
@@ -324,6 +329,9 @@ export function mountStudyChapter({
       i18n,
       (state) => {
         lastChapterState = state;
+      },
+      (nodeId) => {
+        selectedNodeId = nodeId;
       },
     ),
     onDispose: () => {
@@ -340,10 +348,12 @@ export function mountStudyChapter({
         lastChapterState.tree,
         lastChapterState.chapters,
         lastChapterState.exportUrl,
-        (fenAfter) => {
+        (fenAfter, nodeId) => {
+          selectedNodeId = nodeId;
           board?.setPosition(fenAfter);
         },
         i18n,
+        selectedNodeId,
       );
     }
   });

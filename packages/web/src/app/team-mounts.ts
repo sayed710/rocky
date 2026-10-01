@@ -54,6 +54,9 @@ interface TeamRenderDependencies {
   readonly slug: string;
   readonly viewerId: () => string | null;
   readonly i18n: I18nManager;
+  readonly isActionPending?: () => boolean;
+  readonly setActionPending?: (pending: boolean) => void;
+  readonly registerPendingButton?: (button: HTMLButtonElement) => void;
 }
 
 interface TeamActionRequest {
@@ -229,13 +232,21 @@ function renderTeamAction(
     return;
   }
 
+  const isPending = dependencies.isActionPending?.() ?? false;
   const button = dependencies.doc.createElement('button');
   button.type = 'button';
+  button.disabled = isPending;
+  if (isPending) {
+    dependencies.registerPendingButton?.(button);
+  }
   button.textContent = action.kind === 'join'
     ? dependencies.i18n.t('community.teams.actionJoin')
     : dependencies.i18n.t('community.teams.actionLeave');
   button.addEventListener('click', () => {
+    if (dependencies.isActionPending?.()) return;
+    dependencies.setActionPending?.(true);
     button.disabled = true;
+    dependencies.registerPendingButton?.(button);
     void runTeamAction({
       controller: dependencies.controller,
       team,
@@ -243,8 +254,8 @@ function renderTeamAction(
       viewerId,
       slug: dependencies.slug,
       action,
-    }).then(() => {
-      button.disabled = false;
+    }).finally(() => {
+      dependencies.setActionPending?.(false);
     });
   });
   actions.appendChild(button);
@@ -268,6 +279,7 @@ function createTeamDetailCallbacks(
     names: ReadonlyMap<string, SocialPlayer>;
     joinRequests?: readonly JoinRequestView[] | undefined;
   }) => void,
+  onNotFoundTriggered?: () => void,
 ): TeamsCallbacks {
   return {
     onList: () => {},
@@ -286,7 +298,10 @@ function createTeamDetailCallbacks(
       if (dependencies.elements.error) dependencies.elements.error.textContent = message;
     },
     // Missing and private teams deliberately share one state so this UI cannot confirm existence.
-    onNotFound: () => renderTeamNotFound(dependencies.elements, dependencies.i18n),
+    onNotFound: () => {
+      onNotFoundTriggered?.();
+      renderTeamNotFound(dependencies.elements, dependencies.i18n);
+    },
   };
 }
 
@@ -309,6 +324,9 @@ export function mountTeamDetail({
 }: TeamDetailMountDependencies): TeamsController {
   const elements = teamDetailElements(doc);
   let controller: TeamsController;
+  let isActionPending = false;
+  const pendingButtons = new Set<HTMLButtonElement>();
+  let isNotFound = false;
   let lastTeamState: {
     team: TeamDetailView;
     members: readonly TeamMembership[];
@@ -326,20 +344,45 @@ export function mountTeamDetail({
     slug,
     viewerId: () => client.session.current?.user.id ?? null,
     i18n,
+    isActionPending: () => isActionPending,
+    setActionPending: (pending) => {
+      isActionPending = pending;
+      if (!pending) {
+        for (const btn of pendingButtons) {
+          btn.disabled = false;
+        }
+        pendingButtons.clear();
+        const currentBtn = elements.actions?.querySelector('button');
+        if (currentBtn) currentBtn.disabled = false;
+      }
+    },
+    registerPendingButton: (btn) => {
+      pendingButtons.add(btn);
+    },
   };
 
   controller = new TeamsController({
     client,
-    callbacks: createTeamDetailCallbacks(dependencies, (state) => {
-      lastTeamState = state;
-    }),
+    callbacks: createTeamDetailCallbacks(
+      dependencies,
+      (state) => {
+        isNotFound = false;
+        lastTeamState = state;
+      },
+      () => {
+        isNotFound = true;
+      },
+    ),
     onDispose: () => {
+      pendingButtons.clear();
       unsubscribeLocale?.();
     },
   });
 
   unsubscribeLocale = i18n.onLocaleChange(() => {
-    if (lastTeamState) {
+    if (isNotFound) {
+      renderTeamNotFound(dependencies.elements, dependencies.i18n);
+    } else if (lastTeamState) {
       renderTeamIdentity(
         dependencies.elements,
         lastTeamState.team,

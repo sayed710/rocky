@@ -47,6 +47,7 @@ import type {
 import {
   clearOpening,
   openingMessage,
+  OPENING_MESSAGE_KEYS,
   renderOpeningError,
   renderOpeningNote,
   renderOpeningResult,
@@ -58,6 +59,7 @@ import type { CoachTarget } from './coach-controller.js';
 import {
   clearCoach,
   coachMessage,
+  COACH_MESSAGE_KEYS,
   renderCoachError,
   renderCoachNote,
   renderCoachResult,
@@ -67,6 +69,7 @@ import {
 import {
   clearPuzzle,
   puzzleMessage,
+  PUZZLE_MESSAGE_KEYS,
   renderPuzzleError,
   renderPuzzleNote,
   renderPuzzleResult,
@@ -76,6 +79,7 @@ import {
 import { AssessController } from './assess-controller.js';
 import {
   assessMessage,
+  ASSESS_MESSAGE_KEYS,
   clearVerdict,
   renderAssessError,
   renderAssessNote,
@@ -88,6 +92,7 @@ import { ExplainController } from './explain-controller.js';
 import {
   clearExplanation,
   explainMessage,
+  EXPLAIN_MESSAGE_KEYS,
   renderError as renderExplainError,
   renderEvidence,
   renderNote as renderExplainNote,
@@ -103,6 +108,20 @@ import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
 import { isEngineBotUserId } from '@chess-platform/game';
 import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
+import { enMessages, type MessageKey } from '../i18n/catalog/index.js';
+
+function findKeyByEnglishText<K extends string>(
+  text: string | null | undefined,
+  keyMap: Record<K, MessageKey>,
+): K | null {
+  if (!text) return null;
+  for (const [key, msgKey] of Object.entries(keyMap) as [K, MessageKey][]) {
+    if (enMessages[msgKey] === text) {
+      return key;
+    }
+  }
+  return null;
+}
 import { createI18nManager } from '../i18n/manager.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { getVariantLabel } from './variant-labels.js';
@@ -377,8 +396,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let puzzleUnsupported = false;
 
   let lastPuzzleResult: PuzzleGenerationResponse | null = null;
+  let currentPuzzleNoteKey: PuzzleMessageKey | null = null;
+  let currentPuzzleErrorKey: PuzzleMessageKey | null = null;
   const resetPuzzleBlock = (): void => {
     lastPuzzleResult = null;
+    currentPuzzleNoteKey = null;
+    currentPuzzleErrorKey = null;
     if (puzzleRowsEl && puzzleResultEl) clearPuzzle(puzzleRowsEl, puzzleResultEl);
     if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
     if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('idle', i18n));
@@ -438,9 +461,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let coachAvailable = false;
 
   let lastOpeningResult: OpeningExplorationResponse | null = null;
+  let currentOpeningNoteKey: OpeningMessageKey | null = null;
+  let currentOpeningErrorKey: OpeningMessageKey | null = null;
   /** Clear the section's content back to the unanswered state, leaving its visibility alone. */
   const resetOpeningBlock = (): void => {
     lastOpeningResult = null;
+    currentOpeningNoteKey = null;
+    currentOpeningErrorKey = null;
     if (openingRowsEl && openingResultEl) clearOpening(openingRowsEl, openingResultEl);
     if (openingErrorEl) renderOpeningError(openingErrorEl, null);
     if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('idle', i18n));
@@ -453,9 +480,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   if (openingBlockEl) openingBlockEl.hidden = true;
 
   let lastCoachResult: CoachResponse | null = null;
+  let currentCoachNoteKey: CoachMessageKey | null = null;
+  let currentCoachErrorKey: CoachMessageKey | null = null;
   /** Clear the section back to its unasked state: no rows, no error, the idle note. */
   const resetCoachBlock = (): void => {
     lastCoachResult = null;
+    currentCoachNoteKey = null;
+    currentCoachErrorKey = null;
     if (coachRowsEl && coachResultEl) clearCoach(coachRowsEl, coachResultEl);
     if (coachErrorEl) renderCoachError(coachErrorEl, null);
     if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('idle', i18n));
@@ -644,8 +675,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
    * it.
    */
   let lastExplainResult: MoveExplanationResponse | null = null;
+  let currentExplainNoteKey: ExplainMessageKey | null = null;
+  let currentExplainErrorKey: ExplainMessageKey | null = null;
   const resetExplainBlock = (): void => {
     lastExplainResult = null;
+    currentExplainNoteKey = null;
+    currentExplainErrorKey = null;
     if (explainEvidenceEl && explainProseEl && explainSourceEl && explainResultEl) {
       clearExplanation({
         evidence: explainEvidenceEl,
@@ -739,9 +774,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let assessCapabilities: unknown = null;
 
   let lastAssessResult: MistakePredictionResponse | null = null;
+  let currentAssessNoteKey: AssessMessageKey | null = null;
+  let currentAssessErrorKey: AssessMessageKey | null = null;
   /** Clear the block, for the same reason the other two are reset at mount: this DOM outlives it. */
   const resetAssessBlock = (): void => {
     lastAssessResult = null;
+    currentAssessNoteKey = null;
+    currentAssessErrorKey = null;
     if (assessRowsEl && assessResultEl) {
       clearVerdict({ rows: assessRowsEl, result: assessResultEl });
     }
@@ -811,12 +850,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (puzzleResultEl) setPuzzleBusy(puzzleResultEl, phase === 'loading');
         refreshPuzzleControls();
         if (phase === 'loading') {
+          currentPuzzleNoteKey = 'running';
+          currentPuzzleErrorKey = null;
           if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('running', i18n));
           if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
         }
       },
       onResult: (result) => {
         lastPuzzleResult = result;
+        currentPuzzleNoteKey = null;
+        currentPuzzleErrorKey = null;
         const note = puzzleRowsEl && puzzleResultEl
           ? renderPuzzleResult(puzzleRowsEl, puzzleResultEl, result, i18n)
           : null;
@@ -838,8 +881,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         };
         const key = noteFor[failure];
         if (key) {
+          currentPuzzleNoteKey = key;
           if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(key, i18n));
         } else {
+          currentPuzzleErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, null);
           if (puzzleErrorEl) {
             renderPuzzleError(
@@ -851,6 +896,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onInvalidated: () => {
         resetPuzzleBlock();
+        currentPuzzleNoteKey = 'positionChanged';
         if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('positionChanged', i18n));
       },
     },
@@ -864,12 +910,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (openingResultEl) setOpeningBusy(openingResultEl, phase === 'loading');
         refreshOpeningControls();
         if (phase === 'loading') {
+          currentOpeningNoteKey = 'running';
+          currentOpeningErrorKey = null;
           if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('running', i18n));
           if (openingErrorEl) renderOpeningError(openingErrorEl, null);
         }
       },
       onResult: (result) => {
         lastOpeningResult = result;
+        currentOpeningNoteKey = null;
+        currentOpeningErrorKey = null;
         const note = openingRowsEl && openingResultEl
           ? renderOpeningResult(openingRowsEl, openingResultEl, result, i18n)
           : null;
@@ -887,8 +937,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         };
         const key = noteFor[failure];
         if (key) {
+          currentOpeningNoteKey = key;
           if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage(key, i18n));
         } else {
+          currentOpeningErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (openingNoteEl) renderOpeningNote(openingNoteEl, null);
           if (openingErrorEl) {
             renderOpeningError(
@@ -900,6 +952,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onInvalidated: () => {
         resetOpeningBlock();
+        currentOpeningNoteKey = 'sequenceChanged';
         if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('sequenceChanged', i18n));
       },
     },
@@ -913,12 +966,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (coachResultEl) setCoachBusy(coachResultEl, phase === 'loading');
         refreshCoachControls();
         if (phase === 'loading') {
+          currentCoachNoteKey = 'running';
+          currentCoachErrorKey = null;
           if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('running', i18n));
           if (coachErrorEl) renderCoachError(coachErrorEl, null);
         }
       },
       onResult: (result) => {
         lastCoachResult = result;
+        currentCoachNoteKey = null;
+        currentCoachErrorKey = null;
         const note = coachRowsEl && coachResultEl
           ? renderCoachResult(coachRowsEl, coachResultEl, result, i18n)
           : null;
@@ -936,8 +993,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         };
         const key = noteFor[failure];
         if (key) {
+          currentCoachNoteKey = key;
           if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage(key, i18n));
         } else {
+          currentCoachErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (coachNoteEl) renderCoachNote(coachNoteEl, null);
           if (coachErrorEl) {
             renderCoachError(
@@ -949,6 +1008,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onInvalidated: () => {
         resetCoachBlock();
+        currentCoachNoteKey = 'positionChanged';
         if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('positionChanged', i18n));
       },
     },
@@ -962,12 +1022,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (assessResultEl) setAssessBusy(assessResultEl, phase === 'loading');
         refreshAssessControls();
         if (phase === 'loading') {
+          currentAssessNoteKey = 'running';
+          currentAssessErrorKey = null;
           if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage('running', i18n));
           if (assessErrorEl) renderAssessError(assessErrorEl, null);
         }
       },
       onResult: (result) => {
         lastAssessResult = result;
+        currentAssessNoteKey = null;
+        currentAssessErrorKey = null;
         if (assessRowsEl) renderVerdict(assessRowsEl, result, i18n);
         if (assessResultEl) setVerdictVisible(assessResultEl, true);
         if (assessNoteEl) renderAssessNote(assessNoteEl, null);
@@ -983,11 +1047,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         };
         const key = noteFor[failure];
         if (key !== undefined) {
+          currentAssessNoteKey = key;
           if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage(key, i18n));
           return;
         }
-        // `rejected` and `failed` are the ones the player did not cause and cannot act on, so they
-        // read as errors rather than notes.
+        currentAssessErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
         if (assessNoteEl) renderAssessNote(assessNoteEl, null);
         if (assessErrorEl) {
           renderAssessError(
@@ -1010,12 +1074,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (explainResultEl) setExplainBusy(explainResultEl, phase === 'loading');
         refreshExplainControls();
         if (phase === 'loading') {
+          currentExplainNoteKey = 'running';
+          currentExplainErrorKey = null;
           if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage('running', i18n));
           if (explainErrorEl) renderExplainError(explainErrorEl, null);
         }
       },
       onResult: (result) => {
         lastExplainResult = result;
+        currentExplainNoteKey = null;
+        currentExplainErrorKey = null;
         if (explainEvidenceEl) renderEvidence(explainEvidenceEl, result, i18n);
         if (explainProseEl) renderProse(explainProseEl, result);
         if (explainSourceEl) renderSource(explainSourceEl, result, i18n);
@@ -1033,11 +1101,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         };
         const key = noteFor[failure];
         if (key !== undefined) {
+          currentExplainNoteKey = key;
           if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage(key, i18n));
           return;
         }
-        // `rejected` and `failed` are the ones the player did not cause and cannot act on, so they
-        // read as errors rather than notes.
+        currentExplainErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
         if (explainNoteEl) renderExplainNote(explainNoteEl, null);
         if (explainErrorEl) {
           renderExplainError(
@@ -1337,29 +1405,84 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
     if (lastAssessResult && assessRowsEl) {
       renderVerdict(assessRowsEl, lastAssessResult, i18n);
-    } else if (assessNoteEl) {
-      renderAssessNote(assessNoteEl, isUserAuthenticated() ? assessMessage('idle', i18n) : assessMessage('signedOut', i18n));
+    } else {
+      const noteKey = currentAssessNoteKey ?? (assessNoteEl ? findKeyByEnglishText(assessNoteEl.textContent, ASSESS_MESSAGE_KEYS) : null);
+      const errorKey = currentAssessErrorKey ?? (assessErrorEl ? findKeyByEnglishText(assessErrorEl.textContent, ASSESS_MESSAGE_KEYS) : null);
+      if (noteKey) {
+        currentAssessNoteKey = noteKey;
+        if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage(noteKey, i18n));
+      } else if (assessNoteEl) {
+        renderAssessNote(assessNoteEl, isUserAuthenticated() ? assessMessage('idle', i18n) : assessMessage('signedOut', i18n));
+      }
+      if (errorKey) {
+        currentAssessErrorKey = errorKey;
+        if (assessErrorEl) renderAssessError(assessErrorEl, assessMessage(errorKey, i18n));
+      }
     }
     if (lastExplainResult) {
       if (explainEvidenceEl) renderEvidence(explainEvidenceEl, lastExplainResult, i18n);
       if (explainSourceEl) renderSource(explainSourceEl, lastExplainResult, i18n);
-    } else if (explainNoteEl) {
-      renderExplainNote(explainNoteEl, isUserAuthenticated() ? explainMessage('idle', i18n) : explainMessage('signedOut', i18n));
+    } else {
+      const noteKey = currentExplainNoteKey ?? (explainNoteEl ? findKeyByEnglishText(explainNoteEl.textContent, EXPLAIN_MESSAGE_KEYS) : null);
+      const errorKey = currentExplainErrorKey ?? (explainErrorEl ? findKeyByEnglishText(explainErrorEl.textContent, EXPLAIN_MESSAGE_KEYS) : null);
+      if (noteKey) {
+        currentExplainNoteKey = noteKey;
+        if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage(noteKey, i18n));
+      } else if (explainNoteEl) {
+        renderExplainNote(explainNoteEl, isUserAuthenticated() ? explainMessage('idle', i18n) : explainMessage('signedOut', i18n));
+      }
+      if (errorKey) {
+        currentExplainErrorKey = errorKey;
+        if (explainErrorEl) renderExplainError(explainErrorEl, explainMessage(errorKey, i18n));
+      }
     }
     if (lastOpeningResult && openingRowsEl && openingResultEl) {
       renderOpeningResult(openingRowsEl, openingResultEl, lastOpeningResult, i18n);
-    } else if (openingNoteEl) {
-      renderOpeningNote(openingNoteEl, isUserAuthenticated() ? openingMessage('idle', i18n) : openingMessage('signedOut', i18n));
+    } else {
+      const noteKey = currentOpeningNoteKey ?? (openingNoteEl ? findKeyByEnglishText(openingNoteEl.textContent, OPENING_MESSAGE_KEYS) : null);
+      const errorKey = currentOpeningErrorKey ?? (openingErrorEl ? findKeyByEnglishText(openingErrorEl.textContent, OPENING_MESSAGE_KEYS) : null);
+      if (noteKey) {
+        currentOpeningNoteKey = noteKey;
+        if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage(noteKey, i18n));
+      } else if (openingNoteEl) {
+        renderOpeningNote(openingNoteEl, isUserAuthenticated() ? openingMessage('idle', i18n) : openingMessage('signedOut', i18n));
+      }
+      if (errorKey) {
+        currentOpeningErrorKey = errorKey;
+        if (openingErrorEl) renderOpeningError(openingErrorEl, openingMessage(errorKey, i18n));
+      }
     }
     if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
       renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
-    } else if (puzzleNoteEl) {
-      renderPuzzleNote(puzzleNoteEl, isUserAuthenticated() ? puzzleMessage('idle', i18n) : puzzleMessage('signedOut', i18n));
+    } else {
+      const noteKey = currentPuzzleNoteKey ?? (puzzleNoteEl ? findKeyByEnglishText(puzzleNoteEl.textContent, PUZZLE_MESSAGE_KEYS) : null);
+      const errorKey = currentPuzzleErrorKey ?? (puzzleErrorEl ? findKeyByEnglishText(puzzleErrorEl.textContent, PUZZLE_MESSAGE_KEYS) : null);
+      if (noteKey) {
+        currentPuzzleNoteKey = noteKey;
+        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(noteKey, i18n));
+      } else if (puzzleNoteEl) {
+        renderPuzzleNote(puzzleNoteEl, isUserAuthenticated() ? puzzleMessage('idle', i18n) : puzzleMessage('signedOut', i18n));
+      }
+      if (errorKey) {
+        currentPuzzleErrorKey = errorKey;
+        if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, puzzleMessage(errorKey, i18n));
+      }
     }
     if (lastCoachResult && coachRowsEl && coachResultEl) {
       renderCoachResult(coachRowsEl, coachResultEl, lastCoachResult, i18n);
-    } else if (coachNoteEl) {
-      renderCoachNote(coachNoteEl, isUserAuthenticated() ? coachMessage('idle', i18n) : coachMessage('signedOut', i18n));
+    } else {
+      const noteKey = currentCoachNoteKey ?? (coachNoteEl ? findKeyByEnglishText(coachNoteEl.textContent, COACH_MESSAGE_KEYS) : null);
+      const errorKey = currentCoachErrorKey ?? (coachErrorEl ? findKeyByEnglishText(coachErrorEl.textContent, COACH_MESSAGE_KEYS) : null);
+      if (noteKey) {
+        currentCoachNoteKey = noteKey;
+        if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage(noteKey, i18n));
+      } else if (coachNoteEl) {
+        renderCoachNote(coachNoteEl, isUserAuthenticated() ? coachMessage('idle', i18n) : coachMessage('signedOut', i18n));
+      }
+      if (errorKey) {
+        currentCoachErrorKey = errorKey;
+        if (coachErrorEl) renderCoachError(coachErrorEl, coachMessage(errorKey, i18n));
+      }
     }
   });
 

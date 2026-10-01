@@ -20,20 +20,28 @@ import { mountGame } from '../src/app/game-mount.js';
 import { mountLobby } from '../src/app/lobby-mount.js';
 import { mountProfile } from '../src/app/profile-mount.js';
 import {
+  mountLeaderboard,
+  mountTournamentCommentary,
   mountTournamentDetail,
   mountTournamentList,
 } from '../src/app/competition-mounts.js';
+import { mountForum } from '../src/app/forum-mounts.js';
+import { mountTeamDetail } from '../src/app/team-mounts.js';
+import { mountPasswordRecovery } from '../src/app/password-recovery-mount.js';
+import { mountEmailVerification } from '../src/app/email-verification-mount.js';
+import { renderLessonDetail } from '../src/app/learning-view.js';
 import { mountSearch } from '../src/app/search-mount.js';
 import { mountConversation } from '../src/app/messaging-mounts.js';
 import { renderEndgamePositionRows } from '../src/app/endgame-view.js';
-import { renderStudyDetail } from '../src/app/studies-view.js';
+import { renderChapterDetail, renderStudyDetail } from '../src/app/studies-view.js';
 import { renderTeamList } from '../src/app/teams-view.js';
 import { renderTournamentList } from '../src/app/tournament-view.js';
 import { renderEmpty } from '../src/app/render-helpers.js';
+import { HttpError, NotFoundError, ServiceUnavailableError } from '../src/net/errors.js';
 import type { GambitClient } from '../src/api/client.js';
 import { FakeTransport, json } from './support/fake-transport.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
-import { MemoryTokenStore } from '../src/net/session.js';
+import { MemoryTokenStore, type KeyValueStorage } from '../src/net/session.js';
 import type {
   EndgamePosition,
   SeekView,
@@ -43,6 +51,10 @@ import type {
   UserProfile,
   MessageView,
   SocialPlayer,
+  TreeNodeView,
+  LessonView,
+  StepView,
+  ChapterView,
 } from '../src/api/models.js';
 import { PlayBotDialog } from '../src/app/play-bot-dialog.js';
 import { CreateGamePanel } from '../src/app/create-game-panel.js';
@@ -249,7 +261,8 @@ class FakeElement {
     }
 
     if (s.startsWith('.') && !s.includes('[') && !s.includes(':')) {
-      return this.classList.contains(s.slice(1));
+      const classes = s.split('.').filter(Boolean);
+      return classes.every((cls) => this.classList.contains(cls));
     }
 
     if (s.startsWith('#') && !s.includes('[')) {
@@ -433,10 +446,16 @@ function createFakeDoc(elementMap = new Map<string, FakeElement>()): Document {
     addEventListener(_type: string, _fn: unknown, _capture?: unknown) {},
     removeEventListener(_type: string, _fn: unknown, _capture?: unknown) {},
   };
-  (docObj.documentElement as FakeElement).ownerDocument = docObj as unknown as Document;
-  (docObj.body as FakeElement).ownerDocument = docObj as unknown as Document;
+  const html = docObj.documentElement as FakeElement;
+  const body = docObj.body as FakeElement;
+  html.ownerDocument = docObj as unknown as Document;
+  body.ownerDocument = docObj as unknown as Document;
+  html.children.push(body);
+  body.parentElement = html;
   for (const el of elementMap.values()) {
     el.ownerDocument = docObj as unknown as Document;
+    body.children.push(el);
+    el.parentElement = body;
   }
   return docObj as unknown as Document;
 }
@@ -632,6 +651,63 @@ const testArabicCatalog: Partial<MessagesCatalog> = {
   'ai.puzzle.rateLimited': 'طلبات كثيرة. انتظر قليلاً.',
   'ai.puzzle.unavailable': 'الألغاز غير متاحة.',
   'ai.generatedBy': 'تم التوليد بواسطة {model}',
+
+  // Password Recovery
+  'passwordRecovery.sentInstructions': 'إذا كان هناك حساب مطابق، فقد أرسلنا تعليمات لإعادة تعيين كلمة المرور.',
+  'passwordRecovery.resetSuccess': 'تمت إعادة تعيين كلمة المرور بنجاح.',
+  'passwordRecovery.enterHandleOrEmail': 'يرجى إدخال اسم المستخدم أو البريد الإلكتروني.',
+  'passwordRecovery.linkInvalid': 'رابط إعادة التعيين هذا غير صالح أو انتهت صلاحيته.',
+  'passwordRecovery.passwordLength': 'يجب أن تتراوح كلمة المرور بين 8 و 1024 حرفاً.',
+  'passwordRecovery.passwordsDoNotMatch': 'كلمتا المرور غير متطابقتين.',
+  'passwordRecovery.sending': 'جارٍ الإرسال…',
+  'passwordRecovery.submit': 'إرسال تعليمات إعادة التعيين',
+  'passwordRecovery.resetting': 'جارٍ إعادة التعيين…',
+  'passwordRecovery.resetSubmit': 'تعيين كلمة مرور جديدة',
+
+  // Email Verification
+  'emailVerification.verifyingStatus': 'جارٍ التحقق من بريدك الإلكتروني...',
+  'emailVerification.needsLink': 'تحتاج هذه الصفحة إلى رابط تحقق. افتح الرابط في رسالة التحقق الإلكترونية.',
+  'emailVerification.verified': 'تم التحقق من بريدك الإلكتروني.',
+  'emailVerification.linkInvalid': 'رابط التحقق هذا غير صالح، أو انتهت صلاحيته، أو تم استخدامه بالفعل.',
+  'emailVerification.couldNotVerify': 'تعذر التحقق من بريدك الإلكتروني الآن. يرجى المحاولة مرة أخرى.',
+  'emailVerification.retry': 'إعادة المحاولة',
+
+  // Community & Teams
+  'community.teams.notFoundTitle': 'الفريق غير موجود',
+  'community.teams.notFoundBody': 'لا يوجد مثل هذا الفريق، أو أنه خاص.',
+  'community.forum.threadNotFoundTitle': 'الموضوع غير موجود',
+  'community.forum.threadNotFoundBody': 'ربما تمت إزالة هذا الموضوع.',
+  'community.forum.teamForumTitle': 'منتدى {name}',
+  'community.teams.actionJoin': 'الانضمام للفريق',
+  'community.teams.actionLeave': 'مغادرة الفريق',
+
+  // Commentary
+  'tournaments.commentary.idle': 'اطلب تعليقاً على مباراة منتهية، أو ملخصاً لجولة مكتملة.',
+  'tournaments.commentary.running': 'جارٍ كتابة التعليق…',
+  'tournaments.commentary.failed': 'تعذر كتابة التعليق.',
+  'tournaments.commentary.unavailable': 'التعليق غير متوفر حالياً.',
+
+  // Learning Steps
+  'learning.step.stepN': 'الخطوة {n}',
+  'learning.step.complete': 'إكمال',
+  'learning.step.submitMove': 'إرسال النقلة',
+  'learning.step.sanInputLabel': 'نقلة بتنسيق SAN',
+  'learning.step.sanPlaceholder': 'مثال: Nf3',
+  'learning.step.boardReadOnlyAria': 'موقف رقعة الشطرنج للخطوة {n} (للقراءة فقط)',
+  'learning.step.boardSrOnly': 'موقف الشطرنج FEN: {fen}. رقعة غير تفاعلية.',
+  'learning.studies.activeTag': 'الحالي: {name}',
+  'learning.studies.startPosition': 'موقف البداية',
+  'learning.studies.startPositionAria': 'العودة لموقف البداية',
+
+  // Auth Errors
+  'auth.error.stepUpRequired': 'يلزم التحقق الإضافي. أدخل الرمز أو سجل الدخول باستخدام مفتاح مرور.',
+  'auth.error.emailUnverified': 'تحقق من بريدك الإلكتروني قبل تسجيل الدخول.',
+  'auth.error.handleRequiredPasskey': 'يرجى إدخال اسم المستخدم لتسجيل الدخول باستخدام مفتاح المرور.',
+  'auth.error.passkeyUnsupported': 'تسجيل الدخول باستخدام مفتاح المرور غير مدعوم على هذا المتصفح.',
+  'auth.error.passkeyFailed': 'فشل تسجيل الدخول باستخدام مفتاح المرور.',
+  'auth.error.emailRequired': 'مطلوب عنوان بريد إلكتروني لإنشاء حساب.',
+  'auth.error.handleOrEmailRequired': 'أدخل اسم المستخدم أو البريد الإلكتروني للحصول على رابط تحقق جديد.',
+  'auth.notice.verificationSent': 'إذا كان هناك حساب مطابق، فقد أرسلنا رابط تحقق جديداً.',
 };
 
 function createTestI18n(opts: Partial<I18nOptions> = {}): I18n {
@@ -2147,6 +2223,693 @@ describe('AI views (assess, coach, explain, opening, puzzle): representative cop
     assert.equal(updatedSender.textContent, 'GrandmasterAlice');
     assert.equal(updatedBody.textContent, 'Hello world!');
     assert.equal(updatedTime.textContent, arTime);
+  });
+
+  describe('relocalization state integrity (Greptile + Qodo findings A-L)', () => {
+    it('finding A: leaderboard mount isolates pool data across locale changes and prevents stale entries from resurfacing', async () => {
+      const elements = new Map<string, FakeElement>();
+      const select = new FakeElement('select', 'leaderboard-variant-select');
+      const speedSelect = new FakeElement('select', 'leaderboard-speed-select');
+      const loading = new FakeElement('div', 'leaderboard-loading');
+      const results = new FakeElement('div', 'leaderboard-results');
+      const error = new FakeElement('div', 'leaderboard-error');
+      elements.set('leaderboard-variant-select', select);
+      elements.set('leaderboard-speed-select', speedSelect);
+      elements.set('leaderboard-loading', loading);
+      elements.set('leaderboard-results', results);
+      elements.set('leaderboard-error', error);
+      const doc = createFakeDoc(elements);
+
+      let resolveLeaderboard!: (entries: any) => void;
+      let rejectLeaderboard!: (err: any) => void;
+
+      const fakeClient = {
+        leaderboard: (_variant: any, _speed: any) => {
+          return new Promise((res, rej) => {
+            resolveLeaderboard = res;
+            rejectLeaderboard = rej;
+          });
+        },
+        graphql: {
+          resolvePlayers: async () => new Map([['u-1', { id: 'u-1', handle: 'BlitzMaster' }]]),
+        },
+      } as unknown as GambitClient;
+
+      const i18n = createTestI18n();
+      const mounted = mountLeaderboard(doc, fakeClient, i18n);
+
+      assert.ok(results.textContent.includes('Choose a time control'));
+
+      // 1. Load pool A (standard + blitz)
+      speedSelect.value = 'blitz';
+      speedSelect.dispatchEvent({ type: 'change', target: speedSelect });
+      resolveLeaderboard([{ userId: 'u-1', variant: 'standard', speed: 'blitz', rating: 2000, rd: 30 }]);
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.ok(results.textContent.includes('BlitzMaster'), 'Pool A entries must be rendered');
+
+      // 2. Switch to pool B (standard + rapid) -> new request begins
+      speedSelect.value = 'rapid';
+      speedSelect.dispatchEvent({ type: 'change', target: speedSelect });
+
+      // 3. While pool B is loading, change locale
+      i18n.setLocale('ar');
+
+      // 4. Stale pool A entries must NOT appear under pool B!
+      assert.equal(
+        results.textContent.includes('BlitzMaster'),
+        false,
+        'Stale pool A entries must not be rendered under pool B while loading',
+      );
+
+      // 5. Pool B fails
+      rejectLeaderboard(new Error('Pool B network failure'));
+      await new Promise((r) => setTimeout(r, 10));
+      assert.ok(error.textContent.includes('Pool B network failure'));
+
+      // 6. Locale change after failure: pool A entries still must NOT reappear
+      i18n.setLocale('en');
+      assert.equal(
+        results.textContent.includes('BlitzMaster'),
+        false,
+        'Pool A entries must not reappear after pool B failure',
+      );
+
+      mounted.dispose();
+    });
+
+    it('finding B: lobby mount disposes playBotDialog on controller disposal', () => {
+      const elements = new Map<string, FakeElement>();
+      const ids = [
+        'seek-list', 'lobby-error', 'create-game', 'play-bot-mount', 'play-bot-error',
+        'bot-level-novice', 'bot-level-club', 'bot-level-master',
+        'bot-color-random', 'bot-color-white', 'bot-color-black',
+        'bot-time-untimed', 'play-bot-submit', 'play-bot-cancel',
+      ];
+      for (const id of ids) elements.set(id, new FakeElement('div', id));
+      const doc = createFakeDoc(elements);
+
+      const i18n = createTestI18n();
+      const sockets = new FakeSocketFactory();
+      const app = createApp({
+        config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+        wsFactory: sockets.factory,
+        i18n,
+      });
+
+      const initialSubscribers = (i18n as unknown as { listeners?: Set<unknown> }).listeners?.size ?? 0;
+      const mounted = mountLobby({
+        doc,
+        client: app.api,
+        i18n,
+        isAuthenticated: () => true,
+      });
+
+      const activeSubscribers = (i18n as unknown as { listeners?: Set<unknown> }).listeners?.size ?? 0;
+      assert.ok(activeSubscribers > initialSubscribers, 'Mounting lobby must add locale listeners');
+
+      mounted.lobby.dispose();
+
+      const remainingSubscribers = (i18n as unknown as { listeners?: Set<unknown> }).listeners?.size ?? 0;
+      assert.equal(remainingSubscribers, initialSubscribers, 'Disposing lobby must clean up playBotDialog locale subscription');
+    });
+
+    it('finding C: password recovery preserves resetSuccess and validation errors across locale change', async () => {
+      const elements = new Map<string, FakeElement>();
+      const ids = [
+        'password-reset-request-view', 'password-reset-confirm-view',
+        'password-reset-request-form', 'password-reset-confirm-form',
+        'password-reset-request-input', 'password-reset-confirm-password',
+        'password-reset-confirm-password-confirm',
+        'password-reset-request-submit', 'password-reset-confirm-submit',
+        'password-reset-status', 'password-reset-error',
+      ];
+      for (const id of ids) {
+        const tag = id.includes('form') ? 'form' : id.includes('input') || id.includes('password') ? 'input' : id.includes('submit') ? 'button' : 'div';
+        elements.set(id, new FakeElement(tag, id));
+      }
+      const doc = createFakeDoc(elements);
+      const i18n = createTestI18n();
+
+      let confirmCalled = false;
+      const fakeClient = {
+        auth: {
+          confirmPasswordReset: async () => {
+            confirmCalled = true;
+            return { ok: true };
+          },
+          requestPasswordReset: async () => ({ ok: true }),
+        },
+      } as unknown as GambitClient;
+
+      const mounted = mountPasswordRecovery({
+        doc,
+        client: fakeClient,
+        resetToken: 'test-token',
+        onSessionInvalidated: () => {},
+        i18n,
+      });
+
+      const pwdInput = elements.get('password-reset-confirm-password')!;
+      const pwdConfirmInput = elements.get('password-reset-confirm-password-confirm')!;
+      const form = elements.get('password-reset-confirm-form')!;
+      pwdInput.value = 'validpassword123';
+      pwdConfirmInput.value = 'validpassword123';
+
+      form.onsubmit!({ preventDefault: () => {} } as unknown as Event);
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.ok(confirmCalled, 'confirmPasswordReset should be called');
+      const statusEl = elements.get('password-reset-status')!;
+      assert.equal(statusEl.textContent, 'Your password has been reset successfully.');
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        statusEl.textContent,
+        'تمت إعادة تعيين كلمة المرور بنجاح.',
+        'Must relocalize to Arabic resetSuccess, not sentInstructions',
+      );
+
+      mounted.dispose();
+    });
+
+    it('finding D: game mount preserves AI tool failure notes/errors across locale changes', () => {
+      const elements = new Map<string, FakeElement>();
+      const ids = [
+        'board', 'status', 'flip', 'meta-connection', 'meta-role',
+        'meta-white', 'meta-white-name', 'meta-black', 'meta-black-name',
+        'meta-spectators', 'meta-variant', 'meta-time', 'meta-live-status',
+        'game-actions', 'action-error', 'action-offer-draw', 'action-claim-flag', 'action-resign', 'action-abort',
+        'confirm-resign', 'confirm-resign-yes', 'confirm-resign-no',
+        'confirm-abort', 'confirm-abort-yes', 'confirm-abort-no',
+        'draw-offer-received', 'action-accept-draw', 'action-decline-draw',
+        'assess-block', 'assess-rows', 'assess-note', 'assess-error', 'assess-run',
+        'explain-block', 'explain-evidence', 'explain-source', 'explain-prose', 'explain-result', 'explain-note', 'explain-error', 'explain-run',
+        'opening-block', 'opening-rows', 'opening-result', 'opening-note', 'opening-error', 'opening-run',
+        'puzzle-block', 'puzzle-rows', 'puzzle-result', 'puzzle-note', 'puzzle-error', 'puzzle-run',
+        'coach-block', 'coach-rows', 'coach-result', 'coach-note', 'coach-error', 'coach-run',
+      ];
+      for (const id of ids) elements.set(id, new FakeElement('div', id));
+      const doc = createFakeDoc(elements);
+      const boardEl = elements.get('board')! as unknown as HTMLElement;
+
+      const i18n = createTestI18n();
+      const sockets = new FakeSocketFactory();
+      const app = createApp({
+        config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+        wsFactory: sockets.factory,
+        i18n,
+      });
+
+      const mounted = mountGame({
+        doc,
+        boardEl,
+        gameId: 'g-test-ai-reloc',
+        createGameSync: app.createGameSync,
+        createGameOracle: app.createGameOracle,
+        getAccessToken: () => 'token',
+        client: app.api,
+        token: 'tok',
+        restorePromise: Promise.resolve(null),
+        i18n,
+      });
+
+      const assessNote = elements.get('assess-note')!;
+      assessNote.textContent = 'Move assessment is unavailable right now.';
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        assessNote.textContent,
+        'تقييم النقلات غير متوفر حالياً.',
+        'Assess failure note must be preserved and translated on locale change, not wiped to idle',
+      );
+
+      mounted.controller.dispose();
+    });
+
+    it('finding E: study chapter move selection is preserved across locale change', () => {
+      const prevDoc = (globalThis as unknown as { document?: unknown }).document;
+      const elementsMap = new Map<string, FakeElement>();
+      const doc = createFakeDoc(elementsMap);
+      (globalThis as unknown as { document: unknown }).document = doc;
+      try {
+        const elements = {
+          studyLinkEl: doc.createElement('a') as unknown as HTMLAnchorElement,
+          chapterNameEl: doc.createElement('div') as unknown as HTMLElement,
+          exportEl: doc.createElement('a') as unknown as HTMLAnchorElement,
+          treeEl: doc.createElement('div') as unknown as HTMLElement,
+          navEl: doc.createElement('div') as unknown as HTMLElement,
+        };
+        const i18n = createTestI18n();
+        const flatTree: TreeNodeView[] = [
+          { id: 'node-1', chapterId: 'c1', fenAfter: 'fen1', san: 'e4', parentId: null, nags: [], orderIndex: 0 },
+          { id: 'node-2', chapterId: 'c1', fenAfter: 'fen2', san: 'e5', parentId: 'node-1', nags: [], orderIndex: 0 },
+        ];
+        const study = { id: 's1', name: 'Study 1', variant: 'standard', visibility: 'public' } as unknown as StudyView;
+        const chapter = { id: 'c1', name: 'Chapter 1', startingFen: STARTING_FEN } as unknown as ChapterView;
+
+        let selectedId: string | null = null;
+
+        renderChapterDetail(
+          elements,
+          study,
+          chapter,
+          flatTree,
+          [chapter],
+          '/export',
+          (_fen, id) => {
+            selectedId = id;
+          },
+          i18n,
+        );
+
+        const treeEl = elements.treeEl as unknown as FakeElement;
+        const node1Btn = treeEl.querySelector('[data-node-id="node-1"]')!;
+        assert.ok(node1Btn, 'Button for node-1 must exist');
+
+        node1Btn.dispatchEvent({ type: 'click' });
+        assert.equal(selectedId, 'node-1');
+        assert.equal(node1Btn.classList.contains('active'), true);
+        assert.equal(node1Btn.getAttribute('aria-current'), 'true');
+
+        i18n.setLocale('ar');
+        renderChapterDetail(
+          elements,
+          study,
+          chapter,
+          flatTree,
+          [chapter],
+          '/export',
+          (_fen, id) => {
+            selectedId = id;
+          },
+          i18n,
+        );
+
+        const reRenderedNode1Btn = treeEl.querySelector('[data-node-id="node-1"]')!;
+        assert.ok(reRenderedNode1Btn);
+        assert.equal(
+          reRenderedNode1Btn.classList.contains('active'),
+          true,
+          'Active move node must retain active class after relocalization',
+        );
+        assert.equal(
+          reRenderedNode1Btn.getAttribute('aria-current'),
+          'true',
+          'Active move node must retain aria-current="true" after relocalization',
+        );
+      } finally {
+        (globalThis as unknown as { document: unknown }).document = prevDoc;
+      }
+    });
+
+    it('finding F: tournament commentary retry loading phase is not overridden by old failure on locale change', async () => {
+      const elements = new Map<string, FakeElement>();
+      const panel = new FakeElement('div', 'tournament-commentary-panel');
+      const controls = new FakeElement('div', 'tournament-commentary-controls');
+      const status = new FakeElement('div', 'tournament-commentary-status');
+      const result = new FakeElement('div', 'tournament-commentary-result');
+      elements.set('tournament-commentary-panel', panel);
+      elements.set('tournament-commentary-controls', controls);
+      elements.set('tournament-commentary-status', status);
+      elements.set('tournament-commentary-result', result);
+      const doc = createFakeDoc(elements);
+      const i18n = createTestI18n();
+
+      const fakeClient = {
+        tournaments: {
+          rounds: async () => [
+            {
+              roundIndex: 0,
+              pairings: [{ kind: 'game', gameId: 'g1', white: 'w', black: 'b', result: '1-0' }],
+            },
+          ],
+          gameCommentary: async () => {
+            throw new ServiceUnavailableError({ status: 503, message: 'Unavailable', code: 'service_unavailable', retryable: true });
+          },
+        },
+      } as unknown as GambitClient;
+
+      const mounted = mountTournamentCommentary(
+        doc,
+        fakeClient,
+        't1',
+        i18n,
+        async () => ({ capabilities: { tournamentCommentary: true } }),
+      );
+      await new Promise((r) => setTimeout(r, 10));
+
+      const btn = controls.querySelector('#tournament-commentary-game-0-0')!;
+      assert.ok(btn, 'Control button should exist');
+
+      btn.dispatchEvent({ type: 'click' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.equal(status.textContent, 'Commentary is unavailable right now.');
+
+      btn.dispatchEvent({ type: 'click' });
+      assert.equal(status.textContent, 'Writing commentary…');
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        status.textContent,
+        'جارٍ كتابة التعليق…',
+        'Retry loading state must not be overridden by previous failure upon locale change',
+      );
+
+      mounted.dispose();
+    });
+
+    it('finding G: forum not-found state relocalizes on locale change', async () => {
+      const elements = new Map<string, FakeElement>();
+      const title = new FakeElement('div', 'forum-title');
+      const list = new FakeElement('div', 'thread-list');
+      const note = new FakeElement('div', 'forum-note');
+      const error = new FakeElement('div', 'forum-error');
+      elements.set('forum-title', title);
+      elements.set('thread-list', list);
+      elements.set('forum-note', note);
+      elements.set('forum-error', error);
+      const doc = createFakeDoc(elements);
+      const i18n = createTestI18n();
+
+      const fakeClient = {
+        teams: {
+          byId: async () => {
+            throw new NotFoundError({ status: 404, message: 'Not found', code: 'not_found', retryable: false });
+          },
+        },
+        session: { current: null },
+      } as unknown as GambitClient;
+
+      const controller = mountForum({
+        doc,
+        client: fakeClient,
+        slug: 'missing-team',
+        sessionPresent: true,
+        restorePromise: Promise.resolve(null),
+        i18n,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.equal(title.textContent, 'Team not found');
+      assert.equal(note.textContent, 'No such team, or it is private.');
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        title.textContent,
+        'الفريق غير موجود',
+        'Forum not-found title must relocalize on locale change',
+      );
+      assert.equal(
+        note.textContent,
+        'لا يوجد مثل هذا الفريق، أو أنه خاص.',
+        'Forum not-found body must relocalize on locale change',
+      );
+
+      controller.dispose();
+    });
+
+    it('finding H & J: team not-found relocalizes and action button disabled state is preserved across locale change', async () => {
+      // Part H: not found
+      const elementsH = new Map<string, FakeElement>();
+      const nameH = new FakeElement('div', 'team-name');
+      const descH = new FakeElement('div', 'team-description');
+      elementsH.set('team-name', nameH);
+      elementsH.set('team-description', descH);
+      const docH = createFakeDoc(elementsH);
+      const i18n = createTestI18n();
+
+      const fakeClientH = {
+        teams: {
+          byId: async () => {
+            throw new NotFoundError({ status: 404, message: 'Not found', code: 'not_found', retryable: false });
+          },
+        },
+        session: { current: null },
+      } as unknown as GambitClient;
+
+      const ctrlH = mountTeamDetail({
+        doc: docH,
+        client: fakeClientH,
+        slug: 'missing-team',
+        sessionPresent: true,
+        restorePromise: Promise.resolve(null),
+        i18n,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.equal(nameH.textContent, 'Team not found');
+      i18n.setLocale('ar');
+      assert.equal(
+        nameH.textContent,
+        'الفريق غير موجود',
+        'Team not-found title must relocalize on locale change',
+      );
+      ctrlH.dispose();
+
+      // Part J: action button disabled state preservation
+      i18n.setLocale('en');
+      const elementsJ = new Map<string, FakeElement>();
+      const actionsJ = new FakeElement('div', 'team-actions');
+      const actionNoteJ = new FakeElement('div', 'team-action-note');
+      elementsJ.set('team-actions', actionsJ);
+      elementsJ.set('team-action-note', actionNoteJ);
+      const docJ = createFakeDoc(elementsJ);
+
+      let joinPromiseResolve!: (val: boolean) => void;
+      let joinCount = 0;
+      const fakeClientJ = {
+        teams: {
+          byId: async () => ({
+            id: 'team-1',
+            name: 'The Knights',
+            slug: 'knights',
+            visibility: 'public',
+            viewerRole: null,
+            memberCount: 5,
+          }),
+          members: async () => ({ items: [], total: 0 }),
+          join: async () => {
+            joinCount++;
+            return new Promise<boolean>((res) => {
+              joinPromiseResolve = res;
+            });
+          },
+        },
+        graphql: {
+          resolvePlayers: async () => new Map(),
+        },
+        session: { current: { user: { id: 'u-viewer', handle: 'player' } } },
+      } as unknown as GambitClient;
+
+      const ctrlJ = mountTeamDetail({
+        doc: docJ,
+        client: fakeClientJ,
+        slug: 'knights',
+        sessionPresent: true,
+        restorePromise: Promise.resolve(null),
+        i18n,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      const joinBtn = actionsJ.querySelector('button')!;
+      assert.ok(joinBtn);
+      assert.equal(joinBtn.disabled, false);
+
+      joinBtn.dispatchEvent({ type: 'click' });
+      assert.equal(joinBtn.disabled, true);
+      assert.equal(joinCount, 1);
+
+      i18n.setLocale('ar');
+
+      const newJoinBtn = actionsJ.querySelector('button')!;
+      assert.ok(newJoinBtn);
+      assert.equal(
+        newJoinBtn.disabled,
+        true,
+        'Action button must remain disabled during pending network action after relocalization',
+      );
+
+      newJoinBtn.dispatchEvent({ type: 'click' });
+      assert.equal(joinCount, 1, 'Duplicate click on relocalized button must be blocked');
+
+      joinPromiseResolve(true);
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(newJoinBtn.disabled, false);
+
+      ctrlJ.dispose();
+    });
+
+    it('finding I: email verification preserves needsLink across locale change without falling into couldNotVerify', () => {
+      const elements = new Map<string, FakeElement>();
+      const section = new FakeElement('div', 'email-verify');
+      const status = new FakeElement('div', 'email-verify-status');
+      const error = new FakeElement('div', 'email-verify-error');
+      const retry = new FakeElement('button', 'email-verify-retry');
+      elements.set('email-verify', section);
+      elements.set('email-verify-status', status);
+      elements.set('email-verify-error', error);
+      elements.set('email-verify-retry', retry);
+      const doc = createFakeDoc(elements);
+      const i18n = createTestI18n();
+
+      const fakeClient = {
+        auth: {
+          verifyEmail: async () => ({ ok: true }),
+        },
+      } as unknown as GambitClient;
+
+      const mounted = mountEmailVerification({
+        doc,
+        client: fakeClient,
+        verificationToken: null,
+        i18n,
+      });
+
+      assert.equal(
+        error.textContent,
+        'This page needs a verification link. Open the link in the verification email we sent you.',
+      );
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        error.textContent,
+        'تحتاج هذه الصفحة إلى رابط تحقق. افتح الرابط في رسالة التحقق الإلكترونية.',
+        'Must relocalize needsLink to Arabic, not fall back to couldNotVerify',
+      );
+
+      mounted.dispose();
+    });
+
+    it('finding K: lesson move step input value and disabled state survive locale change', () => {
+      const prevDoc = (globalThis as unknown as { document?: unknown }).document;
+      const elementsMap = new Map<string, FakeElement>();
+      const doc = createFakeDoc(elementsMap);
+      (globalThis as unknown as { document: unknown }).document = doc;
+      try {
+        const surface = doc.createElement('div');
+        const stepList = doc.createElement('div');
+        stepList.id = 'step-list';
+        surface.appendChild(stepList);
+        const i18n = createTestI18n();
+
+        const lesson = { id: 'l1', courseId: 'c1', title: 'Tactics' } as unknown as LessonView;
+        const steps = [
+          {
+            id: 's1',
+            lessonId: 'l1',
+            orderIndex: 0,
+            kind: 'move',
+            fen: STARTING_FEN,
+            hint: null,
+          } as unknown as StepView,
+        ];
+
+        renderLessonDetail(
+          surface as unknown as HTMLElement,
+          lesson,
+          steps,
+          null,
+          new Map(),
+          async () => {},
+          i18n,
+        );
+
+        const input = surface.querySelector('#san-input-s1') as unknown as FakeElement;
+        assert.ok(input, 'Input element for move step must exist');
+        input.value = 'Nf3';
+
+        i18n.setLocale('ar');
+        renderLessonDetail(
+          surface as unknown as HTMLElement,
+          lesson,
+          steps,
+          null,
+          new Map(),
+          async () => {},
+          i18n,
+        );
+
+        const reRenderedInput = surface.querySelector('#san-input-s1') as unknown as FakeElement;
+        assert.ok(reRenderedInput);
+        assert.equal(
+          reRenderedInput.value,
+          'Nf3',
+          'User typed SAN input must be preserved across relocalization',
+        );
+      } finally {
+        (globalThis as unknown as { document: unknown }).document = prevDoc;
+      }
+    });
+
+    it('finding L: bootstrap auth error relocalizes on locale change', async () => {
+      const elements = new Map<string, FakeElement>();
+      const doc = createFakeDoc(elements);
+      const ids = [
+        'auth', 'auth-status', 'auth-error', 'auth-form', 'auth-handle',
+        'auth-password', 'auth-email', 'auth-code-row', 'auth-code',
+        'auth-submit', 'auth-register', 'auth-passkey', 'auth-logout',
+        'auth-resend-verification', 'play-bot', 'theme-toggle',
+      ];
+      for (const id of ids) {
+        const tag = id.includes('form') ? 'form' : id.includes('input') || id.includes('handle') || id.includes('password') || id.includes('email') || id.includes('code') ? 'input' : id.includes('submit') || id.includes('register') || id.includes('passkey') || id.includes('logout') || id.includes('bot') || id.includes('theme') || id.includes('resend') ? 'button' : 'div';
+        const el = doc.createElement(tag) as unknown as FakeElement;
+        el.id = id;
+        elements.set(id, el);
+      }
+      const i18n = createTestI18n();
+
+      const shell = bootstrap(doc, {
+        config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+        i18n,
+        storage: new MemoryTokenStore() as unknown as KeyValueStorage,
+        httpTransport: new FakeTransport().onEach((req) => {
+          const path = new URL(req.url).pathname;
+          if (path === '/v1/auth/login') {
+            return json(401, {
+              error: {
+                message: 'Additional verification is required.',
+                code: 'unauthorized',
+                details: { reason: 'step_up_required' },
+              },
+            });
+          }
+          return json(200, {});
+        }),
+      });
+
+      const handleInput = elements.get('auth-handle')!;
+      const pwdInput = elements.get('auth-password')!;
+      const form = elements.get('auth-form')!;
+      handleInput.value = 'alice';
+      pwdInput.value = 'password123';
+
+      form.onsubmit!({ preventDefault: () => {} } as unknown as Event);
+      await new Promise((r) => setTimeout(r, 10));
+
+      const errorEl = elements.get('auth-error')!;
+      assert.equal(
+        errorEl.textContent,
+        'Additional verification is required. If this account has a verified email address, a sign-in code has been sent to it. Enter the code, or sign in with a passkey.',
+      );
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        errorEl.textContent,
+        'يلزم التحقق الإضافي. أدخل الرمز أو سجل الدخول باستخدام مفتاح مرور.',
+        'Auth error must relocalize on locale change',
+      );
+
+      shell.auth.dispose();
+      shell.shellLocalization?.dispose();
+    });
   });
 });
 

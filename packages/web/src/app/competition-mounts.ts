@@ -32,7 +32,7 @@ import {
 } from './tournament-view.js';
 import { loadCapabilities, tournamentCommentaryEnabled } from './capabilities-nav.js';
 import { TournamentCommentaryController } from './tournament-commentary-controller.js';
-import type { CommentaryFailure, CommentaryPhase, CommentaryTarget } from './tournament-commentary-controller.js';
+import type { CommentaryFailure, CommentaryPhase, CommentaryResult, CommentaryTarget } from './tournament-commentary-controller.js';
 import {
   COMMENTARY_MESSAGES,
   getCommentaryMessage,
@@ -68,6 +68,7 @@ function setLeaderboardLoading(
     state.resultsRendered = false;
     if (elements.error) elements.error.textContent = '';
     elements.results.hidden = true;
+    elements.results.innerHTML = '';
     elements.loading.hidden = false;
     return;
   }
@@ -78,14 +79,19 @@ function setLeaderboardLoading(
 
 function createLeaderboardCallbacks(
   elements: LeaderboardElements,
-  onEntries: (entries: readonly LeaderboardEntry[], names: ReadonlyMap<string, SocialPlayer>) => void,
+  onEntries: (
+    entries: readonly LeaderboardEntry[],
+    names: ReadonlyMap<string, SocialPlayer>,
+    variant: Variant,
+    speed: Speed,
+  ) => void,
   i18n: I18n,
 ): LeaderboardCallbacks {
   const state: LeaderboardRenderState = { resultsRendered: false };
   return {
-    onResults: (entries, names) => {
+    onResults: (entries, names, variant, speed) => {
       state.resultsRendered = true;
-      onEntries(entries, names);
+      onEntries(entries, names, variant, speed);
       if (elements.error) elements.error.textContent = '';
       if (elements.results) renderLeaderboard(elements.results, entries, names, i18n);
     },
@@ -107,8 +113,12 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
   let activeVariant: Variant = 'standard';
   // No speed is chosen for the viewer: a pool is a variant and a speed, and there is no default pool.
   let activeSpeed: Speed | null = null;
-  let lastEntries: readonly LeaderboardEntry[] | null = null;
-  let lastNames: ReadonlyMap<string, SocialPlayer> | null = null;
+  let currentLoadedPool: {
+    variant: Variant;
+    speed: Speed;
+    entries: readonly LeaderboardEntry[];
+    names: ReadonlyMap<string, SocialPlayer>;
+  } | null = null;
 
   if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
   if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
@@ -118,10 +128,16 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
     if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
     if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
     if (elements.results) {
-      if (lastEntries !== null && lastNames !== null) {
-        renderLeaderboard(elements.results, lastEntries, lastNames, i18n);
+      if (
+        currentLoadedPool !== null &&
+        currentLoadedPool.variant === activeVariant &&
+        currentLoadedPool.speed === activeSpeed
+      ) {
+        renderLeaderboard(elements.results, currentLoadedPool.entries, currentLoadedPool.names, i18n);
       } else if (activeSpeed === null) {
         renderChooseSpeed(elements.results, i18n);
+      } else {
+        elements.results.innerHTML = '';
       }
     }
   });
@@ -130,9 +146,10 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
     client,
     callbacks: createLeaderboardCallbacks(
       elements,
-      (entries, names) => {
-        lastEntries = entries;
-        lastNames = names;
+      (entries, names, variant, speed) => {
+        if (variant === activeVariant && speed === activeSpeed) {
+          currentLoadedPool = { variant, speed, entries, names };
+        }
       },
       i18n,
     ),
@@ -143,12 +160,14 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
   const unbindVariant = elements.select
     ? bindVariantSelector(elements.select, (variant) => {
         activeVariant = variant;
+        currentLoadedPool = null;
         load();
       })
     : () => {};
   const unbindSpeed = elements.speedSelect
     ? bindSpeedSelector(elements.speedSelect, (speed) => {
         activeSpeed = speed;
+        currentLoadedPool = null;
         load();
       })
     : () => {};
@@ -461,17 +480,20 @@ export function mountTournamentCommentary(
 
   let disposed = false;
   let available = false;
-  let currentResult:
-    | { kind: 'game'; value: TournamentGameCommentary }
-    | { kind: 'round'; value: TournamentRoundRecap }
-    | null = null;
-  let currentPhase: CommentaryPhase = 'idle';
-  let currentFailure: CommentaryFailure | null = null;
+  type CommentaryViewState =
+    | { kind: 'idle' }
+    | { kind: 'loading' }
+    | { kind: 'failure'; failure: CommentaryFailure }
+    | { kind: 'result'; result: CommentaryResult };
+
+  let viewState: CommentaryViewState = { kind: 'idle' };
   let currentRounds: readonly TournamentRound[] | null = null;
 
   /** Drop whatever answer is on screen and hide the region it was in. */
   const clearResult = (): void => {
-    currentResult = null;
+    if (viewState.kind === 'result') {
+      viewState = { kind: 'idle' };
+    }
     if (elements.result) {
       elements.result.textContent = '';
       elements.result.hidden = true;
@@ -482,19 +504,23 @@ export function mountTournamentCommentary(
     client,
     callbacks: {
       onPhase: (phase) => {
-        currentPhase = phase;
         if (!elements.status) return;
         // `error` is deliberately absent. The controller reports the failure first and the phase
         // immediately after, so a branch here that wrote anything for `error` would erase the
         // message `onFailure` had just set — which is what it did, blanking the status line on every
         // refusal until a mount test caught it.
-        if (phase === 'loading') elements.status.textContent = getCommentaryMessage('running', i18n);
-        else if (phase === 'idle') elements.status.textContent = getCommentaryMessage('idle', i18n);
-        else if (phase === 'result') elements.status.textContent = '';
+        if (phase === 'loading') {
+          viewState = { kind: 'loading' };
+          elements.status.textContent = getCommentaryMessage('running', i18n);
+        } else if (phase === 'idle') {
+          viewState = { kind: 'idle' };
+          elements.status.textContent = getCommentaryMessage('idle', i18n);
+        } else if (phase === 'result') {
+          elements.status.textContent = '';
+        }
       },
       onResult: (result) => {
-        currentResult = result;
-        currentFailure = null;
+        viewState = { kind: 'result', result };
         if (!elements.result) return;
         if (result.kind === 'game') {
           renderGameCommentary(doc, elements.result, result.value, i18n);
@@ -504,11 +530,14 @@ export function mountTournamentCommentary(
         elements.result.hidden = false;
       },
       onFailure: (failure) => {
-        currentFailure = failure;
+        viewState = { kind: 'failure', failure };
         clearResult();
         if (elements.status) elements.status.textContent = commentaryFailureMessage(failure, i18n);
       },
-      onInvalidated: clearResult,
+      onInvalidated: () => {
+        viewState = { kind: 'idle' };
+        clearResult();
+      },
     },
   });
 
@@ -575,19 +604,26 @@ export function mountTournamentCommentary(
 
   const unsubscribeLocale = i18n.onLocaleChange(() => {
     if (elements.status) {
-      if (currentFailure !== null) {
-        elements.status.textContent = commentaryFailureMessage(currentFailure, i18n);
-      } else if (currentPhase === 'loading') {
-        elements.status.textContent = getCommentaryMessage('running', i18n);
-      } else if (currentPhase === 'idle') {
-        elements.status.textContent = getCommentaryMessage('idle', i18n);
+      switch (viewState.kind) {
+        case 'failure':
+          elements.status.textContent = commentaryFailureMessage(viewState.failure, i18n);
+          break;
+        case 'loading':
+          elements.status.textContent = getCommentaryMessage('running', i18n);
+          break;
+        case 'idle':
+          elements.status.textContent = getCommentaryMessage('idle', i18n);
+          break;
+        case 'result':
+          elements.status.textContent = '';
+          break;
       }
     }
-    if (elements.result && currentResult !== null) {
-      if (currentResult.kind === 'game') {
-        renderGameCommentary(doc, elements.result, currentResult.value, i18n);
+    if (elements.result && viewState.kind === 'result') {
+      if (viewState.result.kind === 'game') {
+        renderGameCommentary(doc, elements.result, viewState.result.value, i18n);
       } else {
-        renderRoundRecap(doc, elements.result, currentResult.value, i18n);
+        renderRoundRecap(doc, elements.result, viewState.result.value, i18n);
       }
     }
     if (currentRounds !== null && elements.controls) {

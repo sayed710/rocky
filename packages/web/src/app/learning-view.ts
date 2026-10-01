@@ -144,6 +144,15 @@ export function renderLessonDetail(
   if (progressEl) progressEl.textContent = courseProgressLabel(progress, i18n);
 
   if (!stepListEl) return;
+  const previousInputs = new Map<string, { value: string; disabled: boolean }>();
+  for (const input of stepListEl.querySelectorAll<HTMLInputElement>('input')) {
+    if (input.id) {
+      previousInputs.set(input.id, {
+        value: input.value,
+        disabled: Boolean(input.disabled),
+      });
+    }
+  }
   stepListEl.innerHTML = '';
 
   if (steps.length === 0) {
@@ -245,11 +254,20 @@ export function renderLessonDetail(
       input.placeholder = i18n.t('learning.step.sanPlaceholder');
       input.autocomplete = 'off';
       input.required = true;
+
+      const previousState = previousInputs.get(input.id);
+      if (previousState) {
+        input.value = previousState.value;
+        input.disabled = previousState.disabled;
+      }
       form.appendChild(input);
 
       const submitBtn = document.createElement('button');
       submitBtn.type = 'submit';
       submitBtn.textContent = i18n.t('learning.step.submitMove');
+      if (previousState?.disabled) {
+        submitBtn.disabled = true;
+      }
       form.appendChild(submitBtn);
 
       form.addEventListener('submit', (e) => {
