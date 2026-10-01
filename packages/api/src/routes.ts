@@ -39,9 +39,16 @@ import type { Clock } from './ports/clock';
 import type { IdGenerator } from './ports/ids';
 import { aggregatePlayer, BotDetectionService } from '@chess-platform/anti-cheat';
 import { NoEngineForVariantError } from '@chess-platform/engine';
-import { SocialRuleError, type FriendRequestAction } from '@chess-platform/social';
+import { assertDistinct, SocialRuleError, type FriendRequestAction } from '@chess-platform/social';
 import { MessagingRuleError, MAX_MESSAGE_LENGTH } from '@chess-platform/messaging';
-import { CommunityRuleError } from '@chess-platform/community';
+import {
+  assertValidPostBody,
+  assertValidSlug,
+  assertValidTeamDescription,
+  assertValidTeamName,
+  assertValidThreadTitle,
+  CommunityRuleError,
+} from '@chess-platform/community';
 import { AchievementRuleError } from '@chess-platform/achievements';
 import { StudyRuleError, MAX_PGN_BYTES } from '@chess-platform/studies';
 import { LearningRuleError } from '@chess-platform/learning';
@@ -2815,7 +2822,9 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         200: ['FollowEdgeView', 'Follow edge created or existing'],
         403: ['Error', 'Blocked'],
+        404: ['Error', 'No such player'],
         422: ['Error', 'Self relation or malformed ID'],
+        429: ['Error', 'Rate limit exceeded', RETRY_AFTER_HEADER],
         503: ['Error', 'Social service unavailable'],
       },
     }),
@@ -2825,6 +2834,12 @@ export function buildRouter(deps: RouteDeps): Router {
       const actorId = requireAuth(ctx).userId;
       const targetId = parseUuid(ctx.params['playerId']!, 'playerId');
       try {
+        // Refuse a self-follow before charging for it, whatever case the UUID is written in.
+        assertDistinct(actorId.toLowerCase(), targetId.toLowerCase());
+        await admit([
+          { key: `social-initiate:user:${actorId}`, limit: config.rateLimit.socialInitiation.perUser },
+          { key: `social-initiate:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.socialInitiation.perIp },
+        ]);
         const edge = await repo.follow(actorId, targetId, new Date(clock.now()));
         return json(200, followEdgeView(edge));
       } catch (err) {
@@ -2926,8 +2941,10 @@ export function buildRouter(deps: RouteDeps): Router {
       responses: {
         201: ['FriendRequestView', 'Friend request created'],
         403: ['Error', 'Blocked'],
+        404: ['Error', 'No such player'],
         409: ['Error', 'Conflict or already exists'],
         422: ['Error', 'Self relation or malformed ID'],
+        429: ['Error', 'Rate limit exceeded', RETRY_AFTER_HEADER],
         503: ['Error', 'Social service unavailable'],
       },
     }),
@@ -2939,6 +2956,14 @@ export function buildRouter(deps: RouteDeps): Router {
       const addresseeId = parseUuid(reqString(body, 'addresseeId'), 'addresseeId');
       const id = ids.next();
       try {
+        assertDistinct(actorId.toLowerCase(), addresseeId.toLowerCase());
+        // The pair bucket stops one sender re-asking one player after every decline. It is keyed
+        // by the sender first, so only the sender's own requests ever charge it.
+        await admit([
+          { key: `social-initiate:user:${actorId}`, limit: config.rateLimit.socialInitiation.perUser },
+          { key: `social-initiate:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.socialInitiation.perIp },
+          { key: `friend-request:pair:${actorId}:${addresseeId.toLowerCase()}`, limit: config.rateLimit.friendRequestRepeat.perPair },
+        ]);
         const req = await repo.sendFriendRequest(id, actorId, addresseeId, new Date(clock.now()));
         return json(201, friendRequestView(req));
       } catch (err) {
@@ -3476,6 +3501,7 @@ export function buildRouter(deps: RouteDeps): Router {
         400: ['Error', 'Malformed request body'],
         409: ['Error', 'Slug already taken'],
         422: ['Error', 'Validation error'],
+        429: ['Error', 'Rate limit exceeded', RETRY_AFTER_HEADER],
         503: ['Error', 'Community service unavailable'],
       },
     }),
@@ -3491,6 +3517,15 @@ export function buildRouter(deps: RouteDeps): Router {
 
       const teamId = deps.ids.next();
       try {
+        // The repository applies these rules too; applying them first means a malformed team
+        // costs no quota. Rule failures map through `mapCommunityError` exactly as before.
+        assertValidSlug(slug);
+        assertValidTeamName(name);
+        assertValidTeamDescription(description);
+        await admit([
+          { key: `team-create:user:${actorId}`, limit: config.rateLimit.teamCreation.perUser },
+          { key: `team-create:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.teamCreation.perIp },
+        ]);
         const team = await repo.createTeam(teamId, slug, name, description, visibility, actorId, new Date(deps.clock.now()));
         return json(201, teamView(team));
       } catch (err) {
@@ -3653,6 +3688,7 @@ export function buildRouter(deps: RouteDeps): Router {
         403: ['Error', 'Private teams require join request'],
         404: ['Error', 'Team not found'],
         409: ['Error', 'Already a member'],
+        429: ['Error', 'Rate limit exceeded', RETRY_AFTER_HEADER],
         503: ['Error', 'Community service unavailable'],
       },
     }),
@@ -3663,6 +3699,10 @@ export function buildRouter(deps: RouteDeps): Router {
       const teamId = parseUuid(ctx.params['id']!, 'id');
 
       try {
+        await admit([
+          { key: `team-join:user:${actorId}`, limit: config.rateLimit.teamJoin.perUser },
+          { key: `team-join:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.teamJoin.perIp },
+        ]);
         const mem = await repo.joinTeam(teamId, actorId, new Date(deps.clock.now()));
         return json(201, membershipView(mem));
       } catch (err) {
@@ -3792,6 +3832,7 @@ export function buildRouter(deps: RouteDeps): Router {
         201: ['JoinRequestView', 'Join request submitted'],
         404: ['Error', 'Team not found'],
         409: ['Error', 'Already a member or request pending'],
+        429: ['Error', 'Rate limit exceeded', RETRY_AFTER_HEADER],
         503: ['Error', 'Community service unavailable'],
       },
     }),
@@ -3803,6 +3844,10 @@ export function buildRouter(deps: RouteDeps): Router {
       const requestId = deps.ids.next();
 
       try {
+        await admit([
+          { key: `team-join:user:${actorId}`, limit: config.rateLimit.teamJoin.perUser },
+          { key: `team-join:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.teamJoin.perIp },
+        ]);
         const req = await repo.createJoinRequest(requestId, teamId, actorId, new Date(deps.clock.now()));
         return json(201, joinRequestView(req));
       } catch (err) {
@@ -3989,6 +4034,7 @@ export function buildRouter(deps: RouteDeps): Router {
         403: ['Error', 'Only team members can create threads'],
         404: ['Error', 'Team not found'],
         422: ['Error', 'Validation error'],
+        429: ['Error', 'Rate limit exceeded', RETRY_AFTER_HEADER],
         503: ['Error', 'Community service unavailable'],
       },
     }),
@@ -4005,6 +4051,12 @@ export function buildRouter(deps: RouteDeps): Router {
       const firstPostId = deps.ids.next();
 
       try {
+        assertValidThreadTitle(title);
+        assertValidPostBody(postBody);
+        await admit([
+          { key: `forum-thread:user:${actorId}`, limit: config.rateLimit.forumThreadCreation.perUser },
+          { key: `forum-thread:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.forumThreadCreation.perIp },
+        ]);
         const res = await repo.createThread(threadId, teamId, actorId, title, postBody, firstPostId, new Date(deps.clock.now()));
         return json(201, {
           thread: forumThreadView(res.thread),
@@ -4157,6 +4209,7 @@ export function buildRouter(deps: RouteDeps): Router {
         404: ['Error', 'Thread not found'],
         409: ['Error', 'Thread is deleted'],
         422: ['Error', 'Validation error'],
+        429: ['Error', 'Rate limit exceeded', RETRY_AFTER_HEADER],
         503: ['Error', 'Community service unavailable'],
       },
     }),
@@ -4170,6 +4223,11 @@ export function buildRouter(deps: RouteDeps): Router {
       const postId = deps.ids.next();
 
       try {
+        assertValidPostBody(postBody);
+        await admit([
+          { key: `forum-post:user:${actorId}`, limit: config.rateLimit.forumPostCreation.perUser },
+          { key: `forum-post:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.forumPostCreation.perIp },
+        ]);
         const post = await repo.createPost(postId, threadId, actorId, postBody, new Date(deps.clock.now()));
         return json(201, forumPostView(post));
       } catch (err) {
@@ -6310,6 +6368,14 @@ interface DocSpec {
   params?: RouteDoc['params'];
   responses: Record<number, [string | undefined, string, RouteDoc['responses'][number]['headers']?]>;
 }
+
+/** The `Retry-After` header every refused admission sends with its 429. */
+const RETRY_AFTER_HEADER = {
+  'Retry-After': {
+    description: 'Seconds until the rejected rate-limit bucket admits another request',
+    schema: { type: 'integer', minimum: 0 },
+  },
+} as const;
 
 function doc(spec: DocSpec): RouteDoc {
   const responses: Record<number, RouteDoc['responses'][number]> = {};

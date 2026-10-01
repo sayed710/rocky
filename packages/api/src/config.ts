@@ -155,6 +155,43 @@ export interface RateLimitConfig {
     readonly perUser: RateLimitEndpointConfig;
     readonly perIp: RateLimitEndpointConfig;
   };
+  /**
+   * Reaching out to another player: following them or sending a friend request. One budget for
+   * both, keyed by the caller and never by the target, so writes aimed at a player cannot spend
+   * that player's budget. Unfollow, respond, block and unblock are deliberately not metered.
+   */
+  readonly socialInitiation: {
+    readonly perUser: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
+  /** Creating a team, which publishes a listed team and claims its slug. */
+  readonly teamCreation: {
+    readonly perUser: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
+  /** Joining a public team or asking to join one, sharing one budget. Never keyed by the team. */
+  readonly teamJoin: {
+    readonly perUser: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
+  /** Starting a forum thread (the thread and its opening post). */
+  readonly forumThreadCreation: {
+    readonly perUser: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
+  /** Replying in a forum thread. Neither dimension is keyed by the team or thread. */
+  readonly forumPostCreation: {
+    readonly perUser: RateLimitEndpointConfig;
+    readonly perIp: RateLimitEndpointConfig;
+  };
+  /**
+   * Friend requests from one sender to one recipient, charged alongside `socialInitiation`. It
+   * bounds re-sending after a decline to the same player. The key names both players but only the
+   * sender ever charges it, so a request can never spend the recipient's ability to act.
+   */
+  readonly friendRequestRepeat: {
+    readonly perPair: RateLimitEndpointConfig;
+  };
   readonly analysis: {
     readonly perUser: RateLimitEndpointConfig;
     readonly perIp: RateLimitEndpointConfig;
@@ -254,6 +291,45 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   messageSend: {
     perUser: { maxRequests: 30, windowMs: 60 * 1000 }, // 30 / min
     perIp: { maxRequests: 300, windowMs: 60 * 1000 }, // 300 / min
+  },
+  // The community budgets reuse the two shapes above instead of inventing new numbers, and keep
+  // their 10-account shared-NAT margin. Following a player or sending a friend request opens a
+  // relation with someone else, like opening a conversation, so it gets that budget. It charges an
+  // already-existing follow too, bounding repeated calls exactly as get-or-create conversations do.
+  socialInitiation: {
+    perUser: { maxRequests: 20, windowMs: 5 * 60 * 1000 }, // 20 / 5 min
+    perIp: { maxRequests: 200, windowMs: 5 * 60 * 1000 }, // 200 / 5 min
+  },
+  // A team is a durable, listed object with a unique slug, created a handful of times per account,
+  // not retried like a seek. It takes the hourly shape of the other rarely-repeated creations
+  // (`register`, `webauthnRegister`) with the same 10-account margin on the address.
+  teamCreation: {
+    perUser: { maxRequests: 5, windowMs: 60 * 60 * 1000 }, // 5 / 60 min
+    perIp: { maxRequests: 50, windowMs: 60 * 60 * 1000 }, // 50 / 60 min
+  },
+  // Joining, or asking to join, lands in another team's member list or admin queue — the same
+  // reach-out as opening a conversation.
+  teamJoin: {
+    perUser: { maxRequests: 20, windowMs: 5 * 60 * 1000 }, // 20 / 5 min
+    perIp: { maxRequests: 200, windowMs: 5 * 60 * 1000 }, // 200 / 5 min
+  },
+  // A thread is opened the way a conversation is, and a reply is sent the way a message is, so
+  // each takes that budget. Separate buckets, so a long discussion cannot use up the ability to
+  // start a thread.
+  forumThreadCreation: {
+    perUser: { maxRequests: 20, windowMs: 5 * 60 * 1000 }, // 20 / 5 min
+    perIp: { maxRequests: 200, windowMs: 5 * 60 * 1000 }, // 200 / 5 min
+  },
+  forumPostCreation: {
+    perUser: { maxRequests: 30, windowMs: 60 * 1000 }, // 30 / min
+    perIp: { maxRequests: 300, windowMs: 60 * 1000 }, // 300 / min
+  },
+  // The account budget alone still let one sender re-send a declined request to the same player
+  // every few seconds. Asking one person again is the pattern `emailVerificationRequest.perUser`
+  // bounds for one inbox (3). Here the recipient, not the sender, bears the cost, so the window is
+  // a day: a second and third try after an accidental decline still work.
+  friendRequestRepeat: {
+    perPair: { maxRequests: 3, windowMs: 24 * 60 * 60 * 1000 }, // 3 / 24 h per sender → recipient
   },
   // Analysis is a CPU-amplification surface, so it is limited more tightly than a read endpoint.
   analysis: {
@@ -361,11 +437,26 @@ function validateCors(cors: CorsConfig): void {
   }
 }
 
-/** Fail startup on missing or unusable messaging budgets, including untyped runtime input. */
-function validateMessagingRateLimits(rateLimit: RateLimitConfig): void {
-  for (const name of ['conversationCreation', 'messageSend'] as const) {
-    const policy = rateLimit[name];
-    for (const dimension of ['perUser', 'perIp'] as const) {
+const USER_AND_IP = ['perUser', 'perIp'] as const;
+
+/** The budgets on authenticated writes that {@link validateWriteRateLimits} checks, with their dimensions. */
+const WRITE_RATE_LIMITS = {
+  seekCreation: USER_AND_IP,
+  conversationCreation: USER_AND_IP,
+  messageSend: USER_AND_IP,
+  socialInitiation: USER_AND_IP,
+  teamCreation: USER_AND_IP,
+  teamJoin: USER_AND_IP,
+  forumThreadCreation: USER_AND_IP,
+  forumPostCreation: USER_AND_IP,
+  friendRequestRepeat: ['perPair'],
+} as const;
+
+/** Fail startup on missing or unusable write budgets, including untyped runtime input. */
+function validateWriteRateLimits(rateLimit: RateLimitConfig): void {
+  for (const [name, dimensions] of Object.entries(WRITE_RATE_LIMITS)) {
+    const policy = rateLimit[name as keyof typeof WRITE_RATE_LIMITS] as Record<string, RateLimitEndpointConfig | undefined> | undefined;
+    for (const dimension of dimensions) {
       const limit = policy?.[dimension];
       if (
         !limit ||
@@ -426,7 +517,7 @@ export function resolveConfig(
   const trustProxy = input.trustProxy ?? resolveTrustProxyEnv(env['TRUST_PROXY']);
   validateTrustProxy(trustProxy);
   const rateLimit = input.rateLimit ?? DEFAULT_RATE_LIMIT;
-  validateMessagingRateLimits(rateLimit);
+  validateWriteRateLimits(rateLimit);
   return {
     accessTokenSecret,
     accessTokenTtlSec: input.accessTokenTtlSec ?? DEFAULT_ACCESS_TOKEN_TTL_SEC,
