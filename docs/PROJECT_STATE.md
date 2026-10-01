@@ -4607,7 +4607,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
     - 250m/256Mi requests and 1 CPU/1Gi limits
     - typed `trustWorker.{enabled,botAnalysis,antiCheatAnalysis}`, with both-off refused
   - The first rollout backfills existing history once, which is documented.
-- **Tournament reporter**: the delegated architecture review challenged the topology and approved it. The reporter stays on every gateway replica, where duplicates are idempotent under the version CAS, and Helm now defaults it on with a typed boolean kill switch. The review also found a pre-existing race that the default made easier to reach: the launch id names the pairing slot but not its players, so two operations from one tournament version could link one game under the wrong players. `DurableGameLauncher` no longer links a game whose players, variant or time control differ (compared key-order-insensitively, because JSONB reorders keys). Instead it walks the slot's attempts and takes the first one that is free or holds this exact pairing. Every replica takes the same one. A plain refusal, the first version on PR #83, would have wedged a pairing behind a game left by a lost race (Greptile and Qodo exact-head findings).
+- **Tournament reporter**: the delegated architecture review challenged the topology and approved it. The reporter stays on every gateway replica, where duplicates are idempotent under the version CAS, and Helm now defaults it on with a typed boolean kill switch. The review also found a pre-existing race that the default made easier to reach: the launch id names the pairing slot but not its players, so two operations from one tournament version could link one game under the wrong players. `DurableGameLauncher` no longer links a game whose players, variant or time control differ (compared key-order-insensitively, because JSONB reorders keys). Instead it walks the slot's attempts and takes the first one that is free or holds this exact pairing's unfinished game. An ended game is never linked again (a Greptile finding on `add9982`). Every replica takes the same one. A plain refusal, the first version on PR #83, would have wedged a pairing behind a game left by a lost race (Greptile and Qodo exact-head findings).
 - **RED before the change**:
   - `player-reports.test.ts` failed 7/7 against `main` (404 where 201, 401, 403 or 200 were expected).
   - `player-reports.integration.test.ts` failed 5/5 (`relation "player_reports" does not exist`).
@@ -4615,7 +4615,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - The gateway test failed 4/4: with `BOT_AUTO_ANALYZE=1`, main's gateway kept running.
   - Helm had 18 new checks failing.
   - The launcher mismatch test failed.
-- **Falsification**: 32 disposable mutations were each caught, with sources backed up to disk and restored byte-identical:
+- **Falsification**: 33 disposable mutations were each caught, with sources backed up to disk and restored byte-identical:
   - remove admission
   - key by target
   - admit after the write
@@ -4647,6 +4647,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - the launcher refusing instead of probing
   - the queue showing reports the reader filed (in-memory and SQL)
   - the detail view open to the filer
+  - the launcher reusing an ended game
 - **Delegated read-only reviews** (`agy-delegate`):
   - Gemini 3.8 Flash High hit its individual quota (429) on all five briefs. The owner's fallback, Claude Sonnet 4.6 via agy, hit its quota as well.
   - The five reviews (architecture, security, persistence/concurrency, deployment, test quality) then ran as read-only Claude subagents over the design and the implementation patch. All approved with changes and found no blocker.

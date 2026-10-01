@@ -28,7 +28,8 @@ export class DurableGameLauncher implements GameLauncher {
    * lost its version CAS leaves that game unlinked in the slot; its retry may then pair the slot
    * differently again. So a slot holding another pairing's game is never linked under these players
    * (the tournament and the event log would disagree about who played) and never refused either (the
-   * pairing would be wedged forever). The launch moves on to the next attempt of the same slot.
+   * pairing would be wedged forever). The launch moves on to the next attempt of the same slot, as
+   * it does past a game that has already ended.
    * Every replica walks the same sequence, so they still converge on one game per pairing, and the
    * tournament's version CAS still decides which link is kept. A game left unlinked by a lost race
    * is never started; the no-show deadline ends it. ADR-0152.
@@ -71,9 +72,18 @@ export class DurableGameLauncher implements GameLauncher {
     return { gameId };
   }
 
-  /** The stored game if it is this pairing's, or null if another pairing holds the slot. */
+  /**
+   * The stored game if it is this pairing's live game, or null if the slot is not usable: another
+   * pairing holds it, or the game has already ended. A pairing's game can sit past its nominal
+   * attempt, so the relaunch after an abandon can land on that same aborted game; linking it again
+   * would leave the pairing waiting on a game that is over. A concurrent duplicate launch of the
+   * same pairing never needs an ended game either: it loses its version CAS to the update that
+   * linked the live one.
+   */
   private async existing(gameId: string, input: LaunchInput): Promise<{ gameId: string } | null> {
-    const created = (await this.events.load(gameId))[0]?.event;
+    const stored = await this.events.load(gameId);
+    if (stored.some(({ event }) => event.type === 'GameEnded')) return null;
+    const created = stored[0]?.event;
     const same = created?.type === 'GameCreated'
       && created.players.white === input.white
       && created.players.black === input.black

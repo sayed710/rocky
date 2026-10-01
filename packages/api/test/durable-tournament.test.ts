@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { Game } from '@chess-platform/game';
 import { InMemoryEventStore } from '@chess-platform/persistence';
 import { InMemoryTournamentsRepository } from '../src/fakes';
 import { DurableGameLauncher, launchGameId } from '../src/tournament/durable-launcher';
@@ -98,4 +99,25 @@ test('two pairings racing for one slot each get their own game', async () => {
     const stored = await playersOf(events, launched[i]!.gameId);
     assert.deepEqual([stored.white, stored.black], [p.white, p.black]);
   }
+});
+
+/**
+ * A pairing's game can live past its nominal attempt (an earlier attempt was held), and an abandon
+ * relaunches at the nominal attempt + 1. That can land on the pairing's own aborted game, which must
+ * never be linked again: the pairing would wait forever on a game that has already ended.
+ */
+test('a launch never reuses an ended game, even one of the same pairing', async () => {
+  const events = new InMemoryEventStore();
+  const launcher = new DurableGameLauncher(events, { now: () => 1234 });
+  await launcher.launch({ ...input, white: 'carol' }); // holds attempt 0 of the slot
+  const { gameId: first } = await launcher.launch(input); // so this pairing lands on attempt 1
+  assert.equal(first, launchGameId({ ...input, attempt: 1 }));
+  const stored = await events.load(first);
+  const { events: ended } = Game.fromEvents(stored.map((e) => e.event)).abort(2000);
+  await events.append(first, stored.length - 1, ended);
+
+  const { gameId: relaunched } = await launcher.launch({ ...input, attempt: 1 }); // what abandonGame asks for next
+  assert.notEqual(relaunched, first, 'the aborted game is not linked again');
+  assert.equal(relaunched, launchGameId({ ...input, attempt: 2 }));
+  assert.deepEqual(await new DurableGameLauncher(events, { now: () => 9 }).launch({ ...input, attempt: 1 }), { gameId: relaunched }, 'replicas converge on the fresh game');
 });
