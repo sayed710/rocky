@@ -21,6 +21,7 @@ import { applyMove } from '../core/mover.js';
 import { STARTING_FEN } from '../core/position.js';
 import type { Premove } from '../core/premove.js';
 import { createI18nManager, type I18nManager } from '../i18n/manager.js';
+import { createLtrElement } from '../i18n/bidi.js';
 
 /**
  * DOM elements the board binds to.
@@ -135,7 +136,23 @@ export function mountBoard(
 
   const renderStatus = (): void => {
     if (!statusEl || !currentStatus) return;
-    statusEl.textContent = i18n.t(currentStatus.key, { move: currentStatus.move });
+    const doc = statusEl.ownerDocument ?? (typeof document !== 'undefined' ? document : undefined);
+    const template = i18n.t(currentStatus.key);
+    if (!doc || !template.includes('{move}')) {
+      statusEl.textContent = i18n.t(currentStatus.key, { move: currentStatus.move });
+      return;
+    }
+
+    const [prefix = '', suffix = ''] = template.split('{move}');
+    statusEl.textContent = '';
+    if (prefix) {
+      statusEl.appendChild(doc.createTextNode(prefix));
+    }
+    const moveEl = createLtrElement(doc, 'span', currentStatus.move);
+    statusEl.appendChild(moveEl);
+    if (suffix) {
+      statusEl.appendChild(doc.createTextNode(suffix));
+    }
   };
 
   const setStatus = (key: StatusKey, move: string): void => {
@@ -166,7 +183,10 @@ export function mountBoard(
           );
         }
       } else {
-        setStatus('board.status.premoveSet', `${r.premove.from}\u2013${r.premove.to}`);
+        setStatus(
+          'board.status.premoveSet',
+          `${r.premove.from}\u2013${r.premove.to}${r.premove.promotion ? `=${r.premove.promotion.toUpperCase()}` : ''}`,
+        );
       }
     },
   });

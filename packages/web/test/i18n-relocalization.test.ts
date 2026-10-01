@@ -10,7 +10,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { I18n } from '../src/i18n/manager.js';
+import { I18n, type I18nOptions } from '../src/i18n/manager.js';
 import { enMessages } from '../src/i18n/catalog/en.js';
 import type { MessagesCatalog } from '../src/i18n/catalog/index.js';
 import { createI18nManager } from '../src/i18n/index.js';
@@ -208,6 +208,12 @@ class FakeElement {
     return child;
   }
 
+  remove(): void {
+    if (this.parentElement) {
+      this.parentElement.removeChild(this);
+    }
+  }
+
   append(...nodes: (FakeElement | string | null | undefined)[]): void {
     for (const n of nodes) {
       if (n === null || n === undefined) continue;
@@ -330,11 +336,15 @@ class FakeElement {
     type: string;
     target?: unknown;
     preventDefault?: () => void;
+    stopPropagation?: () => void;
     clientX?: number;
     clientY?: number;
   }): boolean {
     if (!event.preventDefault) {
       event.preventDefault = () => {};
+    }
+    if (!event.stopPropagation) {
+      event.stopPropagation = () => {};
     }
     if (!event.target) {
       event.target = this;
@@ -346,7 +356,7 @@ class FakeElement {
 
   click(): void {
     if (this.disabled) return;
-    const evt = { type: 'click', target: this, preventDefault: () => {} };
+    const evt = { type: 'click', target: this, preventDefault: () => {}, stopPropagation: () => {} };
     this.onclick?.(evt);
     this.dispatchEvent(evt);
   }
@@ -420,6 +430,8 @@ function createFakeDoc(elementMap = new Map<string, FakeElement>()): Document {
     querySelectorAll(sel: string) {
       return (docObj.documentElement as FakeElement).querySelectorAll(sel);
     },
+    addEventListener(_type: string, _fn: unknown, _capture?: unknown) {},
+    removeEventListener(_type: string, _fn: unknown, _capture?: unknown) {},
   };
   (docObj.documentElement as FakeElement).ownerDocument = docObj as unknown as Document;
   (docObj.body as FakeElement).ownerDocument = docObj as unknown as Document;
@@ -622,12 +634,13 @@ const testArabicCatalog: Partial<MessagesCatalog> = {
   'ai.generatedBy': 'تم التوليد بواسطة {model}',
 };
 
-function createTestI18n(): I18n {
+function createTestI18n(opts: Partial<I18nOptions> = {}): I18n {
   return new I18n({
     catalogs: {
       en: enMessages,
       ar: testArabicCatalog as unknown as MessagesCatalog,
     },
+    ...opts,
   });
 }
 
@@ -1960,20 +1973,32 @@ describe('AI views (assess, coach, explain, opening, puzzle): representative cop
     }
   });
 
-  it('board mount: status copy relocalizes dynamically, preserves technical move tokens, and disposes without leaks', () => {
+  it('board mount: status copy relocalizes dynamically, isolates move tokens with dir="ltr" and bidi-ltr, inherits RTL prose, and supports promotion', () => {
+    const BIDI_CONTROL_REGEX = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
     const doc = createFakeDoc(new Map());
+    const prevDoc = (globalThis as unknown as { document?: unknown }).document;
+    (globalThis as unknown as { document: unknown }).document = doc;
+
     const boardEl = new FakeElement('div', 'board');
     boardEl.ownerDocument = doc;
     const statusEl = new FakeElement('div', 'status');
-    const i18n = createTestI18n();
+    statusEl.ownerDocument = doc;
+    (doc.body as unknown as FakeElement).appendChild(boardEl);
+    (doc.body as unknown as FakeElement).appendChild(statusEl);
 
+    const i18n = createTestI18n({ doc });
+
+    const promoFen = '8/4P3/8/8/8/8/8/8 w - - 0 1';
     const board = mountBoard(
       {
         boardEl: boardEl as unknown as HTMLElement,
         statusEl: statusEl as unknown as HTMLElement,
       },
       {
-        oracle: new StaticMoveOracle({ [STARTING_FEN]: { e2: ['e4'] } }),
+        oracle: new StaticMoveOracle({
+          [STARTING_FEN]: { e2: ['e4'] },
+          [promoFen]: { e7: ['e8'] },
+        }),
         i18n,
       },
     );
@@ -1985,36 +2010,92 @@ describe('AI views (assess, coach, explain, opening, puzzle): representative cop
       // e4 click: clientX=288, clientY=288
       boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 288 });
 
-      // 2. Status in English
+      // 2. Status in English: overall sentence textContent and isolated LTR move span
       assert.equal(statusEl.textContent, 'Played e2–e4.');
+      const enMoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(enMoveEl, 'move token must be rendered inside a .bidi-ltr element');
+      assert.equal(enMoveEl.getAttribute('dir'), 'ltr', 'move token element must explicitly have dir="ltr"');
+      assert.equal(enMoveEl.textContent, 'e2–e4');
+      assert.equal(statusEl.getAttribute('dir'), null, 'statusEl must not force LTR on the entire sentence');
+      assert.equal(BIDI_CONTROL_REGEX.test(statusEl.textContent), false, 'no bidi control characters in statusEl textContent');
+      assert.equal(BIDI_CONTROL_REGEX.test(enMoveEl.textContent), false, 'no bidi control characters in moveEl textContent');
 
       // 3. Switch locale to Arabic
       i18n.setLocale('ar');
 
-      // 4. Status dynamically relocalizes to Arabic while keeping move token e2–e4 intact
+      // 4. Status dynamically relocalizes to Arabic prose while preserving LTR move token e2–e4
       assert.equal(statusEl.textContent, 'تم لعب e2–e4.');
+      const arMoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(arMoveEl, 'Arabic status must also preserve .bidi-ltr move token');
+      assert.equal(arMoveEl.getAttribute('dir'), 'ltr', 'move token in Arabic must still have dir="ltr"');
+      assert.equal(arMoveEl.textContent, 'e2–e4');
+      // Arabic document has dir="rtl" and statusEl does not force LTR, so Arabic prose inherits RTL
+      assert.equal(doc.documentElement.getAttribute('dir'), 'rtl', 'document has dir="rtl" in Arabic');
+      assert.equal(statusEl.getAttribute('dir'), null, 'statusEl inherits RTL for prose without forcing LTR');
+      assert.equal(BIDI_CONTROL_REGEX.test(statusEl.textContent), false);
+      assert.equal(BIDI_CONTROL_REGEX.test(arMoveEl.textContent), false);
 
-      // 5. Simulate premove: reset to starting position and set turn false
-      board.setPosition(STARTING_FEN);
-      board.setTurn(false);
-      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 416 });
-      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 288 });
-      assert.equal(statusEl.textContent, 'تم تحديد النقلة المسبقة: e2–e4.');
+      // 5. Test promotion move: position with white pawn on e7 moving to e8
+      board.setPosition(promoFen);
+      board.setTurn(true);
+      // Click e7 (clientX=288, clientY=96)
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 96 });
+      // Click e8 (clientX=288, clientY=32) -> opens promotion overlay
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 32 });
+      // Choose Queen promotion
+      const promoChoice = boardEl.querySelector('.cb-promo-choice');
+      assert.ok(promoChoice, 'promotion overlay choice button must be rendered');
+      promoChoice.click();
 
-      // Switch back to English to verify premove English copy
+      // Check promotion status in Arabic
+      assert.equal(statusEl.textContent, 'تم لعب e7–e8=Q.');
+      const arPromoMoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(arPromoMoveEl, 'promotion move token must be rendered in .bidi-ltr element');
+      assert.equal(arPromoMoveEl.getAttribute('dir'), 'ltr', 'promotion notation must have dir="ltr"');
+      assert.equal(arPromoMoveEl.textContent, 'e7–e8=Q');
+      assert.equal(BIDI_CONTROL_REGEX.test(statusEl.textContent), false);
+      assert.equal(BIDI_CONTROL_REGEX.test(arPromoMoveEl.textContent), false);
+
+      // Switch to English and verify promotion notation in English
       i18n.setLocale('en');
-      assert.equal(statusEl.textContent, 'Premove set: e2–e4.');
+      assert.equal(statusEl.textContent, 'Played e7–e8=Q.');
+      const enPromoMoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(enPromoMoveEl);
+      assert.equal(enPromoMoveEl.getAttribute('dir'), 'ltr');
+      assert.equal(enPromoMoveEl.textContent, 'e7–e8=Q');
 
-      // 6. Dispose board
+      // 6. Test premove with promotion: set turn false and play e7-e8 premove
+      board.setPosition(promoFen);
+      board.setTurn(false);
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 96 });
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 32 });
+      const premovePromoChoice = boardEl.querySelector('.cb-promo-choice');
+      assert.ok(premovePromoChoice);
+      premovePromoChoice.click();
+
+      assert.equal(statusEl.textContent, 'Premove set: e7–e8=Q.');
+      const premoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(premoveEl);
+      assert.equal(premoveEl.getAttribute('dir'), 'ltr');
+      assert.equal(premoveEl.textContent, 'e7–e8=Q');
+
+      // Relocalize premove to Arabic
+      i18n.setLocale('ar');
+      assert.equal(statusEl.textContent, 'تم تحديد النقلة المسبقة: e7–e8=Q.');
+      assert.equal(statusEl.querySelector('.bidi-ltr')?.getAttribute('dir'), 'ltr');
+      assert.equal(statusEl.querySelector('.bidi-ltr')?.textContent, 'e7–e8=Q');
+
+      // 7. Dispose board
       board.dispose();
 
-      // 7. Switch locale again
-      i18n.setLocale('ar');
+      // 8. Switch locale again after disposal
+      i18n.setLocale('en');
 
-      // 8. Disposed board ceases reacting
-      assert.equal(statusEl.textContent, 'Premove set: e2–e4.');
+      // 9. Disposed board ceases reacting
+      assert.equal(statusEl.textContent, 'تم تحديد النقلة المسبقة: e7–e8=Q.');
     } finally {
       board.dispose();
+      (globalThis as unknown as { document: unknown }).document = prevDoc;
     }
   });
 
