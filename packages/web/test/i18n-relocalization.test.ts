@@ -42,6 +42,13 @@ import type {
   TournamentDetail,
   UserProfile,
 } from '../src/api/models.js';
+import { PlayBotDialog } from '../src/app/play-bot-dialog.js';
+import { CreateGamePanel } from '../src/app/create-game-panel.js';
+import { assessMessage, classificationLabel } from '../src/app/assess-view.js';
+import { coachMessage, omissionReasonLabel } from '../src/app/coach-view.js';
+import { explainMessage, describeOutcome } from '../src/app/explain-view.js';
+import { openingMessage, plies } from '../src/app/opening-view.js';
+import { puzzleMessage } from '../src/app/puzzle-view.js';
 
 // DOM test double capable of handling all mount and renderer operations
 class FakeElement {
@@ -52,20 +59,51 @@ class FakeElement {
   disabled = false;
   value = '';
   type = 'button';
-  checked = false;
+  name = '';
+  title = '';
+  placeholder = '';
+  open = false;
+  parentElement: FakeElement | null = null;
   attributes: Record<string, string> = {};
   dataset: Record<string, string> = {};
   children: FakeElement[] = [];
   ownerDocument?: unknown;
   onclick: ((event: unknown) => void) | null = null;
+  onsubmit: ((event: unknown) => void) | null = null;
   readonly listeners: Record<string, ((e: unknown) => void)[]> = {};
   style: Record<string, string> = {};
+  private _checked = false;
   private _textContent = '';
   private _innerHTML = '';
 
   constructor(tagName = 'div', id = '') {
     this.tagName = tagName.toUpperCase();
     this.id = id;
+  }
+
+  get checked(): boolean {
+    return this._checked;
+  }
+
+  set checked(val: boolean) {
+    this._checked = val;
+    if (val && this.type === 'radio' && this.name) {
+      let root: FakeElement = this;
+      while (root.parentElement) root = root.parentElement;
+      for (const radio of root.querySelectorAll(`input[name="${this.name}"]`)) {
+        if (radio !== this) {
+          radio._checked = false;
+        }
+      }
+    }
+  }
+
+  showModal(): void {
+    this.open = true;
+  }
+
+  close(): void {
+    this.open = false;
   }
 
   get textContent(): string {
@@ -124,6 +162,11 @@ class FakeElement {
     this.attributes[name] = value;
     if (name === 'id') this.id = value;
     if (name === 'class') this.className = value;
+    if (name === 'name') this.name = value;
+    if (name === 'value') this.value = value;
+    if (name === 'type') this.type = value;
+    if (name === 'title') this.title = value;
+    if (name === 'placeholder') this.placeholder = value;
   }
 
   getAttribute(name: string): string | null {
@@ -133,16 +176,28 @@ class FakeElement {
 
   removeAttribute(name: string): void {
     delete this.attributes[name];
+    if (name === 'title') this.title = '';
+    if (name === 'placeholder') this.placeholder = '';
+  }
+
+  hasAttribute(name: string): boolean {
+    return name in this.attributes;
   }
 
   appendChild(child: FakeElement): FakeElement {
-    if (child) this.children.push(child);
+    if (child) {
+      child.parentElement = this;
+      this.children.push(child);
+    }
     return child;
   }
 
   removeChild(child: FakeElement): FakeElement {
     const idx = this.children.indexOf(child);
-    if (idx !== -1) this.children.splice(idx, 1);
+    if (idx !== -1) {
+      child.parentElement = null;
+      this.children.splice(idx, 1);
+    }
     return child;
   }
 
@@ -153,29 +208,87 @@ class FakeElement {
         const span = new FakeElement('span');
         span.textContent = n;
         span.ownerDocument = this.ownerDocument;
+        span.parentElement = this;
         this.children.push(span);
       } else {
+        n.parentElement = this;
         this.children.push(n);
       }
     }
   }
 
   replaceChildren(...nodes: (FakeElement | string | null | undefined)[]): void {
+    for (const c of this.children) {
+      c.parentElement = null;
+    }
     this.children = [];
     this.append(...nodes);
+  }
+
+  matches(sel: string): boolean {
+    let s = sel.trim();
+    if (!s || s === '*') return true;
+
+    if (s.endsWith(':checked')) {
+      if (!this.checked) return false;
+      s = s.slice(0, -':checked'.length).trim();
+      if (!s) return true;
+    }
+
+    if (s.startsWith('.') && !s.includes('[') && !s.includes(':')) {
+      return this.classList.contains(s.slice(1));
+    }
+
+    if (s.startsWith('#') && !s.includes('[')) {
+      return this.id === s.slice(1);
+    }
+
+    const attrRegex = /\[([a-zA-Z0-9_-]+)(?:="([^"]*)")?\]/g;
+    const bracketIndex = s.indexOf('[');
+    const tag = bracketIndex !== -1 ? s.slice(0, bracketIndex).trim() : s;
+
+    if (tag && tag !== '*' && this.tagName.toLowerCase() !== tag.toLowerCase()) {
+      return false;
+    }
+
+    if (bracketIndex !== -1) {
+      let match: RegExpExecArray | null;
+      while ((match = attrRegex.exec(s)) !== null) {
+        const attrName = match[1];
+        if (!attrName) continue;
+        const expectedVal = match[2];
+        let actualVal: string | null = null;
+        if (attrName === 'name') actualVal = this.name || this.getAttribute('name');
+        else if (attrName === 'value') actualVal = this.value || this.getAttribute('value');
+        else if (attrName === 'id') actualVal = this.id;
+        else if (attrName === 'type') actualVal = this.type || this.getAttribute('type');
+        else actualVal = this.getAttribute(attrName);
+
+        if (expectedVal !== undefined) {
+          if (actualVal !== expectedVal) return false;
+        } else {
+          if (actualVal === null || actualVal === undefined) return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  closest(sel: string): FakeElement | null {
+    let current: FakeElement | null = this;
+    while (current) {
+      if (current.matches(sel)) return current;
+      current = current.parentElement;
+    }
+    return null;
   }
 
   querySelector(sel: string): FakeElement | null {
     const queue = [...this.children];
     while (queue.length > 0) {
       const item = queue.shift()!;
-      if (sel.startsWith('.') && item.classList.contains(sel.slice(1))) {
-        return item;
-      }
-      if (sel.startsWith('#') && item.id === sel.slice(1)) {
-        return item;
-      }
-      if (item.tagName.toLowerCase() === sel.toLowerCase()) {
+      if (item.matches(sel)) {
         return item;
       }
       queue.push(...item.children);
@@ -188,13 +301,7 @@ class FakeElement {
     const queue = [...this.children];
     while (queue.length > 0) {
       const item = queue.shift()!;
-      if (!sel) {
-        result.push(item);
-      } else if (sel.startsWith('.') && item.classList.contains(sel.slice(1))) {
-        result.push(item);
-      } else if (sel.startsWith('#') && item.id === sel.slice(1)) {
-        result.push(item);
-      } else if (item.tagName.toLowerCase() === sel.toLowerCase()) {
+      if (!sel || item.matches(sel)) {
         result.push(item);
       }
       queue.push(...item.children);
@@ -212,7 +319,13 @@ class FakeElement {
     this.listeners[type] = this.listeners[type].filter((cb) => cb !== fn);
   }
 
-  dispatchEvent(event: { type: string }): boolean {
+  dispatchEvent(event: { type: string; target?: unknown; preventDefault?: () => void }): boolean {
+    if (!event.preventDefault) {
+      event.preventDefault = () => {};
+    }
+    if (!event.target) {
+      event.target = this;
+    }
     const list = this.listeners[event.type] ?? [];
     for (const fn of list) fn(event);
     return true;
@@ -234,21 +347,30 @@ class FakeElement {
   }
 }
 
+class FakeHTMLButtonElement extends FakeElement {}
+class FakeHTMLFormElement extends FakeElement {}
+class FakeHTMLInputElement extends FakeElement {}
+class FakeHTMLAnchorElement extends FakeElement {}
+class FakeHTMLDialogElement extends FakeElement {}
+
 // Polyfill global HTML element classes for Node.js test environment if needed
 if (typeof (globalThis as unknown as { HTMLElement?: unknown }).HTMLElement === 'undefined') {
   (globalThis as unknown as { HTMLElement: unknown }).HTMLElement = FakeElement;
 }
 if (typeof (globalThis as unknown as { HTMLButtonElement?: unknown }).HTMLButtonElement === 'undefined') {
-  (globalThis as unknown as { HTMLButtonElement: unknown }).HTMLButtonElement = class FakeHTMLButtonElement extends FakeElement {};
+  (globalThis as unknown as { HTMLButtonElement: unknown }).HTMLButtonElement = FakeHTMLButtonElement;
 }
 if (typeof (globalThis as unknown as { HTMLFormElement?: unknown }).HTMLFormElement === 'undefined') {
-  (globalThis as unknown as { HTMLFormElement: unknown }).HTMLFormElement = class FakeHTMLFormElement extends FakeElement {};
+  (globalThis as unknown as { HTMLFormElement: unknown }).HTMLFormElement = FakeHTMLFormElement;
 }
 if (typeof (globalThis as unknown as { HTMLInputElement?: unknown }).HTMLInputElement === 'undefined') {
-  (globalThis as unknown as { HTMLInputElement: unknown }).HTMLInputElement = class FakeHTMLInputElement extends FakeElement {};
+  (globalThis as unknown as { HTMLInputElement: unknown }).HTMLInputElement = FakeHTMLInputElement;
 }
 if (typeof (globalThis as unknown as { HTMLAnchorElement?: unknown }).HTMLAnchorElement === 'undefined') {
-  (globalThis as unknown as { HTMLAnchorElement: unknown }).HTMLAnchorElement = class FakeHTMLAnchorElement extends FakeElement {};
+  (globalThis as unknown as { HTMLAnchorElement: unknown }).HTMLAnchorElement = FakeHTMLAnchorElement;
+}
+if (typeof (globalThis as unknown as { HTMLDialogElement?: unknown }).HTMLDialogElement === 'undefined') {
+  (globalThis as unknown as { HTMLDialogElement: unknown }).HTMLDialogElement = FakeHTMLDialogElement;
 }
 
 function createFakeDoc(elementMap = new Map<string, FakeElement>()): Document {
@@ -256,7 +378,20 @@ function createFakeDoc(elementMap = new Map<string, FakeElement>()): Document {
     documentElement: new FakeElement('html'),
     body: new FakeElement('body'),
     createElement(tag: string) {
-      const el = new FakeElement(tag);
+      const lower = tag.toLowerCase();
+      let el: FakeElement;
+      if (lower === 'button') el = new FakeHTMLButtonElement(tag);
+      else if (lower === 'form') el = new FakeHTMLFormElement(tag);
+      else if (lower === 'input') el = new FakeHTMLInputElement(tag);
+      else if (lower === 'dialog') el = new FakeHTMLDialogElement(tag);
+      else if (lower === 'a') el = new FakeHTMLAnchorElement(tag);
+      else el = new FakeElement(tag);
+      el.ownerDocument = docObj as unknown as Document;
+      return el;
+    },
+    createTextNode(text: string) {
+      const el = new FakeElement('text');
+      el.textContent = text;
       el.ownerDocument = docObj as unknown as Document;
       return el;
     },
@@ -348,6 +483,114 @@ const testArabicCatalog: Partial<MessagesCatalog> = {
   'learning.studies.visibility': 'الرؤية: {visibility}',
   'community.teams.emptyListTitle': 'لا توجد فرق بعد',
   'community.teams.emptyListBody': 'ستظهر هنا الفرق التي ينشئها اللاعبون.',
+  // Bot dialog
+  'bot.title': 'اللعب ضد الحاسوب',
+  'bot.signInToPlay': 'سجل الدخول للعب ضد الحاسوب',
+  'bot.level': 'المستوى',
+  'bot.level.novice': 'مبتدئ',
+  'bot.level.novice.blurb': 'يرتكب أخطاء تكتيكية متكررة. الأفضل للمبتدئين في تعلم الأنماط الأساسية.',
+  'bot.level.club': 'نادي',
+  'bot.level.club.blurb': 'يلعب نقلات تكتيكية متينة مع عدم دقة عرضية. مناسب للاعبين الهواة.',
+  'bot.level.master': 'أستاذ',
+  'bot.level.master.blurb': 'حساب تكتيكي قوي ولعب استراتيجي. اختبار حقيقي.',
+  'bot.color': 'اللون',
+  'bot.color.white': 'الأبيض',
+  'bot.color.random': 'عشوائي',
+  'bot.color.black': 'الأسود',
+  'bot.timeControl': 'الوقت',
+  'bot.unratedNote': 'مباريات الحاسوب غير مصنفة دائماً.',
+  'bot.start': 'ابدأ اللعبة',
+  'bot.starting': 'جارٍ البدء…',
+  // Create Game panel & errors
+  'lobby.createGame': 'إنشاء مباراة',
+  'lobby.createSeekSubmit': 'إنشاء طلب',
+  'lobby.creating': 'جارٍ الإنشاء…',
+  'lobby.time': 'الوقت',
+  'lobby.timeCustom': 'مخصص',
+  'lobby.timeUnlimited': 'بلا وقت',
+  'lobby.minutes': 'الدقائق',
+  'lobby.incrementSeconds': 'الزيادة (ثوانٍ)',
+  'lobby.mode': 'النمط',
+  'lobby.modeHint': 'المباريات المصنفة تؤثر على تقييمك.',
+  'lobby.mode.casual': 'ودي',
+  'lobby.mode.rated': 'مصنف',
+  'lobby.variant': 'النوع',
+  'lobby.color': 'اللون',
+  'lobby.color.white': 'الأبيض',
+  'lobby.color.black': 'الأسود',
+  'lobby.color.random': 'عشوائي',
+  'lobby.ratingOpponent': 'تقييم المنافس',
+  'lobby.ratingMinLabel': 'الحد الأدنى',
+  'lobby.ratingMaxLabel': 'الحد الأقصى',
+  'lobby.ratingHint': 'اترك الحقول فارغة لأي تقييم.',
+  'lobby.moreOptions': 'خيارات إضافية',
+  'lobby.signInToCreate': 'سجل الدخول لإنشاء مباراة',
+  'lobby.createGame.error.ratingBound': 'أدخل تقييماً صحيحاً بين 0 و 4000.',
+  'lobby.createGame.error.ratingOrder': 'يجب ألا يتجاوز الحد الأدنى الحد الأقصى.',
+  'lobby.createGame.error.customMinutes': 'يجب أن تكون الدقائق بين 0.5 و 180 بخطوات 0.5 دقيقة.',
+  'lobby.createGame.error.customIncrement': 'يجب أن تكون الزيادة رقماً صحيحاً بين 0 و 60 ثانية.',
+  'common.cancel': 'إلغاء',
+  'shell.authStatus.signedIn': 'مسجل كـ {handle}',
+  'shell.authStatus.notSignedIn': 'غير مسجل الدخول',
+  // AI Move Assessment
+  'ai.assess.idle': 'قيّم النقلة الأخيرة.',
+  'ai.assess.noMove': 'لا توجد نقلة للتقييم بعد.',
+  'ai.assess.signedOut': 'سجل الدخول لتقييم النقلات.',
+  'ai.assess.running': 'جارٍ التقييم…',
+  'ai.assess.rateLimited': 'طلبات تقييم كثيرة جداً. حاول لاحقاً.',
+  'ai.assess.unavailable': 'تقييم النقلات غير متوفر حالياً.',
+  'ai.assess.goodMove': 'نقلة جيدة',
+  'ai.assess.inaccuracy': 'عدم دقة',
+  'ai.assess.mistake': 'خطأ',
+  'ai.assess.blunder': 'خطأ فادح',
+
+  // AI Coaching
+  'ai.coach.idle': 'المساعد متاح للتحليل.',
+  'ai.coach.running': 'المساعد يحلل الموقف…',
+  'ai.coach.signedOut': 'سجل الدخول لسؤال المساعد.',
+  'ai.coach.noMove': 'لا توجد نقلة للمساعدة.',
+  'ai.coach.rateLimited': 'تم تجاوز الحد. حاول بعد قليل.',
+  'ai.coach.unavailable': 'المساعد غير متاح حالياً.',
+  'ai.coach.unsupported': 'غير متاح على هذا الخادم',
+  'ai.coach.temporarilyUnavailable': 'غير متاح مؤقتاً',
+  'ai.coach.notApplicable': 'لا يوجد شيء هنا',
+
+  // AI Move Explanation
+  'ai.explain.idle': 'شرح الموقف متاح.',
+  'ai.explain.noMove': 'لا توجد نقلة للشرح بعد.',
+  'ai.explain.signedOut': 'سجل الدخول للحصول على الشرح.',
+  'ai.explain.running': 'جارٍ توليد الشرح…',
+  'ai.explain.rateLimited': 'طلبات شرح كثيرة جداً.',
+  'ai.explain.unavailable': 'الشرح غير متاح حالياً.',
+  'ai.explain.outcome.checkmate': 'كش مات',
+  'ai.explain.outcome.checkmateWinner': 'كش مات — فوز {winner}',
+  'ai.explain.outcome.stalemate': 'تعادل بالمأزق',
+  'ai.explain.outcome.insufficientMaterial': 'تعادل لنقص العتاد',
+  'ai.explain.outcome.fiftyMove': 'تعادل بقاعدة الخمسين نقلة',
+  'ai.explain.outcome.variantWin': 'فوز بحسب نوع اللعبة',
+  'ai.explain.outcome.variantWinWinner': 'فوز بحسب نوع اللعبة — فوز {winner}',
+  'ai.explain.outcome.variantDraw': 'تعادل بحسب نوع اللعبة',
+  'ai.explain.outcome.gameOver': 'انتهت اللعبة — {result}',
+
+  // AI Opening Identification
+  'ai.opening.idle': 'معلومات الافتتاح تظهر هنا.',
+  'ai.opening.running': 'جارٍ البحث عن الافتتاح…',
+  'ai.opening.noOpening': 'لا يوجد افتتاح يطابق هذا الترتيب.',
+  'ai.opening.label.position': 'الموقف',
+  'ai.opening.outOfBook': 'خارج كتاب الافتتاحيات',
+  'ai.opening.inBook': 'في كتاب الافتتاحيات',
+  'ai.opening.ply': 'نقلة واحدة',
+  'ai.opening.plies': '{count} نقلات',
+
+  // AI Puzzle / Tactical Search
+  'ai.puzzle.idle': 'الألغاز التكتيكية تظهر هنا.',
+  'ai.puzzle.running': 'جارٍ البحث عن لغز…',
+  'ai.puzzle.noTactic': 'لا توجد ألغاز لهذا الموقف.',
+  'ai.puzzle.insufficient': 'أدلة غير كافية للغز.',
+  'ai.puzzle.terminal': 'الموقف منتهٍ بالفعل.',
+  'ai.puzzle.rateLimited': 'طلبات كثيرة. انتظر قليلاً.',
+  'ai.puzzle.unavailable': 'الألغاز غير متاحة.',
+  'ai.generatedBy': 'تم التوليد بواسطة {model}',
 };
 
 function createTestI18n(): I18n {
@@ -1114,3 +1357,457 @@ describe('dynamic controller copy re-localization from state (renderer unit test
     assert.ok(targetEl.children.length > 0);
   });
 });
+
+describe('play-bot dialog: dynamic relocalization, option preservation, and disposal unsubscription', () => {
+  it('level options, blurbs, and color options re-localize while preserving checked state', () => {
+    const mount = new FakeElement('div');
+    const doc = createFakeDoc();
+    mount.ownerDocument = doc;
+    const i18n = createTestI18n();
+
+    const dialog = new PlayBotDialog({
+      doc,
+      mount: mount as unknown as HTMLElement,
+      callbacks: {
+        onSubmit: async () => 'g-1',
+      },
+      initialAuthenticated: true,
+      i18n,
+    });
+
+    try {
+      // 1. Initial English assertions
+      const trigger = mount.querySelector('#play-bot')!;
+      assert.equal(trigger.textContent, 'Play vs Computer');
+
+      const noviceRadio = mount.querySelector('input[name="pb-level"][value="novice"]')!;
+      const clubRadio = mount.querySelector('input[name="pb-level"][value="club"]')!;
+      const masterRadio = mount.querySelector('input[name="pb-level"][value="master"]')!;
+      assert.ok(noviceRadio);
+      assert.ok(clubRadio);
+      assert.ok(masterRadio);
+
+      const noviceLabel = noviceRadio.closest('label')?.querySelector('.cg-seg-label');
+      const clubLabel = clubRadio.closest('label')?.querySelector('.cg-seg-label');
+      const masterLabel = masterRadio.closest('label')?.querySelector('.cg-seg-label');
+      assert.equal(noviceLabel?.textContent, 'Novice');
+      assert.equal(clubLabel?.textContent, 'Club');
+      assert.equal(masterLabel?.textContent, 'Master');
+
+      const whiteRadio = mount.querySelector('input[name="pb-color"][value="white"]')!;
+      const randomRadio = mount.querySelector('input[name="pb-color"][value="random"]')!;
+      const blackRadio = mount.querySelector('input[name="pb-color"][value="black"]')!;
+      const whiteLabel = whiteRadio.closest('label')?.querySelector('.cg-seg-label');
+      const blackLabel = blackRadio.closest('label')?.querySelector('.cg-seg-label');
+      assert.ok(whiteLabel?.textContent.includes('White'));
+      assert.ok(blackLabel?.textContent.includes('Black'));
+
+      // Check default blurb (club)
+      const levelHint = mount.querySelector('#pb-level-hint')!;
+      assert.equal(
+        levelHint.textContent,
+        'Plays solid tactical moves with occasional inaccuracies. Suitable for casual players.',
+      );
+
+      // 2. Select novice and black
+      noviceRadio.checked = true;
+      const form = mount.querySelector('form')!;
+      form.dispatchEvent({ type: 'change', target: noviceRadio });
+      blackRadio.checked = true;
+
+      // Verify selected novice blurb in English
+      assert.equal(
+        levelHint.textContent,
+        'Makes frequent tactical errors. Best for beginners learning basic patterns.',
+      );
+
+      // 3. Switch to Arabic via shared i18n without manual renderer invocation
+      i18n.setLocale('ar');
+
+      // 4. Assert client-owned copy changed
+      assert.equal(trigger.textContent, 'اللعب ضد الحاسوب');
+      assert.equal(noviceLabel?.textContent, 'مبتدئ');
+      assert.equal(clubLabel?.textContent, 'نادي');
+      assert.equal(masterLabel?.textContent, 'أستاذ');
+      assert.ok(whiteLabel?.textContent.includes('الأبيض'));
+      assert.ok(blackLabel?.textContent.includes('الأسود'));
+      assert.equal(
+        levelHint.textContent,
+        'يرتكب أخطاء تكتيكية متكررة. الأفضل للمبتدئين في تعلم الأنماط الأساسية.',
+      );
+
+      // 5. Assert selected options and state preserved across relocalization
+      assert.equal(noviceRadio.checked, true);
+      assert.equal(blackRadio.checked, true);
+
+      // 6. Dispose dialog and test unsubscription
+      dialog.dispose();
+
+      // 7. Change locale back to English
+      i18n.setLocale('en');
+
+      // 8. Assert disposed dialog ceased reacting to locale change
+      assert.equal(trigger.textContent, 'اللعب ضد الحاسوب');
+      assert.equal(clubLabel?.textContent, 'نادي');
+    } finally {
+      dialog.dispose();
+    }
+  });
+});
+
+describe('create-game panel: validation error relocalization while preserving invalid inputs', () => {
+  it('rating and custom time validation errors re-localize on locale change while preserving invalid inputs', () => {
+    const mount = new FakeElement('div');
+    const doc = createFakeDoc();
+    mount.ownerDocument = doc;
+    const i18n = createTestI18n();
+
+    const panel = new CreateGamePanel({
+      doc,
+      mount: mount as unknown as HTMLElement,
+      callbacks: {
+        onSubmit: async () => true,
+        onError: () => {},
+      },
+      initialAuthenticated: true,
+      i18n,
+    });
+
+    try {
+      // Expand panel
+      const trigger = mount.querySelector('#create-seek')!;
+      trigger.click();
+
+      // --- Part A: Rating error relocalization ---
+      const minRatingInput = mount.querySelector('#cg-min-rating')!;
+      const maxRatingInput = mount.querySelector('#cg-max-rating')!;
+      const ratingError = mount.querySelector('#cg-rating-error')!;
+
+      // Enter invalid bounds: min > max
+      minRatingInput.value = '2500';
+      maxRatingInput.value = '1500';
+      minRatingInput.dispatchEvent({ type: 'input' });
+
+      // Rating error is displayed in English
+      assert.equal(ratingError.hidden, false);
+      assert.equal(
+        ratingError.textContent,
+        'Minimum rating must not exceed maximum rating.',
+      );
+
+      // Change locale to Arabic (NO manual renderer call)
+      i18n.setLocale('ar');
+
+      // Rating error prose is translated to Arabic
+      assert.equal(ratingError.hidden, false);
+      assert.equal(
+        ratingError.textContent,
+        'يجب ألا يتجاوز الحد الأدنى الحد الأقصى.',
+      );
+
+      // Invalid inputs are strictly preserved
+      assert.equal(minRatingInput.value, '2500');
+      assert.equal(maxRatingInput.value, '1500');
+
+      // --- Part B: Custom time error relocalization ---
+      // Switch time to custom
+      const customTimeRadio = mount.querySelector('input[name="cg-time"][value="custom"]')!;
+      customTimeRadio.checked = true;
+      customTimeRadio.dispatchEvent({ type: 'change' });
+
+      const customMinutesInput = mount.querySelector('#cg-minutes')!;
+      const customIncrementInput = mount.querySelector('#cg-increment')!;
+      const customError = mount.querySelector('#cg-custom-error')!;
+
+      // Enter invalid custom minutes: 0.1 (minimum is 0.5)
+      customMinutesInput.value = '0.1';
+      customIncrementInput.value = '5';
+
+      // Submit form to trigger custom validation
+      const form = mount.querySelector('form')!;
+      form.dispatchEvent({ type: 'submit' });
+
+      // Custom error is displayed in Arabic (since current locale is ar)
+      assert.equal(customError.hidden, false);
+      assert.equal(
+        customError.textContent,
+        'يجب أن تكون الدقائق بين 0.5 و 180 بخطوات 0.5 دقيقة.',
+      );
+      assert.equal(customMinutesInput.value, '0.1');
+
+      // Change locale back to English
+      i18n.setLocale('en');
+
+      // Custom error dynamically re-localizes to English
+      assert.equal(customError.hidden, false);
+      assert.equal(
+        customError.textContent,
+        'Minutes must be between 0.5 and 180 in 0.5-minute steps.',
+      );
+
+      // Input value is strictly preserved
+      assert.equal(customMinutesInput.value, '0.1');
+
+      // Rating error also re-localized to English with values preserved
+      assert.equal(ratingError.hidden, false);
+      assert.equal(
+        ratingError.textContent,
+        'Minimum rating must not exceed maximum rating.',
+      );
+      assert.equal(minRatingInput.value, '2500');
+      assert.equal(maxRatingInput.value, '1500');
+
+      // --- Part C: Disposal stops reactions ---
+      panel.dispose();
+      i18n.setLocale('ar');
+
+      // Prose does NOT change after disposal
+      assert.equal(
+        customError.textContent,
+        'Minutes must be between 0.5 and 180 in 0.5-minute steps.',
+      );
+    } finally {
+      panel.dispose();
+    }
+  });
+});
+
+describe('bootstrap play-bot auth title: dynamic relocalization from preserved auth state', () => {
+  it('play-bot button title dynamically re-localizes and preserves auth state transitions', () => {
+    const ids = [
+      'board', 'status', 'flip', 'meta-connection', 'meta-role',
+      'meta-white', 'meta-white-name', 'meta-black', 'meta-black-name',
+      'meta-spectators', 'meta-variant', 'meta-time', 'meta-live-status',
+      'game-actions', 'action-error', 'action-offer-draw', 'action-claim-flag', 'action-resign', 'action-abort',
+      'confirm-resign', 'confirm-resign-yes', 'confirm-resign-no',
+      'confirm-abort', 'confirm-abort-yes', 'confirm-abort-no',
+      'draw-offer-received', 'action-accept-draw', 'action-decline-draw',
+      'theme-toggle', 'auth-status', 'auth', 'auth-submit', 'auth-register',
+      'play-bot',
+    ];
+    const elements = new Map<string, FakeElement>();
+    for (const id of ids) {
+      const isButton = (id === 'play-bot' || id === 'auth-submit' || id === 'auth-register' || id === 'theme-toggle');
+      elements.set(id, isButton ? new FakeHTMLButtonElement('button', id) : new FakeElement('div', id));
+    }
+    const doc = createFakeDoc(elements);
+
+    const i18n = createTestI18n();
+    const sockets = new FakeSocketFactory();
+
+    const bootstrapped = bootstrap(doc, {
+      gameId: 'g-test-bot-auth',
+      token: 'test-token',
+      config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+      httpTransport: new FakeTransport().onEach(() => json(200, {})),
+      wsFactory: sockets.factory,
+      tokenStore: new MemoryTokenStore(),
+      i18n,
+    });
+
+    try {
+      const playBotBtn = elements.get('play-bot')!;
+
+      // 1. Initially unauthenticated in English
+      assert.equal(playBotBtn.disabled, true);
+      assert.equal(playBotBtn.title, 'Sign in to play the computer');
+
+      // 2. Change locale to Arabic (unauthenticated state preserved)
+      i18n.setLocale('ar');
+      assert.equal(playBotBtn.disabled, true);
+      assert.equal(playBotBtn.title, 'سجل الدخول للعب ضد الحاسوب');
+
+      // 3. Authenticate session
+      const auth = bootstrapped.auth as unknown as {
+        callbacks?: { onSessionChange?: (s: unknown) => void };
+      };
+      auth.callbacks?.onSessionChange?.({
+        userId: 'u-alice',
+        handle: 'Alice',
+        roles: [],
+        tokens: { accessToken: 'a', refreshToken: 'r', expiresAt: Date.now() + 60000 },
+      });
+
+      // 4. Assert button enabled and title cleared
+      assert.equal(playBotBtn.disabled, false);
+      assert.equal(playBotBtn.title, '');
+
+      // 5. Change locale while authenticated: title remains empty
+      i18n.setLocale('en');
+      assert.equal(playBotBtn.disabled, false);
+      assert.equal(playBotBtn.title, '');
+
+      // 6. Log out
+      auth.callbacks?.onSessionChange?.(null);
+
+      // 7. Assert button disabled and English title restored
+      assert.equal(playBotBtn.disabled, true);
+      assert.equal(playBotBtn.title, 'Sign in to play the computer');
+
+      // 8. Change locale to Arabic again
+      i18n.setLocale('ar');
+      assert.equal(playBotBtn.disabled, true);
+      assert.equal(playBotBtn.title, 'سجل الدخول للعب ضد الحاسوب');
+
+      // 9. Dispose shell localization and test unsubscription
+      bootstrapped.shellLocalization?.dispose();
+      i18n.setLocale('en');
+
+      // Title does NOT react after disposal
+      assert.equal(playBotBtn.title, 'سجل الدخول للعب ضد الحاسوب');
+    } finally {
+      bootstrapped.controller?.dispose();
+      bootstrapped.board?.dispose();
+      bootstrapped.connectivity?.dispose();
+      bootstrapped.app.dispose();
+    }
+  });
+});
+
+describe('AI views (assess, coach, explain, opening, puzzle): representative copy and game mount dynamic relocalization', () => {
+  it('representative message formatters and helpers react to locale changes', () => {
+    const i18n = createTestI18n();
+
+    // 1. English checks
+    assert.equal(assessMessage('idle', i18n), 'Assess the last move played.');
+    assert.equal(assessMessage('noMove', i18n), 'No move to assess yet.');
+    assert.equal(assessMessage('rateLimited', i18n), 'Too many assessments. Try again shortly.');
+    assert.equal(classificationLabel('ok', i18n), 'Good move');
+    assert.equal(classificationLabel('blunder', i18n), 'Blunder');
+    assert.equal(classificationLabel('inaccuracy', i18n), 'Inaccuracy');
+    assert.equal(classificationLabel('mistake', i18n), 'Mistake');
+
+    assert.equal(coachMessage('idle', i18n), 'Get coaching advice for the current position.');
+    assert.equal(coachMessage('noMove', i18n), 'Play or select a move to receive move-specific coaching.');
+    assert.equal(omissionReasonLabel('unsupported', i18n), 'Not available on this server');
+    assert.equal(omissionReasonLabel('not_applicable', i18n), 'Nothing to say here');
+
+    assert.equal(explainMessage('idle', i18n), 'Explain the last move played.');
+    assert.equal(
+      describeOutcome({ kind: 'terminal', reason: 'checkmate', result: '1-0' }, i18n),
+      'Checkmate — White wins',
+    );
+    assert.equal(
+      describeOutcome({ kind: 'terminal', reason: 'stalemate', result: '1/2-1/2' }, i18n),
+      'Stalemate — draw',
+    );
+
+    assert.equal(openingMessage('idle', i18n), 'Identify the opening played in this game.');
+    assert.equal(plies(1, i18n), '1 ply');
+    assert.equal(plies(4, i18n), '4 plies');
+
+    assert.equal(puzzleMessage('idle', i18n), 'Find a tactic in the position on the board.');
+    assert.equal(puzzleMessage('noTactic', i18n), 'No tactic met the server’s fixed evidence threshold.');
+
+    // 2. Switch to Arabic
+    i18n.setLocale('ar');
+
+    assert.equal(assessMessage('idle', i18n), 'قيّم النقلة الأخيرة.');
+    assert.equal(assessMessage('noMove', i18n), 'لا توجد نقلة للتقييم بعد.');
+    assert.equal(classificationLabel('ok', i18n), 'نقلة جيدة');
+    assert.equal(classificationLabel('blunder', i18n), 'خطأ فادح');
+
+    assert.equal(coachMessage('idle', i18n), 'المساعد متاح للتحليل.');
+    assert.equal(coachMessage('noMove', i18n), 'لا توجد نقلة للمساعدة.');
+    assert.equal(omissionReasonLabel('unsupported', i18n), 'غير متاح على هذا الخادم');
+    assert.equal(omissionReasonLabel('not_applicable', i18n), 'لا يوجد شيء هنا');
+
+    assert.equal(explainMessage('idle', i18n), 'شرح الموقف متاح.');
+    assert.equal(
+      describeOutcome({ kind: 'terminal', reason: 'checkmate', result: '1-0' }, i18n),
+      'كش مات — فوز الأبيض',
+    );
+    assert.equal(
+      describeOutcome({ kind: 'terminal', reason: 'stalemate', result: '1/2-1/2' }, i18n),
+      'تعادل بالمأزق',
+    );
+
+    assert.equal(openingMessage('idle', i18n), 'معلومات الافتتاح تظهر هنا.');
+    assert.equal(plies(1, i18n), 'نقلة واحدة');
+    assert.equal(plies(4, i18n), '4 نقلات');
+
+    assert.equal(puzzleMessage('idle', i18n), 'الألغاز التكتيكية تظهر هنا.');
+    assert.equal(puzzleMessage('noTactic', i18n), 'لا توجد ألغاز لهذا الموقف.');
+  });
+
+  it('game mount re-renders cached AI view states on locale change and stops upon disposal', () => {
+    const ids = [
+      'board', 'status', 'flip', 'meta-connection', 'meta-role',
+      'meta-white', 'meta-white-name', 'meta-black', 'meta-black-name',
+      'meta-spectators', 'meta-variant', 'meta-time', 'meta-live-status',
+      'game-actions', 'action-error', 'action-offer-draw', 'action-claim-flag', 'action-resign', 'action-abort',
+      'confirm-resign', 'confirm-resign-yes', 'confirm-resign-no',
+      'confirm-abort', 'confirm-abort-yes', 'confirm-abort-no',
+      'draw-offer-received', 'action-accept-draw', 'action-decline-draw',
+      'assess-note', 'coach-note', 'explain-note', 'opening-note', 'puzzle-note',
+    ];
+    const elements = new Map<string, FakeElement>();
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+    const boardEl = elements.get('board')! as unknown as HTMLElement;
+
+    const i18n = createTestI18n();
+    const sockets = new FakeSocketFactory();
+    const app = createApp({
+      config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+      wsFactory: sockets.factory,
+      i18n,
+    });
+
+    const mounted = mountGame({
+      doc,
+      boardEl,
+      gameId: 'g-ai-test',
+      createGameSync: app.createGameSync,
+      createGameOracle: app.createGameOracle,
+      getAccessToken: () => 'tok',
+      client: app.api,
+      token: 'tok',
+      restorePromise: Promise.resolve(null),
+      i18n,
+    });
+
+    try {
+      const assessNote = elements.get('assess-note')!;
+      const coachNote = elements.get('coach-note')!;
+      const explainNote = elements.get('explain-note')!;
+      const openingNote = elements.get('opening-note')!;
+      const puzzleNote = elements.get('puzzle-note')!;
+
+      // 1. Initial English prompts
+      assert.equal(assessNote.textContent, 'Assess the last move played.');
+      assert.equal(coachNote.textContent, 'Get coaching advice for the current position.');
+      assert.equal(explainNote.textContent, 'Explain the last move played.');
+      assert.equal(openingNote.textContent, 'Identify the opening played in this game.');
+      assert.equal(puzzleNote.textContent, 'Find a tactic in the position on the board.');
+
+      // 2. Switch locale to Arabic
+      i18n.setLocale('ar');
+
+      // 3. AI views automatically re-render in Arabic via onLocaleChange
+      assert.equal(assessNote.textContent, 'قيّم النقلة الأخيرة.');
+      assert.equal(coachNote.textContent, 'المساعد متاح للتحليل.');
+      assert.equal(explainNote.textContent, 'شرح الموقف متاح.');
+      assert.equal(openingNote.textContent, 'معلومات الافتتاح تظهر هنا.');
+      assert.equal(puzzleNote.textContent, 'الألغاز التكتيكية تظهر هنا.');
+
+      // 4. Dispose mount
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+
+      // 5. Switch locale to English
+      i18n.setLocale('en');
+
+      // 6. Disposed mount does NOT react
+      assert.equal(assessNote.textContent, 'قيّم النقلة الأخيرة.');
+      assert.equal(coachNote.textContent, 'المساعد متاح للتحليل.');
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      app.dispose();
+    }
+  });
+});
+

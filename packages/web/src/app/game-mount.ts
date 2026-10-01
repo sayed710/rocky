@@ -37,46 +37,57 @@ import {
 import { PuzzleController } from './puzzle-controller.js';
 import { MAX_OPENING_PLIES, OpeningController } from './opening-controller.js';
 import type { OpeningTarget } from './opening-controller.js';
+import type {
+  CoachResponse,
+  MistakePredictionResponse,
+  MoveExplanationResponse,
+  OpeningExplorationResponse,
+  PuzzleGenerationResponse,
+} from '../api/models.js';
 import {
-  OPENING_MESSAGES,
   clearOpening,
+  openingMessage,
   renderOpeningError,
   renderOpeningNote,
   renderOpeningResult,
   setOpeningBusy,
+  type OpeningMessageKey,
 } from './opening-view.js';
 import { CoachController, MAX_COACH_PLIES } from './coach-controller.js';
 import type { CoachTarget } from './coach-controller.js';
 import {
-  COACH_MESSAGES,
   clearCoach,
+  coachMessage,
   renderCoachError,
   renderCoachNote,
   renderCoachResult,
   setCoachBusy,
+  type CoachMessageKey,
 } from './coach-view.js';
 import {
   clearPuzzle,
-  PUZZLE_MESSAGES,
+  puzzleMessage,
   renderPuzzleError,
   renderPuzzleNote,
   renderPuzzleResult,
   setPuzzleBusy,
+  type PuzzleMessageKey,
 } from './puzzle-view.js';
 import { AssessController } from './assess-controller.js';
 import {
-  ASSESS_MESSAGES,
+  assessMessage,
   clearVerdict,
   renderAssessError,
   renderAssessNote,
   renderVerdict,
   setAssessBusy,
   setVerdictVisible,
+  type AssessMessageKey,
 } from './assess-view.js';
 import { ExplainController } from './explain-controller.js';
 import {
   clearExplanation,
-  EXPLAIN_MESSAGES,
+  explainMessage,
   renderError as renderExplainError,
   renderEvidence,
   renderNote as renderExplainNote,
@@ -84,6 +95,7 @@ import {
   renderSource,
   setBusy as setExplainBusy,
   setResultVisible as setExplainResultVisible,
+  type ExplainMessageKey,
 } from './explain-view.js';
 import { formatClock, formatTimeControl } from './render-helpers.js';
 import type { AuthSession } from './auth-controller.js';
@@ -364,10 +376,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let puzzleCapabilities: unknown = null;
   let puzzleUnsupported = false;
 
+  let lastPuzzleResult: PuzzleGenerationResponse | null = null;
   const resetPuzzleBlock = (): void => {
+    lastPuzzleResult = null;
     if (puzzleRowsEl && puzzleResultEl) clearPuzzle(puzzleRowsEl, puzzleResultEl);
     if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
-    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, PUZZLE_MESSAGES.idle);
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('idle', i18n));
   };
   resetPuzzleBlock();
 
@@ -391,15 +405,17 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       puzzleRunBtn.disabled = !authed || !hasPosition() || puzzleController.isPending;
     }
     if (!puzzleNoteEl) return;
+    const idleMsg = puzzleMessage('idle', i18n);
+    const signedOutMsg = puzzleMessage('signedOut', i18n);
     const owned = new Set<string>([
-      PUZZLE_MESSAGES.idle,
-      PUZZLE_MESSAGES.signedOut,
+      idleMsg,
+      signedOutMsg,
       '',
     ]);
     if (!owned.has(puzzleNoteEl.textContent ?? '')) return;
     renderPuzzleNote(
       puzzleNoteEl,
-      authed ? PUZZLE_MESSAGES.idle : PUZZLE_MESSAGES.signedOut,
+      authed ? idleMsg : signedOutMsg,
     );
   };
 
@@ -421,11 +437,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const coachRowsEl = doc.getElementById('coach-rows');
   let coachAvailable = false;
 
+  let lastOpeningResult: OpeningExplorationResponse | null = null;
   /** Clear the section's content back to the unanswered state, leaving its visibility alone. */
   const resetOpeningBlock = (): void => {
+    lastOpeningResult = null;
     if (openingRowsEl && openingResultEl) clearOpening(openingRowsEl, openingResultEl);
     if (openingErrorEl) renderOpeningError(openingErrorEl, null);
-    if (openingNoteEl) renderOpeningNote(openingNoteEl, OPENING_MESSAGES.idle);
+    if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('idle', i18n));
   };
   resetOpeningBlock();
   // The section lives in `index.html` and outlives the mount, so a previous game's reveal is still
@@ -434,11 +452,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   // would hide it again, and a deployment that does not offer the feature would show it.
   if (openingBlockEl) openingBlockEl.hidden = true;
 
+  let lastCoachResult: CoachResponse | null = null;
   /** Clear the section back to its unasked state: no rows, no error, the idle note. */
   const resetCoachBlock = (): void => {
+    lastCoachResult = null;
     if (coachRowsEl && coachResultEl) clearCoach(coachRowsEl, coachResultEl);
     if (coachErrorEl) renderCoachError(coachErrorEl, null);
-    if (coachNoteEl) renderCoachNote(coachNoteEl, COACH_MESSAGES.idle);
+    if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('idle', i18n));
   };
   resetCoachBlock();
   if (coachBlockEl) coachBlockEl.hidden = true;
@@ -491,9 +511,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     // Only the notes this function owns are replaced. A "position changed" or "too many requests"
     // message belongs to whatever put it there, and overwriting it here would hide the answer to a
     // question the reader just asked.
-    const owned = new Set<string>([COACH_MESSAGES.idle, COACH_MESSAGES.signedOut, '']);
+    const idleMsg = coachMessage('idle', i18n);
+    const signedOutMsg = coachMessage('signedOut', i18n);
+    const owned = new Set<string>([idleMsg, signedOutMsg, '']);
     if (!owned.has(coachNoteEl.textContent ?? '')) return;
-    renderCoachNote(coachNoteEl, authed ? COACH_MESSAGES.idle : COACH_MESSAGES.signedOut);
+    renderCoachNote(coachNoteEl, authed ? idleMsg : signedOutMsg);
   };
 
   /**
@@ -538,10 +560,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const openingNoteFor = (availability: OpeningAvailability): string | null => {
     switch (availability.kind) {
       case 'ready': return null;
-      case 'unsupported-variant': return OPENING_MESSAGES.unsupportedVariant;
-      case 'no-moves': return OPENING_MESSAGES.noMoves;
-      case 'beyond-opening': return OPENING_MESSAGES.beyondOpening;
-      default: return OPENING_MESSAGES.noSequence;
+      case 'unsupported-variant': return openingMessage('unsupportedVariant', i18n);
+      case 'no-moves': return openingMessage('noMoves', i18n);
+      case 'beyond-opening': return openingMessage('beyondOpening', i18n);
+      default: return openingMessage('noSequence', i18n);
     }
   };
 
@@ -562,19 +584,21 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (!openingNoteEl) return;
     // Only overwrite a note this block owns, so a result note or a failure stays on screen.
+    const idleMsg = openingMessage('idle', i18n);
+    const signedOutMsg = openingMessage('signedOut', i18n);
     const owned = new Set<string>([
-      OPENING_MESSAGES.idle,
-      OPENING_MESSAGES.signedOut,
-      OPENING_MESSAGES.unsupportedVariant,
-      OPENING_MESSAGES.noMoves,
-      OPENING_MESSAGES.noSequence,
-      OPENING_MESSAGES.beyondOpening,
+      idleMsg,
+      signedOutMsg,
+      openingMessage('unsupportedVariant', i18n),
+      openingMessage('noMoves', i18n),
+      openingMessage('noSequence', i18n),
+      openingMessage('beyondOpening', i18n),
       '',
     ]);
     if (!owned.has(openingNoteEl.textContent ?? '')) return;
     renderOpeningNote(
       openingNoteEl,
-      authed ? (openingNoteFor(availability) ?? OPENING_MESSAGES.idle) : OPENING_MESSAGES.signedOut,
+      authed ? (openingNoteFor(availability) ?? idleMsg) : signedOutMsg,
     );
   };
 
@@ -619,7 +643,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
    * when the next one mounts. No request is involved, so nothing in the request lifecycle catches
    * it.
    */
+  let lastExplainResult: MoveExplanationResponse | null = null;
   const resetExplainBlock = (): void => {
+    lastExplainResult = null;
     if (explainEvidenceEl && explainProseEl && explainSourceEl && explainResultEl) {
       clearExplanation({
         evidence: explainEvidenceEl,
@@ -629,7 +655,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       });
     }
     if (explainErrorEl) renderExplainError(explainErrorEl, null);
-    if (explainNoteEl) renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.idle);
+    if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage('idle', i18n));
   };
 
   resetExplainBlock();
@@ -681,19 +707,22 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     // Only the two messages that are properties of the *control* rather than of a request, and only
     // transitions between them — anything a request had to say owns the note until something else
     // does.
+    const idleMsg = explainMessage('idle', i18n);
+    const signedOutMsg = explainMessage('signedOut', i18n);
+    const noMoveMsg = explainMessage('noMove', i18n);
     const owned = new Set<string>([
-      EXPLAIN_MESSAGES.idle,
-      EXPLAIN_MESSAGES.signedOut,
-      EXPLAIN_MESSAGES.noMove,
+      idleMsg,
+      signedOutMsg,
+      noMoveMsg,
       '',
     ]);
     if (!owned.has(explainNoteEl.textContent ?? '')) return;
     if (!authed) {
-      renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.signedOut);
+      renderExplainNote(explainNoteEl, signedOutMsg);
     } else if (target === null) {
-      renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.noMove);
+      renderExplainNote(explainNoteEl, noMoveMsg);
     } else {
-      renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.idle);
+      renderExplainNote(explainNoteEl, idleMsg);
     }
   };
 
@@ -709,13 +738,15 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   /** The capability payload, held so the variant gate can re-run when the variant lands. */
   let assessCapabilities: unknown = null;
 
+  let lastAssessResult: MistakePredictionResponse | null = null;
   /** Clear the block, for the same reason the other two are reset at mount: this DOM outlives it. */
   const resetAssessBlock = (): void => {
+    lastAssessResult = null;
     if (assessRowsEl && assessResultEl) {
       clearVerdict({ rows: assessRowsEl, result: assessResultEl });
     }
     if (assessErrorEl) renderAssessError(assessErrorEl, null);
-    if (assessNoteEl) renderAssessNote(assessNoteEl, ASSESS_MESSAGES.idle);
+    if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage('idle', i18n));
   };
 
   resetAssessBlock();
@@ -747,19 +778,22 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     // Only the messages that are properties of the *control* rather than of a request, and only
     // transitions between them — anything a request had to say owns the note until something else
     // does.
+    const idleMsg = assessMessage('idle', i18n);
+    const signedOutMsg = assessMessage('signedOut', i18n);
+    const noMoveMsg = assessMessage('noMove', i18n);
     const owned = new Set<string>([
-      ASSESS_MESSAGES.idle,
-      ASSESS_MESSAGES.signedOut,
-      ASSESS_MESSAGES.noMove,
+      idleMsg,
+      signedOutMsg,
+      noMoveMsg,
       '',
     ]);
     if (!owned.has(assessNoteEl.textContent ?? '')) return;
     if (!authed) {
-      renderAssessNote(assessNoteEl, ASSESS_MESSAGES.signedOut);
+      renderAssessNote(assessNoteEl, signedOutMsg);
     } else if (target === null) {
-      renderAssessNote(assessNoteEl, ASSESS_MESSAGES.noMove);
+      renderAssessNote(assessNoteEl, noMoveMsg);
     } else {
-      renderAssessNote(assessNoteEl, ASSESS_MESSAGES.idle);
+      renderAssessNote(assessNoteEl, idleMsg);
     }
   };
 
@@ -777,13 +811,14 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (puzzleResultEl) setPuzzleBusy(puzzleResultEl, phase === 'loading');
         refreshPuzzleControls();
         if (phase === 'loading') {
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, PUZZLE_MESSAGES.running);
+          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('running', i18n));
           if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
         }
       },
       onResult: (result) => {
+        lastPuzzleResult = result;
         const note = puzzleRowsEl && puzzleResultEl
-          ? renderPuzzleResult(puzzleRowsEl, puzzleResultEl, result)
+          ? renderPuzzleResult(puzzleRowsEl, puzzleResultEl, result, i18n)
           : null;
         if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, note);
         if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
@@ -795,28 +830,28 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           if (puzzleBlockEl) puzzleBlockEl.hidden = true;
           return;
         }
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': PUZZLE_MESSAGES.rateLimited,
-          unavailable: PUZZLE_MESSAGES.unavailable,
-          'active-game': PUZZLE_MESSAGES.activeGame,
-          unauthenticated: PUZZLE_MESSAGES.signedOut,
+        const noteFor: Partial<Record<typeof failure, PuzzleMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
         };
-        const note = noteFor[failure];
-        if (note) {
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, note);
+        const key = noteFor[failure];
+        if (key) {
+          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(key, i18n));
         } else {
           if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, null);
           if (puzzleErrorEl) {
             renderPuzzleError(
               puzzleErrorEl,
-              failure === 'rejected' ? PUZZLE_MESSAGES.rejected : PUZZLE_MESSAGES.failed,
+              failure === 'rejected' ? puzzleMessage('rejected', i18n) : puzzleMessage('failed', i18n),
             );
           }
         }
       },
       onInvalidated: () => {
         resetPuzzleBlock();
-        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, PUZZLE_MESSAGES.positionChanged);
+        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('positionChanged', i18n));
       },
     },
   });
@@ -829,42 +864,43 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (openingResultEl) setOpeningBusy(openingResultEl, phase === 'loading');
         refreshOpeningControls();
         if (phase === 'loading') {
-          if (openingNoteEl) renderOpeningNote(openingNoteEl, OPENING_MESSAGES.running);
+          if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('running', i18n));
           if (openingErrorEl) renderOpeningError(openingErrorEl, null);
         }
       },
       onResult: (result) => {
+        lastOpeningResult = result;
         const note = openingRowsEl && openingResultEl
-          ? renderOpeningResult(openingRowsEl, openingResultEl, result)
+          ? renderOpeningResult(openingRowsEl, openingResultEl, result, i18n)
           : null;
         if (openingNoteEl) renderOpeningNote(openingNoteEl, note);
         if (openingErrorEl) renderOpeningError(openingErrorEl, null);
       },
       onFailure: (failure) => {
         resetOpeningBlock();
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': OPENING_MESSAGES.rateLimited,
-          unavailable: OPENING_MESSAGES.unavailable,
-          'active-game': OPENING_MESSAGES.activeGame,
-          unauthenticated: OPENING_MESSAGES.signedOut,
-          'unsupported-variant': OPENING_MESSAGES.unsupportedVariant,
+        const noteFor: Partial<Record<typeof failure, OpeningMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
+          'unsupported-variant': 'unsupportedVariant',
         };
-        const note = noteFor[failure];
-        if (note) {
-          if (openingNoteEl) renderOpeningNote(openingNoteEl, note);
+        const key = noteFor[failure];
+        if (key) {
+          if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage(key, i18n));
         } else {
           if (openingNoteEl) renderOpeningNote(openingNoteEl, null);
           if (openingErrorEl) {
             renderOpeningError(
               openingErrorEl,
-              failure === 'rejected' ? OPENING_MESSAGES.rejected : OPENING_MESSAGES.failed,
+              failure === 'rejected' ? openingMessage('rejected', i18n) : openingMessage('failed', i18n),
             );
           }
         }
       },
       onInvalidated: () => {
         resetOpeningBlock();
-        if (openingNoteEl) renderOpeningNote(openingNoteEl, OPENING_MESSAGES.sequenceChanged);
+        if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('sequenceChanged', i18n));
       },
     },
   });
@@ -877,42 +913,43 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (coachResultEl) setCoachBusy(coachResultEl, phase === 'loading');
         refreshCoachControls();
         if (phase === 'loading') {
-          if (coachNoteEl) renderCoachNote(coachNoteEl, COACH_MESSAGES.running);
+          if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('running', i18n));
           if (coachErrorEl) renderCoachError(coachErrorEl, null);
         }
       },
       onResult: (result) => {
+        lastCoachResult = result;
         const note = coachRowsEl && coachResultEl
-          ? renderCoachResult(coachRowsEl, coachResultEl, result)
+          ? renderCoachResult(coachRowsEl, coachResultEl, result, i18n)
           : null;
         if (coachNoteEl) renderCoachNote(coachNoteEl, note);
         if (coachErrorEl) renderCoachError(coachErrorEl, null);
       },
       onFailure: (failure) => {
         resetCoachBlock();
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': COACH_MESSAGES.rateLimited,
-          unavailable: COACH_MESSAGES.unavailable,
-          'active-game': COACH_MESSAGES.activeGame,
-          unauthenticated: COACH_MESSAGES.signedOut,
-          'unsupported-variant': COACH_MESSAGES.unsupportedVariant,
+        const noteFor: Partial<Record<typeof failure, CoachMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
+          'unsupported-variant': 'unsupportedVariant',
         };
-        const note = noteFor[failure];
-        if (note) {
-          if (coachNoteEl) renderCoachNote(coachNoteEl, note);
+        const key = noteFor[failure];
+        if (key) {
+          if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage(key, i18n));
         } else {
           if (coachNoteEl) renderCoachNote(coachNoteEl, null);
           if (coachErrorEl) {
             renderCoachError(
               coachErrorEl,
-              failure === 'rejected' ? COACH_MESSAGES.rejected : COACH_MESSAGES.failed,
+              failure === 'rejected' ? coachMessage('rejected', i18n) : coachMessage('failed', i18n),
             );
           }
         }
       },
       onInvalidated: () => {
         resetCoachBlock();
-        if (coachNoteEl) renderCoachNote(coachNoteEl, COACH_MESSAGES.positionChanged);
+        if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('positionChanged', i18n));
       },
     },
   });
@@ -925,27 +962,28 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (assessResultEl) setAssessBusy(assessResultEl, phase === 'loading');
         refreshAssessControls();
         if (phase === 'loading') {
-          if (assessNoteEl) renderAssessNote(assessNoteEl, ASSESS_MESSAGES.running);
+          if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage('running', i18n));
           if (assessErrorEl) renderAssessError(assessErrorEl, null);
         }
       },
       onResult: (result) => {
-        if (assessRowsEl) renderVerdict(assessRowsEl, result);
+        lastAssessResult = result;
+        if (assessRowsEl) renderVerdict(assessRowsEl, result, i18n);
         if (assessResultEl) setVerdictVisible(assessResultEl, true);
         if (assessNoteEl) renderAssessNote(assessNoteEl, null);
         if (assessErrorEl) renderAssessError(assessErrorEl, null);
       },
       onFailure: (failure) => {
         resetAssessBlock();
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': ASSESS_MESSAGES.rateLimited,
-          unavailable: ASSESS_MESSAGES.unavailable,
-          'active-game': ASSESS_MESSAGES.activeGame,
-          unauthenticated: ASSESS_MESSAGES.signedOut,
+        const noteFor: Partial<Record<typeof failure, AssessMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
         };
-        const note = noteFor[failure];
-        if (note !== undefined) {
-          if (assessNoteEl) renderAssessNote(assessNoteEl, note);
+        const key = noteFor[failure];
+        if (key !== undefined) {
+          if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage(key, i18n));
           return;
         }
         // `rejected` and `failed` are the ones the player did not cause and cannot act on, so they
@@ -954,7 +992,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (assessErrorEl) {
           renderAssessError(
             assessErrorEl,
-            failure === 'rejected' ? ASSESS_MESSAGES.rejected : ASSESS_MESSAGES.failed,
+            failure === 'rejected' ? assessMessage('rejected', i18n) : assessMessage('failed', i18n),
           );
         }
       },
@@ -972,29 +1010,30 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (explainResultEl) setExplainBusy(explainResultEl, phase === 'loading');
         refreshExplainControls();
         if (phase === 'loading') {
-          if (explainNoteEl) renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.running);
+          if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage('running', i18n));
           if (explainErrorEl) renderExplainError(explainErrorEl, null);
         }
       },
       onResult: (result) => {
-        if (explainEvidenceEl) renderEvidence(explainEvidenceEl, result);
+        lastExplainResult = result;
+        if (explainEvidenceEl) renderEvidence(explainEvidenceEl, result, i18n);
         if (explainProseEl) renderProse(explainProseEl, result);
-        if (explainSourceEl) renderSource(explainSourceEl, result);
+        if (explainSourceEl) renderSource(explainSourceEl, result, i18n);
         if (explainResultEl) setExplainResultVisible(explainResultEl, true);
         if (explainNoteEl) renderExplainNote(explainNoteEl, null);
         if (explainErrorEl) renderExplainError(explainErrorEl, null);
       },
       onFailure: (failure) => {
         resetExplainBlock();
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': EXPLAIN_MESSAGES.rateLimited,
-          unavailable: EXPLAIN_MESSAGES.unavailable,
-          'active-game': EXPLAIN_MESSAGES.activeGame,
-          unauthenticated: EXPLAIN_MESSAGES.signedOut,
+        const noteFor: Partial<Record<typeof failure, ExplainMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
         };
-        const note = noteFor[failure];
-        if (note !== undefined) {
-          if (explainNoteEl) renderExplainNote(explainNoteEl, note);
+        const key = noteFor[failure];
+        if (key !== undefined) {
+          if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage(key, i18n));
           return;
         }
         // `rejected` and `failed` are the ones the player did not cause and cannot act on, so they
@@ -1003,7 +1042,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (explainErrorEl) {
           renderExplainError(
             explainErrorEl,
-            failure === 'rejected' ? EXPLAIN_MESSAGES.rejected : EXPLAIN_MESSAGES.failed,
+            failure === 'rejected' ? explainMessage('rejected', i18n) : explainMessage('failed', i18n),
           );
         }
       },
@@ -1287,6 +1326,39 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (lastReviewResult) {
       renderGameReview(lastReviewResult);
+    }
+    refreshAnalysisControls();
+    refreshPuzzleControls();
+    refreshOpeningControls();
+    refreshCoachControls();
+    refreshExplainControls();
+    refreshAssessControls();
+
+    if (lastAssessResult && assessRowsEl) {
+      renderVerdict(assessRowsEl, lastAssessResult, i18n);
+    } else if (assessNoteEl) {
+      renderAssessNote(assessNoteEl, isUserAuthenticated() ? assessMessage('idle', i18n) : assessMessage('signedOut', i18n));
+    }
+    if (lastExplainResult) {
+      if (explainEvidenceEl) renderEvidence(explainEvidenceEl, lastExplainResult, i18n);
+      if (explainSourceEl) renderSource(explainSourceEl, lastExplainResult, i18n);
+    } else if (explainNoteEl) {
+      renderExplainNote(explainNoteEl, isUserAuthenticated() ? explainMessage('idle', i18n) : explainMessage('signedOut', i18n));
+    }
+    if (lastOpeningResult && openingRowsEl && openingResultEl) {
+      renderOpeningResult(openingRowsEl, openingResultEl, lastOpeningResult, i18n);
+    } else if (openingNoteEl) {
+      renderOpeningNote(openingNoteEl, isUserAuthenticated() ? openingMessage('idle', i18n) : openingMessage('signedOut', i18n));
+    }
+    if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
+      renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
+    } else if (puzzleNoteEl) {
+      renderPuzzleNote(puzzleNoteEl, isUserAuthenticated() ? puzzleMessage('idle', i18n) : puzzleMessage('signedOut', i18n));
+    }
+    if (lastCoachResult && coachRowsEl && coachResultEl) {
+      renderCoachResult(coachRowsEl, coachResultEl, lastCoachResult, i18n);
+    } else if (coachNoteEl) {
+      renderCoachNote(coachNoteEl, isUserAuthenticated() ? coachMessage('idle', i18n) : coachMessage('signedOut', i18n));
     }
   });
 

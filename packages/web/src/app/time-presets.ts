@@ -81,12 +81,14 @@ export function presetToTimeControl(minutes: number, increment: number): TimeCon
   };
 }
 
+export type CustomTimeErrorCode = 'minutes_range' | 'increment_range';
+
 export type CustomTimeValidation =
   | { readonly ok: true; readonly timeControl: TimeControl }
   | {
       readonly ok: false;
       readonly field: 'minutes' | 'increment';
-      readonly message: string;
+      readonly code: CustomTimeErrorCode;
     };
 
 /** Validate and map the custom inputs before any seek request can be created. */
@@ -100,7 +102,7 @@ export function validateCustomTime(minutes: number, increment: number): CustomTi
     return {
       ok: false,
       field: 'minutes',
-      message: 'Minutes must be between 0.5 and 180 in 0.5-minute steps.',
+      code: 'minutes_range',
     };
   }
 
@@ -113,7 +115,7 @@ export function validateCustomTime(minutes: number, increment: number): CustomTi
     return {
       ok: false,
       field: 'increment',
-      message: 'Increment must be a whole number between 0 and 60 seconds.',
+      code: 'increment_range',
     };
   }
 

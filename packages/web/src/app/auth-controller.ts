@@ -28,6 +28,9 @@ import { isTransientRefreshFailure, NoSessionError } from '../net/session.js';
 import { NativeWebAuthnAdapter } from '../ports/webauthn.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
 
+import type { I18nManager } from '../i18n/manager.js';
+import { createI18nManager } from '../i18n/index.js';
+
 /** Callbacks the bootstrap wires to DOM elements. */
 export interface AuthCallbacks {
   /** Called when the session state changes (login, logout, restore). */
@@ -54,13 +57,12 @@ function refusalReason(err: unknown): string | undefined {
  * What to tell the person for a refused password sign-in. The step-up wording is the same whether
  * or not the handle exists, because the server's answer is.
  */
-function signInError(err: unknown): string {
+function signInError(err: unknown, i18n: I18nManager): string {
   switch (refusalReason(err)) {
     case 'step_up_required':
-      return 'Additional verification is required. If this account has a verified email address, ' +
-        'a sign-in code has been sent to it. Enter the code, or sign in with a passkey.';
+      return i18n.t('auth.error.stepUpRequired');
     case 'email_unverified':
-      return 'Verify your email address before signing in. We sent a new verification link.';
+      return i18n.t('auth.error.emailUnverified');
     default:
       return err instanceof Error ? err.message : String(err);
   }
@@ -93,6 +95,8 @@ interface PersistedAuth {
 export interface AuthControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: AuthCallbacks;
+  /** Injectable i18n manager for user-facing auth copy. */
+  readonly i18n?: I18nManager;
   /** Injectable WebAuthn adapter (defaults to NativeWebAuthnAdapter). */
   readonly webauthnAdapter?: WebAuthnAdapter;
   /** Injected storage for session persistence (defaults to localStorage). */
@@ -116,6 +120,7 @@ const DEFAULT_STORAGE_KEY = 'gambit-session';
 export class AuthController {
   private readonly client: GambitClient;
   private readonly callbacks: AuthCallbacks;
+  private readonly i18n: I18nManager;
   private readonly webauthnAdapter: WebAuthnAdapter;
   private readonly storage: KeyValueStorage | undefined;
   private readonly storageKey: string;
@@ -131,6 +136,7 @@ export class AuthController {
   constructor(opts: AuthControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.i18n = opts.i18n ?? createI18nManager();
     this.webauthnAdapter = opts.webauthnAdapter ?? new NativeWebAuthnAdapter();
     this.storage = opts.storage;
     this.storageKey = opts.storageKey ?? DEFAULT_STORAGE_KEY;
@@ -239,7 +245,7 @@ export class AuthController {
     } catch (err) {
       if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
       if (refusalReason(err) === 'step_up_required') this.callbacks.onStepUp?.(true);
-      this.callbacks.onError(signInError(err));
+      this.callbacks.onError(signInError(err, this.i18n));
       return null;
     } finally {
       this.finishPendingOperation();
@@ -251,11 +257,11 @@ export class AuthController {
     if (this.disposed) return null;
     const trimmed = handle.trim();
     if (!trimmed) {
-      this.callbacks.onError('Please enter your handle to sign in with a passkey.');
+      this.callbacks.onError(this.i18n.t('auth.error.handleRequiredPasskey'));
       return null;
     }
     if (!this.webauthnAdapter.isSupported()) {
-      this.callbacks.onError('Passkey sign-in is not supported on this browser.');
+      this.callbacks.onError(this.i18n.t('auth.error.passkeyUnsupported'));
       return null;
     }
     const managerGeneration = this.client.session.captureGeneration();
@@ -272,7 +278,7 @@ export class AuthController {
     } catch (err) {
       if (!this.authOperationIsCurrent(generation, managerGeneration) || err instanceof NoSessionError) return null;
       // Do not expose account-existence details in client error copy.
-      this.callbacks.onError('Sign in with passkey failed.');
+      this.callbacks.onError(this.i18n.t('auth.error.passkeyFailed'));
       return null;
     } finally {
       this.finishPendingOperation();
@@ -289,7 +295,7 @@ export class AuthController {
     if (this.disposed) return null;
     const trimmed = email?.trim() ?? '';
     if (!trimmed) {
-      this.callbacks.onError('An email address is required to create an account.');
+      this.callbacks.onError(this.i18n.t('auth.error.emailRequired'));
       return null;
     }
     const managerGeneration = this.client.session.captureGeneration();
@@ -317,14 +323,14 @@ export class AuthController {
     if (this.disposed) return;
     const trimmed = handleOrEmail.trim();
     if (!trimmed) {
-      this.callbacks.onError('Enter your handle or email to get a new verification link.');
+      this.callbacks.onError(this.i18n.t('auth.error.handleOrEmailRequired'));
       return;
     }
     this.beginPendingOperation();
     try {
       await this.client.auth.resendEmailVerification({ handleOrEmail: trimmed });
       this.callbacks.onError(
-        'If that account has an unverified email address, a new verification link is on its way.',
+        this.i18n.t('auth.notice.verificationSent'),
       );
     } catch (err) {
       this.callbacks.onError(err instanceof Error ? err.message : String(err));

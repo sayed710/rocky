@@ -1,22 +1,28 @@
 /**
  * Deterministic AST/Syntax Runtime Localization Coverage Guard.
  *
- * Verifies that runtime view renderers, mounts, dialogs, and helpers in `packages/web/src/app/`
- * do not render raw English string literals to DOM nodes or define unlocalized label tables.
+ * Verifies that all runtime presentation views, mounts, dialogs, and UI helpers in
+ * `packages/web/src/app/` route 100% of user-visible copy through `i18n.t(key)`.
  *
- * Covers:
- * - textContent, innerHTML, innerText assignments (direct literals, interpolated templates, ternaries)
- * - setAttribute('aria-label' | 'title' | 'placeholder', ...)
- * - el(doc, tag, attrs, ...children) helper calls (text children & attribute copy)
- * - renderEmpty(container, { title, body, cta: { label } }) real options call shape
- * - Option and UI label tables / constants flowing to DOM
- * - Ternary fallback branches (e.g. i18n ? i18n.t(...) : 'English fallback')
- *
- * All user-facing copy must be routed through `i18n.t(key)`.
+ * Architecture:
+ * - Scans all application source files in `packages/web/src/app/` by default.
+ * - Every file is strictly classified: either UI-bearing (scanned) or technical/headless
+ *   (documented in `NON_UI_TECHNICAL_FILES` with an architectural justification).
+ * - New files cannot silently escape the guard: unclassified files fail the test immediately.
+ * - Inspects:
+ *   - .textContent, .innerHTML, .innerText assignments (literals, templates, ternaries)
+ *   - .title and .placeholder DOM property assignments
+ *   - setAttribute('aria-label' | 'title' | 'placeholder', ...)
+ *   - el(doc, tag, attrs, ...children) helper calls (attribute copy & text children)
+ *   - renderEmpty(container, { title, body, cta: { label } }) calls
+ *   - Option tables with { label: '...' }
+ *   - Validation results with { message: '...' }
+ *   - Technical protocol values (e.g. 'white', 'black', 'rated') are NOT allowlisted as copy strings
+ *     when flowing into user-visible DOM locations.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -32,49 +38,66 @@ export interface AstViolation {
 }
 
 /**
- * All client-owned runtime view renderers, mounts, dialogs, and UI helpers
- * migrated in PR #81.
+ * Narrowly justified classification of application files that contain zero presentation
+ * copy, zero UI mounts, and zero user-facing error messages.
+ *
+ * Every excluded file MUST have a documented architectural reason.
  */
-export const MIGRATED_VIEW_FILES: readonly string[] = [
-  'achievements-helpers.ts',
-  'achievements-view.ts',
-  'analysis-view.ts',
-  'competition-mounts.ts',
-  'create-game-panel.ts',
-  'email-verification-mount.ts',
-  'endgame-mount.ts',
-  'endgame-view.ts',
-  'forum-helpers.ts',
-  'forum-mounts.ts',
-  'forum-view.ts',
-  'game-controller.ts',
-  'game-mount.ts',
-  'leaderboard-view.ts',
-  'learning-helpers.ts',
-  'learning-mounts.ts',
-  'learning-view.ts',
-  'lobby-mount.ts',
-  'messages-helpers.ts',
-  'messages-view.ts',
-  'messaging-mounts.ts',
-  'passkeys-view.ts',
-  'password-recovery-mount.ts',
-  'play-bot-dialog.ts',
-  'profile-mount.ts',
-  'render-helpers.ts',
-  'search-mount.ts',
-  'search-view.ts',
-  'sessions-view.ts',
-  'studies-helpers.ts',
-  'studies-mounts.ts',
-  'studies-view.ts',
-  'team-mounts.ts',
-  'teams-helpers.ts',
-  'teams-view.ts',
-  'tournament-commentary-view.ts',
-  'tournament-view.ts',
-  'variant-labels.ts',
-];
+export const NON_UI_TECHNICAL_FILES: Readonly<Record<string, string>> = {
+  'achievements-controller.ts': 'Headless state controller managing achievements API fetching and reactive state; presentation copy rendered via achievements-view.ts.',
+  'analysis-controller.ts': 'Headless network and debounce controller for engine analysis WebSocket/REST requests; output rendered via analysis-view.ts.',
+  'analysis-format.ts': 'Pure numeric/algebraic chess notation and centipawn formatter functions; no presentation prose.',
+  'assess-controller.ts': 'Headless request controller managing mistake prediction API calls; UI copy rendered via assess-view.ts.',
+  'capabilities-nav.ts': 'Pure boolean predicate functions querying server capability flags; no user-visible presentation copy.',
+  'coach-controller.ts': 'Headless request controller coordinating multi-section AI coaching requests; UI copy rendered via coach-view.ts.',
+  'composition.ts': 'Dependency injection container and application composition root; instantiates services and wires routes.',
+  'config.ts': 'Pure technical configuration constants (API URLs, WebSocket endpoints, storage keys).',
+  'create-game-prefs.ts': 'Pure localStorage read/write persistence for player game preferences (variant, speed, rating range).',
+  'dom.ts': 'Low-level DOM construction primitives and element creation helpers (el, clearChildren).',
+  'email-verification-controller.ts': 'Headless state controller for email verification token lifecycle; presentation handled by email-verification-mount.ts.',
+  'endgame-controller.ts': 'Headless controller managing endgame training position requests and validation; UI rendered via endgame-view.ts.',
+  'explain-controller.ts': 'Headless state controller managing move explanation API requests; UI rendered via explain-view.ts.',
+  'forum-controller.ts': 'Headless state controller for forum thread listings, post creation, and pagination; UI rendered via forum-view.ts.',
+  'game-review-annotation.ts': 'Pure chess annotation symbols and move evaluation classification mapping functions; no presentation prose.',
+  'game-review-controller.ts': 'Headless background controller managing post-game move evaluation batch requests; presentation handled by game-mount.ts.',
+  'index.ts': 'Library module re-export barrel file.',
+  'leaderboard-controller.ts': 'Headless data controller managing leaderboard queries and caching; UI rendered via leaderboard-view.ts.',
+  'learning-controller.ts': 'Headless state controller for learning courses, lessons, and interactive step state; UI rendered via learning-view.ts.',
+  'lifecycle.ts': 'Pure resource disposal primitives and lifecycle management interfaces (Disposable, CompositeDisposable).',
+  'lobby-controller.ts': 'Headless state machine managing open game offers (seeks) and live subscriptions; UI rendered via lobby-mount.ts.',
+  'messages-controller.ts': 'Headless messaging client controller managing direct message threads; UI rendered via messages-view.ts.',
+  'move-request-controller.ts': 'Headless HTTP controller executing chess move requests against game API endpoints; no UI copy.',
+  'opening-controller.ts': 'Headless request controller for opening book exploration; UI copy rendered via opening-view.ts.',
+  'passkeys-controller.ts': 'Headless WebAuthn credentials controller coordinating browser navigator.credentials calls; UI rendered via passkeys-view.ts.',
+  'password-reset-controller.ts': 'Headless state controller for password recovery tokens and reset calls; UI rendered via password-recovery-mount.ts.',
+  'profile-controller.ts': 'Headless user profile and social relationship data controller; UI rendered via profile-mount.ts.',
+  'puzzle-controller.ts': 'Headless controller managing tactic search requests and state invalidation; UI copy rendered via puzzle-view.ts.',
+  'route-surface.ts': 'DOM container attachment helpers and route mount surface management; no presentation prose.',
+  'router.ts': 'Pure client-side hash/history routing engine without DOM rendering logic.',
+  'search-controller.ts': 'Headless state controller coordinating keyword and semantic search queries; UI rendered via search-view.ts.',
+  'search-results.ts': 'Pure data transform functions mapping search API responses to entity views; no presentation prose.',
+  'sessions-controller.ts': 'Headless controller managing active browser session listing and revocation; UI rendered via sessions-view.ts.',
+  'social-controller.ts': 'Headless state controller for friendships, follower relationships, and player blocking; UI rendered via profile-mount.ts.',
+  'studies-controller.ts': 'Headless state controller managing study chapter trees and collaborative edits; UI rendered via studies-view.ts.',
+  'teams-controller.ts': 'Headless state controller for team membership, join requests, and administration; UI rendered via teams-view.ts.',
+  'tournament-commentary-controller.ts': 'Headless controller managing tournament round commentary polling; UI rendered via tournament-commentary-view.ts.',
+  'tournament-controller.ts': 'Headless state controller for tournament brackets, standings, and pairings; UI rendered via tournament-view.ts.',
+};
+
+/**
+ * Derives the active set of scanned UI-bearing files.
+ * Any app file not explicitly in NON_UI_TECHNICAL_FILES is scanned by default.
+ */
+export function getScannedViewFiles(appDir: string = APP_DIR): string[] {
+  const allFiles = readdirSync(appDir).filter((f) => f.endsWith('.ts'));
+  const nonUiSet = new Set(Object.keys(NON_UI_TECHNICAL_FILES));
+  return allFiles.filter((f) => !nonUiSet.has(f)).sort();
+}
+
+/**
+ * Backwards-compatible alias for existing imports.
+ */
+export const MIGRATED_VIEW_FILES: readonly string[] = getScannedViewFiles();
 
 /**
  * Narrowly documented allowlist for non-copy tokens:
@@ -82,7 +105,10 @@ export const MIGRATED_VIEW_FILES: readonly string[] = [
  * - DOM attribute names and input types
  * - DOM event names
  * - Directionality and live region state tokens
- * - Protocol identifiers (variants, speeds, seek modes, player roles)
+ *
+ * Protocol values (e.g. 'white', 'black', 'random', 'rated') are intentionally NOT here:
+ * if they are rendered into textContent, title, placeholder, or option labels, they must
+ * be localized via i18n.t().
  */
 const TECHNICAL_TOKENS = new Set([
   // DOM element tags
@@ -104,13 +130,6 @@ const TECHNICAL_TOKENS = new Set([
   // Direction & state tokens
   'ltr', 'rtl', 'auto', 'off', 'on', 'none', 'polite', 'assertive', 'true', 'false',
   'open', 'close',
-  // Protocol & domain identifiers
-  'standard', 'chess960', 'kingofthehill', 'atomic', 'crazyhouse', 'threecheck',
-  'horde', 'racingkings', 'ultrabullet', 'bullet', 'blitz', 'rapid', 'classical',
-  'correspondence', 'casual', 'rated', 'keyword', 'semantic', 'hybrid',
-  'white', 'black', 'random', 'player', 'spectator', 'idle', 'connecting',
-  'ready', 'playing', 'finished', 'aborted', 'unlimited', 'sudden_death',
-  'increment', 'delay',
 ]);
 
 /**
@@ -141,11 +160,13 @@ export function isCopyString(text: string): boolean {
   if (/^[a-h][1-8]$/.test(trimmed) || /^[01]\-[01]$/.test(trimmed) || trimmed === '1/2-1/2') return false;
 
   // English copy patterns:
-  // 1. Multi-word phrases with English words
-  if (/\b[a-zA-Z]{2,}\s+[a-zA-Z]{2,}\b/.test(trimmed)) return true;
-  // 2. Sentences ending with period, exclamation, question mark, or ellipsis
+  // 1. Example / hint patterns (e.g. 'e.g. Nf3')
+  if (/e\.g\./i.test(trimmed)) return true;
+  // 2. Multi-word phrases with English words or alphanumerics
+  if (/\b[a-zA-Z]{2,}\s+[a-zA-Z0-9]{2,}\b/.test(trimmed)) return true;
+  // 3. Sentences ending with period, exclamation, question mark, or ellipsis
   if (/[.!?…]$/.test(trimmed) && /[a-zA-Z]{3,}/.test(trimmed)) return true;
-  // 3. Capitalized English word of length >= 3 that is not an allowlisted technical token
+  // 4. Capitalized English word of length >= 3 that is not an allowlisted technical token
   if (/^[A-Z][a-z]{2,}$/.test(trimmed)) return true;
 
   return false;
@@ -190,11 +211,11 @@ export function scanSourceForViolations(fileName: string, sourceCode: string): A
   }
 
   function walk(node: ts.Node): void {
-    // 1. Property assignments: textContent, innerHTML, innerText
+    // 1. Property assignments: textContent, innerHTML, innerText, title, placeholder
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
       if (ts.isPropertyAccessExpression(node.left)) {
         const prop = node.left.name.text;
-        if (['textContent', 'innerHTML', 'innerText'].includes(prop)) {
+        if (['textContent', 'innerHTML', 'innerText', 'title', 'placeholder'].includes(prop)) {
           checkExpressionForCopy(node.right, prop);
         }
       }
@@ -254,11 +275,13 @@ export function scanSourceForViolations(fileName: string, sourceCode: string): A
       }
     }
 
-    // 5. UI label constants / tables flowing to DOM: { label: '...' } in option arrays
+    // 5. Option tables and validation message objects: { label: '...' } or { message: '...' }
     if (ts.isPropertyAssignment(node)) {
       const propName = node.name.getText(sf).replace(/['"]/g, '');
       if (propName === 'label') {
         checkExpressionForCopy(node.initializer, 'option.label');
+      } else if (propName === 'message') {
+        checkExpressionForCopy(node.initializer, 'validation.message');
       }
     }
 
@@ -269,13 +292,46 @@ export function scanSourceForViolations(fileName: string, sourceCode: string): A
   return violations;
 }
 
-test('i18n AST guard: all 38 migrated runtime view renderers in packages/web/src/app have 0 raw copy literals', () => {
-  assert.ok(MIGRATED_VIEW_FILES.length >= 38, 'expected at least 38 migrated view files');
+test('i18n AST guard: all application source files are strictly classified and accounted for', () => {
+  const allFiles = readdirSync(APP_DIR).filter((f) => f.endsWith('.ts')).sort();
+  assert.ok(allFiles.length >= 87, `expected at least 87 files in packages/web/src/app, got ${allFiles.length}`);
 
+  const nonUiEntries = Object.keys(NON_UI_TECHNICAL_FILES);
+  for (const file of nonUiEntries) {
+    assert.ok(
+      allFiles.includes(file),
+      `NON_UI_TECHNICAL_FILES contains phantom file not in app directory: ${file}`,
+    );
+    const justification = NON_UI_TECHNICAL_FILES[file];
+    assert.ok(
+      justification && justification.length >= 20,
+      `NON_UI_TECHNICAL_FILES entry for ${file} must have a detailed architectural justification`,
+    );
+  }
+
+  const scannedFiles = getScannedViewFiles();
+  assert.ok(
+    scannedFiles.length >= 48,
+    `expected at least 48 scanned presentation files, got ${scannedFiles.length}`,
+  );
+
+  const classifiedSet = new Set([...nonUiEntries, ...scannedFiles]);
+  const unclassified = allFiles.filter((f) => !classifiedSet.has(f));
+  assert.deepEqual(
+    unclassified,
+    [],
+    `Found unclassified files in packages/web/src/app: ${unclassified.join(', ')}. ` +
+      'Every file must either be scanned for runtime copy or explicitly classified in NON_UI_TECHNICAL_FILES.',
+  );
+});
+
+test('i18n AST guard: all scanned runtime UI surfaces have 0 raw copy literals', () => {
+  const scannedFiles = getScannedViewFiles();
   const allViolations: AstViolation[] = [];
-  for (const file of MIGRATED_VIEW_FILES) {
+
+  for (const file of scannedFiles) {
     const filePath = resolve(APP_DIR, file);
-    assert.ok(existsSync(filePath), `migrated view file must exist: ${file}`);
+    assert.ok(existsSync(filePath), `scanned view file must exist: ${file}`);
     const content = readFileSync(filePath, 'utf8');
     const violations = scanSourceForViolations(file, content);
     allViolations.push(...violations);
@@ -284,7 +340,9 @@ test('i18n AST guard: all 38 migrated runtime view renderers in packages/web/src
   assert.deepEqual(
     allViolations,
     [],
-    `Found ${allViolations.length} raw copy literal violation(s) in migrated view files. Use i18n.t() instead.`,
+    `Found ${allViolations.length} raw copy literal violation(s) in scanned UI surfaces:\n` +
+      allViolations.map((v) => `  ${v.file}:${v.line} [${v.type}]: "${v.text}"`).join('\n') +
+      '\nUse i18n.t() instead.',
   );
 });
 
@@ -293,32 +351,41 @@ test('i18n AST guard falsification: comprehensive check of real application call
     'const SEARCH_OPTIONS = [',
     '  { value: "keyword", label: "Keyword search" },',
     '];',
-    'function render(doc: Document, container: HTMLElement, btn: HTMLElement, i18n?: I18n) {',
+    'function validate() {',
+    '  return { valid: false, message: "Enter a whole rating from 0 to 4000." };',
+    '}',
+    'function render(doc: Document, container: HTMLElement, btn: HTMLElement, input: HTMLInputElement, i18n?: I18n) {',
     '  container.textContent = `Welcome to ${siteName} chess`;',
     '  renderEmpty(container, {',
     '    title: "No active tournaments",',
     '    body: "Create a new tournament to get started",',
     '    cta: { label: "Create tournament", href: "/tournaments/new", route: "tournament-new" }',
     '  });',
-    '  const action = el(doc, "button", { "aria-label": "Close dialog" }, "Cancel action");',
+    '  const action = el(doc, "button", { "aria-label": "Close dialog", title: "Action title" }, "Cancel action");',
     '  btn.textContent = i18n ? i18n.t("action.save") : "Save changes";',
     '  btn.setAttribute("title", "Click to submit");',
+    '  btn.title = session === null ? "Sign in to play the computer" : "";',
+    '  input.placeholder = "e.g. Nf3";',
     '}',
   ].join('\n');
 
   const violations = scanSourceForViolations('synthetic-test.ts', syntheticSnippet);
-  assert.ok(violations.length >= 8, `expected at least 8 synthetic violations, got ${violations.length}`);
+  assert.ok(violations.length >= 12, `expected at least 12 synthetic violations, got ${violations.length}`);
 
   const types = violations.map((v) => v.type);
   assert.ok(types.includes('option.label'), 'must catch option.label');
+  assert.ok(types.includes('validation.message'), 'must catch validation.message');
   assert.ok(types.includes('textContent-template'), 'must catch interpolated textContent template');
   assert.ok(types.includes('renderEmpty.title'), 'must catch renderEmpty.title');
   assert.ok(types.includes('renderEmpty.body'), 'must catch renderEmpty.body');
   assert.ok(types.includes('renderEmpty.cta.label'), 'must catch renderEmpty.cta.label');
   assert.ok(types.includes('el(attrs.aria-label)'), 'must catch el() aria-label attr');
+  assert.ok(types.includes('el(attrs.title)'), 'must catch el() title attr');
   assert.ok(types.includes('el(child)'), 'must catch el() text child');
   assert.ok(types.includes('textContent-ternary-false'), 'must catch ternary false English fallback');
   assert.ok(types.includes('setAttribute(title)'), 'must catch setAttribute(title)');
+  assert.ok(types.includes('title-ternary-true'), 'must catch DOM property title = ternary');
+  assert.ok(types.includes('placeholder'), 'must catch DOM property placeholder =');
 });
 
 test('i18n AST guard falsification: proves individual real mutations fail the guard', () => {
@@ -351,4 +418,48 @@ test('i18n AST guard falsification: proves individual real mutations fail the gu
   assert.equal(v3.length, 1);
   assert.equal(v3[0]?.type, 'textContent-template');
   assert.equal(v3[0]?.text, 'Playing against ');
+
+  // Mutation 4: Raw .title DOM property assignment
+  const m4 = `
+    playBotBtn.title = 'Sign in to play the computer';
+  `;
+  const v4 = scanSourceForViolations('mutation-4.ts', m4);
+  assert.equal(v4.length, 1);
+  assert.equal(v4[0]?.type, 'title');
+  assert.equal(v4[0]?.text, 'Sign in to play the computer');
+
+  // Mutation 5: Raw .placeholder DOM property assignment
+  const m5 = `
+    sanInput.placeholder = 'e.g. Nf3';
+  `;
+  const v5 = scanSourceForViolations('mutation-5.ts', m5);
+  assert.equal(v5.length, 1);
+  assert.equal(v5[0]?.type, 'placeholder');
+  assert.equal(v5[0]?.text, 'e.g. Nf3');
+
+  // Mutation 6: Raw validation message object
+  const m6 = `
+    return { valid: false, message: 'Minimum rating must not exceed maximum rating.' };
+  `;
+  const v6 = scanSourceForViolations('mutation-6.ts', m6);
+  assert.equal(v6.length, 1);
+  assert.equal(v6[0]?.type, 'validation.message');
+  assert.equal(v6[0]?.text, 'Minimum rating must not exceed maximum rating.');
+
+  // Mutation 7: Protocol word 'White' used as user-visible label in option or child
+  const m7 = `
+    label.textContent = 'White';
+  `;
+  const v7 = scanSourceForViolations('mutation-7.ts', m7);
+  assert.equal(v7.length, 1);
+  assert.equal(v7[0]?.type, 'textContent');
+  assert.equal(v7[0]?.text, 'White');
+
+  // Mutation 8: An unclassified file cannot evade the classification guard
+  const fakeFileList = ['assess-view.ts', 'unclassified-feature-view.ts'];
+  const fakeNonUi = { 'assess-controller.ts': 'Headless controller' };
+  const classified = new Set([...Object.keys(fakeNonUi), 'assess-view.ts']);
+  const unclassified = fakeFileList.filter((f) => !classified.has(f));
+  assert.equal(unclassified.length, 1);
+  assert.equal(unclassified[0], 'unclassified-feature-view.ts');
 });

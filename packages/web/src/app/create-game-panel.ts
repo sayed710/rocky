@@ -26,6 +26,7 @@ import {
   estimateSpeed,
   presetToTimeControl,
   validateCustomTime,
+  type CustomTimeErrorCode,
 } from './time-presets.js';
 import {
   DEFAULT_CREATE_GAME_COLOR,
@@ -269,6 +270,8 @@ export class CreateGamePanel {
       if (this.moreLabelEl) this.moreLabelEl.textContent = this.i18n.t('lobby.moreOptions');
       this.syncTimeSelection(false);
       this.syncAdvancedSummary();
+      this.refreshRatingError();
+      this.refreshCustomError();
     });
   }
 
@@ -585,7 +588,7 @@ export class CreateGamePanel {
         this.customIncrement.value.trim() === '' ? Number.NaN : Number(this.customIncrement.value);
       const validation = validateCustomTime(minutes, increment);
       if (!validation.ok) {
-        this.showCustomError(validation.message, validation.field);
+        this.showCustomError(validation.code, validation.field);
         return null;
       }
       this.clearCustomError();
@@ -667,19 +670,35 @@ export class CreateGamePanel {
         readonly ok: true;
         readonly value: { readonly minRating: number | null; readonly maxRating: number | null };
       }
-    | { readonly ok: false; readonly message: string; readonly input: HTMLInputElement } {
+    | {
+        readonly ok: false;
+        readonly code: 'rating_bound' | 'rating_order';
+        readonly message: string;
+        readonly input: HTMLInputElement;
+      } {
     const minimum = parseRatingBound(this.minRating.value);
     const maximum = parseRatingBound(this.maxRating.value);
     if (!minimum.ok) {
-      return { ok: false, message: 'Enter a whole rating from 0 to 4000.', input: this.minRating };
+      return {
+        ok: false,
+        code: 'rating_bound',
+        message: this.i18n.t('lobby.createGame.error.ratingBound'),
+        input: this.minRating,
+      };
     }
     if (!maximum.ok) {
-      return { ok: false, message: 'Enter a whole rating from 0 to 4000.', input: this.maxRating };
+      return {
+        ok: false,
+        code: 'rating_bound',
+        message: this.i18n.t('lobby.createGame.error.ratingBound'),
+        input: this.maxRating,
+      };
     }
     if (minimum.value !== null && maximum.value !== null && minimum.value > maximum.value) {
       return {
         ok: false,
-        message: 'Minimum rating must not exceed maximum rating.',
+        code: 'rating_order',
+        message: this.i18n.t('lobby.createGame.error.ratingOrder'),
         input: this.minRating,
       };
     }
@@ -841,7 +860,10 @@ export class CreateGamePanel {
   }
 
   /** Surface one custom validation error at the field that needs correction. */
-  private showCustomError(message: string, field: 'minutes' | 'increment'): void {
+  private showCustomError(code: CustomTimeErrorCode, field: 'minutes' | 'increment'): void {
+    const message = code === 'minutes_range'
+      ? this.i18n.t('lobby.createGame.error.customMinutes')
+      : this.i18n.t('lobby.createGame.error.customIncrement');
     this.customError.textContent = message;
     this.customError.hidden = false;
     this.customMinutes.removeAttribute('aria-invalid');
@@ -849,6 +871,23 @@ export class CreateGamePanel {
     const input = field === 'minutes' ? this.customMinutes : this.customIncrement;
     input.setAttribute('aria-invalid', 'true');
     input.focus();
+  }
+
+  /** Refresh an existing custom time error without moving focus or clearing values. */
+  private refreshCustomError(): void {
+    if (this.customError.hidden) return;
+    const minutes = this.customMinutes.value.trim() === '' ? Number.NaN : Number(this.customMinutes.value);
+    const increment =
+      this.customIncrement.value.trim() === '' ? Number.NaN : Number(this.customIncrement.value);
+    const validation = validateCustomTime(minutes, increment);
+    if (!validation.ok) {
+      const message = validation.code === 'minutes_range'
+        ? this.i18n.t('lobby.createGame.error.customMinutes')
+        : this.i18n.t('lobby.createGame.error.customIncrement');
+      this.customError.textContent = message;
+      return;
+    }
+    this.clearCustomError();
   }
 
   /** Clear custom validation state without affecting the lobby-level error region. */

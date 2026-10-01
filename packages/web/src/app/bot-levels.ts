@@ -5,29 +5,29 @@
  * lobby dialog and provides string parsing with safe fallbacks.
  */
 import type { BotLevel } from '../api/models.js';
+import type { MessageKey } from '../i18n/catalog/index.js';
 
 export interface BotLevelOption {
   readonly id: BotLevel;
-  readonly label: string;
-  /** One short line explaining who this opponent suits. */
-  readonly blurb: string;
+  readonly labelKey: MessageKey;
+  readonly blurbKey: MessageKey;
 }
 
 export const BOT_LEVELS: readonly BotLevelOption[] = [
   {
     id: 'novice',
-    label: 'Novice',
-    blurb: 'Makes frequent tactical errors. Best for beginners learning basic patterns.',
+    labelKey: 'bot.level.novice',
+    blurbKey: 'bot.level.novice.blurb',
   },
   {
     id: 'club',
-    label: 'Club',
-    blurb: 'Plays solid tactical moves with occasional inaccuracies. Suitable for casual players.',
+    labelKey: 'bot.level.club',
+    blurbKey: 'bot.level.club.blurb',
   },
   {
     id: 'master',
-    label: 'Master',
-    blurb: 'Strong tactical calculation and positional play. A challenging test.',
+    labelKey: 'bot.level.master',
+    blurbKey: 'bot.level.master.blurb',
   },
 ];
 

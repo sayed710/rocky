@@ -39,14 +39,14 @@ export interface PlayBotDialogOptions {
 
 interface ColorOption {
   readonly value: SeekColor;
-  readonly label: string;
+  readonly labelKey: 'bot.color.white' | 'bot.color.random' | 'bot.color.black';
   readonly glyph: string;
 }
 
 const COLOR_OPTIONS: readonly ColorOption[] = [
-  { value: 'white', label: 'White', glyph: '♔' },
-  { value: 'random', label: 'Random', glyph: '½' },
-  { value: 'black', label: 'Black', glyph: '♚' },
+  { value: 'white', labelKey: 'bot.color.white', glyph: '♔' },
+  { value: 'random', labelKey: 'bot.color.random', glyph: '½' },
+  { value: 'black', labelKey: 'bot.color.black', glyph: '♚' },
 ];
 
 export class PlayBotDialog {
@@ -97,7 +97,7 @@ export class PlayBotDialog {
     const levelSeg = el(d, 'div', { class: 'cg-segmented' });
     for (const lvl of BOT_LEVELS) {
       levelSeg.append(
-        this.segment('pb-level', lvl.id, lvl.label, lvl.id === DEFAULT_BOT_LEVEL),
+        this.segment('pb-level', lvl.id, this.i18n.t(lvl.labelKey), lvl.id === DEFAULT_BOT_LEVEL),
       );
     }
     this.levelLegend = el(d, 'legend', {}, this.i18n.t('bot.level'));
@@ -117,7 +117,7 @@ export class PlayBotDialog {
     const colorSeg = el(d, 'div', { class: 'cg-segmented' });
     for (const c of COLOR_OPTIONS) {
       colorSeg.append(
-        this.segment('pb-color', c.value, c.label, c.value === 'random', c.glyph),
+        this.segment('pb-color', c.value, this.i18n.t(c.labelKey), c.value === 'random', c.glyph),
       );
     }
     this.colorLegend = el(d, 'legend', {}, this.i18n.t('bot.color'));
@@ -244,7 +244,7 @@ export class PlayBotDialog {
   private updateLevelHint(): void {
     const selectedId = parseBotLevel(this.readChecked('pb-level'));
     const option = BOT_LEVELS.find((opt) => opt.id === selectedId);
-    this.levelHint.textContent = option ? option.blurb : '';
+    this.levelHint.textContent = option ? this.i18n.t(option.blurbKey) : '';
   }
 
   private gather(): CreateBotGameParams {
@@ -334,6 +334,29 @@ export class PlayBotDialog {
     if (!this.authenticated) {
       this.trigger.title = this.i18n.t('bot.signInToPlay');
     }
+
+    // Retranslate difficulty option labels without disturbing checked radio states
+    for (const lvl of BOT_LEVELS) {
+      const radio = this.form.querySelector<HTMLInputElement>(`input[name="pb-level"][value="${lvl.id}"]`);
+      const segLabel = radio?.closest('label')?.querySelector('.cg-seg-label');
+      if (segLabel) {
+        segLabel.textContent = this.i18n.t(lvl.labelKey);
+      }
+    }
+
+    // Retranslate color option labels without disturbing checked radio states
+    for (const c of COLOR_OPTIONS) {
+      const radio = this.form.querySelector<HTMLInputElement>(`input[name="pb-color"][value="${c.value}"]`);
+      const segLabel = radio?.closest('label')?.querySelector('.cg-seg-label');
+      if (segLabel) {
+        segLabel.replaceChildren(
+          el(this.doc, 'span', { class: 'cg-seg-glyph', 'aria-hidden': 'true' }, c.glyph),
+          this.doc.createTextNode(this.i18n.t(c.labelKey)),
+        );
+      }
+    }
+
+    this.updateLevelHint();
   }
 
   dispose(): void {

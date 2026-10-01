@@ -270,8 +270,19 @@ export function bootstrap(
         : app.i18n.t('shell.authStatus.notSignedIn');
     }
   };
-  const unsubAuthLocale = app.i18n.onLocaleChange(() => updateAuthStatus());
+  const updatePlayBotButton = (): void => {
+    const playBotBtn = doc.getElementById('play-bot');
+    if (playBotBtn instanceof HTMLButtonElement) {
+      playBotBtn.disabled = currentAuthSession === null;
+      playBotBtn.title = currentAuthSession === null ? app.i18n.t('bot.signInToPlay') : '';
+    }
+  };
+  const unsubAuthLocale = app.i18n.onLocaleChange(() => {
+    updateAuthStatus();
+    updatePlayBotButton();
+  });
   updateAuthStatus();
+  updatePlayBotButton();
   const shellLocalization = {
     dispose: () => {
       unsubAuthLocale();
@@ -289,20 +300,17 @@ export function bootstrap(
   let commentarySessionHandler: ((signedIn: boolean) => void) | null = null;
   const auth = new AuthController({
     client: app.api,
+    i18n: app.i18n,
     ...(deps?.webauthnAdapter !== undefined ? { webauthnAdapter: deps.webauthnAdapter } : {}),
     callbacks: {
       onSessionChange: (session) => {
         currentAuthSession = session;
         updateAuthStatus();
+        updatePlayBotButton();
         // Show/hide the sign-in surface vs the logout button. The section is what hides, not just
         // the form inside it: hiding only the form left a signed-in visitor looking at an empty box.
         if (authSectionEl) authSectionEl.hidden = session !== null || hideAuthSection;
         if (authLogoutEl) authLogoutEl.hidden = session === null;
-        const playBotBtn = doc.getElementById('play-bot');
-        if (playBotBtn instanceof HTMLButtonElement) {
-          playBotBtn.disabled = session === null;
-          playBotBtn.title = session === null ? 'Sign in to play the computer' : '';
-        }
         setCreateGameAuthenticated?.(session !== null);
         setPlayBotAuthenticated?.(session !== null);
         lobbySessionHandler?.();
