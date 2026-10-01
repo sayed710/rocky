@@ -10,6 +10,7 @@
  *
  * Theme toggle and auth controller are always wired across all routes.
  */
+import { resolveBrowserStorage } from '../i18n/storage.js';
 import { createApp } from './composition.js';
 import type { App, AppDependencies } from './composition.js';
 import { applyNavCapabilities } from './capabilities-nav.js';
@@ -189,6 +190,7 @@ export function bootstrap(
   doc: Document,
   deps?: BootstrapDependencies,
 ): Bootstrapped {
+  const preferenceStorage = deps?.storage ?? resolveBrowserStorage();
   // Capture recovery tokens out of the fragment and clear the location bar BEFORE any network call
   // or app composition. The fragment never reached the server; this clears the browser's copy.
   const rawUrl = typeof location !== 'undefined' ? location.pathname + (location.search ?? '') : '/';
@@ -234,7 +236,7 @@ export function bootstrap(
         }
       },
     },
-    ...(deps?.storage !== undefined ? { storage: deps.storage } : typeof localStorage !== 'undefined' ? { storage: localStorage } : {}),
+    ...(preferenceStorage ? { storage: preferenceStorage } : {}),
   });
   theme.emit();
   const unsubThemeLocale = app.i18n.onLocaleChange(() => {
@@ -351,7 +353,7 @@ export function bootstrap(
       },
       onStepUp: showStepUp,
     },
-    ...(deps?.storage !== undefined ? { storage: deps.storage } : typeof localStorage !== 'undefined' ? { storage: localStorage } : {}),
+    ...(preferenceStorage ? { storage: preferenceStorage } : {}),
   });
 
   // Wire auth form submit (sign in). Bound on the form so pressing Enter in the password field signs in.

@@ -66,7 +66,6 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
   let hasPosition = false;
   let lastPosition: EndgamePosition | null = null;
   let lastAttemptResult: EndgameAttemptResult | null = null;
-  let lastVerdictNote: string | null = null;
   let lastNoteKey: keyof typeof ENDGAME_MESSAGES | null = null;
   let lastErrorKey: keyof typeof ENDGAME_MESSAGES | null = null;
 
@@ -99,7 +98,6 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
     hasPosition = false;
     lastPosition = null;
     lastAttemptResult = null;
-    lastVerdictNote = null;
     lastNoteKey = null;
     lastErrorKey = null;
   };
@@ -112,13 +110,8 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
     if (submitBtn) submitBtn.disabled = !authed || !hasPosition || controller.isPending;
     if (moveInput) moveInput.disabled = !authed || !hasPosition;
     if (!noteEl) return;
-    const currentText = noteEl.textContent ?? '';
-    const isOwned =
-      currentText === '' ||
-      currentText === getEndgameMessage('idle', deps.i18n) ||
-      currentText === getEndgameMessage('signedOut', deps.i18n) ||
-      currentText === getEndgameMessage('yourMove', deps.i18n);
-    if (!isOwned) return;
+    const isOwned = lastNoteKey === null || lastNoteKey === 'idle' || lastNoteKey === 'signedOut' || lastNoteKey === 'yourMove';
+    if (!isOwned || lastAttemptResult || lastErrorKey) return;
     const noteKey = !authed ? 'signedOut' : hasPosition ? 'yourMove' : 'idle';
     lastNoteKey = noteKey;
     renderEndgameNote(noteEl, getEndgameMessage(noteKey, deps.i18n));
@@ -130,6 +123,12 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
       onPhase: (phase) => {
         // Both phases are work in flight; only announcing `loading` left the region reporting
         // "not busy" through the two engine searches an attempt costs.
+        if (phase === 'loading' || phase === 'attempting') {
+          lastAttemptResult = null;
+          lastErrorKey = null;
+          if (rowsEl && resultEl) clearEndgame(rowsEl, resultEl);
+          if (errorEl) renderEndgameError(errorEl, null);
+        }
         if (resultEl) setEndgameBusy(resultEl, phase === 'loading' || phase === 'attempting');
         refresh();
         if (noteEl && phase === 'loading') {
@@ -144,7 +143,6 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
       onPosition: (position) => {
         lastPosition = position;
         lastAttemptResult = null;
-        lastVerdictNote = null;
         if (boardEl && positionRowsEl) {
           disposeBoard();
           boardEl.innerHTML = '';
@@ -163,9 +161,9 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
       },
       onAttemptResult: (result) => {
         lastAttemptResult = result;
+        lastNoteKey = null;
         if (rowsEl && resultEl) {
           const note = renderEndgameVerdict(doc, rowsEl, resultEl, result, deps.i18n);
-          lastVerdictNote = note;
           if (noteEl) renderEndgameNote(noteEl, note);
         }
         if (errorEl) {
@@ -211,14 +209,10 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
     if (hasPosition && lastPosition && positionRowsEl) {
       renderEndgamePositionRows(doc, positionRowsEl, lastPosition, deps.i18n);
     }
-    if (lastAttemptResult && rowsEl && resultEl) {
-      lastVerdictNote = renderEndgameVerdict(doc, rowsEl, resultEl, lastAttemptResult, deps.i18n);
-    }
-    if (lastVerdictNote !== null && noteEl) {
-      renderEndgameNote(noteEl, lastVerdictNote);
-    } else if (lastNoteKey && noteEl) {
-      renderEndgameNote(noteEl, getEndgameMessage(lastNoteKey, deps.i18n));
-    }
+    const verdictNote = lastAttemptResult && rowsEl && resultEl
+      ? renderEndgameVerdict(doc, rowsEl, resultEl, lastAttemptResult, deps.i18n)
+      : null;
+    if (noteEl) renderEndgameNote(noteEl, lastNoteKey ? getEndgameMessage(lastNoteKey, deps.i18n) : verdictNote);
     if (lastErrorKey && errorEl) {
       renderEndgameError(errorEl, getEndgameMessage(lastErrorKey, deps.i18n));
     }

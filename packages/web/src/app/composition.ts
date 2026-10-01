@@ -92,11 +92,7 @@ export function createApp(deps: AppDependencies): App {
 
   const i18n = deps.i18n ?? createI18n({
     doc: deps.doc,
-    storage: deps.storage
-      ? new LocaleStorage({ storage: deps.storage })
-      : typeof localStorage !== 'undefined'
-        ? new LocaleStorage({ storage: localStorage })
-        : undefined,
+    storage: new LocaleStorage({ storage: deps.storage }),
   });
   if (deps.i18n && deps.doc) {
     deps.i18n.setDocument(deps.doc);

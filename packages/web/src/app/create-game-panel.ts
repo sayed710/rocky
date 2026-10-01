@@ -296,7 +296,7 @@ export class CreateGamePanel {
       // Retranslate variant, mode, and color option labels
       for (const v of OFFERED_VARIANTS) {
         const radio = this.form.querySelector<HTMLInputElement>(`input[name="cg-variant"][value="${v}"]`);
-        const labelSpan = radio?.closest('label')?.querySelector('.cg-chip-label');
+        const labelSpan = radio?.closest('label')?.querySelector('.cg-option-label');
         if (labelSpan) labelSpan.textContent = getVariantLabel(v, this.i18n);
       }
       for (const m of ['casual', 'rated'] as const) {

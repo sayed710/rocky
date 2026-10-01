@@ -229,6 +229,13 @@ export function renderChapterDetail(
 
   // Render Notation Pane
   if (elements.treeEl) {
+    const doc = elements.treeEl.ownerDocument ?? document;
+    const focused = doc.activeElement;
+    const focusedNodeId = focused && elements.treeEl.contains(focused)
+      ? focused.getAttribute('data-node-id')
+      : null;
+    const startFocused = focused !== null && elements.treeEl.contains(focused)
+      && focused.classList.contains('notation-start-btn');
     const existingActiveId =
       elements.treeEl.querySelector('[aria-current="true"]')?.getAttribute('data-node-id')
       ?? elements.treeEl.querySelector('.active')?.getAttribute('data-node-id')
@@ -267,6 +274,7 @@ export function renderChapterDetail(
       onNodeSelect(chapter.startingFen, null);
     });
     elements.treeEl.appendChild(startBtn);
+    if (startFocused) startBtn.focus();
 
     if (tree.length === 0) {
       const empty = document.createElement('p');
@@ -293,6 +301,10 @@ export function renderChapterDetail(
     elements.treeEl.appendChild(container);
     if (activeNodeId) {
       updateActiveButton(activeNodeId);
+    }
+    if (focusedNodeId) {
+      Array.from(elements.treeEl.querySelectorAll<HTMLButtonElement>('.notation-move'))
+        .find((button) => button.getAttribute('data-node-id') === focusedNodeId)?.focus();
     }
   }
 }

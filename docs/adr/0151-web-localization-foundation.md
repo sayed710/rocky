@@ -72,3 +72,9 @@ Per owner directives:
 ### Negative / Trade-offs
 - Adding new client-owned UI features requires defining message keys in `enMessages` rather than inlining string literals in markup or renderers.
 - Dynamic controller nodes require explicit re-render subscriptions if they need to update when locale changes.
+
+### English copy decisions verified during PR #81 correction (2026-10-02)
+
+English remains the default. Lobby seek rows preserve the pre-migration raw variant and speed spelling (`standard · blitz`); other registered catalogs translate these labels. Two deliberate exceptions to exact English text parity are retained from the documented implementation: tournament detail uses human-readable variant labels, and premove announcements include the selected promotion piece (`e7–e8=Q`). The tournament decision is recorded in Increment 80, Finding M; the promotion suffix accurately identifies the technical move and is covered by the board bidi/promotion regressions. The PR description must disclose both exceptions.
+
+Locale changes render semantic pending, message and result state without issuing new requests. Lesson attempts belong to a mount-owned set of stable step IDs; completion updates current controls, and disposal releases read-only boards and subscriptions. Default browser storage property access is guarded as well as storage operations. Missing persistence does not prevent startup or in-memory locale operations.

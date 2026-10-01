@@ -24,7 +24,9 @@ export const ANALYSIS_MESSAGES = {
   failed: enMessages['game.analysis.failed'],
 } as const;
 
-export function getAnalysisMessage(key: keyof typeof ANALYSIS_MESSAGES, i18n: I18nManager): string {
+export type AnalysisMessageKey = keyof typeof ANALYSIS_MESSAGES;
+
+export function getAnalysisMessage(key: AnalysisMessageKey, i18n: I18nManager): string {
   switch (key) {
     case 'idle': return i18n.t('game.analysis.idle');
     case 'loading': return i18n.t('game.analysis.loading');
@@ -100,7 +102,7 @@ export function renderReached(el: HTMLElement, result: AnalysisResponse, i18n: I
  */
 export function renderLimits(el: HTMLElement, result: AnalysisResponse, i18n: I18nManager): void {
   const linesCount = result.applied.multiPv;
-  const linesLabel = linesCount === 1 ? i18n.t('game.analysis.oneLine') : `${linesCount} lines`;
+  const linesLabel = linesCount === 1 ? i18n.t('game.analysis.oneLine') : i18n.t('game.analysis.lineCount', { count: String(linesCount) });
   el.textContent = i18n.t('game.analysis.limits', {
     depth: String(result.applied.depth),
     movetime: formatSeconds(result.applied.movetimeMs),

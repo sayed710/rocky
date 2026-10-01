@@ -12,6 +12,7 @@ interface EmailVerificationElements {
 
 interface EmailVerificationState {
   token: string | null;
+  pending: boolean;
 }
 
 export interface EmailVerificationMountOptions {
@@ -65,6 +66,7 @@ function createEmailVerificationCallbacks(
 
   return {
     onPending: (pending) => {
+      state.pending = pending;
       setEmailVerificationPending(elements, pending, i18n);
       if (pending) {
         wasRetryable = false;
@@ -126,7 +128,7 @@ export function mountEmailVerification(
 ): { dispose: () => void } {
   let disposed = false;
   const elements = emailVerificationElements(options.doc);
-  const state: EmailVerificationState = { token: options.verificationToken };
+  const state: EmailVerificationState = { token: options.verificationToken, pending: false };
   resetEmailVerificationSurface(elements, options.i18n);
 
   let hasSuccess = false;
@@ -145,6 +147,7 @@ export function mountEmailVerification(
 
   const unsubscribeLocale = options.i18n.onLocaleChange(() => {
     if (elements.retry) elements.retry.textContent = options.i18n.t('emailVerification.retry');
+    if (state.pending) setEmailVerificationPending(elements, true, options.i18n);
     if (hasSuccess && elements.status) {
       elements.status.textContent = options.i18n.t('emailVerification.verified');
     }

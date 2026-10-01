@@ -569,7 +569,7 @@ test('renderSeeks: renders owned seek with cancel affordance and waiting indicat
   assert.equal(row.dataset['seekId'], 's-own');
 
   const info = row.querySelector('.seek-info');
-  assert.equal(info?.textContent, 'Standard · Blitz · 3+2 · rated');
+  assert.equal(info?.textContent, 'standard · blitz · 3+2 · rated');
 
   const waiting = row.querySelector('.seek-waiting');
   assert.ok(waiting);
@@ -605,7 +605,7 @@ test('renderSeeks: renders other player seek with accept Play button', () => {
   assert.equal(row.dataset['seekId'], 's-other');
 
   const info = row.querySelector('.seek-info');
-  assert.equal(info?.textContent, 'Standard · Rapid · 10 min');
+  assert.equal(info?.textContent, 'standard · rapid · 10 min');
 
   const acceptBtn = row.querySelector<FakeDOMElement>('.seek-accept');
   assert.ok(acceptBtn);

@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-01 — M15 Increment 80: Web localization exact-head Greptile and Qodo corrections._
+_Last updated: 2026-10-02 — M15 Increment 80: Localization semantic state, pending ownership and accessibility corrections._
+
+Prior: _Last updated: 2026-10-01 — M15 Increment 80: Web localization exact-head Greptile and Qodo corrections._
 
 Prior: _Last updated: 2026-10-01 — M15 Increment 80: Typed web localization and bidi foundation._
 
@@ -4621,3 +4623,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - Finding L — Bootstrap auth error relocalization (`auth-controller.ts`, `bootstrap.ts`): exported strongly typed `AuthErrorMessageKey` and `AuthErrorInfo`, passing semantic error descriptors from `AuthController.onError` to `bootstrap.ts`, which tracks the active error and updates `authErrorEl` on `onLocaleChange`.
   - Finding M — Tournament variant labels (`tournament-view.ts`): verified and retained `getVariantLabel(detail.variant, i18n)` for localized display of tournament variants.
   - Pure type safety: eliminated all `as any` occurrences across test and application code, maintaining 100% compliance with Gambit purity guardrails.
+- Primary Codex correction of starting head `f76f1d2` (2026-10-02):
+  - Lesson attempt pending state now belongs to the mount by stable step ID; all move/text/quiz actions render disabled while pending, guard duplicate submissions, and settlement updates current controls. Drafts, idle focus/selection and study `aria-current`/focus survive locale replay; replaced lesson boards are disposed.
+  - Analysis notices/errors and AI control notes use semantic keys rather than translated DOM inspection. Completed analysis responses replay localized metadata without rerunning requests and clear on invalidation. Opening/puzzle/coach returned result notes share initial/locale presentation paths, with new pending/error state taking priority. Endgame final verdicts clear judging and new requests clear old result state. Verification retains pending status. Invalidated private Game Review and unavailable-lesson outcomes cannot be resurrected incorrectly by locale replay.
+  - Default storage getter access is guarded in locale storage, composition, bootstrap and lobby. Variant labels query their actual `.cg-option-label` nodes while preserving radio state. English lobby seek tokens retain original spelling; documented tournament human-readable labels and promotion suffix correctness remain deliberate English parity exceptions in ADR-0151.
+  - Verification: representative RED tests before fixes; exact-starting-head disposable archive reproduced 17 failures of 28 tests with zero skips; corrected disposable control passed 28/28. All 14 representative source mutations were caught and restored byte-identically. Five real Chromium lesson state/focus/accessibility tests passed with zero retries/skips. Detailed thread inventory and evidence: `docs/audits/PR81_LOCALIZATION_CORRECTION.md`.
+  - PR #81 still proposes Increment 80 against merged Increment 79. PR #83 remains open at `e140093f69fd5ec5ab740b1b10f4394b3f640efe`; no backend integration or historical increment rewrite. Final full validation and exact-head review gates are recorded from actual results in the PR handoff; owner performs the merge.

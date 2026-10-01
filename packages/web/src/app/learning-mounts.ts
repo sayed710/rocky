@@ -174,128 +174,88 @@ export function mountCourseDetail({
   return controller;
 }
 
-function createLessonCallbacks(
-  doc: Document,
-  surface: HTMLElement,
-  error: HTMLElement | null,
-  submitAttempt: (
-    stepId: string,
-    courseId: string,
-    input: SubmitAttemptRequest,
-  ) => Promise<void>,
-  i18n: I18nManager,
-  onLessonLoaded?: (state: {
-    lesson: LessonView;
-    steps: readonly StepView[];
-    progress: CourseProgressSummaryView | null;
-    stepAttempts: ReadonlyMap<string, AttemptResultView>;
-  }) => void,
-  onAttemptHandled?: (stepId: string, result: AttemptResultView, courseProgress: CourseProgressSummaryView | null) => void,
-): LearningCallbacks {
-  let currentCourseId = '';
-  return {
-    onCourseList: () => {},
-    onCourse: () => {},
-    onLesson: (lesson, steps, progress, stepAttempts) => {
-      currentCourseId = lesson.courseId;
-      onLessonLoaded?.({ lesson, steps, progress, stepAttempts });
-      if (error) error.textContent = '';
-      renderLessonDetail(
-        surface,
-        lesson,
-        steps,
-        progress,
-        stepAttempts,
-        (stepId, input) => submitAttempt(stepId, currentCourseId, input),
-        i18n,
-      );
-    },
-    onAttemptResult: (stepId, result, courseProgress) => {
-      onAttemptHandled?.(stepId, result, courseProgress);
-      const stepCard = surface.querySelector(`[data-step-id="${stepId}"]`);
-      if (stepCard) {
-        const status = stepCard.querySelector('.step-status');
-        if (status) status.textContent = stepStatusLabel(result, i18n);
-      }
-      const progress = doc.getElementById('lesson-progress');
-      if (progress) progress.textContent = courseProgressLabel(courseProgress, i18n);
-    },
-    onLoading: (loading) => {
-      const stepList = doc.getElementById('step-list');
-      if (stepList) stepList.setAttribute('aria-busy', loading ? 'true' : 'false');
-    },
-    onError: (message) => {
-      if (error) error.textContent = message;
-    },
-    onUnavailable: () => renderUnavailable(doc, surface, i18n),
-  };
-}
-
 export function mountLesson({
-  doc,
-  client,
-  surface,
-  lessonId,
-  sessionPresent,
-  restorePromise,
-  i18n,
+  doc, client, surface, lessonId, sessionPresent, restorePromise, i18n,
 }: LessonMountDependencies): LearningController {
-  let controller: LearningController;
   let lastLessonState: {
     lesson: LessonView;
     steps: readonly StepView[];
     progress: CourseProgressSummaryView | null;
     stepAttempts: ReadonlyMap<string, AttemptResultView>;
   } | null = null;
+  const pendingSteps = new Set<string>();
+  let active = true;
+  let unavailable = false;
+  let disposeView: (() => void) | undefined;
   let unsubscribeLocale: (() => void) | undefined;
-
-  controller = new LearningController({
+  const error = doc.getElementById('lesson-error');
+  const updatePendingControls = (stepId: string): void => {
+    // Find current nodes by stable step identity; never retain replaced controls in promises.
+    const card = Array.from(surface.querySelectorAll<HTMLElement>('.step-block')).find((el) => el.dataset.stepId === stepId);
+    if (!card) return;
+    const pending = pendingSteps.has(stepId);
+    card.setAttribute('aria-busy', String(pending));
+    for (const el of card.querySelectorAll<HTMLInputElement>('input')) el.disabled = pending;
+    for (const el of card.querySelectorAll<HTMLButtonElement>('button')) el.disabled = pending;
+  };
+  const submitAttempt = async (stepId: string, input: SubmitAttemptRequest): Promise<void> => {
+    if (!active || !lastLessonState || pendingSteps.has(stepId)) return;
+    pendingSteps.add(stepId);
+    updatePendingControls(stepId);
+    try {
+      await controller.submitAttempt(stepId, lastLessonState.lesson.courseId, input);
+    } finally {
+      pendingSteps.delete(stepId);
+      if (active) updatePendingControls(stepId);
+    }
+  };
+  const render = (): void => {
+    if (!active) return;
+    if (unavailable) { renderUnavailable(doc, surface, i18n); return; }
+    if (!lastLessonState) return;
+    disposeView?.();
+    const { lesson, steps, progress, stepAttempts } = lastLessonState;
+    disposeView = renderLessonDetail(surface, lesson, steps, progress, stepAttempts, submitAttempt, i18n, pendingSteps);
+  };
+  const controller = new LearningController({
     client,
-    callbacks: createLessonCallbacks(
-      doc,
-      surface,
-      doc.getElementById('lesson-error'),
-      async (stepId, courseId, input) => {
-        await controller.submitAttempt(stepId, courseId, input);
+    callbacks: {
+      onCourseList: () => {},
+      onCourse: () => {},
+      onLesson: (lesson, steps, progress, stepAttempts) => {
+        lastLessonState = { lesson, steps, progress, stepAttempts };
+        if (error) error.textContent = '';
+        render();
       },
-      i18n,
-      (state) => {
-        lastLessonState = state;
+      onAttemptResult: (stepId, result, progress) => {
+        if (!lastLessonState) return;
+        const attempts = new Map(lastLessonState.stepAttempts);
+        attempts.set(stepId, result);
+        lastLessonState = { ...lastLessonState, progress, stepAttempts: attempts };
+        const card = Array.from(surface.querySelectorAll<HTMLElement>('.step-block')).find((el) => el.dataset.stepId === stepId);
+        const status = card?.querySelector('.step-status');
+        if (status) status.textContent = stepStatusLabel(result, i18n);
+        const progressEl = surface.querySelector('#lesson-progress');
+        if (progressEl) progressEl.textContent = courseProgressLabel(progress, i18n);
       },
-      (stepId, result, courseProgress) => {
-        if (lastLessonState) {
-          const nextAttempts = new Map(lastLessonState.stepAttempts);
-          nextAttempts.set(stepId, result);
-          lastLessonState = {
-            ...lastLessonState,
-            progress: courseProgress,
-            stepAttempts: nextAttempts,
-          };
-        }
+      onLoading: (loading) => { surface.querySelector('#step-list')?.setAttribute('aria-busy', String(loading)); },
+      onError: (message) => { if (error) error.textContent = message; },
+      onUnavailable: () => {
+        unavailable = true;
+        lastLessonState = null;
+        disposeView?.();
+        renderUnavailable(doc, surface, i18n);
       },
-    ),
+    },
     onDispose: () => {
+      active = false;
       unsubscribeLocale?.();
+      disposeView?.();
+      pendingSteps.clear();
+      lastLessonState = null;
     },
   });
-
-  unsubscribeLocale = i18n.onLocaleChange(() => {
-    if (lastLessonState) {
-      renderLessonDetail(
-        surface,
-        lastLessonState.lesson,
-        lastLessonState.steps,
-        lastLessonState.progress,
-        lastLessonState.stepAttempts,
-        async (stepId, input) => {
-          if (!lastLessonState) return;
-          await controller.submitAttempt(stepId, lastLessonState.lesson.courseId, input);
-        },
-        i18n,
-      );
-    }
-  });
-
+  unsubscribeLocale = i18n.onLocaleChange(render);
   loadAfterSessionRestore(sessionPresent, restorePromise, () => void controller.loadLesson(lessonId));
   return controller;
 }

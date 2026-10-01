@@ -1,3 +1,4 @@
+import { resolveBrowserStorage } from '../i18n/storage.js';
 import type { GambitClient } from '../api/client.js';
 import type { SeekView, SocialPlayer } from '../api/models.js';
 import { shortId } from '../api/graphql.js';
@@ -78,8 +79,8 @@ export function renderSeeks(
     const info = doc.createElement('span');
     info.className = 'seek-info';
     const tc = formatTimeControl(seek.timeControl, i18n);
-    const variantStr = getVariantLabel(seek.variant, i18n);
-    const speedStr = getSpeedLabel(seek.speed, i18n);
+    const variantStr = i18n.locale === 'en' ? seek.variant : getVariantLabel(seek.variant, i18n);
+    const speedStr = i18n.locale === 'en' ? seek.speed : getSpeedLabel(seek.speed, i18n);
     const ratedStr = seek.rated ? ` · ${i18n.t('lobby.rated')}` : '';
     info.textContent = `${variantStr} · ${speedStr} · ${tc}${ratedStr}`;
 
@@ -211,6 +212,7 @@ export interface MountedLobby {
  */
 export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
   const { doc, client, isAuthenticated, storage, i18n } = deps;
+  const preferenceStorage = storage ?? resolveBrowserStorage();
   const seekListEl = doc.getElementById('seek-list');
   const createGameEl = doc.getElementById('create-game');
   const playBotMountEl = doc.getElementById('play-bot-mount');
@@ -283,11 +285,7 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
       mount: createGameEl,
       initialAuthenticated: isAuthenticated(),
       i18n,
-      ...(storage !== undefined
-        ? { storage }
-        : typeof localStorage !== 'undefined'
-          ? { storage: localStorage }
-          : {}),
+      ...(preferenceStorage ? { storage: preferenceStorage } : {}),
       callbacks: {
         onSubmit: async (params) => {
           const seek = await lobby.createSeek(params);

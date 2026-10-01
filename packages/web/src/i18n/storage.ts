@@ -5,6 +5,15 @@ import { DEFAULT_LOCALE, isSupportedLocale } from './metadata.js';
 /** Default storage key for persisting explicit user locale preference. */
 export const DEFAULT_LOCALE_STORAGE_KEY = 'rookzen_locale_v1';
 
+/** Property access itself can throw in restricted browser contexts. */
+export function resolveBrowserStorage(): KeyValueStorage | undefined {
+  try {
+    return typeof localStorage === 'undefined' ? undefined : localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Options for initializing {@link LocaleStorage}. */
 export interface LocaleStorageOptions {
   readonly storage?: KeyValueStorage | undefined;
@@ -24,7 +33,7 @@ export class LocaleStorage {
   private readonly storageKey: string;
 
   constructor(opts: LocaleStorageOptions = {}) {
-    this.storage = opts.storage ?? (typeof localStorage !== 'undefined' ? localStorage : undefined);
+    this.storage = opts.storage ?? resolveBrowserStorage();
     this.storageKey = opts.storageKey ?? DEFAULT_LOCALE_STORAGE_KEY;
   }
 

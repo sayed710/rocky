@@ -205,6 +205,7 @@ export const enMessages = {
   'game.analysis.run': 'Analyse',
   'game.analysis.linesAria': 'Number of lines',
   'game.analysis.oneLine': '1 line',
+  'game.analysis.lineCount': '{count} lines',
   'game.analysis.threeLines': '3 lines',
   'game.analysis.fiveLines': '5 lines',
   'game.analysis.idle': 'Analyse the position on the board.',

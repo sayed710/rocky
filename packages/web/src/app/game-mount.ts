@@ -11,7 +11,8 @@ import { mountBoard, type MountedBoard } from './board.js';
 import { GameController, type GameActionState, type GameMetadataState } from './game-controller.js';
 import { AnalysisController } from './analysis-controller.js';
 import {
-  ANALYSIS_MESSAGES,
+  getAnalysisMessage,
+  type AnalysisMessageKey,
   clearLines,
   renderError,
   renderLimits,
@@ -38,6 +39,7 @@ import { PuzzleController } from './puzzle-controller.js';
 import { MAX_OPENING_PLIES, OpeningController } from './opening-controller.js';
 import type { OpeningTarget } from './opening-controller.js';
 import type {
+  AnalysisResponse,
   CoachResponse,
   MistakePredictionResponse,
   MoveExplanationResponse,
@@ -47,7 +49,6 @@ import type {
 import {
   clearOpening,
   openingMessage,
-  OPENING_MESSAGE_KEYS,
   renderOpeningError,
   renderOpeningNote,
   renderOpeningResult,
@@ -59,7 +60,6 @@ import type { CoachTarget } from './coach-controller.js';
 import {
   clearCoach,
   coachMessage,
-  COACH_MESSAGE_KEYS,
   renderCoachError,
   renderCoachNote,
   renderCoachResult,
@@ -69,7 +69,6 @@ import {
 import {
   clearPuzzle,
   puzzleMessage,
-  PUZZLE_MESSAGE_KEYS,
   renderPuzzleError,
   renderPuzzleNote,
   renderPuzzleResult,
@@ -79,7 +78,6 @@ import {
 import { AssessController } from './assess-controller.js';
 import {
   assessMessage,
-  ASSESS_MESSAGE_KEYS,
   clearVerdict,
   renderAssessError,
   renderAssessNote,
@@ -92,7 +90,6 @@ import { ExplainController } from './explain-controller.js';
 import {
   clearExplanation,
   explainMessage,
-  EXPLAIN_MESSAGE_KEYS,
   renderError as renderExplainError,
   renderEvidence,
   renderNote as renderExplainNote,
@@ -108,20 +105,6 @@ import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
 import { isEngineBotUserId } from '@chess-platform/game';
 import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
-import { enMessages, type MessageKey } from '../i18n/catalog/index.js';
-
-function findKeyByEnglishText<K extends string>(
-  text: string | null | undefined,
-  keyMap: Record<K, MessageKey>,
-): K | null {
-  if (!text) return null;
-  for (const [key, msgKey] of Object.entries(keyMap) as [K, MessageKey][]) {
-    if (enMessages[msgKey] === text) {
-      return key;
-    }
-  }
-  return null;
-}
 import { createI18nManager } from '../i18n/manager.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { getVariantLabel } from './variant-labels.js';
@@ -260,6 +243,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   /** Remove all private review nodes from persistent route DOM. */
   const clearGameReview = (): void => {
+    lastReviewResult = null;
     if (gameReviewErrorEl) {
       gameReviewErrorEl.hidden = true;
       gameReviewErrorEl.textContent = '';
@@ -282,6 +266,23 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const analysisReachedEl = doc.getElementById('analysis-reached');
   const analysisLimitsEl = doc.getElementById('analysis-limits');
 
+  let lastAnalysisResult: AnalysisResponse | null = null;
+  let currentAnalysisNoteKey: AnalysisMessageKey | null = 'idle';
+  let currentAnalysisErrorKey: AnalysisMessageKey | null = null;
+  const setAnalysisNote = (key: AnalysisMessageKey | null): void => {
+    currentAnalysisNoteKey = key;
+    if (analysisNoteEl) renderNote(analysisNoteEl, key ? getAnalysisMessage(key, i18n) : null);
+  };
+  const setAnalysisError = (key: AnalysisMessageKey | null): void => {
+    currentAnalysisErrorKey = key;
+    if (analysisErrorEl) renderError(analysisErrorEl, key ? getAnalysisMessage(key, i18n) : null);
+  };
+  const renderAnalysisResult = (): void => {
+    if (!lastAnalysisResult) return;
+    if (analysisResultsEl) renderLines(analysisResultsEl, lastAnalysisResult);
+    if (analysisReachedEl) renderReached(analysisReachedEl, lastAnalysisResult, i18n);
+    if (analysisLimitsEl) renderLimits(analysisLimitsEl, lastAnalysisResult, i18n);
+  };
   let currentVariant: string | null = null;
   let analysisDisposed = false;
   let analysisAvailable = false;
@@ -304,6 +305,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
    * mark it stale. Nothing in the request lifecycle catches it, because no request is involved.
    */
   const resetAnalysisPanel = (): void => {
+    lastAnalysisResult = null;
     if (analysisResultsEl) {
       clearLines(analysisResultsEl);
       setBusy(analysisResultsEl, false);
@@ -314,8 +316,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         el.hidden = true;
       }
     }
-    if (analysisErrorEl) renderError(analysisErrorEl, null);
-    if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.idle);
+    setAnalysisError(null);
+    setAnalysisNote('idle');
   };
 
   resetAnalysisPanel();
@@ -357,7 +359,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       !analysisSupportsVariant(analysisCapabilities, currentVariant)
     ) {
       analysisUnsupported = true;
-      if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unsupportedVariant);
+      setAnalysisNote('unsupportedVariant');
     }
 
     const blocked = liveHumanGameBlocksAssistance();
@@ -378,9 +380,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     // its own error.
     if (!analysisNoteEl) return;
     if (!authed) {
-      renderNote(analysisNoteEl, ANALYSIS_MESSAGES.signedOut);
-    } else if (analysisNoteEl.textContent === ANALYSIS_MESSAGES.signedOut) {
-      renderNote(analysisNoteEl, ANALYSIS_MESSAGES.idle);
+      setAnalysisNote('signedOut');
+    } else if (currentAnalysisNoteKey === 'signedOut') {
+      setAnalysisNote('idle');
     }
   };
 
@@ -400,7 +402,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let currentPuzzleErrorKey: PuzzleMessageKey | null = null;
   const resetPuzzleBlock = (): void => {
     lastPuzzleResult = null;
-    currentPuzzleNoteKey = null;
+    currentPuzzleNoteKey = 'idle';
     currentPuzzleErrorKey = null;
     if (puzzleRowsEl && puzzleResultEl) clearPuzzle(puzzleRowsEl, puzzleResultEl);
     if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
@@ -427,19 +429,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (puzzleRunBtn) {
       puzzleRunBtn.disabled = !authed || !hasPosition() || puzzleController.isPending;
     }
-    if (!puzzleNoteEl) return;
-    const idleMsg = puzzleMessage('idle', i18n);
-    const signedOutMsg = puzzleMessage('signedOut', i18n);
-    const owned = new Set<string>([
-      idleMsg,
-      signedOutMsg,
-      '',
-    ]);
-    if (!owned.has(puzzleNoteEl.textContent ?? '')) return;
-    renderPuzzleNote(
-      puzzleNoteEl,
-      authed ? idleMsg : signedOutMsg,
-    );
+    const ownsControlNote = currentPuzzleNoteKey === 'idle' || currentPuzzleNoteKey === 'signedOut';
+    if (!ownsControlNote || lastPuzzleResult || currentPuzzleErrorKey) return;
+    currentPuzzleNoteKey = authed ? 'idle' : 'signedOut';
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(currentPuzzleNoteKey, i18n));
   };
 
   // Opening identification (M15 inc 19), keyed on the game's move order rather than its position.
@@ -466,7 +459,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   /** Clear the section's content back to the unanswered state, leaving its visibility alone. */
   const resetOpeningBlock = (): void => {
     lastOpeningResult = null;
-    currentOpeningNoteKey = null;
+    currentOpeningNoteKey = 'idle';
     currentOpeningErrorKey = null;
     if (openingRowsEl && openingResultEl) clearOpening(openingRowsEl, openingResultEl);
     if (openingErrorEl) renderOpeningError(openingErrorEl, null);
@@ -485,7 +478,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   /** Clear the section back to its unasked state: no rows, no error, the idle note. */
   const resetCoachBlock = (): void => {
     lastCoachResult = null;
-    currentCoachNoteKey = null;
+    currentCoachNoteKey = 'idle';
     currentCoachErrorKey = null;
     if (coachRowsEl && coachResultEl) clearCoach(coachRowsEl, coachResultEl);
     if (coachErrorEl) renderCoachError(coachErrorEl, null);
@@ -538,15 +531,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (coachRunBtn) {
       coachRunBtn.disabled = !authed || coachTarget() === null || coachController.isPending;
     }
-    if (!coachNoteEl) return;
-    // Only the notes this function owns are replaced. A "position changed" or "too many requests"
-    // message belongs to whatever put it there, and overwriting it here would hide the answer to a
-    // question the reader just asked.
-    const idleMsg = coachMessage('idle', i18n);
-    const signedOutMsg = coachMessage('signedOut', i18n);
-    const owned = new Set<string>([idleMsg, signedOutMsg, '']);
-    if (!owned.has(coachNoteEl.textContent ?? '')) return;
-    renderCoachNote(coachNoteEl, authed ? idleMsg : signedOutMsg);
+    const ownsControlNote = currentCoachNoteKey === 'idle' || currentCoachNoteKey === 'signedOut';
+    if (!ownsControlNote || lastCoachResult || currentCoachErrorKey) return;
+    currentCoachNoteKey = authed ? 'idle' : 'signedOut';
+    if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage(currentCoachNoteKey, i18n));
   };
 
   /**
@@ -588,13 +576,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   };
 
   /** Why the control is off, said in the terms a reader cares about. `null` means it is on. */
-  const openingNoteFor = (availability: OpeningAvailability): string | null => {
+  const openingNoteFor = (availability: OpeningAvailability): OpeningMessageKey | null => {
     switch (availability.kind) {
       case 'ready': return null;
-      case 'unsupported-variant': return openingMessage('unsupportedVariant', i18n);
-      case 'no-moves': return openingMessage('noMoves', i18n);
-      case 'beyond-opening': return openingMessage('beyondOpening', i18n);
-      default: return openingMessage('noSequence', i18n);
+      case 'unsupported-variant': return 'unsupportedVariant';
+      case 'no-moves': return 'noMoves';
+      case 'beyond-opening': return 'beyondOpening';
+      default: return 'noSequence';
     }
   };
 
@@ -613,24 +601,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       openingRunBtn.disabled =
         !authed || availability.kind !== 'ready' || openingController.isPending;
     }
-    if (!openingNoteEl) return;
-    // Only overwrite a note this block owns, so a result note or a failure stays on screen.
-    const idleMsg = openingMessage('idle', i18n);
-    const signedOutMsg = openingMessage('signedOut', i18n);
-    const owned = new Set<string>([
-      idleMsg,
-      signedOutMsg,
-      openingMessage('unsupportedVariant', i18n),
-      openingMessage('noMoves', i18n),
-      openingMessage('noSequence', i18n),
-      openingMessage('beyondOpening', i18n),
-      '',
-    ]);
-    if (!owned.has(openingNoteEl.textContent ?? '')) return;
-    renderOpeningNote(
-      openingNoteEl,
-      authed ? (openingNoteFor(availability) ?? idleMsg) : signedOutMsg,
-    );
+    const ownsControlNote = currentOpeningNoteKey === 'idle' || currentOpeningNoteKey === 'signedOut' || currentOpeningNoteKey === 'unsupportedVariant' || currentOpeningNoteKey === 'noMoves' || currentOpeningNoteKey === 'noSequence' || currentOpeningNoteKey === 'beyondOpening';
+    if (!ownsControlNote || lastOpeningResult || currentOpeningErrorKey) return;
+    currentOpeningNoteKey = !authed ? 'signedOut' : (openingNoteFor(availability) ?? 'idle');
+    if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage(currentOpeningNoteKey, i18n));
   };
 
   /**
@@ -679,7 +653,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let currentExplainErrorKey: ExplainMessageKey | null = null;
   const resetExplainBlock = (): void => {
     lastExplainResult = null;
-    currentExplainNoteKey = null;
+    currentExplainNoteKey = 'idle';
     currentExplainErrorKey = null;
     if (explainEvidenceEl && explainProseEl && explainSourceEl && explainResultEl) {
       clearExplanation({
@@ -738,27 +712,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (explainRunBtn) {
       explainRunBtn.disabled = !authed || target === null || explainController.isPending;
     }
-    if (!explainNoteEl) return;
-    // Only the two messages that are properties of the *control* rather than of a request, and only
-    // transitions between them — anything a request had to say owns the note until something else
-    // does.
-    const idleMsg = explainMessage('idle', i18n);
-    const signedOutMsg = explainMessage('signedOut', i18n);
-    const noMoveMsg = explainMessage('noMove', i18n);
-    const owned = new Set<string>([
-      idleMsg,
-      signedOutMsg,
-      noMoveMsg,
-      '',
-    ]);
-    if (!owned.has(explainNoteEl.textContent ?? '')) return;
-    if (!authed) {
-      renderExplainNote(explainNoteEl, signedOutMsg);
-    } else if (target === null) {
-      renderExplainNote(explainNoteEl, noMoveMsg);
-    } else {
-      renderExplainNote(explainNoteEl, idleMsg);
-    }
+    const ownsControlNote = currentExplainNoteKey === 'idle' || currentExplainNoteKey === 'signedOut' || currentExplainNoteKey === 'noMove';
+    if (!ownsControlNote || lastExplainResult || currentExplainErrorKey) return;
+    currentExplainNoteKey = !authed ? 'signedOut' : target === null ? 'noMove' : 'idle';
+    if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage(currentExplainNoteKey, i18n));
   };
 
   // Mistake Prediction block (M15 inc 5), the third in the same panel.
@@ -779,7 +736,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   /** Clear the block, for the same reason the other two are reset at mount: this DOM outlives it. */
   const resetAssessBlock = (): void => {
     lastAssessResult = null;
-    currentAssessNoteKey = null;
+    currentAssessNoteKey = 'idle';
     currentAssessErrorKey = null;
     if (assessRowsEl && assessResultEl) {
       clearVerdict({ rows: assessRowsEl, result: assessResultEl });
@@ -813,30 +770,22 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (assessRunBtn) {
       assessRunBtn.disabled = !authed || target === null || assessController.isPending;
     }
-    if (!assessNoteEl) return;
-    // Only the messages that are properties of the *control* rather than of a request, and only
-    // transitions between them — anything a request had to say owns the note until something else
-    // does.
-    const idleMsg = assessMessage('idle', i18n);
-    const signedOutMsg = assessMessage('signedOut', i18n);
-    const noMoveMsg = assessMessage('noMove', i18n);
-    const owned = new Set<string>([
-      idleMsg,
-      signedOutMsg,
-      noMoveMsg,
-      '',
-    ]);
-    if (!owned.has(assessNoteEl.textContent ?? '')) return;
-    if (!authed) {
-      renderAssessNote(assessNoteEl, signedOutMsg);
-    } else if (target === null) {
-      renderAssessNote(assessNoteEl, noMoveMsg);
-    } else {
-      renderAssessNote(assessNoteEl, idleMsg);
-    }
+    const ownsControlNote = currentAssessNoteKey === 'idle' || currentAssessNoteKey === 'signedOut' || currentAssessNoteKey === 'noMove';
+    if (!ownsControlNote || lastAssessResult || currentAssessErrorKey) return;
+    currentAssessNoteKey = !authed ? 'signedOut' : target === null ? 'noMove' : 'idle';
+    if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage(currentAssessNoteKey, i18n));
   };
 
   let controller: GameController;
+
+  const renderPuzzlePresentation = (): void => {
+    let resultNote: string | null = null;
+    if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
+      resultNote = renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
+    }
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, currentPuzzleNoteKey ? puzzleMessage(currentPuzzleNoteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
+    if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, currentPuzzleErrorKey ? puzzleMessage(currentPuzzleErrorKey, i18n) : null);
+  };
 
   const puzzleController = new PuzzleController({
     client: deps.client,
@@ -860,11 +809,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         lastPuzzleResult = result;
         currentPuzzleNoteKey = null;
         currentPuzzleErrorKey = null;
-        const note = puzzleRowsEl && puzzleResultEl
-          ? renderPuzzleResult(puzzleRowsEl, puzzleResultEl, result, i18n)
-          : null;
-        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, note);
-        if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
+        renderPuzzlePresentation();
       },
       onFailure: (failure) => {
         resetPuzzleBlock();
@@ -884,6 +829,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           currentPuzzleNoteKey = key;
           if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(key, i18n));
         } else {
+          currentPuzzleNoteKey = null;
           currentPuzzleErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, null);
           if (puzzleErrorEl) {
@@ -901,6 +847,15 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
     },
   });
+
+  const renderOpeningPresentation = (): void => {
+    let resultNote: string | null = null;
+    if (lastOpeningResult && openingRowsEl && openingResultEl) {
+      resultNote = renderOpeningResult(openingRowsEl, openingResultEl, lastOpeningResult, i18n);
+    }
+    if (openingNoteEl) renderOpeningNote(openingNoteEl, currentOpeningNoteKey ? openingMessage(currentOpeningNoteKey, i18n) : currentOpeningErrorKey ? null : resultNote);
+    if (openingErrorEl) renderOpeningError(openingErrorEl, currentOpeningErrorKey ? openingMessage(currentOpeningErrorKey, i18n) : null);
+  };
 
   const openingController = new OpeningController({
     client: deps.client,
@@ -920,11 +875,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         lastOpeningResult = result;
         currentOpeningNoteKey = null;
         currentOpeningErrorKey = null;
-        const note = openingRowsEl && openingResultEl
-          ? renderOpeningResult(openingRowsEl, openingResultEl, result, i18n)
-          : null;
-        if (openingNoteEl) renderOpeningNote(openingNoteEl, note);
-        if (openingErrorEl) renderOpeningError(openingErrorEl, null);
+        renderOpeningPresentation();
       },
       onFailure: (failure) => {
         resetOpeningBlock();
@@ -940,6 +891,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           currentOpeningNoteKey = key;
           if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage(key, i18n));
         } else {
+          currentOpeningNoteKey = null;
           currentOpeningErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (openingNoteEl) renderOpeningNote(openingNoteEl, null);
           if (openingErrorEl) {
@@ -957,6 +909,15 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
     },
   });
+
+  const renderCoachPresentation = (): void => {
+    let resultNote: string | null = null;
+    if (lastCoachResult && coachRowsEl && coachResultEl) {
+      resultNote = renderCoachResult(coachRowsEl, coachResultEl, lastCoachResult, i18n);
+    }
+    if (coachNoteEl) renderCoachNote(coachNoteEl, currentCoachNoteKey ? coachMessage(currentCoachNoteKey, i18n) : currentCoachErrorKey ? null : resultNote);
+    if (coachErrorEl) renderCoachError(coachErrorEl, currentCoachErrorKey ? coachMessage(currentCoachErrorKey, i18n) : null);
+  };
 
   const coachController = new CoachController({
     client: deps.client,
@@ -976,11 +937,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         lastCoachResult = result;
         currentCoachNoteKey = null;
         currentCoachErrorKey = null;
-        const note = coachRowsEl && coachResultEl
-          ? renderCoachResult(coachRowsEl, coachResultEl, result, i18n)
-          : null;
-        if (coachNoteEl) renderCoachNote(coachNoteEl, note);
-        if (coachErrorEl) renderCoachError(coachErrorEl, null);
+        renderCoachPresentation();
       },
       onFailure: (failure) => {
         resetCoachBlock();
@@ -996,6 +953,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           currentCoachNoteKey = key;
           if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage(key, i18n));
         } else {
+          currentCoachNoteKey = null;
           currentCoachErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (coachNoteEl) renderCoachNote(coachNoteEl, null);
           if (coachErrorEl) {
@@ -1051,6 +1009,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage(key, i18n));
           return;
         }
+        currentAssessNoteKey = null;
         currentAssessErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
         if (assessNoteEl) renderAssessNote(assessNoteEl, null);
         if (assessErrorEl) {
@@ -1105,6 +1064,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage(key, i18n));
           return;
         }
+        currentExplainNoteKey = null;
         currentExplainErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
         if (explainNoteEl) renderExplainNote(explainNoteEl, null);
         if (explainErrorEl) {
@@ -1134,18 +1094,18 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         }
         refreshAnalysisControls();
         if (phase === 'loading') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.loading);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('loading');
+          setAnalysisError(null);
         }
       },
       onResult: (result) => {
-        if (analysisResultsEl) renderLines(analysisResultsEl, result);
-        if (analysisReachedEl) renderReached(analysisReachedEl, result, i18n);
-        if (analysisLimitsEl) renderLimits(analysisLimitsEl, result, i18n);
-        if (analysisNoteEl) renderNote(analysisNoteEl, null);
-        if (analysisErrorEl) renderError(analysisErrorEl, null);
+        lastAnalysisResult = result;
+        renderAnalysisResult();
+        setAnalysisNote(null);
+        setAnalysisError(null);
       },
       onFailure: (failure) => {
+        lastAnalysisResult = null;
         if (analysisResultsEl) clearLines(analysisResultsEl);
         if (analysisReachedEl) {
           analysisReachedEl.hidden = true;
@@ -1156,34 +1116,35 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           analysisLimitsEl.textContent = '';
         }
         if (failure === 'rate-limited') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.rateLimited);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('rateLimited');
+          setAnalysisError(null);
         } else if (failure === 'unavailable') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unavailable);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('unavailable');
+          setAnalysisError(null);
         } else if (failure === 'unsupported-variant') {
           // Permanent for this game, so stop offering the control rather than let it fail the same
           // way on every click. DESIGN.md's rule for a composer that cannot succeed: hide the
           // control and name the actual obstacle.
           analysisUnsupported = true;
           if (analysisRunBtn) analysisRunBtn.disabled = true;
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unsupportedVariant);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('unsupportedVariant');
+          setAnalysisError(null);
         } else if (failure === 'unauthenticated') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unauthenticated);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('unauthenticated');
+          setAnalysisError(null);
         } else if (failure === 'active-game') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.activeGame);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('activeGame');
+          setAnalysisError(null);
         } else if (failure === 'rejected') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, null);
-          if (analysisErrorEl) renderError(analysisErrorEl, ANALYSIS_MESSAGES.rejected);
+          setAnalysisNote(null);
+          setAnalysisError('rejected');
         } else {
-          if (analysisNoteEl) renderNote(analysisNoteEl, null);
-          if (analysisErrorEl) renderError(analysisErrorEl, ANALYSIS_MESSAGES.failed);
+          setAnalysisNote(null);
+          setAnalysisError('failed');
         }
       },
       onInvalidated: () => {
+        lastAnalysisResult = null;
         if (analysisResultsEl) clearLines(analysisResultsEl);
         if (analysisReachedEl) {
           analysisReachedEl.hidden = true;
@@ -1193,8 +1154,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           analysisLimitsEl.hidden = true;
           analysisLimitsEl.textContent = '';
         }
-        if (analysisErrorEl) renderError(analysisErrorEl, null);
-        if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.positionChanged);
+        setAnalysisError(null);
+        setAnalysisNote('positionChanged');
       },
     },
   });
@@ -1403,87 +1364,21 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     refreshExplainControls();
     refreshAssessControls();
 
-    if (lastAssessResult && assessRowsEl) {
-      renderVerdict(assessRowsEl, lastAssessResult, i18n);
-    } else {
-      const noteKey = currentAssessNoteKey ?? (assessNoteEl ? findKeyByEnglishText(assessNoteEl.textContent, ASSESS_MESSAGE_KEYS) : null);
-      const errorKey = currentAssessErrorKey ?? (assessErrorEl ? findKeyByEnglishText(assessErrorEl.textContent, ASSESS_MESSAGE_KEYS) : null);
-      if (noteKey) {
-        currentAssessNoteKey = noteKey;
-        if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage(noteKey, i18n));
-      } else if (assessNoteEl) {
-        renderAssessNote(assessNoteEl, isUserAuthenticated() ? assessMessage('idle', i18n) : assessMessage('signedOut', i18n));
-      }
-      if (errorKey) {
-        currentAssessErrorKey = errorKey;
-        if (assessErrorEl) renderAssessError(assessErrorEl, assessMessage(errorKey, i18n));
-      }
-    }
+    renderAnalysisResult();
+    setAnalysisNote(currentAnalysisNoteKey);
+    setAnalysisError(currentAnalysisErrorKey);
+    if (lastAssessResult && assessRowsEl) renderVerdict(assessRowsEl, lastAssessResult, i18n);
+    if (assessNoteEl) renderAssessNote(assessNoteEl, currentAssessNoteKey ? assessMessage(currentAssessNoteKey, i18n) : null);
+    if (assessErrorEl) renderAssessError(assessErrorEl, currentAssessErrorKey ? assessMessage(currentAssessErrorKey, i18n) : null);
     if (lastExplainResult) {
       if (explainEvidenceEl) renderEvidence(explainEvidenceEl, lastExplainResult, i18n);
       if (explainSourceEl) renderSource(explainSourceEl, lastExplainResult, i18n);
-    } else {
-      const noteKey = currentExplainNoteKey ?? (explainNoteEl ? findKeyByEnglishText(explainNoteEl.textContent, EXPLAIN_MESSAGE_KEYS) : null);
-      const errorKey = currentExplainErrorKey ?? (explainErrorEl ? findKeyByEnglishText(explainErrorEl.textContent, EXPLAIN_MESSAGE_KEYS) : null);
-      if (noteKey) {
-        currentExplainNoteKey = noteKey;
-        if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage(noteKey, i18n));
-      } else if (explainNoteEl) {
-        renderExplainNote(explainNoteEl, isUserAuthenticated() ? explainMessage('idle', i18n) : explainMessage('signedOut', i18n));
-      }
-      if (errorKey) {
-        currentExplainErrorKey = errorKey;
-        if (explainErrorEl) renderExplainError(explainErrorEl, explainMessage(errorKey, i18n));
-      }
     }
-    if (lastOpeningResult && openingRowsEl && openingResultEl) {
-      renderOpeningResult(openingRowsEl, openingResultEl, lastOpeningResult, i18n);
-    } else {
-      const noteKey = currentOpeningNoteKey ?? (openingNoteEl ? findKeyByEnglishText(openingNoteEl.textContent, OPENING_MESSAGE_KEYS) : null);
-      const errorKey = currentOpeningErrorKey ?? (openingErrorEl ? findKeyByEnglishText(openingErrorEl.textContent, OPENING_MESSAGE_KEYS) : null);
-      if (noteKey) {
-        currentOpeningNoteKey = noteKey;
-        if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage(noteKey, i18n));
-      } else if (openingNoteEl) {
-        renderOpeningNote(openingNoteEl, isUserAuthenticated() ? openingMessage('idle', i18n) : openingMessage('signedOut', i18n));
-      }
-      if (errorKey) {
-        currentOpeningErrorKey = errorKey;
-        if (openingErrorEl) renderOpeningError(openingErrorEl, openingMessage(errorKey, i18n));
-      }
-    }
-    if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
-      renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
-    } else {
-      const noteKey = currentPuzzleNoteKey ?? (puzzleNoteEl ? findKeyByEnglishText(puzzleNoteEl.textContent, PUZZLE_MESSAGE_KEYS) : null);
-      const errorKey = currentPuzzleErrorKey ?? (puzzleErrorEl ? findKeyByEnglishText(puzzleErrorEl.textContent, PUZZLE_MESSAGE_KEYS) : null);
-      if (noteKey) {
-        currentPuzzleNoteKey = noteKey;
-        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(noteKey, i18n));
-      } else if (puzzleNoteEl) {
-        renderPuzzleNote(puzzleNoteEl, isUserAuthenticated() ? puzzleMessage('idle', i18n) : puzzleMessage('signedOut', i18n));
-      }
-      if (errorKey) {
-        currentPuzzleErrorKey = errorKey;
-        if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, puzzleMessage(errorKey, i18n));
-      }
-    }
-    if (lastCoachResult && coachRowsEl && coachResultEl) {
-      renderCoachResult(coachRowsEl, coachResultEl, lastCoachResult, i18n);
-    } else {
-      const noteKey = currentCoachNoteKey ?? (coachNoteEl ? findKeyByEnglishText(coachNoteEl.textContent, COACH_MESSAGE_KEYS) : null);
-      const errorKey = currentCoachErrorKey ?? (coachErrorEl ? findKeyByEnglishText(coachErrorEl.textContent, COACH_MESSAGE_KEYS) : null);
-      if (noteKey) {
-        currentCoachNoteKey = noteKey;
-        if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage(noteKey, i18n));
-      } else if (coachNoteEl) {
-        renderCoachNote(coachNoteEl, isUserAuthenticated() ? coachMessage('idle', i18n) : coachMessage('signedOut', i18n));
-      }
-      if (errorKey) {
-        currentCoachErrorKey = errorKey;
-        if (coachErrorEl) renderCoachError(coachErrorEl, coachMessage(errorKey, i18n));
-      }
-    }
+    if (explainNoteEl) renderExplainNote(explainNoteEl, currentExplainNoteKey ? explainMessage(currentExplainNoteKey, i18n) : null);
+    if (explainErrorEl) renderExplainError(explainErrorEl, currentExplainErrorKey ? explainMessage(currentExplainErrorKey, i18n) : null);
+    renderOpeningPresentation();
+    renderPuzzlePresentation();
+    renderCoachPresentation();
   });
 
   controller = new GameController({

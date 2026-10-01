@@ -8,6 +8,7 @@ import { AsyncTransport, createGameDocument, makeFinishedState, makeState } from
 import type { FakeElement } from './support/analysis-fixtures.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
 import { json } from './support/fake-transport.js';
+import { enMessages } from '../src/i18n/catalog/index.js';
 
 const FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const AFTER_E4_FEN = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
@@ -231,6 +232,11 @@ test('sign-out removes a completed private review and restores the authoritative
     assert.equal(mountedGame.elements.get('game-review-note')!.textContent, 'Sign in to review your game.');
     assert.equal(board.innerHTML, authoritativeBoard);
     assert.equal(status.textContent, authoritativeStatus);
+    mountedGame.app.i18n.registerCatalog('ar', enMessages);
+    mountedGame.app.i18n.setLocale('ar');
+    assert.equal(summary.hidden, true, 'locale replay cannot restore a signed-out private review');
+    assert.equal(summary.childElementCount, 0);
+    assert.equal(mountedGame.elements.get('game-review-moves')!.childElementCount, 0);
   } finally {
     dispose(mountedGame);
   }
