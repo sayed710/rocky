@@ -4803,7 +4803,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Addresses the open Fable + Astra P1 item "Game PGN export — still open for finished-game download" (`CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md`), reverified on `origin/main` `499a861`. The only PGN route was the study export, and a finished game could not be downloaded. Decisions are recorded in ADR-0154. This is not D-12 personal-data export.
 - **Event log as source** (`packages/api/src/game-export/finished-game-pgn.ts`):
   - One `EventStore.load`. Stream invariants come from the projection's own `projectGameStream`: gaps, a missing or duplicate `GameCreated`, skipped plies and events after `GameEnded` are refused.
-  - Every stored UCI is replayed through `Game.fromEvents`. A foreign `GameCreated` id, a non-PGN result and a stored SAN that is not SAN-shaped are also refused (`CorruptGameStreamError`, HTTP 500). A prefix is never exported.
+  - Every stored UCI is replayed through `Game.fromEvents`. A foreign `GameCreated` id, a non-PGN result, a `GameEnded` whose winner or termination contradicts its result, and a stored SAN that is not chess-core's SAN for its UCI move (apart from suffixes and `0-0`) are also refused (`CorruptGameStreamError`, HTTP 500). A prefix is never exported.
   - Moves are the stored SAN in committed order, and the result is `GameEnded.result`. The `games` projection is never read.
   - Zero-move endings (resignation before a move, abort, no-show) export as a result-only movetext.
 - **Serializer**: the studies `serializePgn` is reused, not duplicated. It gains an optional `PgnGame.startingMove` (a Black-to-move or later-fullmove start; study output is unchanged without it). Tag values now write control characters as spaces after the existing `\`/`"` escapes; a raw newline previously split a tag.
@@ -4827,9 +4827,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - One request at a time, using `aria-disabled` so focus stays. A `role=status` line, a `role=alert` failure, and abort plus drop of late answers on dispose.
   - English keys only. RTL is tested with the test-only Arabic catalog, and the saved document is never direction-transformed.
 - **Tests**:
-  - `finished-game-pgn.test.ts` (37):
+  - `finished-game-pgn.test.ts` (40):
     - white/black/draw/`*` results, checkmate, stored-SAN fidelity, zero-move resignation/abort/no-show, and live games;
-    - corrupt streams: missing creation, gap, event after end, skipped ply, illegal UCI, foreign id, bad result, forged SAN;
+    - corrupt streams: missing creation, gap, event after end, skipped ply, illegal UCI, foreign id, bad result, forged or wrong-move SAN, contradictory endings, and a Three-Check FEN ending in check counters;
     - hostile and Unicode names, the UTC date, no invented tags, and the time-control table;
     - every non-standard variant identifiable and replayed from the export alone through `CorePositionReader`, Chess960 0/518/959, a historical Chess960 game, and a Black-to-move custom FEN;
     - one stream read and one batched identity read, bot and unknown seats, 404/409 without identity reads, and cancellation;
@@ -4838,7 +4838,7 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - `game-pgn-export.test.ts`: filename safety, exact Blob bytes, revocation (including when the click throws), live/finished visibility, double activation, failure and retry, a throwing save, stale response and failure after dispose, a clean remount, and Arabic relocalization.
   - Game-mount integration for players and spectators.
   - A backend Playwright test: no control or export during play (409); then keyboard download whose saved bytes equal the server's; filename, MIME and nosniff; focus retained; no navigation; an anonymous RTL 390 px touch spectator with a ≥ 44 px target and no overflow; and an error alert with nothing saved.
-- **Falsification**: 25 disposable mutations, with sources backed up to disk and restored by SHA-256. Compile and test steps were separated, and 25/25 were killed by tests:
+- **Falsification**: 29 disposable mutations, with sources backed up to disk and restored by SHA-256. Compile and test steps were separated, and 29/29 were killed by tests (two first written as compile failures were rewritten to compile before counting):
   - change one SAN
   - swap White/Black
   - use the projection result
@@ -4862,12 +4862,17 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - never revoke the URL
   - put the raw route id in the filename
   - accept any media type
-  - skip the SAN-shape check
+  - skip the SAN-for-UCI check
+  - accept a winner that contradicts the result
+  - accept a draw-only termination with a decisive result
+  - accept a decided termination with no result
+  - read the fullmove from the last FEN field
   - report a thrown save as started
 - **Validation**:
   - build, lint, every `check:*` guard and `test:scripts` (312);
-  - 19 hermetic workspaces (3,857, zero skips; run before the SAN-shape guard, whose suite was rerun at 37/37);
+  - 19 hermetic workspaces (3,861, zero skips, rerun after the review corrections);
   - static Playwright (184; the first run had one lobby create-game failure in sign-in restore timing, unrelated to this change, and passed on a clean full rerun);
-  - `GAMBIT_E2E_BACKEND=1` Playwright with 4 workers and 0 retries (226), 0 failures and 0 skips;
+  - `GAMBIT_E2E_BACKEND=1` Playwright with 4 workers and 0 retries (226), 0 failures and 0 skips, both before and after the review corrections;
   - real-nginx `test:web-delivery` (12) and `test:trusted-edge` (8).
+- **Review corrections** (Qodo and Greptile on `66f4989`): the stored SAN must denote its UCI move (it was only shape-checked), contradictory `GameEnded` events are refused, and the starting fullmove comes from the parsed FEN so a trailing-counter Three-Check FEN numbers correctly.
 - **Deliberate limits**: single-game export only (no bulk or monthly archives); no `%clk` clock comments, annotations, Termination, ratings or ECO; no rate-limit bucket (comparable public reads are unmetered); a future private-game policy must cover the spectator join, the game summary and this route together. Engineering review was first-party only (no Gemini, no delegation); external exact-head evidence belongs to the PR handoff. The owner performs the merge.

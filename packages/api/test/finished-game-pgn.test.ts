@@ -176,18 +176,61 @@ test('a checkmate exports the stored mating SAN and the decisive result', () => 
   assert.equal(pgn.result, '0-1');
 });
 
-test('the exported moves are the stored SAN, not a re-derivation from the board', () => {
-  // A stored SAN is a durable fact. The export writes it as stored rather than recomputing it, so a
-  // historical spelling survives; replay still checks that every stored UCI was legal.
-  const played = play({ moves: ['e2e4', 'e7e5', 'g1f3'] });
-  const stream = played.stream.map((entry) =>
-    entry.event.type === 'MovePlayed' && entry.event.ply === 3
-      ? stored(entry.seq, { ...entry.event, san: 'Ng1f3' })
-      : entry,
+/** The stream with the stored SAN of `ply` replaced. */
+function withSan(played: Played, ply: number, san: string): StoredEvent[] {
+  return played.stream.map((entry) =>
+    entry.event.type === 'MovePlayed' && entry.event.ply === ply ? stored(entry.seq, { ...entry.event, san }) : entry,
   );
-  const record = readFinishedGame(GAME_ID, stream);
+}
+
+test('the exported moves are the stored SAN text, including a historical castling spelling', () => {
+  // The stored SAN is written as stored, not recomputed: `0-0` stays `0-0`.
+  const played = play({ moves: ['e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'g8f6', 'e1g1'] });
+  assert.equal(played.sans.at(-1), 'O-O');
+  const record = readFinishedGame(GAME_ID, withSan(played, 7, '0-0'));
   assert.ok(record);
-  assert.deepEqual(parsePgn(finishedGamePgn(record, NAMES))[0]!.moves.map((move) => move.san), ['e4', 'e5', 'Ng1f3']);
+  assert.deepEqual(
+    parsePgn(finishedGamePgn(record, NAMES))[0]!.moves.map((move) => move.san),
+    ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'Nf6', '0-0'],
+  );
+});
+
+test('a stored SAN that names a different move than its UCI is refused', () => {
+  // Replay checks the UCI; a well-formed SAN for another move would make the PGN a different game.
+  const played = play({ moves: ['e2e4', 'e7e5', 'g1f3'] });
+  for (const [ply, san] of [[2, 'e6'], [2, 'd5'], [3, 'Ng1f3'], [3, 'Nh3'], [1, 'e3']] as const) {
+    assert.throws(() => readFinishedGame(GAME_ID, withSan(played, ply, san)), CorruptGameStreamError, `${ply} ${san}`);
+  }
+});
+
+test('a GameEnded whose winner or termination contradicts its result is refused', () => {
+  const played = play({ moves: ['e2e4'] });
+  const ending = (patch: object): StoredEvent[] => played.stream.map((entry) =>
+    entry.event.type === 'GameEnded' ? stored(entry.seq, { ...entry.event, ...patch }) : entry);
+  for (const patch of [
+    { result: '1-0', winner: null, termination: 'resignation' },
+    { result: '1-0', winner: 'b', termination: 'resignation' },
+    { result: '1/2-1/2', winner: 'w', termination: 'agreement' },
+    { result: '1-0', winner: 'w', termination: 'agreement' },
+    { result: '1-0', winner: 'w', termination: 'aborted' },
+    { result: '*', winner: null, termination: 'resignation' },
+  ]) {
+    assert.throws(() => readFinishedGame(GAME_ID, ending(patch)), CorruptGameStreamError, JSON.stringify(patch));
+  }
+  for (const patch of [
+    { result: '1/2-1/2', winner: null, termination: 'timeout' },
+    { result: '0-1', winner: 'b', termination: 'no_show' },
+    { result: '1-0', winner: 'w', termination: 'variant' },
+  ]) {
+    assert.ok(readFinishedGame(GAME_ID, ending(patch)), JSON.stringify(patch));
+  }
+});
+
+test('a Three-Check FEN that ends with its check counters still numbers from its fullmove', () => {
+  const initialFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 7 +0+0';
+  const { pgn, text } = exportOf(play({ variant: 'threecheck', initialFen, moves: ['e2e4'] }));
+  assert.equal(tagValue(pgn, 'FEN'), initialFen, 'the stored start is written as stored');
+  assert.match(text, /\n7\. e4 1-0\n$/);
 });
 
 test('zero-move endings are finished games, not corrupt ones', () => {

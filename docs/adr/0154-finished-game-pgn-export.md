@@ -28,9 +28,14 @@ A finished game's moves exist in one place: its append-only event stream (`GameC
 - **Replay** through `Game.fromEvents` checks every stored UCI against the authority's rules,
   including the Chess960 start-id/FEN agreement (ADR-0137). A `GameCreated` naming another game id
   and a `GameEnded` with a result outside PGN's four tokens are also refused.
-- **Stored SAN shape**: replay checks the UCI, not the SAN text. A stored SAN that fails the PGN
-  parser's own `isSanShaped` is refused, because it would be written into the movetext as is and
-  could forge moves or tags (for example `1-0 [Evil "x"]`).
+- **Stored SAN agreement**: replay checks the UCI, but the export writes the stored SAN. Each stored
+  SAN must equal chess-core's SAN for its UCI move, ignoring check, mate and annotation suffixes and
+  accepting the `0-0` castling spelling. A SAN for another move (`d4` stored for `e2e4`) would
+  describe a different game, and text that is not SAN at all could forge movetext or tags (for
+  example `1-0 [Evil "x"]`). Both are refused. The stored text is still what is written.
+- **Ending agreement**: `GameEnded.winner` must match the result (`w` for `1-0`, `b` for `0-1`, none
+  otherwise). Draw-only terminations must be `1/2-1/2`, and only `aborted` or `no_show` may leave
+  `*`. An abort must be `*`.
 - A refused stream raises `CorruptGameStreamError` (HTTP 500, logged). A prefix is never exported.
 - A valid stream without `GameEnded` is not finished (409). The `games` row is never read, so it
   cannot override `GameEnded`.
@@ -47,7 +52,9 @@ parser reads, and `@chess-platform/api` already depends on `@chess-platform/stud
 reused rather than copied or moved. Two additive changes, both covered by studies tests:
 
 - `PgnGame.startingMove` (optional) numbers movetext from a FEN with Black to move or a later
-  fullmove number. Absent means `1.` with White, so study export output is unchanged.
+  fullmove number. Absent means `1.` with White, so study export output is unchanged. The export
+  takes the side and fullmove number from chess-core's parsed position, not from the FEN text,
+  because an accepted Three-Check spelling ends with its check counters.
 - Tag values have each non-printing character (U+0000–U+001F, U+007F) written as a space, after
   the existing `\\` and `"` escapes. The parser ends a string at a newline, so a raw newline
   previously split a tag and turned its remainder into movetext. Study chapter names gain the
