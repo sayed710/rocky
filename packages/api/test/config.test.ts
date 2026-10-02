@@ -46,6 +46,7 @@ describe('resolveConfig community admission', () => {
     ['seekCreation', USER_AND_IP], ['conversationCreation', USER_AND_IP], ['messageSend', USER_AND_IP],
     ['socialInitiation', USER_AND_IP], ['teamCreation', USER_AND_IP], ['teamJoin', USER_AND_IP],
     ['forumThreadCreation', USER_AND_IP], ['forumPostCreation', USER_AND_IP], ['friendRequestRepeat', ['perPair']],
+    ['playerReport', ['perUser', 'perUserDaily', 'perIp']], ['playerReportRepeat', ['perPair']],
   ];
 
   it('defaults every community budget to its account limit with a 10-account address margin', () => {
@@ -67,6 +68,9 @@ describe('resolveConfig community admission', () => {
       perUser: { maxRequests: 30, windowMs: 60_000 }, perIp: { maxRequests: 300, windowMs: 60_000 },
     });
     assert.deepEqual(rateLimit.friendRequestRepeat, { perPair: { maxRequests: 3, windowMs: 86_400_000 } });
+    // Player reports (ADR-0152): the hourly creation shape of `teamCreation`, and the 3-a-day repeat.
+    assert.deepEqual(rateLimit.playerReport, { ...rateLimit.teamCreation, perUserDaily: { maxRequests: 20, windowMs: 86_400_000 } });
+    assert.deepEqual(rateLimit.playerReportRepeat, rateLimit.friendRequestRepeat);
   });
 
   it('refuses at startup any write budget that is missing, malformed or out of range', () => {

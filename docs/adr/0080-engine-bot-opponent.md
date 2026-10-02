@@ -1,5 +1,7 @@
 # ADR-0080 — Engine Bot Opponent Wiring ("Play vs Computer")
 
+> **Superseded in part by [ADR-0152](0152-moderation-and-trust-operations.md):** `ANTICHEAT_AUTO_ANALYZE` no longer shares the gateway's engine provider; the trust worker owns its own.
+
 | Field      | Value                                                                                                          |
 |------------|----------------------------------------------------------------------------------------------------------------|
 | **Status** | Accepted                                                                                                       |

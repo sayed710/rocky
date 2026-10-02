@@ -1,5 +1,7 @@
 # 25. Production Tournament Result Reporter
 
+> **Superseded in part by [ADR-0152](0152-moderation-and-trust-operations.md):** the reporter is now enabled by default in Helm as well as Compose, and a launch never links a slot's game under another pairing; it takes the next attempt of the slot.
+
 Date: 2026-07-18
 
 ## Status

@@ -1,5 +1,7 @@
 # ADR-0057 — Dedicated Single-Replica Deployment for the Search Indexer
 
+> **Superseded in part by [ADR-0152](0152-moderation-and-trust-operations.md):** the bot and anti-cheat analyzers no longer remain gateway flags; they moved to the trust worker.
+
 | Field      | Value                                                            |
 |------------|------------------------------------------------------------------|
 | **Status** | Accepted                                                         |
@@ -58,5 +60,5 @@ Three properties make this awkward to solve by adding the flag to the existing g
 - Upgrades never leave the channel unsubscribed, at the cost of a brief two-pod overlap that duplicates idempotent work.
 - Until the CI step is added, the chart's indexer behaviour is guarded only by the local snapshot test.
 - Search can now be disabled in Kubernetes via `search.enabled=false`.
-- This closes the "dedicated single-replica Deployment" debt for the indexer specifically. `TOURNAMENT_REPORTER`, `BOT_AUTO_ANALYZE` and `ANTICHEAT_AUTO_ANALYZE` remain gateway-hosted on every replica; the reporter is safe by CAS, and the two analyzers keep the process-local dedup caveat recorded in ADR-0056. Shared distributed leadership for those remains tracked debt.
+- This closes the "dedicated single-replica Deployment" debt for the indexer specifically. `TOURNAMENT_REPORTER` remains gateway-hosted on every replica, where it is safe by CAS. `BOT_AUTO_ANALYZE` and `ANTICHEAT_AUTO_ANALYZE` have since moved to the dedicated single-replica trust worker, and the gateway refuses them (ADR-0152).
 - The indexer pod holds a Redis connection and a Postgres pool while owning no games. That is the cost of reusing one entry point rather than building a worker-only binary; a dedicated entry point is the natural follow-up if more workers move out of the gateway.

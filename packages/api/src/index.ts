@@ -23,6 +23,7 @@ export * from './tournament/arena.service';
 export * from './tournament/live-view';
 export * from './tournament/reporter';
 export * from './terminal-event-reconciler';
+export * from './trust-analyzers';
 export * from './anti-cheat/source';
 export * from './anti-cheat/analysis-service';
 export * from './anti-cheat/auto-analyzer';

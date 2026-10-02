@@ -38,6 +38,7 @@
     "migrate": "node dist/pg/migrate-cli.js",
     "games:rebuild": "node dist/pg/games-rebuild-cli.js",
     "ratings:blocked": "node dist/pg/ratings-blocks-cli.js",
+    "admin:bootstrap": "node dist/pg/first-admin-cli.js",
     "clean": "rm -rf dist dist-test"
   },
   "keywords": [

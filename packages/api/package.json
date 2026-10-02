@@ -26,7 +26,7 @@
     "test:unit": "node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/**/!(analysis-*smoke|analysis-real-stack|*.integration|*.posix).test.js\"",
     "test:posix": "npm run build:test && node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/**/*.posix.test.js\"",
     "test:integration:postgres": "npm run build:test && node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/**/*.integration.test.js\"",
-    "test:analysis-smoke": "tsc -p tsconfig.test.json && node ../../scripts/run-zero-skip.mjs -- node --test dist-test/test/analysis-stockfish-smoke.test.js dist-test/test/analysis-fairy-threecheck-smoke.test.js dist-test/test/analysis-real-stack.test.js",
+    "test:analysis-smoke": "tsc -p tsconfig.test.json && node ../../scripts/run-zero-skip.mjs -- node --test dist-test/test/analysis-stockfish-smoke.test.js dist-test/test/analysis-fairy-threecheck-smoke.test.js dist-test/test/analysis-real-stack.test.js dist-test/test/analysis-trust-worker-smoke.test.js",
     "test": "npm run build:test && npm run test:unit",
     "test:diagnostics:abort": "tsc -p tsconfig.test.json && node ../../scripts/run-zero-skip.mjs -- node --test dist-test/test/diagnostics/signature-b-preload-abort.diag.js",
     "test:diagnostics:signature-b": "tsc -p tsconfig.test.json && node ./test/diagnostics/run-signature-b-pass.mjs",

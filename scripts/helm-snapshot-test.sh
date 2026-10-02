@@ -124,11 +124,11 @@ NETWORK_POLICY_IPBLOCK_COUNT=$(yq 'select(.kind=="NetworkPolicy") | .spec.ingres
 GATEWAY_POLICY_PORTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="gateway") | .spec.ingress[].ports[] | select(.protocol=="TCP") | .port' "$TMPDIR/default.yaml" 2>/dev/null | grep -vx -- '---' | sort -n | tr '\n' ' ' | sed 's/ $//')
 WEB_ALLOWED_NAMESPACE=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="web") | .spec.ingress[0].from[0].namespaceSelector.matchLabels."kubernetes.io/metadata.name"' "$TMPDIR/default.yaml" 2>/dev/null || echo "")
 WEB_ALLOWED_POD=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="web") | .spec.ingress[0].from[0].podSelector.matchLabels."app.kubernetes.io/name"' "$TMPDIR/default.yaml" 2>/dev/null || echo "")
-check "Trusted edge: three application NetworkPolicies render with Ingress" "$([ "$NETWORK_POLICY_COUNT" = "3" ] && echo 0 || echo 1)"
+check "Trusted edge: four application NetworkPolicies render with Ingress (web, api, gateway, trust-worker)" "$([ "$NETWORK_POLICY_COUNT" = "4" ] && echo 0 || echo 1)"
 check "Trusted edge: web allows only the configured ingress-controller namespace" "$([ "$WEB_ALLOWED_NAMESPACE" = "ingress-nginx" ] && echo 0 || echo 1)"
 check "Trusted edge: web allows only the configured ingress-controller pods" "$([ "$WEB_ALLOWED_POD" = "ingress-nginx" ] && echo 0 || echo 1)"
-check "Trusted edge: web policy is omitted for the one-hop ingress-disabled topology" "$([ "$INGRESS_OFF_NETWORK_POLICY_COUNT" = "2" ] && echo 0 || echo 1)"
-check "Trusted edge: only gateway and web pods can enter the API" "$([ "$API_ALLOWED_COMPONENTS" = "gateway web" ] && echo 0 || echo 1)"
+check "Trusted edge: web policy is omitted for the one-hop ingress-disabled topology" "$([ "$INGRESS_OFF_NETWORK_POLICY_COUNT" = "3" ] && echo 0 || echo 1)"
+check "Trusted edge: only gateway, trust-worker (migration wait) and web pods can enter the API" "$([ "$API_ALLOWED_COMPONENTS" = "gateway trust-worker web" ] && echo 0 || echo 1)"
 check "Trusted edge: only web pods can enter the WebSocket gateway" "$([ "$GATEWAY_ALLOWED_COMPONENTS" = "web" ] && echo 0 || echo 1)"
 check "Trusted edge: bundled policies do not guess node CIDRs" "$([ "$NETWORK_POLICY_IPBLOCK_COUNT" = "0" ] && echo 0 || echo 1)"
 check "Trusted edge: application pods cannot enter the gateway health port" "$([ "$GATEWAY_POLICY_PORTS" = "4175" ] && echo 0 || echo 1)"
@@ -270,7 +270,7 @@ INDEXER_API_ALLOWED_COMPONENTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata
 INDEXER_API_INSTANCE=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].from[] | select(.podSelector.matchLabels."app.kubernetes.io/component"=="search-indexer") | .podSelector.matchLabels."app.kubernetes.io/instance"' "$TMPDIR/indexer.yaml" 2>/dev/null || echo "")
 INDEXER_API_PORT=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].ports[] | select(.protocol=="TCP") | .port' "$TMPDIR/indexer.yaml" 2>/dev/null || echo "")
 INDEXER_GATEWAY_ALLOWED_COMPONENTS=$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="gateway") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/indexer.yaml" 2>/dev/null | grep -vx -- '---' | sort | tr '\n' ' ' | sed 's/ $//')
-check "Indexer enabled: only gateway, search-indexer, and web pods can enter the API" "$([ "$INDEXER_API_ALLOWED_COMPONENTS" = "gateway search-indexer web" ] && echo 0 || echo 1)"
+check "Indexer enabled: only gateway, search-indexer, trust-worker and web pods can enter the API" "$([ "$INDEXER_API_ALLOWED_COMPONENTS" = "gateway search-indexer trust-worker web" ] && echo 0 || echo 1)"
 check "Indexer enabled: API ingress is scoped to the same release" "$([ "$INDEXER_API_INSTANCE" = "release-name" ] && echo 0 || echo 1)"
 check "Indexer enabled: API ingress remains limited to TCP port 8080" "$([ "$INDEXER_API_PORT" = "8080" ] && echo 0 || echo 1)"
 check "Indexer enabled: only web pods can enter the WebSocket gateway" "$([ "$INDEXER_GATEWAY_ALLOWED_COMPONENTS" = "web" ] && echo 0 || echo 1)"
@@ -309,9 +309,9 @@ check "Indexer: adds exactly one resource to the release" "$([ "$((DOCS_INDEXER 
 
 # Rollout strategy must be explicit and zero-gap. Recreate / maxSurge 0 would
 # leave the fire-and-forget game-ended channel unsubscribed during upgrades.
-IX_SURGE=$(grep -c 'maxSurge: 1' "$TMPDIR/indexer.yaml" || true)
-IX_UNAVAIL=$(grep -c 'maxUnavailable: 0' "$TMPDIR/indexer.yaml" || true)
-IX_RECREATE=$(grep -c 'type: Recreate' "$TMPDIR/indexer.yaml" || true)
+IX_SURGE=$(deployment_doc "$TMPDIR/indexer.yaml" search-indexer | grep -c 'maxSurge: 1' || true)
+IX_UNAVAIL=$(deployment_doc "$TMPDIR/indexer.yaml" search-indexer | grep -c 'maxUnavailable: 0' || true)
+IX_RECREATE=$(deployment_doc "$TMPDIR/indexer.yaml" search-indexer | grep -c 'type: Recreate' || true)
 check "Indexer: explicit maxSurge 1 / maxUnavailable 0 (no rollout gap)" "$([ "$IX_SURGE" = "1" ] && [ "$IX_UNAVAIL" = "1" ] && [ "$IX_RECREATE" = "0" ] && echo 0 || echo 1)"
 
 # Fail closed: indexer enabled while search is disabled must not render.
@@ -413,7 +413,7 @@ gateway_env_value() {
 }
 
 helm template "$CHART_DIR" "${HELM_SECRETS[@]}"   --set gateway.engineBot.enabled=false > "$TMPDIR/engine-bot-off.yaml" 2>/dev/null
-helm template "$CHART_DIR" "${HELM_SECRETS[@]}"   --set gateway.tournamentReporter.enabled=true > "$TMPDIR/reporter.yaml" 2>/dev/null
+helm template "$CHART_DIR" "${HELM_SECRETS[@]}"   --set gateway.tournamentReporter.enabled=false > "$TMPDIR/reporter-off.yaml" 2>/dev/null
 
 check "Engine bot: ENGINE_BOT=\"1\" on the gateway by default" "$([ "$(gateway_env_value "$TMPDIR/default.yaml" ENGINE_BOT)" = "1" ] && echo 0 || echo 1)"
 check "Engine bot: ENGINE_BOT appears once in the default release (gateway only)" "$([ "$(grep -c 'name: ENGINE_BOT' "$TMPDIR/default.yaml" || true)" = "1" ] && echo 0 || echo 1)"
@@ -421,16 +421,65 @@ check "Engine bot: ENGINE_BOT is absent when gateway.engineBot.enabled=false" "$
 check "Engine bot: not set on the search-indexer Deployment" "$([ "$(deployment_doc "$TMPDIR/indexer.yaml" search-indexer | grep -c 'ENGINE_BOT' || true)" = "0" ] && echo 0 || echo 1)"
 check "Engine bot: the chart configures no engine of its own (no STOCKFISH_PATH env)" "$([ "$(grep -c 'name: STOCKFISH' "$TMPDIR/default.yaml" || true)" = "0" ] && echo 0 || echo 1)"
 
-# The rest of the gateway env contract is pinned, so the flag cannot ride in on
-# a change to anything else. Disabling the bot removes exactly ENGINE_BOT.
+# The rest of the gateway env contract is pinned, so a flag cannot ride in on
+# a change to anything else. Disabling the bot removes exactly ENGINE_BOT. The
+# trust analyzers never appear here: they run in the trust-worker Deployment.
 GW_ENV_BASE="POSTGRES_PASSWORD DATABASE_URL ACCESS_TOKEN_SECRET ACCESS_TOKEN_TTL_SEC PORT HOST HEALTH_PORT NODE_ENV REDIS_URL NODE_ID CMD_FORWARD_TIMEOUT_MS OWNERSHIP_LEASE_TTL_SEC OWNERSHIP_RENEWAL_INTERVAL_SEC TRUST_PROXY"
-check "Gateway env contract: default render is the base contract plus ENGINE_BOT" "$([ "$(gateway_env_names "$TMPDIR/default.yaml")" = "$GW_ENV_BASE ENGINE_BOT" ] && echo 0 || echo 1)"
-check "Gateway env contract: engine bot disabled leaves exactly the base contract" "$([ "$(gateway_env_names "$TMPDIR/engine-bot-off.yaml")" = "$GW_ENV_BASE" ] && echo 0 || echo 1)"
+GW_REPORTER="TOURNAMENT_REPORTER TOURNAMENT_REPORTER_SCAN_MS"
+check "Gateway env contract: default render is the base contract plus the reporter and ENGINE_BOT" "$([ "$(gateway_env_names "$TMPDIR/default.yaml")" = "$GW_ENV_BASE $GW_REPORTER ENGINE_BOT" ] && echo 0 || echo 1)"
+check "Gateway env contract: engine bot disabled removes exactly ENGINE_BOT" "$([ "$(gateway_env_names "$TMPDIR/engine-bot-off.yaml")" = "$GW_ENV_BASE $GW_REPORTER" ] && echo 0 || echo 1)"
 
-# Tournament reporter (ADR-0025) is independent of the bot: off by default,
-# and when on it renders its two variables next to ENGINE_BOT, not instead of it.
-check "Tournament reporter: absent by default" "$([ "$(grep -c 'TOURNAMENT_REPORTER' "$TMPDIR/default.yaml" || true)" = "0" ] && echo 0 || echo 1)"
-check "Tournament reporter: enabled renders TOURNAMENT_REPORTER=1 + scan interval alongside ENGINE_BOT" "$([ "$(gateway_env_names "$TMPDIR/reporter.yaml")" = "$GW_ENV_BASE TOURNAMENT_REPORTER TOURNAMENT_REPORTER_SCAN_MS ENGINE_BOT" ] && [ "$(gateway_env_value "$TMPDIR/reporter.yaml" TOURNAMENT_REPORTER)" = "1" ] && [ "$(gateway_env_value "$TMPDIR/reporter.yaml" TOURNAMENT_REPORTER_SCAN_MS)" = "30000" ] && echo 0 || echo 1)"
+# Tournament reporter (ADR-0025, ADR-0152): a chart that serves tournaments
+# records their results by default, on every gateway replica (deterministic
+# launch ids + version CAS make duplicates harmless). Off only when asked.
+check "Tournament reporter: TOURNAMENT_REPORTER=1 and a 30000 ms scan on the gateway by default" "$([ "$(gateway_env_value "$TMPDIR/default.yaml" TOURNAMENT_REPORTER)" = "1" ] && [ "$(gateway_env_value "$TMPDIR/default.yaml" TOURNAMENT_REPORTER_SCAN_MS)" = "30000" ] && echo 0 || echo 1)"
+check "Tournament reporter: the explicit kill switch removes exactly its two variables" "$([ "$(gateway_env_names "$TMPDIR/reporter-off.yaml")" = "$GW_ENV_BASE ENGINE_BOT" ] && echo 0 || echo 1)"
+check "Tournament reporter: a string boolean is refused" "$(helm template "$CHART_DIR" "${HELM_SECRETS[@]}" --set-string gateway.tournamentReporter.enabled=false >/dev/null 2>&1 && echo 1 || echo 0)"
+
+# --- Trust worker (ADR-0152) ------------------------------------------------
+# Bot-timing and anti-cheat analysis of every finished game run in ONE
+# dedicated Deployment, never on the scalable gateway replicas: one pod,
+# no Service, no Ingress, the thin trust-worker entrypoint, both analyzers on.
+echo ""
+echo "Trust worker (ADR-0152):"
+trust_doc() { deployment_doc "$1" trust-worker; }
+trust_env_value() {
+  yq "select(.kind==\"Deployment\" and .metadata.labels.\"app.kubernetes.io/component\"==\"trust-worker\") | .spec.template.spec.containers[0].env[] | select(.name==\"$2\") | .value" "$1" 2>/dev/null || echo ""
+}
+helm template "$CHART_DIR" "${HELM_SECRETS[@]}" --set trustWorker.antiCheatAnalysis=false > "$TMPDIR/trust-bot-only.yaml" 2>/dev/null
+helm template "$CHART_DIR" "${HELM_SECRETS[@]}" --set trustWorker.enabled=false > "$TMPDIR/trust-off.yaml" 2>/dev/null
+
+check "Trust worker: exactly one Deployment renders by default" "$([ "$(yq 'select(.kind=="Deployment" and .metadata.labels."app.kubernetes.io/component"=="trust-worker") | .metadata.name' "$TMPDIR/default.yaml" 2>/dev/null | grep -vc -- '---' || true)" = "1" ] && echo 0 || echo 1)"
+check "Trust worker: pinned to one replica" "$([ "$(yq 'select(.kind=="Deployment" and .metadata.labels."app.kubernetes.io/component"=="trust-worker") | .spec.replicas' "$TMPDIR/default.yaml" 2>/dev/null | tr -d '
+-')" = "1" ] && echo 0 || echo 1)"
+check "Trust worker: runs the thin trust-worker entrypoint, not the WebSocket gateway" "$([ "$(trust_doc "$TMPDIR/default.yaml" | grep -c 'services/gateway/dist/trust-worker.js' || true)" = "1" ] && [ "$(trust_doc "$TMPDIR/default.yaml" | grep -c 'serve.js' || true)" = "0" ] && echo 0 || echo 1)"
+check "Trust worker: BOT_AUTO_ANALYZE=1 and ANTICHEAT_AUTO_ANALYZE=1 by default" "$([ "$(trust_env_value "$TMPDIR/default.yaml" BOT_AUTO_ANALYZE)" = "1" ] && [ "$(trust_env_value "$TMPDIR/default.yaml" ANTICHEAT_AUTO_ANALYZE)" = "1" ] && echo 0 || echo 1)"
+check "Trust worker: antiCheatAnalysis=false renders ANTICHEAT_AUTO_ANALYZE=0" "$([ "$(trust_env_value "$TMPDIR/trust-bot-only.yaml" ANTICHEAT_AUTO_ANALYZE)" = "0" ] && [ "$(trust_env_value "$TMPDIR/trust-bot-only.yaml" BOT_AUTO_ANALYZE)" = "1" ] && echo 0 || echo 1)"
+check "Trust worker: the analyzer flags appear nowhere but the trust worker" "$([ "$(grep -c 'name: BOT_AUTO_ANALYZE' "$TMPDIR/default.yaml" || true)" = "1" ] && [ "$(grep -c 'name: ANTICHEAT_AUTO_ANALYZE' "$TMPDIR/default.yaml" || true)" = "1" ] && echo 0 || echo 1)"
+check "Trust worker: no Service and no Ingress select it" "$([ "$(yq 'select((.kind=="Service" or .kind=="Ingress") and (.metadata.labels."app.kubernetes.io/component"=="trust-worker" or .spec.selector."app.kubernetes.io/component"=="trust-worker")) | .metadata.name' "$TMPDIR/default.yaml" 2>/dev/null | grep -vx -- '---' | grep -c . || true)" = "0" ] && [ "$(yq 'select(.kind=="Service") | .metadata.name' "$TMPDIR/default.yaml" 2>/dev/null | grep -vx -- '---' | grep -c . || true)" -gt 0 ] && echo 0 || echo 1)"
+check "Trust worker: terminationGracePeriodSeconds lets a long analysis finish (300)" "$([ "$(yq 'select(.kind=="Deployment" and .metadata.labels."app.kubernetes.io/component"=="trust-worker") | .spec.template.spec.terminationGracePeriodSeconds' "$TMPDIR/default.yaml" 2>/dev/null | tr -d '
+-')" = "300" ] && echo 0 || echo 1)"
+check "Trust worker: disabled, the API NetworkPolicy no longer admits it" "$([ "$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/trust-off.yaml" 2>/dev/null | grep -c 'trust-worker' || true)" = "0" ] && echo 0 || echo 1)"
+check "Trust worker: positive control - the refused renders differ from one that succeeds" "$(helm template "$CHART_DIR" "${HELM_SECRETS[@]}" --set trustWorker.enabled=true --set trustWorker.botAnalysis=true --set trustWorker.antiCheatAnalysis=false >/dev/null 2>&1 && echo 0 || echo 1)"
+check "Trust worker: declares only its health port (no WebSocket port)" "$([ "$(trust_doc "$TMPDIR/default.yaml" | grep -c 'containerPort' || true)" = "1" ] && echo 0 || echo 1)"
+TW_SURGE=$(trust_doc "$TMPDIR/default.yaml" | grep -c 'maxSurge: 1' || true)
+TW_UNAVAIL=$(trust_doc "$TMPDIR/default.yaml" | grep -c 'maxUnavailable: 0' || true)
+check "Trust worker: rolls with maxSurge 1 / maxUnavailable 0" "$([ "$TW_SURGE" = "1" ] && [ "$TW_UNAVAIL" = "1" ] && echo 0 || echo 1)"
+check "Trust worker: NetworkPolicy admits no inbound traffic" "$([ "$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="trust-worker") | .spec.ingress | length' "$TMPDIR/default.yaml" 2>/dev/null | tr -d '
+-')" = "0" ] && echo 0 || echo 1)"
+check "Trust worker: carries no access-token secret" "$([ "$(trust_doc "$TMPDIR/default.yaml" | grep -c 'ACCESS_TOKEN_SECRET' || true)" = "0" ] && echo 0 || echo 1)"
+check "Trust worker: has CPU and memory limits for the engine" "$([ "$(yq 'select(.kind=="Deployment" and .metadata.labels."app.kubernetes.io/component"=="trust-worker") | .spec.template.spec.containers[0].resources.limits | (has("cpu") and has("memory"))' "$TMPDIR/default.yaml" 2>/dev/null | tr -d '
+-')" = "true" ] && echo 0 || echo 1)"
+check "Trust worker: enabled=false renders nothing" "$([ "$(grep -c 'trust-worker' "$TMPDIR/trust-off.yaml" || true)" = "0" ] && echo 0 || echo 1)"
+check "Trust worker: both analyzers off is refused" "$(helm template "$CHART_DIR" "${HELM_SECRETS[@]}" --set trustWorker.botAnalysis=false --set trustWorker.antiCheatAnalysis=false >/dev/null 2>&1 && echo 1 || echo 0)"
+for key in enabled botAnalysis antiCheatAnalysis; do
+  check "Trust worker: a string boolean for trustWorker.$key is refused" "$(helm template "$CHART_DIR" "${HELM_SECRETS[@]}" --set-string trustWorker.$key=true >/dev/null 2>&1 && echo 1 || echo 0)"
+done
+for strategy in "rollout.strategy=blueGreen --set rollout.blueGreen.colors.green.tag=9.9.9" "rollout.strategy=canary --set rollout.canary.tag=9.9.9"; do
+  # shellcheck disable=SC2086
+  helm template "$CHART_DIR" "${HELM_SECRETS[@]}" --set $strategy > "$TMPDIR/trust-rollout.yaml" 2>/dev/null
+  check "Trust worker: still exactly one Deployment under ${strategy%% *}" "$([ "$(yq 'select(.kind=="Deployment" and .metadata.labels."app.kubernetes.io/component"=="trust-worker") | .metadata.name' "$TMPDIR/trust-rollout.yaml" 2>/dev/null | grep -vc -- '---' || true)" = "1" ] && echo 0 || echo 1)"
+done
 
 # --- Progressive delivery (M14 inc 9, ADR-0075) -----------------------------
 # Three properties matter here and none of them are schema-checkable:

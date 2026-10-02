@@ -1,5 +1,7 @@
 # ADR-0041 — Bot Detection Automated Auto-Analysis Worker and Gateway Hosting
 
+> **Superseded in part by [ADR-0152](0152-moderation-and-trust-operations.md):** bot-timing analysis now runs only in the dedicated single-replica trust worker; the gateway refuses `BOT_AUTO_ANALYZE`.
+
 | Field      | Value                                                            |
 |------------|------------------------------------------------------------------|
 | **Status** | Accepted                                                         |

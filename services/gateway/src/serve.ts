@@ -34,10 +34,9 @@
  *   result reporter (ADR-0025) in this process; requires `DATABASE_URL`.
  * - `TOURNAMENT_REPORTER_SCAN_MS` (default 30000) — how often the reporter
  *   re-scans running tournaments for games launched by other processes.
- * - `BOT_AUTO_ANALYZE` (optional, "1" to enable) — hosts the bot-detection
- *   auto-analyzer in this process; requires `DATABASE_URL`; needs no engine.
- * - `ANTICHEAT_AUTO_ANALYZE` (optional, "1" to enable) — hosts the anti-cheat
- *   auto-analyzer; requires `DATABASE_URL` and an engine binary (`STOCKFISH_PATH`).
+ * - `BOT_AUTO_ANALYZE`, `ANTICHEAT_AUTO_ANALYZE` — refused here. Trust analysis runs only in the
+ *   dedicated trust worker (`trust-worker.ts`, ADR-0152); a gateway Deployment cannot vary env per
+ *   pod, so hosting it here would analyze every game once per replica.
  * - `SEARCH_INDEXER` (optional, "1" to enable) — hosts the live search index
  *   worker (ADR-0056); requires `DATABASE_URL`. Dedup is process-local, so set
  *   this on exactly ONE replica: every replica that enables it will index every
@@ -170,6 +169,13 @@ async function main(): Promise<void> {
   const trustProxy = resolveTrustProxyEnv(process.env['TRUST_PROXY']);
 
   const logger = new JsonLogger({ service: 'realtime-gateway', nodeId });
+  // A leftover "0" asks for nothing, so it is tolerated; anything else would expect analysis here.
+  for (const moved of ['BOT_AUTO_ANALYZE', 'ANTICHEAT_AUTO_ANALYZE']) {
+    if (process.env[moved] !== undefined && process.env[moved] !== '0') {
+      logger.error(`${moved} is not a gateway setting: trust analysis runs only in the trust worker (trust-worker.js, ADR-0152)`);
+      process.exit(1);
+    }
+  }
   const metrics = new InMemoryMetrics();
 
   const logExporter = new LoggingSpanExporter(logger);
@@ -303,32 +309,6 @@ async function main(): Promise<void> {
     }
   }
 
-  // --- Bot Detection Auto-Analyzer (M12 inc 6, ADR-0041) ---
-  let botAutoAnalyzer: { stop(): void } | undefined;
-  if (process.env['BOT_AUTO_ANALYZE'] === '1') {
-    if (!pgPool || !eventStore) {
-      logger.warn('BOT_AUTO_ANALYZE requires DATABASE_URL to be set');
-    } else {
-      const { PgBotBehaviorReportRepository, PgTerminalEventInbox } = await import('@chess-platform/persistence/pg');
-      const api = await import('@chess-platform/api');
-
-      const botRepo = new PgBotBehaviorReportRepository(pgPool);
-      const source = new api.EventStoreBotTimingSource(eventStore);
-      const analysis = new api.BotAnalysisService(source, botRepo);
-
-      const worker = new api.TerminalEventReconciler(
-        pubsub, new PgTerminalEventInbox(pgPool), 'bot-analysis',
-        async (gameId, ending) => {
-          if (ending.result === '*') return;
-          if (!(await analysis.analyzeAndStore(gameId))) throw new Error(`no finished game for ${gameId}`);
-        },
-      );
-      void worker.start().catch((error: unknown) => logger.error('Bot terminal recovery failed', { error: String(error) }));
-      botAutoAnalyzer = worker;
-      logger.info('BotAutoAnalyzer is enabled');
-    }
-  }
-
   // Shared engine instance provider helper
   let sharedEngineProvider: ReturnType<typeof import('@chess-platform/api')['createEngineProviderFromEnv']> | undefined;
   let engineCreated = false;
@@ -340,42 +320,6 @@ async function main(): Promise<void> {
     }
     return sharedEngineProvider;
   };
-
-  // --- Anti-Cheat Auto-Analyzer (M12 inc 8, ADR-0043) ---
-  let antiCheatAutoAnalyzer: { stop(): void } | undefined;
-  if (process.env['ANTICHEAT_AUTO_ANALYZE'] === '1') {
-    if (!pgPool || !eventStore) {
-      logger.warn('ANTICHEAT_AUTO_ANALYZE requires DATABASE_URL to be set');
-    } else {
-      const { PgAntiCheatReportRepository } = await import('@chess-platform/persistence/pg');
-      const api = await import('@chess-platform/api');
-
-      const engine = await getSharedEngine();
-      if (!engine) {
-        logger.warn('ANTICHEAT_AUTO_ANALYZE requires an engine binary (set STOCKFISH_PATH)');
-      } else {
-        // The logger matters here more than anywhere: this is the *automatic* path, so a game whose
-        // stored events cannot be replayed is skipped with nobody watching. `AntiCheatAutoAnalyzer`
-        // reports only rejected promises, and a contained failure resolves to `null`. Raised in the
-        // Qodo review of PR #12, against a fix that had wired the logger in `bootstrap` and missed
-        // this second production construction site.
-        const source = new api.EventStoreGameSource(eventStore, logger);
-        const repo = new PgAntiCheatReportRepository(pgPool);
-        const service = api.createEngineBackedAnalysisService(source, engine, repo);
-        const { PgTerminalEventInbox } = await import('@chess-platform/persistence/pg');
-        const worker = new api.TerminalEventReconciler(
-          pubsub, new PgTerminalEventInbox(pgPool), 'anti-cheat-analysis',
-          async (gameId, ending) => {
-            if (ending.result === '*') return;
-            if (!(await service.analyzeAndStore(gameId))) throw new Error(`no analyzable game for ${gameId}`);
-          },
-        );
-        void worker.start().catch((error: unknown) => logger.error('Anti-cheat terminal recovery failed', { error: String(error) }));
-        antiCheatAutoAnalyzer = worker;
-        logger.info('AntiCheatAutoAnalyzer is enabled');
-      }
-    }
-  }
 
   // --- Search Index Worker (M11 inc 8, ADR-0056) ---
   let searchIndexWorker: { stop(): void; drain(): Promise<void> } | undefined;
@@ -859,8 +803,6 @@ async function main(): Promise<void> {
     shuttingDown = true;
     clearInterval(heartbeat);
     reporter?.stop();
-    botAutoAnalyzer?.stop();
-    antiCheatAutoAnalyzer?.stop();
     engineBotMover?.stop();
     // No new no-show or flag pass starts from here; an in-flight one may still be routing a command
     // through Redis and the database, so it is awaited below before either closes.
