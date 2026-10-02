@@ -36,6 +36,7 @@ const STATIC_SPECS = new Set([
   'email-verification.spec.ts',
   'rtl-layout-reliability.spec.ts',
   'localization-state.spec.ts',
+  'public-documents.spec.ts',
 ]);
 
 /**

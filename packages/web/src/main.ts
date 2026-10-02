@@ -10,7 +10,14 @@ import { bootstrap, createLifecycle } from './app/index.js';
 import { buildSearchUrl, parseSearchMode } from './app/search-results.js';
 
 if (typeof document !== 'undefined') {
-  const lifecycle = createLifecycle(() => bootstrap(document));
+  // The first run is the page load; every later run is an in-app navigation (link, search submit,
+  // back/forward), after which route surfaces may move focus to their new heading.
+  let hasRun = false;
+  const lifecycle = createLifecycle(() => {
+    const result = bootstrap(document, { inAppNavigation: hasRun });
+    hasRun = true;
+    return result;
+  });
 
   const run = (): void => {
     lifecycle.run();

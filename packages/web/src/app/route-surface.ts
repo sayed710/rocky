@@ -24,6 +24,8 @@ const ROUTE_SURFACE_IDS: Readonly<Record<Route['name'], string | null>> = {
   'study-chapter': 'study-chapter',
   'password-reset': 'password-reset',
   'email-verify': 'email-verify',
+  // One surface serves all four documents; the mount renders the requested one into it.
+  'public-document': 'public-document',
   'not-found': 'not-found',
 };
 

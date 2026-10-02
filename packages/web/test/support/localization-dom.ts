@@ -406,6 +406,13 @@ export function createFakeDoc(elementMap = new Map<string, FakeElement>()): Docu
 const testArabicCatalog: Partial<MessagesCatalog> = {
   // Shell
   'shell.brand': 'روك زن',
+  // Public documents (test-only strings; not an approved production translation)
+  'publicDocument.documentTitle': '{page} · {brand}',
+  'publicDocument.publicationStatus': 'حالة النشر',
+  'publicDocument.about.title': 'حول روك زن',
+  'publicDocument.about.sourceHeading': 'الشيفرة المصدرية',
+  'publicDocument.about.repositoryLabel': 'مستودع المصدر',
+  'publicDocument.about.revisionLabel': 'مراجعة البناء',
   // Variant & Speed
   'variant.standard': 'قياسي',
   'variant.crazyhouse': 'كレイزي هاوس',
