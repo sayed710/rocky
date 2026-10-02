@@ -1182,7 +1182,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const oracle = createGameOracle(gameSync);
 
   const board = mountBoard(
-    { boardEl, statusEl, flipEl },
+    { boardEl, statusEl, flipEl, feedbackEl: doc.getElementById('move-feedback') },
     {
       oracle,
       onMove: (uci: string) => {

@@ -36,6 +36,7 @@ const backendSpecs = [
   'game-responsive.spec.ts',
   'game-vs-bot.spec.ts',
   'game-vs-human.spec.ts',
+  'illegal-move-feedback.spec.ts',
   'learning.spec.ts',
   'messages.spec.ts',
   'play-vs-computer.spec.ts',

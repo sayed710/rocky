@@ -13,7 +13,7 @@
  * updates back through `setPosition` via the controller's callbacks.
  */
 import { BoardView } from '../ui/board-view.js';
-import type { ResolvedMove } from '../ui/board-view.js';
+import type { MoveFeedback, ResolvedMove } from '../ui/board-view.js';
 import { BoardInteraction } from '../core/interaction.js';
 import { NullMoveOracle } from '../ports/move-oracle.js';
 import type { LegalMoveOracle } from '../ports/move-oracle.js';
@@ -30,6 +30,13 @@ export interface BoardElements {
   readonly boardEl: HTMLElement;
   readonly statusEl?: HTMLElement | null;
   readonly flipEl?: HTMLElement | null;
+  /**
+   * Polite live region for locally rejected moves. Separate from `statusEl` because on the game
+   * route the controller rewrites the status on every sync, which would erase the message before it
+   * is heard. Pass it only where a real legality oracle is wired: with the null oracle every move
+   * would be "rejected".
+   */
+  readonly feedbackEl?: HTMLElement | null;
 }
 
 /**
@@ -115,7 +122,7 @@ export function mountBoard(
   elements: BoardElements,
   options?: MountBoardOptions,
 ): MountedBoard {
-  const { boardEl, statusEl, flipEl } = elements;
+  const { boardEl, statusEl, flipEl, feedbackEl } = elements;
 
   // The whole teardown, not just the view's: the flip button's handler is bound out here and would
   // otherwise survive a remount, stacking one flip per navigation.
@@ -160,13 +167,33 @@ export function mountBoard(
     renderStatus();
   };
 
+  // The live rejection message, if one is showing. Every rejection gets a new node: re-setting the
+  // same text is not a change a screen reader announces, but an added node is, so a repeated
+  // identical attempt is still heard.
+  let rejection: HTMLElement | null = null;
+  const showFeedback = (feedback: MoveFeedback): void => {
+    if (!feedbackEl) return;
+    if (feedback.kind === 'illegal') {
+      rejection = feedbackEl.ownerDocument.createElement('span');
+      rejection.textContent = i18n.t('board.feedback.illegalMove');
+      feedbackEl.replaceChildren(rejection);
+      return;
+    }
+    if (rejection === null) return;
+    rejection = null;
+    feedbackEl.replaceChildren();
+  };
+  const clearFeedback = (): void => showFeedback({ kind: 'clear' });
+
   const unsubscribeLocale = options?.i18n?.onLocaleChange(() => {
     renderStatus();
+    if (rejection) rejection.textContent = i18n.t('board.feedback.illegalMove');
   });
 
   const view = new BoardView(boardEl, {
     interaction,
     orientation: 'white',
+    onFeedback: showFeedback,
     onResult: (r: ResolvedMove) => {
       if (r.kind === 'move') {
         if (onMove) {
@@ -200,6 +227,7 @@ export function mountBoard(
 
   const teardown = (): void => {
     unsubscribeLocale?.();
+    clearFeedback();
     flipEl?.removeEventListener('click', onFlip);
     view.destroy();
     if (mountedTeardowns.get(boardEl) === teardown) mountedTeardowns.delete(boardEl);
@@ -208,9 +236,16 @@ export function mountBoard(
 
   return {
     view,
-    setPosition: (f: string) => view.setPosition(f),
+    // A rejection describes the position and turn it was made in; once either moves on it is stale.
+    setPosition: (f: string) => {
+      clearFeedback();
+      view.setPosition(f);
+    },
     setLastMove: (from: string | null, to: string | null) => view.setLastMove(from, to),
-    setTurn: (myTurn: boolean) => view.setTurn(myTurn),
+    setTurn: (myTurn: boolean) => {
+      clearFeedback();
+      view.setTurn(myTurn);
+    },
     setOrientation: (orientation: 'white' | 'black') => {
       if (view.orientationColor !== orientation) view.flip();
     },

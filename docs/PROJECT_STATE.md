@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-02 — M15 Increment 84: Durable finished-game PGN export._
+_Last updated: 2026-10-02 — M15 Increment 85: Accessible local illegal-move feedback._
+
+Prior: _Last updated: 2026-10-02 — M15 Increment 84: Durable finished-game PGN export._
 
 Prior: _Last updated: 2026-10-02 — M15 Increment 83: Truthful opponent pool ratings in lobby seeks._
 
@@ -4899,3 +4901,34 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Owner exact-head review correction** (on `fe67730`): the ending check enforced only part of the contract, so drawn checkmate, resignation, timeout and no-show endings passed. It is now an exhaustive `Record<Termination, …>` derived from `packages/game/src/game.ts`, and the earlier test that accepted a drawn `timeout` was wrong and was replaced. The new matrix tests fail against `fe67730`.
 - **Concurrency**: implemented on `499a861`. PR #86 (seek creator pool ratings, M15 Increment 83) merged first as `f9144a2` and was merged normally into this branch (no rebase, no force). Its Increment 83 entry, seek-rating contract, tests and browser topology are preserved unchanged; this entry is renumbered to Increment 84. The only conflict was this file. Validation recorded above predates the merge; post-merge validation is recorded below.
 - **Deliberate limits**: single-game export only (no bulk or monthly archives); no `%clk` clock comments, annotations, Termination, ratings or ECO; no rate-limit bucket (comparable public reads are unmetered); a future private-game policy must cover the spectator join, the game summary and this route together. Engineering review was first-party only (no Gemini, no delegation); external exact-head evidence belongs to the PR handoff. The owner performs the merge.
+
+## M15 Increment 85 — Accessible local illegal-move feedback (2026-10-02)
+
+- Addresses the open item "Illegal-move feedback — still open for explicit locally rejected gestures" (`CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md`), reverified on `origin/main` `2dd6d4d`. `BoardInteraction.attempt` turned an on-turn destination the oracle did not offer into `deselect`, the same result as tapping the selected square again, so a rejected move was silent. Server rejection presentation was already separate and is unchanged.
+- **Contract** (`packages/web/src/core/interaction.ts`): a new `GestureResult` `{ kind: 'illegal', from, to }`, returned only on our turn when a selected or dragged own piece is sent to a destination absent from `LegalMoveOracle.destinations(from)` and the target is not another own piece (reselection stays `select`). It carries no reason: the oracle answers only "which destinations", so pins, checks or castling rights are never claimed. Unchanged: `none` for empty/opponent taps with nothing selected and for every gesture while a promotion is pending, `deselect` for the same square or a drop on the source, `premove` for every off-turn destination (validated when the turn arrives, as before), promotion and `applyPremove`.
+- **Latent fix needed for a truthful message**: `setTurn` now recomputes the surviving selection's destinations. The turn can arrive without a new position (readiness, an acknowledged move), and a selection made off-turn kept an empty destination list, which would have reported a legal move as illegal.
+- **View** (`packages/web/src/ui/board-view.ts`): an exhaustive `switch` over `GestureResult` (with a `never` default) and a separate typed `onFeedback(MoveFeedback)` channel: `illegal`, or `clear` on `select`/`deselect`/`move`/`premove`/`promotion`. `onResult` still carries only moves to submit or queue, because `mountBoard` treats any non-move result as a premove. Click, tap, keyboard activation and drag/drop all route through the same `BoardInteraction` decision; there is no per-input legality code.
+- **Presentation** (`packages/web/src/app/board.ts`, `index.html`): an optional `feedbackEl`, `#move-feedback`, a `role="status"` polite live region under `#status`. It is separate from `#status` because `GameController` rewrites the status on every sync, which would erase the message before it is heard and would let the message overwrite server-owned state. Each rejection inserts a new `<span>`, so an identical repeated attempt is a fresh live-region addition and is heard again. Focus never moves: the roving tab stop stays on the attempted square. The message clears on any non-rejected gesture, `setPosition` (an authoritative update, a review position), `setTurn` (a submitted move, game completion) and disposal or remount. Locale changes retranslate it in place. Only the game route passes the element; the fallback, studies, endgame and learning boards use `NullMoveOracle` or no player turn, where every move would be "rejected".
+- **Copy and style**: one typed key, `board.feedback.illegalMove` = "That move isn’t legal.". English only, with no Arabic production copy; relocalization is tested with the test-only catalog. No coordinates are in the message, so there is no bidi concatenation. The element reuses the existing muted `count` note style, with `:empty { margin: 0 }`; there is no animation, shake or colour-only signal, and no new visual direction.
+- **Server authority**: a rejected gesture never calls `onMove`, sends no frame and creates no optimistic state; legal moves are submitted exactly as before. No API, WebSocket, gateway, persistence or migration change.
+- **Tests**:
+  - `interaction.test.ts`: illegal by tap and drag, an uncapturable opponent piece, a move straight after, legality from two different oracles on the same gesture, a selection that survives the turn arriving, reselection by drop, off-turn premoves to currently-illegal squares, and gestures during a pending promotion. The two old "illegal deselects" tests now state the new contract.
+  - `board-a11y.test.ts` (real `mountBoard` + `BoardView` on the fake DOM): keyboard, click and drag rejection; one announcement per gesture; identical repeats by tap and by drag as new nodes; no `onMove`; the single roving tab stop stays on the attempted square and the message never takes focus; a legal move after a rejection; reselection, deselection, empty taps and focus navigation stay silent; premoves stay silent; clearing on position, turn and disposal; relocalization and no reaction after dispose; and exactly one announcement after remounting on the same elements.
+  - `e2e-live-loop.test.ts` (real `GameAuthority`, codec, `GameSync`, `AuthoritativeMoveOracle`): Standard e2–e5 is rejected with no frame and no pending move, and e2–e4 then commits (ply 1). Racing Kings: the knight's e2–c3 (gives check, forbidden by the variant) is rejected while the geometrically equivalent e2–d4 is submitted, so the distinction can only come from the server's legal-move map.
+  - Backend Playwright `illegal-move-feedback.spec.ts`: keyboard e2–e5 on a real game shows the message with focus kept on the board, no `move` WebSocket frame, an unchanged board and `#status`, and a repeat as a new node; then keyboard e2–e4 commits ("Black to move"), clears the message and sends exactly one frame; a spectator's gestures send nothing and show nothing. A second test covers touch at 390 px under `dir="rtl"`: the message appears, there is no horizontal overflow, the board stays at least 350 px wide, and the next legal move commits.
+- **RED evidence**: on `2dd6d4d`, with the tests compiling, 5 interaction tests and 8 board tests failed on behaviour (results such as `deselect` instead of `illegal`, no announcement, no catalog key). The preservation tests passed before and after.
+- **Falsification**: 13 disposable mutations, with sources backed up to disk and restored by SHA-256; all 13 were killed by tests (none by compile errors). The first draft of one mutation did not compile and was rewritten. The mutation "reuse the node" survived at first: a tap-to-reselect clears the message between repeats, but a second drag does not, so the drag repeat test was added. The mutations:
+  - illegal back to deselect
+  - illegal also submitted
+  - keyboard rejection not announced
+  - reselection reported illegal
+  - premoves reported illegal
+  - announcement dropped
+  - node reused on repeat
+  - not cleared after a legal move
+  - view not destroyed on remount
+  - Standard knight geometry beside the oracle
+  - `setTurn` refresh removed
+  - not cleared on a new position
+  - not cleared on disposal
+- **Deliberate limits**: no reason text (the oracle exposes none); no feedback for a queued premove invalidated later (no production caller applies premoves today, so this is separate scope); no sound, vibration or animation; the board's own English ARIA labels remain outside the catalog as before. The owner performs the merge.

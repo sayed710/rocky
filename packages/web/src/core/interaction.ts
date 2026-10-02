@@ -35,7 +35,13 @@ export type GestureResult =
   | { readonly kind: 'deselect' }
   | { readonly kind: 'move'; readonly move: Premove }
   | { readonly kind: 'premove'; readonly premove: Premove }
-  | { readonly kind: 'promotion'; readonly from: Square; readonly to: Square; readonly premove: boolean };
+  | { readonly kind: 'promotion'; readonly from: Square; readonly to: Square; readonly premove: boolean }
+  /**
+   * On our turn, the selected piece was sent to a destination the oracle does not offer. Nothing is
+   * submitted and the selection is cleared. Carries no reason: the oracle only answers "which
+   * destinations", so any explanation beyond "not legal" would be invented here.
+   */
+  | { readonly kind: 'illegal'; readonly from: Square; readonly to: Square };
 
 export interface BoardInteractionOptions {
   readonly oracle: LegalMoveOracle;
@@ -93,6 +99,10 @@ export class BoardInteraction {
 
   setTurn(myTurn: boolean): void {
     this.myTurn = myTurn;
+    // The turn can arrive without a new position (readiness, an acknowledged move), so a selection
+    // made off-turn survives it. Judge that selection by this turn's destinations, not the empty
+    // off-turn list, or a legal move would be reported illegal.
+    if (this.selected !== null) this.setSelection(this.selected);
   }
 
   get hasPremove(): boolean {
@@ -191,9 +201,8 @@ export class BoardInteraction {
 
     if (this.myTurn) {
       if (!legalTarget) {
-        // Illegal target: keep it simple and deselect.
         this.clearSelection();
-        return { kind: 'deselect' };
+        return { kind: 'illegal', from, to };
       }
       if (this.isPromotion(from, to)) {
         this.pending = { from, to, premove: false };
