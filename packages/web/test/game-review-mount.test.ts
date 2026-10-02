@@ -8,6 +8,7 @@ import { AsyncTransport, createGameDocument, makeFinishedState, makeState } from
 import type { FakeElement } from './support/analysis-fixtures.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
 import { json } from './support/fake-transport.js';
+import { enMessages } from '../src/i18n/catalog/index.js';
 
 const FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const AFTER_E4_FEN = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
@@ -133,6 +134,7 @@ function setup(options: SetupOptions = {}) {
     token: 'token',
     initialSessionId: 'user-1',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   sockets.last.open();
   sockets.last.emit({
@@ -178,6 +180,44 @@ function dispose(setupResult: ReturnType<typeof setup>): void {
   setupResult.mounted.controller.dispose();
   setupResult.app.dispose();
 }
+
+test('review pending and failure relocalize without requests and clear on retry/sign-out', async () => {
+  const g = setup();
+  g.app.i18n.registerCatalog('ar', { ...enMessages,
+    'game.review.reviewingMoves': 'AR reviewing moves',
+    'game.review.unavailableError': 'AR review unavailable',
+    'game.review.noteSignedOut': 'AR sign in for review',
+  });
+  try {
+    await waitUntil(() => g.elements.get('game-review-run')!.disabled === false);
+    runReview(g.elements);
+    await waitUntil(() => g.pendingReviews.length === 1);
+    runReview(g.elements);
+    g.app.i18n.setLocale('ar');
+    assert.equal(g.elements.get('game-review-note')!.textContent, g.app.i18n.t('game.review.reviewingMoves'));
+    assert.equal(g.pendingReviews.length, 1);
+    assert.equal(g.elements.get('game-review-run')!.disabled, true);
+    g.pendingReviews[0]!.resolve(json(503, {}));
+    await waitUntil(() => g.elements.get('game-review-error')!.hidden === false);
+    g.app.i18n.setLocale('en');
+    assert.equal(g.elements.get('game-review-error')!.textContent, g.app.i18n.t('game.review.unavailableError'));
+    g.app.i18n.setLocale('ar');
+    assert.equal(g.elements.get('game-review-error')!.textContent, g.app.i18n.t('game.review.unavailableError'));
+    assert.equal(g.pendingReviews.length, 1);
+    runReview(g.elements);
+    await waitUntil(() => g.pendingReviews.length === 2);
+    assert.equal(g.elements.get('game-review-error')!.hidden, true);
+    g.app.i18n.setLocale('en');
+    assert.equal(g.elements.get('game-review-note')!.textContent, g.app.i18n.t('game.review.reviewingMoves'));
+    g.mounted.onSessionChange?.(null);
+    g.app.i18n.setLocale('ar');
+    assert.equal(g.elements.get('game-review-note')!.textContent, g.app.i18n.t('game.review.noteSignedOut'));
+    assert.equal(g.elements.get('game-review-error')!.hidden, true);
+    g.pendingReviews[1]!.resolve(json(503, {}));
+    await settle();
+    assert.equal(g.elements.get('game-review-error')!.hidden, true);
+  } finally { dispose(g); }
+});
 
 test('mounted session changes synchronously refresh Game Review controls', async () => {
   const mountedGame = setup();
@@ -230,6 +270,11 @@ test('sign-out removes a completed private review and restores the authoritative
     assert.equal(mountedGame.elements.get('game-review-note')!.textContent, 'Sign in to review your game.');
     assert.equal(board.innerHTML, authoritativeBoard);
     assert.equal(status.textContent, authoritativeStatus);
+    mountedGame.app.i18n.registerCatalog('ar', enMessages);
+    mountedGame.app.i18n.setLocale('ar');
+    assert.equal(summary.hidden, true, 'locale replay cannot restore a signed-out private review');
+    assert.equal(summary.childElementCount, 0);
+    assert.equal(mountedGame.elements.get('game-review-moves')!.childElementCount, 0);
   } finally {
     dispose(mountedGame);
   }

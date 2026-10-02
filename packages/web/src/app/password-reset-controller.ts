@@ -6,15 +6,26 @@
  * the bootstrap layer wires callbacks to DOM elements.
  */
 import type { GambitClient } from '../api/client.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { UnauthorizedError } from '../net/errors.js';
+
+export type PasswordResetStatusKey =
+  | 'passwordRecovery.sentInstructions'
+  | 'passwordRecovery.resetSuccess';
+
+export type PasswordResetErrorKey =
+  | 'passwordRecovery.enterHandleOrEmail'
+  | 'passwordRecovery.linkInvalid'
+  | 'passwordRecovery.passwordLength'
+  | 'passwordRecovery.passwordsDoNotMatch';
 
 export interface PasswordResetCallbacks {
   /** Called when an operation is in-flight (for UI spinner / disabled / aria-busy state). */
   onPending: (pending: boolean) => void;
   /** Called when an error occurs (for UI error display). */
-  onError: (message: string | null) => void;
+  onError: (message: string | null, key?: PasswordResetErrorKey | null) => void;
   /** Called when a success status message should be displayed. */
-  onSuccess: (message: string | null) => void;
+  onSuccess: (message: string | null, key?: PasswordResetStatusKey | null) => void;
   /** Called after a password reset confirm succeeds to clear local session state. */
   onSessionInvalidated?: () => void;
 }
@@ -22,11 +33,13 @@ export interface PasswordResetCallbacks {
 export interface PasswordResetControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: PasswordResetCallbacks;
+  readonly i18n: I18nManager;
 }
 
 export class PasswordResetController {
   private readonly client: GambitClient;
   private readonly callbacks: PasswordResetCallbacks;
+  private readonly i18n: I18nManager;
   private requestGeneration = 0;
   private pendingGeneration = 0;
   private isSubmitting = false;
@@ -35,6 +48,7 @@ export class PasswordResetController {
   constructor(opts: PasswordResetControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.i18n = opts.i18n;
   }
 
   /**
@@ -46,7 +60,10 @@ export class PasswordResetController {
 
     const trimmed = handleOrEmail.trim();
     if (!trimmed) {
-      this.callbacks.onError('Please enter your handle or email address.');
+      this.callbacks.onError(
+        this.i18n.t('passwordRecovery.enterHandleOrEmail'),
+        'passwordRecovery.enterHandleOrEmail',
+      );
       this.callbacks.onSuccess(null);
       return false;
     }
@@ -61,7 +78,8 @@ export class PasswordResetController {
       if (!this.isCurrent(generation)) return false;
 
       this.callbacks.onSuccess(
-        'If an account matching that handle or email address exists, we have sent instructions to reset your password.',
+        this.i18n.t('passwordRecovery.sentInstructions'),
+        'passwordRecovery.sentInstructions',
       );
       return true;
     } catch (err) {
@@ -82,19 +100,28 @@ export class PasswordResetController {
     if (this.disposed || this.isSubmitting) return false;
 
     if (!token) {
-      this.callbacks.onError('This password reset link is invalid or has expired.');
+      this.callbacks.onError(
+        this.i18n.t('passwordRecovery.linkInvalid'),
+        'passwordRecovery.linkInvalid',
+      );
       this.callbacks.onSuccess(null);
       return false;
     }
 
     if (newPassword.length < 8 || newPassword.length > 1024) {
-      this.callbacks.onError('Password must be between 8 and 1024 characters.');
+      this.callbacks.onError(
+        this.i18n.t('passwordRecovery.passwordLength'),
+        'passwordRecovery.passwordLength',
+      );
       this.callbacks.onSuccess(null);
       return false;
     }
 
     if (newPassword !== confirmPassword) {
-      this.callbacks.onError('Passwords do not match.');
+      this.callbacks.onError(
+        this.i18n.t('passwordRecovery.passwordsDoNotMatch'),
+        'passwordRecovery.passwordsDoNotMatch',
+      );
       this.callbacks.onSuccess(null);
       return false;
     }
@@ -108,13 +135,19 @@ export class PasswordResetController {
       await this.client.auth.confirmPasswordReset({ token, newPassword });
       if (!this.isCurrent(generation)) return false;
 
-      this.callbacks.onSuccess('Your password has been reset successfully.');
+      this.callbacks.onSuccess(
+        this.i18n.t('passwordRecovery.resetSuccess'),
+        'passwordRecovery.resetSuccess',
+      );
       this.callbacks.onSessionInvalidated?.();
       return true;
     } catch (err) {
       if (this.isCurrent(generation)) {
         if (err instanceof UnauthorizedError) {
-          this.callbacks.onError('This password reset link is invalid or has expired.');
+          this.callbacks.onError(
+            this.i18n.t('passwordRecovery.linkInvalid'),
+            'passwordRecovery.linkInvalid',
+          );
         } else {
           this.callbacks.onError(err instanceof Error ? err.message : String(err));
         }

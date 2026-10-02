@@ -2,8 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { GambitClient } from '../src/api/client.js';
 import type { StudyView } from '../src/api/models.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { mountStudiesList, mountStudyChapter } from '../src/app/studies-mounts.js';
 import { httpErrorFrom } from '../src/net/errors.js';
+
+const defaultI18n = createI18nManager();
 
 const STUDY: StudyView = {
   id: 'study-1',
@@ -69,8 +72,8 @@ test('remounting studies replaces the persistent search handler', async () => {
       },
     }) as unknown as GambitClient;
 
-  const first = mountStudiesList({ doc, client: client(firstQueries), surface });
-  const second = mountStudiesList({ doc, client: client(secondQueries), surface });
+  const first = mountStudiesList({ doc, client: client(firstQueries), surface, i18n: defaultI18n });
+  const second = mountStudiesList({ doc, client: client(secondQueries), surface, i18n: defaultI18n });
   await settleRequests();
 
   form.onsubmit?.({ preventDefault: () => undefined } as unknown as Event);
@@ -105,7 +108,7 @@ test('studies list renders the existing unavailable state on a 503', async () =>
     },
   } as unknown as GambitClient;
 
-  mountStudiesList({ doc, client, surface });
+  mountStudiesList({ doc, client, surface, i18n: defaultI18n });
   await settleRequests();
 
   assert.deepEqual(rendered, {
@@ -150,6 +153,7 @@ test('chapter route disposal detaches its board and suppresses a stale response'
     surface: {} as HTMLElement,
     studyId: STUDY.id,
     chapterId: 'chapter-1',
+    i18n: defaultI18n,
   });
   assert.ok(mounted.board);
   assert.equal(board.liveCount('click'), 1);

@@ -13,6 +13,9 @@ import {
   setBusy,
 } from '../src/app/analysis-view.js';
 import type { AnalysisResponse } from '../src/api/models.js';
+import { createI18nManager } from '../src/i18n/manager.js';
+
+const i18n = createI18nManager();
 
 class FakeHTMLElement {
   private _innerHTML = '';
@@ -110,10 +113,11 @@ test('result rendering: one row per line, in multipv order', () => {
   assert.equal(row1.className, 'panel-row');
   assert.equal(row1.children.length, 1);
   const row1Main = row1.children[0]!;
-  assert.equal(row1Main.className, 'row-main');
-  assert.equal(row1Main.children[0]!.className, 'analysis-eval');
+  assert.ok(row1Main.children[0]!.className.includes('analysis-eval'));
+  assert.equal(row1Main.children[0]!.getAttribute('dir'), 'ltr');
   assert.equal(row1Main.children[0]!.textContent, '+0.40');
-  assert.equal(row1Main.children[1]!.className, 'analysis-moves');
+  assert.ok(row1Main.children[1]!.className.includes('analysis-moves'));
+  assert.equal(row1Main.children[1]!.getAttribute('dir'), 'ltr');
   assert.equal(row1Main.children[1]!.textContent, 'e2e4 e7e5');
 
   // Line 2 is rendered second
@@ -189,8 +193,8 @@ test('reached vs limits are not conflated: with applied.depth = 16 and lines[0].
     ],
   });
 
-  renderReached(reachedEl, result);
-  renderLimits(limitsEl, result);
+  renderReached(reachedEl, result, i18n);
+  renderLimits(limitsEl, result, i18n);
 
   assert.equal(reachedEl.textContent, 'Reached depth 12 · 0.9 s');
   assert.equal(reachedEl.hidden, false);
@@ -203,7 +207,7 @@ test('renderReached hides element when there are no lines', () => {
   const reachedEl = new FakeHTMLElement() as unknown as HTMLElement;
   const result = sampleResult({ lines: [] });
 
-  renderReached(reachedEl, result);
+  renderReached(reachedEl, result, i18n);
 
   assert.equal(reachedEl.hidden, true);
   assert.equal(reachedEl.textContent, '');

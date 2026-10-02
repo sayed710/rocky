@@ -27,17 +27,20 @@ export interface TeamsCallbacks {
 export interface TeamsControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: TeamsCallbacks;
+  readonly onDispose?: (() => void) | undefined;
 }
 
 export class TeamsController {
   private readonly client: GambitClient;
   private readonly callbacks: TeamsCallbacks;
+  private readonly onDispose?: (() => void) | undefined;
   private requestGeneration = 0;
   private disposed = false;
 
   constructor(opts: TeamsControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.onDispose = opts.onDispose;
   }
 
   /** Load the team list, optionally filtered by a search term. */
@@ -150,6 +153,7 @@ export class TeamsController {
 
   dispose(): void {
     this.disposed = true;
+    this.onDispose?.();
   }
 
   private isCurrent(generation: number): boolean {

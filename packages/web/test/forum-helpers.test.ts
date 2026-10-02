@@ -8,7 +8,10 @@ import {
   postDisplayBody,
   threadDisplayTitle,
 } from '../src/app/forum-helpers.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import type { ForumPost, ForumThread, TeamMembership } from '../src/api/models.js';
+
+const testI18n = createI18nManager();
 
 function member(playerId: string, role: 'owner' | 'admin' | 'member' = 'member'): TeamMembership {
   return { teamId: 't1', playerId, role, joinedAt: '2026-08-04T00:00:00Z' };
@@ -73,9 +76,9 @@ test('a non-member on a locked thread is told about membership, not the lock', (
 });
 
 test('every refusal has a sentence that names the actual obstacle', () => {
-  assert.match(abilityExplanation('signed-out'), /sign in/i);
-  assert.match(abilityExplanation('not-member'), /member/i);
-  assert.match(abilityExplanation('locked'), /locked/i);
+  assert.match(abilityExplanation('signed-out', testI18n), /sign in/i);
+  assert.match(abilityExplanation('not-member', testI18n), /member/i);
+  assert.match(abilityExplanation('locked', testI18n), /locked/i);
 });
 
 test('threads sort pinned first, then most recently active', () => {
@@ -93,11 +96,11 @@ test('sortThreads does not mutate the page it was given', () => {
 });
 
 test('a deleted post shows a placeholder, never its body', () => {
-  assert.equal(postDisplayBody(post({ body: 'still here' })), 'still here');
-  assert.equal(postDisplayBody(post({ body: 'secret', deletedAt: '2026-08-04T11:00:00Z' })), '[Post deleted]');
+  assert.equal(postDisplayBody(post({ body: 'still here' }), testI18n), 'still here');
+  assert.equal(postDisplayBody(post({ body: 'secret', deletedAt: '2026-08-04T11:00:00Z' }), testI18n), '[Post deleted]');
 });
 
 test('a deleted thread shows a placeholder, never its title', () => {
-  assert.equal(threadDisplayTitle(thread({ title: 'Normal' })), 'Normal');
-  assert.equal(threadDisplayTitle(thread({ title: 'Secret', deletedAt: '2026-08-04T11:00:00Z' })), '[Thread deleted]');
+  assert.equal(threadDisplayTitle(thread({ title: 'Normal' }), testI18n), 'Normal');
+  assert.equal(threadDisplayTitle(thread({ title: 'Secret', deletedAt: '2026-08-04T11:00:00Z' }), testI18n), '[Thread deleted]');
 });

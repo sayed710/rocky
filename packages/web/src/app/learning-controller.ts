@@ -54,11 +54,13 @@ export interface LearningCallbacks {
 export interface LearningControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: LearningCallbacks;
+  readonly onDispose?: (() => void) | undefined;
 }
 
 export class LearningController {
   private readonly client: GambitClient;
   private readonly callbacks: LearningCallbacks;
+  private readonly onDispose?: (() => void) | undefined;
   private requestGeneration = 0;
   private disposed = false;
   private unavailable = false;
@@ -67,6 +69,7 @@ export class LearningController {
   constructor(opts: LearningControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.onDispose = opts.onDispose;
   }
 
   /**
@@ -249,6 +252,7 @@ export class LearningController {
 
   dispose(): void {
     this.disposed = true;
+    this.onDispose?.();
   }
 
   private isCurrent(generation: number): boolean {

@@ -80,7 +80,7 @@ test('one persistent main landmark contains every application route', () => {
 });
 
 test('html has lang attribute', () => {
-  assert.ok(HTML_TEMPLATE.includes('<html lang="en">'));
+  assert.ok(HTML_TEMPLATE.includes('<html lang="en" dir="ltr">') || HTML_TEMPLATE.includes('<html lang="en">'));
 });
 
 test('skip link is present and points to board', () => {

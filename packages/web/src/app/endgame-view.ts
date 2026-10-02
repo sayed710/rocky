@@ -10,33 +10,65 @@ import type {
   EndgameAttemptResult,
   EndgamePosition,
 } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
+import { enMessages } from '../i18n/catalog/en.js';
+import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
 import { mountBoard } from './board.js';
 
 export const ENDGAME_MESSAGES = {
-  idle: 'Pick a training endgame to begin.',
-  loading: 'Loading a training position…',
-  judging: 'Checking your move…',
-  signedOut: 'Sign in to train endgames.',
-  unavailable: 'Endgame training is unavailable right now.',
-  rateLimited: 'Too many attempts. Try again shortly.',
-  rejected: 'That move cannot be played in this position.',
-  failed: 'Could not load the endgame trainer.',
-  noMatch: 'No training position matches those filters.',
-  yourMove: 'Play the move you think is best.',
+  idle: enMessages['learning.endgames.msgIdle'],
+  loading: enMessages['learning.endgames.msgLoading'],
+  judging: enMessages['learning.endgames.msgJudging'],
+  signedOut: enMessages['learning.endgames.msgSignedOut'],
+  unavailable: enMessages['learning.endgames.msgUnavailable'],
+  rateLimited: enMessages['learning.endgames.msgRateLimited'],
+  rejected: enMessages['learning.endgames.msgRejected'],
+  failed: enMessages['learning.endgames.msgFailed'],
+  noMatch: enMessages['learning.endgames.msgNoMatch'],
+  yourMove: enMessages['learning.endgames.msgYourMove'],
 } as const;
 
-/** Objective wording the learner reads, kept out of the render functions so it stays consistent. */
-const OBJECTIVE_LABEL: Record<EndgamePosition['objective'], string> = {
-  mate: 'Deliver checkmate',
-  win: 'Win the position',
-  draw: 'Hold the draw',
-};
+export function getEndgameMessage(key: keyof typeof ENDGAME_MESSAGES, i18n: I18nManager): string {
+  switch (key) {
+    case 'idle': return i18n.t('learning.endgames.msgIdle');
+    case 'loading': return i18n.t('learning.endgames.msgLoading');
+    case 'judging': return i18n.t('learning.endgames.msgJudging');
+    case 'signedOut': return i18n.t('learning.endgames.msgSignedOut');
+    case 'unavailable': return i18n.t('learning.endgames.msgUnavailable');
+    case 'rateLimited': return i18n.t('learning.endgames.msgRateLimited');
+    case 'rejected': return i18n.t('learning.endgames.msgRejected');
+    case 'failed': return i18n.t('learning.endgames.msgFailed');
+    case 'noMatch': return i18n.t('learning.endgames.msgNoMatch');
+    case 'yourMove': return i18n.t('learning.endgames.msgYourMove');
+  }
+}
 
-const CLASSIFICATION_LABEL: Record<EndgameAttemptResult['classification'], string> = {
-  optimal: 'Best move',
-  acceptable: 'Playable, but not best',
-  throws_result: 'Throws the result away',
-};
+export function renderEndgamePositionRows(
+  doc: Document,
+  rows: HTMLElement,
+  position: EndgamePosition,
+  i18n: I18nManager,
+): void {
+  rows.innerHTML = '';
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowEndgame'), position.name, 'auto'));
+
+  const objLabel = position.objective === 'mate'
+    ? i18n.t('learning.endgames.deliverCheckmate')
+    : position.objective === 'win'
+      ? i18n.t('learning.endgames.winPosition')
+      : i18n.t('learning.endgames.holdDraw');
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowObjective'), objLabel));
+
+  const turnLabel = position.sideToMove === 'w'
+    ? i18n.t('learning.endgames.rowWhite')
+    : i18n.t('learning.endgames.rowBlack');
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowToMove'), turnLabel));
+
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowLevel'), position.difficulty));
+  if (position.technique) {
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowTechnique'), position.technique, 'auto'));
+  }
+}
 
 /**
  * Render the training position: the board, the objective, and nothing else.
@@ -48,6 +80,7 @@ const CLASSIFICATION_LABEL: Record<EndgameAttemptResult['classification'], strin
  * @param boardEl - the element the read-only board mounts into.
  * @param rows - the container for the position's descriptive rows.
  * @param position - what the server selected.
+ * @param i18n - optional i18n manager for localization.
  * @returns the mounted board, so the caller can tear it down before mounting the next one.
  */
 export function renderEndgamePosition(
@@ -55,17 +88,13 @@ export function renderEndgamePosition(
   boardEl: HTMLElement,
   rows: HTMLElement,
   position: EndgamePosition,
+  i18n: I18nManager,
 ): { dispose: () => void } {
   const board = mountBoard({ boardEl });
   board.setTurn(false);
   board.setPosition(position.fen);
 
-  rows.innerHTML = '';
-  rows.appendChild(row(doc, 'Endgame', position.name));
-  rows.appendChild(row(doc, 'Objective', OBJECTIVE_LABEL[position.objective]));
-  rows.appendChild(row(doc, 'To move', position.sideToMove === 'w' ? 'White' : 'Black'));
-  rows.appendChild(row(doc, 'Level', position.difficulty));
-  if (position.technique) rows.appendChild(row(doc, 'Technique', position.technique));
+  renderEndgamePositionRows(doc, rows, position, i18n);
   return board;
 }
 
@@ -79,26 +108,45 @@ export function renderEndgameVerdict(
   rows: HTMLElement,
   resultEl: HTMLElement,
   result: EndgameAttemptResult,
+  i18n: I18nManager,
 ): string | null {
   rows.innerHTML = '';
-  rows.appendChild(row(doc, 'Your move', result.move));
-  rows.appendChild(row(doc, 'Verdict', CLASSIFICATION_LABEL[result.classification]));
-  rows.appendChild(row(doc, 'Goal', result.goalPreserved ? 'Still alive' : 'Lost'));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowYourMove'), result.move, 'ltr'));
+
+  const verdictLabel = result.classification === 'optimal'
+    ? i18n.t('learning.endgames.bestMove')
+    : result.classification === 'acceptable'
+      ? i18n.t('learning.endgames.playableNotBest')
+      : i18n.t('learning.endgames.throwsResult');
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowVerdict'), verdictLabel));
+
+  const goalLabel = result.goalPreserved
+    ? i18n.t('learning.endgames.stillAlive')
+    : i18n.t('learning.endgames.lost');
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowGoal'), goalLabel));
 
   if (result.kind === 'terminal') {
     // A decided game has a result, not a score. Rendering an evaluation here — even a zero — would
     // describe a finished position as an equal one.
-    rows.appendChild(row(doc, 'Game', terminalLabel(result.terminal.reason, result.terminal.result)));
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowGame'), terminalLabel(result.terminal.reason, result.terminal.result), 'ltr'));
     resultEl.hidden = false;
     return null;
   }
 
-  rows.appendChild(row(doc, 'Before', evaluationLabel(result.evalBefore)));
-  rows.appendChild(row(doc, 'After', evaluationLabel(result.evalAfter)));
-  rows.appendChild(row(doc, 'Cost', lossLabel(result)));
-  if (result.betterMove !== null) rows.appendChild(row(doc, 'Engine prefers', result.betterMove));
-  if (result.bestLine.length > 0) rows.appendChild(row(doc, 'Line', result.bestLine.join(' ')));
-  rows.appendChild(row(doc, 'Depth', String(result.depth)));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowBefore'), evaluationLabel(result.evalBefore, i18n), 'ltr'));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowAfter'), evaluationLabel(result.evalAfter, i18n), 'ltr'));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowCost'), lossLabel(result, i18n)));
+
+  if (result.betterMove !== null) {
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowEnginePrefers'), result.betterMove, 'ltr'));
+  }
+
+  if (result.bestLine.length > 0) {
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowLine'), result.bestLine.join(' '), 'ltr'));
+  }
+
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowDepth'), String(result.depth), 'ltr'));
+
   resultEl.hidden = false;
   return null;
 }
@@ -144,10 +192,15 @@ export function renderEndgameError(el: HTMLElement, text: string | null): void {
 }
 
 /** `{kind:'decisive'}` has no number to show, and must not be given one. */
-function lossLabel(result: Extract<EndgameAttemptResult, { kind: 'judged' }>): string {
-  if (result.loss.kind === 'decisive') return 'Decisive — the goal is gone';
+function lossLabel(result: Extract<EndgameAttemptResult, { kind: 'judged' }>, i18n: I18nManager): string {
+  if (result.loss.kind === 'decisive') {
+    return i18n.t('learning.endgames.costDecisive');
+  }
   const pawns = result.loss.value / 100;
-  return pawns === 0 ? 'Nothing' : `${pawns.toFixed(2)} pawns`;
+  if (pawns === 0) {
+    return i18n.t('learning.endgames.costNothing');
+  }
+  return i18n.t('learning.endgames.costPawns', { pawns: pawns.toFixed(2) });
 }
 
 /**
@@ -155,9 +208,15 @@ function lossLabel(result: Extract<EndgameAttemptResult, { kind: 'judged' }>): s
  * @returns it in the reader's terms — a mate distance, or pawns to two places. A mate is never
  * rendered as a number of pawns, because it is not one.
  */
-function evaluationLabel(evaluation: { readonly type: 'cp' | 'mate'; readonly value: number }): string {
+function evaluationLabel(
+  evaluation: { readonly type: 'cp' | 'mate'; readonly value: number },
+  i18n: I18nManager,
+): string {
   if (evaluation.type === 'mate') {
-    return evaluation.value >= 0 ? `Mate in ${evaluation.value}` : `Mated in ${Math.abs(evaluation.value)}`;
+    if (evaluation.value >= 0) {
+      return i18n.t('learning.endgames.evalMate', { count: String(evaluation.value) });
+    }
+    return i18n.t('learning.endgames.evalMated', { count: String(Math.abs(evaluation.value)) });
   }
   const pawns = evaluation.value / 100;
   return `${pawns > 0 ? '+' : ''}${pawns.toFixed(2)}`;
@@ -180,7 +239,12 @@ function terminalLabel(reason: string, result: string): string {
  * @param valueText - the right column, set as text so nothing from the server can be markup.
  * @returns the row, unattached.
  */
-function row(doc: Document, labelText: string, valueText: string): HTMLElement {
+function row(
+  doc: Document,
+  labelText: string,
+  valueText: string,
+  isolate: 'auto' | 'ltr' | 'none' = 'none',
+): HTMLElement {
   const item = doc.createElement('div');
   item.className = 'panel-row';
   const label = doc.createElement('span');
@@ -189,6 +253,11 @@ function row(doc: Document, labelText: string, valueText: string): HTMLElement {
   const value = doc.createElement('span');
   value.className = 'endgame-value';
   value.textContent = valueText;
+  if (isolate === 'auto') {
+    applyAutoDirection(value);
+  } else if (isolate === 'ltr') {
+    applyLtrIsolation(value);
+  }
   item.appendChild(label);
   item.appendChild(value);
   return item;

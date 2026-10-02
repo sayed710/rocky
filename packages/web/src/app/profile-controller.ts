@@ -22,6 +22,7 @@ export interface ProfileControllerOptions {
   readonly callbacks: ProfileCallbacks;
   /** Number of recent games to fetch (default 20). */
   readonly gameLimit?: number;
+  readonly onDispose?: () => void;
 }
 
 /**
@@ -35,6 +36,7 @@ export class ProfileController {
   private readonly client: GambitClient;
   private readonly callbacks: ProfileCallbacks;
   private readonly gameLimit: number;
+  private readonly onDispose?: (() => void) | undefined;
   private profile: UserProfile | null = null;
   private games: readonly GameSummary[] = [];
   private requestGeneration = 0;
@@ -44,6 +46,7 @@ export class ProfileController {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
     this.gameLimit = opts.gameLimit ?? 20;
+    this.onDispose = opts.onDispose;
   }
 
   /** Current profile (snapshot). */
@@ -103,6 +106,7 @@ export class ProfileController {
   /** Permanently dispose the controller. */
   dispose(): void {
     this.disposed = true;
+    this.onDispose?.();
   }
 
   private isCurrent(generation: number): boolean {

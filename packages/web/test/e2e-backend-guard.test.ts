@@ -35,6 +35,7 @@ const STATIC_SPECS = new Set([
   'password-recovery.spec.ts',
   'email-verification.spec.ts',
   'rtl-layout-reliability.spec.ts',
+  'localization-state.spec.ts',
 ]);
 
 /**

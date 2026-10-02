@@ -7,12 +7,12 @@
  */
 import type { App } from './composition.js';
 import type { GambitClient } from '../api/client.js';
-import { mountBoard } from './board.js';
-import type { MountedBoard } from './board.js';
-import { GameController } from './game-controller.js';
+import { mountBoard, type MountedBoard } from './board.js';
+import { GameController, type GameActionState, type GameMetadataState } from './game-controller.js';
 import { AnalysisController } from './analysis-controller.js';
 import {
-  ANALYSIS_MESSAGES,
+  getAnalysisMessage,
+  type AnalysisMessageKey,
   clearLines,
   renderError,
   renderLimits,
@@ -38,46 +38,58 @@ import {
 import { PuzzleController } from './puzzle-controller.js';
 import { MAX_OPENING_PLIES, OpeningController } from './opening-controller.js';
 import type { OpeningTarget } from './opening-controller.js';
+import type {
+  AnalysisResponse,
+  CoachResponse,
+  MistakePredictionResponse,
+  MoveExplanationResponse,
+  OpeningExplorationResponse,
+  PuzzleGenerationResponse,
+} from '../api/models.js';
 import {
-  OPENING_MESSAGES,
   clearOpening,
+  openingMessage,
   renderOpeningError,
   renderOpeningNote,
   renderOpeningResult,
   setOpeningBusy,
+  type OpeningMessageKey,
 } from './opening-view.js';
 import { CoachController, MAX_COACH_PLIES } from './coach-controller.js';
 import type { CoachTarget } from './coach-controller.js';
 import {
-  COACH_MESSAGES,
   clearCoach,
+  coachMessage,
   renderCoachError,
   renderCoachNote,
   renderCoachResult,
   setCoachBusy,
+  type CoachMessageKey,
 } from './coach-view.js';
 import {
   clearPuzzle,
-  PUZZLE_MESSAGES,
+  puzzleMessage,
   renderPuzzleError,
   renderPuzzleNote,
   renderPuzzleResult,
   setPuzzleBusy,
+  type PuzzleMessageKey,
 } from './puzzle-view.js';
 import { AssessController } from './assess-controller.js';
 import {
-  ASSESS_MESSAGES,
+  assessMessage,
   clearVerdict,
   renderAssessError,
   renderAssessNote,
   renderVerdict,
   setAssessBusy,
   setVerdictVisible,
+  type AssessMessageKey,
 } from './assess-view.js';
 import { ExplainController } from './explain-controller.js';
 import {
   clearExplanation,
-  EXPLAIN_MESSAGES,
+  explainMessage,
   renderError as renderExplainError,
   renderEvidence,
   renderNote as renderExplainNote,
@@ -85,12 +97,17 @@ import {
   renderSource,
   setBusy as setExplainBusy,
   setResultVisible as setExplainResultVisible,
+  type ExplainMessageKey,
 } from './explain-view.js';
 import { formatClock, formatTimeControl } from './render-helpers.js';
 import type { AuthSession } from './auth-controller.js';
 import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
 import { isEngineBotUserId } from '@chess-platform/game';
+import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
+import { createI18nManager } from '../i18n/manager.js';
+import type { I18nManager } from '../i18n/manager.js';
+import { getVariantLabel } from './variant-labels.js';
 
 /**
  * The line counts the panel offers. Every one is at or below the server's published MultiPV
@@ -111,6 +128,7 @@ interface GameMountDependencies {
   readonly token?: string;
   readonly initialSessionId?: string;
   readonly restorePromise: Promise<AuthSession | null>;
+  readonly i18n: I18nManager;
 }
 
 /** The result of mounting the game route. */
@@ -128,6 +146,7 @@ interface MountedGame {
    * simply was not.
    */
   readonly onSessionChange: (session: AuthSession | null) => void;
+  readonly dispose?: () => void;
 }
 
 /**
@@ -143,7 +162,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     getAccessToken,
     token,
     restorePromise,
+    i18n,
   } = deps;
+
+  let lastMetadataState: GameMetadataState | null = null;
+  let lastActionState: GameActionState | null = null;
+  let lastReviewResult: Awaited<ReturnType<GambitClient['games']['review']>> | null = null;
 
   const statusEl = doc.getElementById('status');
   const flipEl = doc.getElementById('flip');
@@ -193,6 +217,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let isGamePlayer = false;
   let isHumanGame = false;
   let gameReviewPending = false;
+  let currentReviewNoteKey: 'game.review.reviewingMoves' | null = null;
+  let currentReviewErrorKey: 'game.review.unavailableError' | null = null;
   let gameReviewSessionId = deps.initialSessionId ?? null;
   let authoritativeGameFen: string | null = null;
   let authoritativeGameTurn = false;
@@ -210,15 +236,24 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         || gameReviewSessionId === null
         || gameReviewPending;
     }
-    if (gameReviewNoteEl && !gameReviewPending && gameReviewMovesEl?.childElementCount === 0) {
+    if (gameReviewNoteEl && currentReviewNoteKey) {
+      gameReviewNoteEl.textContent = i18n.t(currentReviewNoteKey);
+    } else if (gameReviewNoteEl && !gameReviewPending && gameReviewMovesEl?.childElementCount === 0) {
       gameReviewNoteEl.textContent = gameReviewSessionId !== null
-        ? 'Review your moves after the game.'
-        : 'Sign in to review your game.';
+        ? i18n.t('game.review.noteSignedIn')
+        : i18n.t('game.review.noteSignedOut');
+    }
+    if (gameReviewErrorEl) {
+      gameReviewErrorEl.hidden = currentReviewErrorKey === null;
+      gameReviewErrorEl.textContent = currentReviewErrorKey ? i18n.t(currentReviewErrorKey) : '';
     }
   };
 
   /** Remove all private review nodes from persistent route DOM. */
   const clearGameReview = (): void => {
+    lastReviewResult = null;
+    currentReviewNoteKey = null;
+    currentReviewErrorKey = null;
     if (gameReviewErrorEl) {
       gameReviewErrorEl.hidden = true;
       gameReviewErrorEl.textContent = '';
@@ -241,6 +276,23 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const analysisReachedEl = doc.getElementById('analysis-reached');
   const analysisLimitsEl = doc.getElementById('analysis-limits');
 
+  let lastAnalysisResult: AnalysisResponse | null = null;
+  let currentAnalysisNoteKey: AnalysisMessageKey | null = 'idle';
+  let currentAnalysisErrorKey: AnalysisMessageKey | null = null;
+  const setAnalysisNote = (key: AnalysisMessageKey | null): void => {
+    currentAnalysisNoteKey = key;
+    if (analysisNoteEl) renderNote(analysisNoteEl, key ? getAnalysisMessage(key, i18n) : null);
+  };
+  const setAnalysisError = (key: AnalysisMessageKey | null): void => {
+    currentAnalysisErrorKey = key;
+    if (analysisErrorEl) renderError(analysisErrorEl, key ? getAnalysisMessage(key, i18n) : null);
+  };
+  const renderAnalysisResult = (): void => {
+    if (!lastAnalysisResult) return;
+    if (analysisResultsEl) renderLines(analysisResultsEl, lastAnalysisResult);
+    if (analysisReachedEl) renderReached(analysisReachedEl, lastAnalysisResult, i18n);
+    if (analysisLimitsEl) renderLimits(analysisLimitsEl, lastAnalysisResult, i18n);
+  };
   let currentVariant: string | null = null;
   let analysisDisposed = false;
   let analysisAvailable = false;
@@ -263,6 +315,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
    * mark it stale. Nothing in the request lifecycle catches it, because no request is involved.
    */
   const resetAnalysisPanel = (): void => {
+    lastAnalysisResult = null;
     if (analysisResultsEl) {
       clearLines(analysisResultsEl);
       setBusy(analysisResultsEl, false);
@@ -273,8 +326,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         el.hidden = true;
       }
     }
-    if (analysisErrorEl) renderError(analysisErrorEl, null);
-    if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.idle);
+    setAnalysisError(null);
+    setAnalysisNote('idle');
   };
 
   resetAnalysisPanel();
@@ -316,7 +369,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       !analysisSupportsVariant(analysisCapabilities, currentVariant)
     ) {
       analysisUnsupported = true;
-      if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unsupportedVariant);
+      setAnalysisNote('unsupportedVariant');
     }
 
     const blocked = liveHumanGameBlocksAssistance();
@@ -337,9 +390,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     // its own error.
     if (!analysisNoteEl) return;
     if (!authed) {
-      renderNote(analysisNoteEl, ANALYSIS_MESSAGES.signedOut);
-    } else if (analysisNoteEl.textContent === ANALYSIS_MESSAGES.signedOut) {
-      renderNote(analysisNoteEl, ANALYSIS_MESSAGES.idle);
+      setAnalysisNote('signedOut');
+    } else if (currentAnalysisNoteKey === 'signedOut') {
+      setAnalysisNote('idle');
     }
   };
 
@@ -354,10 +407,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let puzzleCapabilities: unknown = null;
   let puzzleUnsupported = false;
 
+  let lastPuzzleResult: PuzzleGenerationResponse | null = null;
+  let currentPuzzleNoteKey: PuzzleMessageKey | null = null;
+  let currentPuzzleErrorKey: PuzzleMessageKey | null = null;
   const resetPuzzleBlock = (): void => {
+    lastPuzzleResult = null;
+    currentPuzzleNoteKey = 'idle';
+    currentPuzzleErrorKey = null;
     if (puzzleRowsEl && puzzleResultEl) clearPuzzle(puzzleRowsEl, puzzleResultEl);
     if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
-    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, PUZZLE_MESSAGES.idle);
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('idle', i18n));
   };
   resetPuzzleBlock();
 
@@ -380,17 +439,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (puzzleRunBtn) {
       puzzleRunBtn.disabled = !authed || !hasPosition() || puzzleController.isPending;
     }
-    if (!puzzleNoteEl) return;
-    const owned = new Set<string>([
-      PUZZLE_MESSAGES.idle,
-      PUZZLE_MESSAGES.signedOut,
-      '',
-    ]);
-    if (!owned.has(puzzleNoteEl.textContent ?? '')) return;
-    renderPuzzleNote(
-      puzzleNoteEl,
-      authed ? PUZZLE_MESSAGES.idle : PUZZLE_MESSAGES.signedOut,
-    );
+    const ownsControlNote = currentPuzzleNoteKey === 'idle' || currentPuzzleNoteKey === 'signedOut';
+    if (!ownsControlNote || lastPuzzleResult || currentPuzzleErrorKey) return;
+    currentPuzzleNoteKey = authed ? 'idle' : 'signedOut';
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(currentPuzzleNoteKey, i18n));
   };
 
   // Opening identification (M15 inc 19), keyed on the game's move order rather than its position.
@@ -411,11 +463,17 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const coachRowsEl = doc.getElementById('coach-rows');
   let coachAvailable = false;
 
+  let lastOpeningResult: OpeningExplorationResponse | null = null;
+  let currentOpeningNoteKey: OpeningMessageKey | null = null;
+  let currentOpeningErrorKey: OpeningMessageKey | null = null;
   /** Clear the section's content back to the unanswered state, leaving its visibility alone. */
   const resetOpeningBlock = (): void => {
+    lastOpeningResult = null;
+    currentOpeningNoteKey = 'idle';
+    currentOpeningErrorKey = null;
     if (openingRowsEl && openingResultEl) clearOpening(openingRowsEl, openingResultEl);
     if (openingErrorEl) renderOpeningError(openingErrorEl, null);
-    if (openingNoteEl) renderOpeningNote(openingNoteEl, OPENING_MESSAGES.idle);
+    if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('idle', i18n));
   };
   resetOpeningBlock();
   // The section lives in `index.html` and outlives the mount, so a previous game's reveal is still
@@ -424,11 +482,17 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   // would hide it again, and a deployment that does not offer the feature would show it.
   if (openingBlockEl) openingBlockEl.hidden = true;
 
+  let lastCoachResult: CoachResponse | null = null;
+  let currentCoachNoteKey: CoachMessageKey | null = null;
+  let currentCoachErrorKey: CoachMessageKey | null = null;
   /** Clear the section back to its unasked state: no rows, no error, the idle note. */
   const resetCoachBlock = (): void => {
+    lastCoachResult = null;
+    currentCoachNoteKey = 'idle';
+    currentCoachErrorKey = null;
     if (coachRowsEl && coachResultEl) clearCoach(coachRowsEl, coachResultEl);
     if (coachErrorEl) renderCoachError(coachErrorEl, null);
-    if (coachNoteEl) renderCoachNote(coachNoteEl, COACH_MESSAGES.idle);
+    if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('idle', i18n));
   };
   resetCoachBlock();
   if (coachBlockEl) coachBlockEl.hidden = true;
@@ -477,13 +541,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (coachRunBtn) {
       coachRunBtn.disabled = !authed || coachTarget() === null || coachController.isPending;
     }
-    if (!coachNoteEl) return;
-    // Only the notes this function owns are replaced. A "position changed" or "too many requests"
-    // message belongs to whatever put it there, and overwriting it here would hide the answer to a
-    // question the reader just asked.
-    const owned = new Set<string>([COACH_MESSAGES.idle, COACH_MESSAGES.signedOut, '']);
-    if (!owned.has(coachNoteEl.textContent ?? '')) return;
-    renderCoachNote(coachNoteEl, authed ? COACH_MESSAGES.idle : COACH_MESSAGES.signedOut);
+    const ownsControlNote = currentCoachNoteKey === 'idle' || currentCoachNoteKey === 'signedOut';
+    if (!ownsControlNote || lastCoachResult || currentCoachErrorKey) return;
+    currentCoachNoteKey = authed ? 'idle' : 'signedOut';
+    if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage(currentCoachNoteKey, i18n));
   };
 
   /**
@@ -525,13 +586,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   };
 
   /** Why the control is off, said in the terms a reader cares about. `null` means it is on. */
-  const openingNoteFor = (availability: OpeningAvailability): string | null => {
+  const openingNoteFor = (availability: OpeningAvailability): OpeningMessageKey | null => {
     switch (availability.kind) {
       case 'ready': return null;
-      case 'unsupported-variant': return OPENING_MESSAGES.unsupportedVariant;
-      case 'no-moves': return OPENING_MESSAGES.noMoves;
-      case 'beyond-opening': return OPENING_MESSAGES.beyondOpening;
-      default: return OPENING_MESSAGES.noSequence;
+      case 'unsupported-variant': return 'unsupportedVariant';
+      case 'no-moves': return 'noMoves';
+      case 'beyond-opening': return 'beyondOpening';
+      default: return 'noSequence';
     }
   };
 
@@ -550,22 +611,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       openingRunBtn.disabled =
         !authed || availability.kind !== 'ready' || openingController.isPending;
     }
-    if (!openingNoteEl) return;
-    // Only overwrite a note this block owns, so a result note or a failure stays on screen.
-    const owned = new Set<string>([
-      OPENING_MESSAGES.idle,
-      OPENING_MESSAGES.signedOut,
-      OPENING_MESSAGES.unsupportedVariant,
-      OPENING_MESSAGES.noMoves,
-      OPENING_MESSAGES.noSequence,
-      OPENING_MESSAGES.beyondOpening,
-      '',
-    ]);
-    if (!owned.has(openingNoteEl.textContent ?? '')) return;
-    renderOpeningNote(
-      openingNoteEl,
-      authed ? (openingNoteFor(availability) ?? OPENING_MESSAGES.idle) : OPENING_MESSAGES.signedOut,
-    );
+    const ownsControlNote = currentOpeningNoteKey === 'idle' || currentOpeningNoteKey === 'signedOut' || currentOpeningNoteKey === 'unsupportedVariant' || currentOpeningNoteKey === 'noMoves' || currentOpeningNoteKey === 'noSequence' || currentOpeningNoteKey === 'beyondOpening';
+    if (!ownsControlNote || lastOpeningResult || currentOpeningErrorKey) return;
+    currentOpeningNoteKey = !authed ? 'signedOut' : (openingNoteFor(availability) ?? 'idle');
+    if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage(currentOpeningNoteKey, i18n));
   };
 
   /**
@@ -609,7 +658,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
    * when the next one mounts. No request is involved, so nothing in the request lifecycle catches
    * it.
    */
+  let lastExplainResult: MoveExplanationResponse | null = null;
+  let currentExplainNoteKey: ExplainMessageKey | null = null;
+  let currentExplainErrorKey: ExplainMessageKey | null = null;
   const resetExplainBlock = (): void => {
+    lastExplainResult = null;
+    currentExplainNoteKey = 'idle';
+    currentExplainErrorKey = null;
     if (explainEvidenceEl && explainProseEl && explainSourceEl && explainResultEl) {
       clearExplanation({
         evidence: explainEvidenceEl,
@@ -619,7 +674,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       });
     }
     if (explainErrorEl) renderExplainError(explainErrorEl, null);
-    if (explainNoteEl) renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.idle);
+    if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage('idle', i18n));
   };
 
   resetExplainBlock();
@@ -667,24 +722,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (explainRunBtn) {
       explainRunBtn.disabled = !authed || target === null || explainController.isPending;
     }
-    if (!explainNoteEl) return;
-    // Only the two messages that are properties of the *control* rather than of a request, and only
-    // transitions between them — anything a request had to say owns the note until something else
-    // does.
-    const owned = new Set<string>([
-      EXPLAIN_MESSAGES.idle,
-      EXPLAIN_MESSAGES.signedOut,
-      EXPLAIN_MESSAGES.noMove,
-      '',
-    ]);
-    if (!owned.has(explainNoteEl.textContent ?? '')) return;
-    if (!authed) {
-      renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.signedOut);
-    } else if (target === null) {
-      renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.noMove);
-    } else {
-      renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.idle);
-    }
+    const ownsControlNote = currentExplainNoteKey === 'idle' || currentExplainNoteKey === 'signedOut' || currentExplainNoteKey === 'noMove';
+    if (!ownsControlNote || lastExplainResult || currentExplainErrorKey) return;
+    currentExplainNoteKey = !authed ? 'signedOut' : target === null ? 'noMove' : 'idle';
+    if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage(currentExplainNoteKey, i18n));
   };
 
   // Mistake Prediction block (M15 inc 5), the third in the same panel.
@@ -699,13 +740,19 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   /** The capability payload, held so the variant gate can re-run when the variant lands. */
   let assessCapabilities: unknown = null;
 
+  let lastAssessResult: MistakePredictionResponse | null = null;
+  let currentAssessNoteKey: AssessMessageKey | null = null;
+  let currentAssessErrorKey: AssessMessageKey | null = null;
   /** Clear the block, for the same reason the other two are reset at mount: this DOM outlives it. */
   const resetAssessBlock = (): void => {
+    lastAssessResult = null;
+    currentAssessNoteKey = 'idle';
+    currentAssessErrorKey = null;
     if (assessRowsEl && assessResultEl) {
       clearVerdict({ rows: assessRowsEl, result: assessResultEl });
     }
     if (assessErrorEl) renderAssessError(assessErrorEl, null);
-    if (assessNoteEl) renderAssessNote(assessNoteEl, ASSESS_MESSAGES.idle);
+    if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage('idle', i18n));
   };
 
   resetAssessBlock();
@@ -733,27 +780,22 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (assessRunBtn) {
       assessRunBtn.disabled = !authed || target === null || assessController.isPending;
     }
-    if (!assessNoteEl) return;
-    // Only the messages that are properties of the *control* rather than of a request, and only
-    // transitions between them — anything a request had to say owns the note until something else
-    // does.
-    const owned = new Set<string>([
-      ASSESS_MESSAGES.idle,
-      ASSESS_MESSAGES.signedOut,
-      ASSESS_MESSAGES.noMove,
-      '',
-    ]);
-    if (!owned.has(assessNoteEl.textContent ?? '')) return;
-    if (!authed) {
-      renderAssessNote(assessNoteEl, ASSESS_MESSAGES.signedOut);
-    } else if (target === null) {
-      renderAssessNote(assessNoteEl, ASSESS_MESSAGES.noMove);
-    } else {
-      renderAssessNote(assessNoteEl, ASSESS_MESSAGES.idle);
-    }
+    const ownsControlNote = currentAssessNoteKey === 'idle' || currentAssessNoteKey === 'signedOut' || currentAssessNoteKey === 'noMove';
+    if (!ownsControlNote || lastAssessResult || currentAssessErrorKey) return;
+    currentAssessNoteKey = !authed ? 'signedOut' : target === null ? 'noMove' : 'idle';
+    if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage(currentAssessNoteKey, i18n));
   };
 
   let controller: GameController;
+
+  const renderPuzzlePresentation = (): void => {
+    let resultNote: string | null = null;
+    if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
+      resultNote = renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
+    }
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, currentPuzzleNoteKey ? puzzleMessage(currentPuzzleNoteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
+    if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, currentPuzzleErrorKey ? puzzleMessage(currentPuzzleErrorKey, i18n) : null);
+  };
 
   const puzzleController = new PuzzleController({
     client: deps.client,
@@ -767,16 +809,17 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (puzzleResultEl) setPuzzleBusy(puzzleResultEl, phase === 'loading');
         refreshPuzzleControls();
         if (phase === 'loading') {
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, PUZZLE_MESSAGES.running);
+          currentPuzzleNoteKey = 'running';
+          currentPuzzleErrorKey = null;
+          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('running', i18n));
           if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
         }
       },
       onResult: (result) => {
-        const note = puzzleRowsEl && puzzleResultEl
-          ? renderPuzzleResult(puzzleRowsEl, puzzleResultEl, result)
-          : null;
-        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, note);
-        if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
+        lastPuzzleResult = result;
+        currentPuzzleNoteKey = null;
+        currentPuzzleErrorKey = null;
+        renderPuzzlePresentation();
       },
       onFailure: (failure) => {
         resetPuzzleBlock();
@@ -785,31 +828,44 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           if (puzzleBlockEl) puzzleBlockEl.hidden = true;
           return;
         }
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': PUZZLE_MESSAGES.rateLimited,
-          unavailable: PUZZLE_MESSAGES.unavailable,
-          'active-game': PUZZLE_MESSAGES.activeGame,
-          unauthenticated: PUZZLE_MESSAGES.signedOut,
+        const noteFor: Partial<Record<typeof failure, PuzzleMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
         };
-        const note = noteFor[failure];
-        if (note) {
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, note);
+        const key = noteFor[failure];
+        if (key) {
+          currentPuzzleNoteKey = key;
+          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(key, i18n));
         } else {
+          currentPuzzleNoteKey = null;
+          currentPuzzleErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, null);
           if (puzzleErrorEl) {
             renderPuzzleError(
               puzzleErrorEl,
-              failure === 'rejected' ? PUZZLE_MESSAGES.rejected : PUZZLE_MESSAGES.failed,
+              failure === 'rejected' ? puzzleMessage('rejected', i18n) : puzzleMessage('failed', i18n),
             );
           }
         }
       },
       onInvalidated: () => {
         resetPuzzleBlock();
-        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, PUZZLE_MESSAGES.positionChanged);
+        currentPuzzleNoteKey = 'positionChanged';
+        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('positionChanged', i18n));
       },
     },
   });
+
+  const renderOpeningPresentation = (): void => {
+    let resultNote: string | null = null;
+    if (lastOpeningResult && openingRowsEl && openingResultEl) {
+      resultNote = renderOpeningResult(openingRowsEl, openingResultEl, lastOpeningResult, i18n);
+    }
+    if (openingNoteEl) renderOpeningNote(openingNoteEl, currentOpeningNoteKey ? openingMessage(currentOpeningNoteKey, i18n) : currentOpeningErrorKey ? null : resultNote);
+    if (openingErrorEl) renderOpeningError(openingErrorEl, currentOpeningErrorKey ? openingMessage(currentOpeningErrorKey, i18n) : null);
+  };
 
   const openingController = new OpeningController({
     client: deps.client,
@@ -819,45 +875,59 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (openingResultEl) setOpeningBusy(openingResultEl, phase === 'loading');
         refreshOpeningControls();
         if (phase === 'loading') {
-          if (openingNoteEl) renderOpeningNote(openingNoteEl, OPENING_MESSAGES.running);
+          currentOpeningNoteKey = 'running';
+          currentOpeningErrorKey = null;
+          if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('running', i18n));
           if (openingErrorEl) renderOpeningError(openingErrorEl, null);
         }
       },
       onResult: (result) => {
-        const note = openingRowsEl && openingResultEl
-          ? renderOpeningResult(openingRowsEl, openingResultEl, result)
-          : null;
-        if (openingNoteEl) renderOpeningNote(openingNoteEl, note);
-        if (openingErrorEl) renderOpeningError(openingErrorEl, null);
+        lastOpeningResult = result;
+        currentOpeningNoteKey = null;
+        currentOpeningErrorKey = null;
+        renderOpeningPresentation();
       },
       onFailure: (failure) => {
         resetOpeningBlock();
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': OPENING_MESSAGES.rateLimited,
-          unavailable: OPENING_MESSAGES.unavailable,
-          'active-game': OPENING_MESSAGES.activeGame,
-          unauthenticated: OPENING_MESSAGES.signedOut,
-          'unsupported-variant': OPENING_MESSAGES.unsupportedVariant,
+        const noteFor: Partial<Record<typeof failure, OpeningMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
+          'unsupported-variant': 'unsupportedVariant',
         };
-        const note = noteFor[failure];
-        if (note) {
-          if (openingNoteEl) renderOpeningNote(openingNoteEl, note);
+        const key = noteFor[failure];
+        if (key) {
+          currentOpeningNoteKey = key;
+          if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage(key, i18n));
         } else {
+          currentOpeningNoteKey = null;
+          currentOpeningErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (openingNoteEl) renderOpeningNote(openingNoteEl, null);
           if (openingErrorEl) {
             renderOpeningError(
               openingErrorEl,
-              failure === 'rejected' ? OPENING_MESSAGES.rejected : OPENING_MESSAGES.failed,
+              failure === 'rejected' ? openingMessage('rejected', i18n) : openingMessage('failed', i18n),
             );
           }
         }
       },
       onInvalidated: () => {
         resetOpeningBlock();
-        if (openingNoteEl) renderOpeningNote(openingNoteEl, OPENING_MESSAGES.sequenceChanged);
+        currentOpeningNoteKey = 'sequenceChanged';
+        if (openingNoteEl) renderOpeningNote(openingNoteEl, openingMessage('sequenceChanged', i18n));
       },
     },
   });
+
+  const renderCoachPresentation = (): void => {
+    let resultNote: string | null = null;
+    if (lastCoachResult && coachRowsEl && coachResultEl) {
+      resultNote = renderCoachResult(coachRowsEl, coachResultEl, lastCoachResult, i18n);
+    }
+    if (coachNoteEl) renderCoachNote(coachNoteEl, currentCoachNoteKey ? coachMessage(currentCoachNoteKey, i18n) : currentCoachErrorKey ? null : resultNote);
+    if (coachErrorEl) renderCoachError(coachErrorEl, currentCoachErrorKey ? coachMessage(currentCoachErrorKey, i18n) : null);
+  };
 
   const coachController = new CoachController({
     client: deps.client,
@@ -867,42 +937,47 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (coachResultEl) setCoachBusy(coachResultEl, phase === 'loading');
         refreshCoachControls();
         if (phase === 'loading') {
-          if (coachNoteEl) renderCoachNote(coachNoteEl, COACH_MESSAGES.running);
+          currentCoachNoteKey = 'running';
+          currentCoachErrorKey = null;
+          if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('running', i18n));
           if (coachErrorEl) renderCoachError(coachErrorEl, null);
         }
       },
       onResult: (result) => {
-        const note = coachRowsEl && coachResultEl
-          ? renderCoachResult(coachRowsEl, coachResultEl, result)
-          : null;
-        if (coachNoteEl) renderCoachNote(coachNoteEl, note);
-        if (coachErrorEl) renderCoachError(coachErrorEl, null);
+        lastCoachResult = result;
+        currentCoachNoteKey = null;
+        currentCoachErrorKey = null;
+        renderCoachPresentation();
       },
       onFailure: (failure) => {
         resetCoachBlock();
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': COACH_MESSAGES.rateLimited,
-          unavailable: COACH_MESSAGES.unavailable,
-          'active-game': COACH_MESSAGES.activeGame,
-          unauthenticated: COACH_MESSAGES.signedOut,
-          'unsupported-variant': COACH_MESSAGES.unsupportedVariant,
+        const noteFor: Partial<Record<typeof failure, CoachMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
+          'unsupported-variant': 'unsupportedVariant',
         };
-        const note = noteFor[failure];
-        if (note) {
-          if (coachNoteEl) renderCoachNote(coachNoteEl, note);
+        const key = noteFor[failure];
+        if (key) {
+          currentCoachNoteKey = key;
+          if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage(key, i18n));
         } else {
+          currentCoachNoteKey = null;
+          currentCoachErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
           if (coachNoteEl) renderCoachNote(coachNoteEl, null);
           if (coachErrorEl) {
             renderCoachError(
               coachErrorEl,
-              failure === 'rejected' ? COACH_MESSAGES.rejected : COACH_MESSAGES.failed,
+              failure === 'rejected' ? coachMessage('rejected', i18n) : coachMessage('failed', i18n),
             );
           }
         }
       },
       onInvalidated: () => {
         resetCoachBlock();
-        if (coachNoteEl) renderCoachNote(coachNoteEl, COACH_MESSAGES.positionChanged);
+        currentCoachNoteKey = 'positionChanged';
+        if (coachNoteEl) renderCoachNote(coachNoteEl, coachMessage('positionChanged', i18n));
       },
     },
   });
@@ -915,36 +990,42 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (assessResultEl) setAssessBusy(assessResultEl, phase === 'loading');
         refreshAssessControls();
         if (phase === 'loading') {
-          if (assessNoteEl) renderAssessNote(assessNoteEl, ASSESS_MESSAGES.running);
+          currentAssessNoteKey = 'running';
+          currentAssessErrorKey = null;
+          if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage('running', i18n));
           if (assessErrorEl) renderAssessError(assessErrorEl, null);
         }
       },
       onResult: (result) => {
-        if (assessRowsEl) renderVerdict(assessRowsEl, result);
+        lastAssessResult = result;
+        currentAssessNoteKey = null;
+        currentAssessErrorKey = null;
+        if (assessRowsEl) renderVerdict(assessRowsEl, result, i18n);
         if (assessResultEl) setVerdictVisible(assessResultEl, true);
         if (assessNoteEl) renderAssessNote(assessNoteEl, null);
         if (assessErrorEl) renderAssessError(assessErrorEl, null);
       },
       onFailure: (failure) => {
         resetAssessBlock();
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': ASSESS_MESSAGES.rateLimited,
-          unavailable: ASSESS_MESSAGES.unavailable,
-          'active-game': ASSESS_MESSAGES.activeGame,
-          unauthenticated: ASSESS_MESSAGES.signedOut,
+        const noteFor: Partial<Record<typeof failure, AssessMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
         };
-        const note = noteFor[failure];
-        if (note !== undefined) {
-          if (assessNoteEl) renderAssessNote(assessNoteEl, note);
+        const key = noteFor[failure];
+        if (key !== undefined) {
+          currentAssessNoteKey = key;
+          if (assessNoteEl) renderAssessNote(assessNoteEl, assessMessage(key, i18n));
           return;
         }
-        // `rejected` and `failed` are the ones the player did not cause and cannot act on, so they
-        // read as errors rather than notes.
+        currentAssessNoteKey = null;
+        currentAssessErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
         if (assessNoteEl) renderAssessNote(assessNoteEl, null);
         if (assessErrorEl) {
           renderAssessError(
             assessErrorEl,
-            failure === 'rejected' ? ASSESS_MESSAGES.rejected : ASSESS_MESSAGES.failed,
+            failure === 'rejected' ? assessMessage('rejected', i18n) : assessMessage('failed', i18n),
           );
         }
       },
@@ -962,38 +1043,44 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (explainResultEl) setExplainBusy(explainResultEl, phase === 'loading');
         refreshExplainControls();
         if (phase === 'loading') {
-          if (explainNoteEl) renderExplainNote(explainNoteEl, EXPLAIN_MESSAGES.running);
+          currentExplainNoteKey = 'running';
+          currentExplainErrorKey = null;
+          if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage('running', i18n));
           if (explainErrorEl) renderExplainError(explainErrorEl, null);
         }
       },
       onResult: (result) => {
-        if (explainEvidenceEl) renderEvidence(explainEvidenceEl, result);
+        lastExplainResult = result;
+        currentExplainNoteKey = null;
+        currentExplainErrorKey = null;
+        if (explainEvidenceEl) renderEvidence(explainEvidenceEl, result, i18n);
         if (explainProseEl) renderProse(explainProseEl, result);
-        if (explainSourceEl) renderSource(explainSourceEl, result);
+        if (explainSourceEl) renderSource(explainSourceEl, result, i18n);
         if (explainResultEl) setExplainResultVisible(explainResultEl, true);
         if (explainNoteEl) renderExplainNote(explainNoteEl, null);
         if (explainErrorEl) renderExplainError(explainErrorEl, null);
       },
       onFailure: (failure) => {
         resetExplainBlock();
-        const noteFor: Partial<Record<typeof failure, string>> = {
-          'rate-limited': EXPLAIN_MESSAGES.rateLimited,
-          unavailable: EXPLAIN_MESSAGES.unavailable,
-          'active-game': EXPLAIN_MESSAGES.activeGame,
-          unauthenticated: EXPLAIN_MESSAGES.signedOut,
+        const noteFor: Partial<Record<typeof failure, ExplainMessageKey>> = {
+          'rate-limited': 'rateLimited',
+          unavailable: 'unavailable',
+          'active-game': 'activeGame',
+          unauthenticated: 'signedOut',
         };
-        const note = noteFor[failure];
-        if (note !== undefined) {
-          if (explainNoteEl) renderExplainNote(explainNoteEl, note);
+        const key = noteFor[failure];
+        if (key !== undefined) {
+          currentExplainNoteKey = key;
+          if (explainNoteEl) renderExplainNote(explainNoteEl, explainMessage(key, i18n));
           return;
         }
-        // `rejected` and `failed` are the ones the player did not cause and cannot act on, so they
-        // read as errors rather than notes.
+        currentExplainNoteKey = null;
+        currentExplainErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
         if (explainNoteEl) renderExplainNote(explainNoteEl, null);
         if (explainErrorEl) {
           renderExplainError(
             explainErrorEl,
-            failure === 'rejected' ? EXPLAIN_MESSAGES.rejected : EXPLAIN_MESSAGES.failed,
+            failure === 'rejected' ? explainMessage('rejected', i18n) : explainMessage('failed', i18n),
           );
         }
       },
@@ -1017,18 +1104,18 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         }
         refreshAnalysisControls();
         if (phase === 'loading') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.loading);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('loading');
+          setAnalysisError(null);
         }
       },
       onResult: (result) => {
-        if (analysisResultsEl) renderLines(analysisResultsEl, result);
-        if (analysisReachedEl) renderReached(analysisReachedEl, result);
-        if (analysisLimitsEl) renderLimits(analysisLimitsEl, result);
-        if (analysisNoteEl) renderNote(analysisNoteEl, null);
-        if (analysisErrorEl) renderError(analysisErrorEl, null);
+        lastAnalysisResult = result;
+        renderAnalysisResult();
+        setAnalysisNote(null);
+        setAnalysisError(null);
       },
       onFailure: (failure) => {
+        lastAnalysisResult = null;
         if (analysisResultsEl) clearLines(analysisResultsEl);
         if (analysisReachedEl) {
           analysisReachedEl.hidden = true;
@@ -1039,34 +1126,35 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           analysisLimitsEl.textContent = '';
         }
         if (failure === 'rate-limited') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.rateLimited);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('rateLimited');
+          setAnalysisError(null);
         } else if (failure === 'unavailable') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unavailable);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('unavailable');
+          setAnalysisError(null);
         } else if (failure === 'unsupported-variant') {
           // Permanent for this game, so stop offering the control rather than let it fail the same
           // way on every click. DESIGN.md's rule for a composer that cannot succeed: hide the
           // control and name the actual obstacle.
           analysisUnsupported = true;
           if (analysisRunBtn) analysisRunBtn.disabled = true;
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unsupportedVariant);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('unsupportedVariant');
+          setAnalysisError(null);
         } else if (failure === 'unauthenticated') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.unauthenticated);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('unauthenticated');
+          setAnalysisError(null);
         } else if (failure === 'active-game') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.activeGame);
-          if (analysisErrorEl) renderError(analysisErrorEl, null);
+          setAnalysisNote('activeGame');
+          setAnalysisError(null);
         } else if (failure === 'rejected') {
-          if (analysisNoteEl) renderNote(analysisNoteEl, null);
-          if (analysisErrorEl) renderError(analysisErrorEl, ANALYSIS_MESSAGES.rejected);
+          setAnalysisNote(null);
+          setAnalysisError('rejected');
         } else {
-          if (analysisNoteEl) renderNote(analysisNoteEl, null);
-          if (analysisErrorEl) renderError(analysisErrorEl, ANALYSIS_MESSAGES.failed);
+          setAnalysisNote(null);
+          setAnalysisError('failed');
         }
       },
       onInvalidated: () => {
+        lastAnalysisResult = null;
         if (analysisResultsEl) clearLines(analysisResultsEl);
         if (analysisReachedEl) {
           analysisReachedEl.hidden = true;
@@ -1076,8 +1164,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           analysisLimitsEl.hidden = true;
           analysisLimitsEl.textContent = '';
         }
-        if (analysisErrorEl) renderError(analysisErrorEl, null);
-        if (analysisNoteEl) renderNote(analysisNoteEl, ANALYSIS_MESSAGES.positionChanged);
+        setAnalysisError(null);
+        setAnalysisNote('positionChanged');
       },
     },
   });
@@ -1092,22 +1180,228 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       onMove: (uci: string) => {
         controller.submitMove(uci);
       },
+      i18n,
     },
   );
 
+  const renderMetadata = (state: GameMetadataState): void => {
+    let liveAnnouncement = '';
+
+    if (metaConnectionEl) {
+      const connText = state.connected
+        ? i18n.t('game.connection.connected')
+        : state.role !== null
+          ? i18n.t('game.connection.reconnecting')
+          : i18n.t('game.connection.connecting');
+      if (metaConnectionEl.textContent !== connText) {
+        metaConnectionEl.textContent = connText;
+        liveAnnouncement += i18n.t('game.connection.announcement', { status: connText });
+      }
+    }
+
+    if (metaRoleEl) {
+      const roleText = state.role === 'white' ? i18n.t('game.role.playingWhite')
+        : state.role === 'black' ? i18n.t('game.role.playingBlack')
+        : state.role === 'spectator' ? i18n.t('game.role.spectating')
+        : i18n.t('game.role.waiting');
+      metaRoleEl.textContent = roleText;
+    }
+
+    const unknownPresence = !state.connected || !state.presence;
+
+    if (metaWhiteEl && metaWhiteNameEl) {
+      const isMe = state.myColor === 'w';
+      metaWhiteNameEl.textContent = isMe ? i18n.t('game.player.whiteYou') : i18n.t('game.player.white');
+      applyAutoDirection(metaWhiteNameEl);
+
+      const dot = metaWhiteEl.querySelector<HTMLElement>('.presence-dot');
+      const txt = metaWhiteEl.querySelector('.presence-text');
+      if (dot && txt) {
+        if (state.players && isEngineBotUserId(state.players.white)) {
+          dot.hidden = true;
+          txt.textContent = i18n.t('game.presence.computer');
+        } else if (unknownPresence) {
+          dot.hidden = false;
+          dot.className = 'presence-dot offline';
+          txt.textContent = i18n.t('game.presence.unknown');
+        } else {
+          dot.hidden = false;
+          const online = state.presence!.white;
+          dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
+          const newTxt = online ? i18n.t('game.presence.online') : i18n.t('game.presence.offline');
+          if (txt.textContent !== newTxt) {
+            txt.textContent = newTxt;
+            liveAnnouncement += i18n.t('game.presence.whiteIs', { status: newTxt });
+          }
+        }
+      }
+    }
+
+    if (metaBlackEl && metaBlackNameEl) {
+      const isMe = state.myColor === 'b';
+      metaBlackNameEl.textContent = isMe ? i18n.t('game.player.blackYou') : i18n.t('game.player.black');
+      applyAutoDirection(metaBlackNameEl);
+
+      const dot = metaBlackEl.querySelector<HTMLElement>('.presence-dot');
+      const txt = metaBlackEl.querySelector('.presence-text');
+      if (dot && txt) {
+        if (state.players && isEngineBotUserId(state.players.black)) {
+          dot.hidden = true;
+          txt.textContent = i18n.t('game.presence.computer');
+        } else if (unknownPresence) {
+          dot.hidden = false;
+          dot.className = 'presence-dot offline';
+          txt.textContent = i18n.t('game.presence.unknown');
+        } else {
+          dot.hidden = false;
+          const online = state.presence!.black;
+          dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
+          const newTxt = online ? i18n.t('game.presence.online') : i18n.t('game.presence.offline');
+          if (txt.textContent !== newTxt) {
+            txt.textContent = newTxt;
+            liveAnnouncement += i18n.t('game.presence.blackIs', { status: newTxt });
+          }
+        }
+      }
+    }
+
+    if (metaSpectatorsEl) {
+      metaSpectatorsEl.textContent = unknownPresence ? '—' : String(state.presence!.spectators);
+    }
+
+    if (metaVariantEl && state.variant) {
+      const label = getVariantLabel(state.variant, i18n);
+      metaVariantEl.textContent =
+        typeof state.chess960StartId === 'number'
+          ? `${label} · #${state.chess960StartId}`
+          : label;
+    }
+    if (metaTimeEl && state.timeControl) {
+      metaTimeEl.textContent = formatTimeControl(state.timeControl, i18n);
+    }
+
+    if (metaLiveStatusEl && liveAnnouncement) {
+      metaLiveStatusEl.textContent = liveAnnouncement.trim();
+    }
+  };
+
+  const renderActionState = (state: GameActionState): void => {
+    isGamePlayer = state.isPlayer;
+    isHumanGame = state.isHumanGame;
+    gameOver = state.isOver;
+    refreshGameReview();
+    refreshAnalysisControls();
+    refreshPuzzleControls();
+    refreshOpeningControls();
+    refreshCoachControls();
+    refreshExplainControls();
+    refreshAssessControls();
+    if (actionsPanelEl) {
+      if (state.isOver && !actionsPanelEl.hidden && doc.activeElement && actionsPanelEl.contains(doc.activeElement)) {
+        statusEl?.focus();
+      }
+      actionsPanelEl.hidden = !state.isPlayer || state.isOver;
+    }
+    if (!state.isPlayer) return;
+
+    const disabled = !state.connected || state.isOver || state.pendingAction !== null;
+
+    if (btnOfferDraw) {
+      if (state.drawOffer === 'sent') {
+        btnOfferDraw.textContent = i18n.t('game.actions.drawOfferSent');
+        btnOfferDraw.disabled = true;
+      } else {
+        btnOfferDraw.textContent = i18n.t('game.actions.offerDraw');
+        btnOfferDraw.disabled = disabled || state.drawOffer !== 'none';
+      }
+    }
+    if (btnClaimFlag) btnClaimFlag.disabled = disabled;
+
+    if (btnResign) {
+      btnResign.disabled = disabled;
+      if (disabled && confirmResignEl && !confirmResignEl.hidden) {
+        confirmResignEl.hidden = true;
+        if (confirmResignYes) (confirmResignYes as HTMLButtonElement).disabled = true;
+        if (confirmResignNo) (confirmResignNo as HTMLButtonElement).disabled = true;
+        btnResign.hidden = false;
+        statusEl?.focus();
+      }
+    }
+
+    if (btnAbort) {
+      btnAbort.hidden = !state.canAbort;
+      btnAbort.disabled = disabled;
+      if ((disabled || !state.canAbort) && confirmAbortEl && !confirmAbortEl.hidden) {
+        confirmAbortEl.hidden = true;
+        if (confirmAbortYes) (confirmAbortYes as HTMLButtonElement).disabled = true;
+        if (confirmAbortNo) (confirmAbortNo as HTMLButtonElement).disabled = true;
+        btnAbort.hidden = !state.canAbort;
+        statusEl?.focus();
+      }
+    }
+
+    if (drawOfferReceivedEl) {
+      drawOfferReceivedEl.hidden = state.drawOffer !== 'received' || state.isOver;
+    }
+    if (btnAcceptDraw) {
+      (btnAcceptDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
+    }
+    if (btnDeclineDraw) {
+      (btnDeclineDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
+    }
+
+    if (actionErrorEl) {
+      actionErrorEl.hidden = state.lastReject === null;
+      actionErrorEl.textContent = state.lastReject ?? '';
+    }
+  };
+
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
+    refreshGameReview();
+    if (lastMetadataState) {
+      renderMetadata(lastMetadataState);
+    }
+    if (lastActionState) {
+      renderActionState(lastActionState);
+    }
+    if (lastReviewResult) {
+      renderGameReview(lastReviewResult);
+    }
+    refreshAnalysisControls();
+    refreshPuzzleControls();
+    refreshOpeningControls();
+    refreshCoachControls();
+    refreshExplainControls();
+    refreshAssessControls();
+
+    renderAnalysisResult();
+    setAnalysisNote(currentAnalysisNoteKey);
+    setAnalysisError(currentAnalysisErrorKey);
+    if (lastAssessResult && assessRowsEl) renderVerdict(assessRowsEl, lastAssessResult, i18n);
+    if (assessNoteEl) renderAssessNote(assessNoteEl, currentAssessNoteKey ? assessMessage(currentAssessNoteKey, i18n) : null);
+    if (assessErrorEl) renderAssessError(assessErrorEl, currentAssessErrorKey ? assessMessage(currentAssessErrorKey, i18n) : null);
+    if (lastExplainResult) {
+      if (explainEvidenceEl) renderEvidence(explainEvidenceEl, lastExplainResult, i18n);
+      if (explainSourceEl) renderSource(explainSourceEl, lastExplainResult, i18n);
+    }
+    if (explainNoteEl) renderExplainNote(explainNoteEl, currentExplainNoteKey ? explainMessage(currentExplainNoteKey, i18n) : null);
+    if (explainErrorEl) renderExplainError(explainErrorEl, currentExplainErrorKey ? explainMessage(currentExplainErrorKey, i18n) : null);
+    renderOpeningPresentation();
+    renderPuzzlePresentation();
+    renderCoachPresentation();
+  });
+
   controller = new GameController({
     gameSync,
+    i18n,
+    onDispose: () => unsubscribeLocale(),
     callbacks: {
       onPosition: (fen: string) => {
         authoritativeGameFen = fen;
         board.setPosition(fen);
         analysisController.positionChanged(fen);
         if (currentVariant) puzzleController.positionChanged({ fen, variant: currentVariant });
-        // Keyed on the ledger rather than the position, and told about every change including the
-        // ones that leave nothing to ask about.
         openingStateChanged();
-        // Coaching keys on the position *and* the last replayed move, so it hears about both this
-        // and `onExplainableChange` below — same reasoning as the opening section.
         coachStateChanged();
         explainController.targetChanged();
         assessController.targetChanged();
@@ -1117,16 +1411,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         refreshExplainControls();
         refreshAssessControls();
       },
-      // Both controls key on the same replayed move, so both are told when it changes — including
-      // the resync case where an authoritative snapshot clears it while the FEN stays put.
       onExplainableChange: () => {
         explainController.targetChanged();
         assessController.targetChanged();
         refreshExplainControls();
         refreshAssessControls();
-        // The ledger can be replaced at an unchanged position — an authoritative snapshot taken
-        // where the board already was — and `onPosition` stays silent for that. Opening
-        // identification reads the ledger, so it has to hear about this one too.
         openingStateChanged();
         refreshOpeningControls();
         coachStateChanged();
@@ -1136,10 +1425,17 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         board.setTurn(myTurn);
       },
       onClock: (whiteMs: number, blackMs: number) => {
-        if (whiteClockEl) whiteClockEl.textContent = formatClock(whiteMs);
-        if (blackClockEl) blackClockEl.textContent = formatClock(blackMs);
+        if (whiteClockEl) {
+          whiteClockEl.textContent = formatClock(whiteMs);
+          applyLtrIsolation(whiteClockEl);
+        }
+        if (blackClockEl) {
+          blackClockEl.textContent = formatClock(blackMs);
+          applyLtrIsolation(blackClockEl);
+        }
         if (clockEl) {
           clockEl.textContent = `${formatClock(whiteMs)} – ${formatClock(blackMs)}`;
+          applyLtrIsolation(clockEl);
         }
       },
       onStatus: (text: string) => {
@@ -1154,204 +1450,22 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (color === 'b') board.setOrientation('black');
       },
       onMetadata: (state) => {
+        lastMetadataState = state;
         if (state.variant) {
           currentVariant = state.variant;
           refreshAnalysisControls();
           refreshPuzzleControls();
-          // Every gate depends on the variant, and this is the arrival that supplies it. Refreshing
-          // only the analysis one left the explain control offered on a variant with no engine
-          // whenever capabilities answered first.
           refreshExplainControls();
           refreshAssessControls();
-          // And this one, which gates on the variant harder than the rest: it serves `standard`
-          // alone, so before the variant arrives it has no target and the control stays off.
           refreshOpeningControls();
-          // Coaching has no target until the variant is known either, so it needs the same wake-up.
-          // Omitting it here is what left the opening control permanently disabled in M15 inc 19.
           refreshCoachControls();
           refreshGameReview();
         }
-
-        let liveAnnouncement = '';
-
-        if (metaConnectionEl) {
-          const connText = state.connected
-            ? 'Connected'
-            : state.role !== null
-              ? 'Reconnecting…'
-              : 'Connecting…';
-          if (metaConnectionEl.textContent !== connText) {
-            metaConnectionEl.textContent = connText;
-            liveAnnouncement += `Connection: ${connText}. `;
-          }
-        }
-
-        if (metaRoleEl) {
-          const roleText = state.role === 'white' ? 'Playing as White'
-            : state.role === 'black' ? 'Playing as Black'
-            : state.role === 'spectator' ? 'Spectating'
-            : 'Waiting…';
-          metaRoleEl.textContent = roleText;
-        }
-
-        const unknownPresence = !state.connected || !state.presence;
-
-        if (metaWhiteEl && metaWhiteNameEl) {
-          const isMe = state.myColor === 'w';
-          metaWhiteNameEl.textContent = 'White' + (isMe ? ' (You)' : '');
-
-          const dot = metaWhiteEl.querySelector<HTMLElement>('.presence-dot');
-          const txt = metaWhiteEl.querySelector('.presence-text');
-          if (dot && txt) {
-            if (state.players && isEngineBotUserId(state.players.white)) {
-              dot.hidden = true;
-              txt.textContent = 'Computer';
-            } else if (unknownPresence) {
-              dot.hidden = false;
-              dot.className = 'presence-dot offline';
-              txt.textContent = 'Unknown';
-            } else {
-              dot.hidden = false;
-              const online = state.presence!.white;
-              dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
-              const newTxt = online ? 'Online' : 'Offline';
-              if (txt.textContent !== newTxt) {
-                txt.textContent = newTxt;
-                liveAnnouncement += `White is ${newTxt}. `;
-              }
-            }
-          }
-        }
-
-        if (metaBlackEl && metaBlackNameEl) {
-          const isMe = state.myColor === 'b';
-          metaBlackNameEl.textContent = 'Black' + (isMe ? ' (You)' : '');
-
-          const dot = metaBlackEl.querySelector<HTMLElement>('.presence-dot');
-          const txt = metaBlackEl.querySelector('.presence-text');
-          if (dot && txt) {
-            if (state.players && isEngineBotUserId(state.players.black)) {
-              dot.hidden = true;
-              txt.textContent = 'Computer';
-            } else if (unknownPresence) {
-              dot.hidden = false;
-              dot.className = 'presence-dot offline';
-              txt.textContent = 'Unknown';
-            } else {
-              dot.hidden = false;
-              const online = state.presence!.black;
-              dot.className = `presence-dot ${online ? 'online' : 'offline'}`;
-              const newTxt = online ? 'Online' : 'Offline';
-              if (txt.textContent !== newTxt) {
-                txt.textContent = newTxt;
-                liveAnnouncement += `Black is ${newTxt}. `;
-              }
-            }
-          }
-        }
-
-        if (metaSpectatorsEl) {
-          metaSpectatorsEl.textContent = unknownPresence ? '—' : String(state.presence!.spectators);
-        }
-
-        if (metaVariantEl && state.variant) {
-          const label = state.variant.charAt(0).toUpperCase() + state.variant.slice(1);
-          // The starting position is part of what the variant *is* for this game: "Chess960" alone
-          // does not say which of the 960 arrangements is on the board, and once the first move is
-          // played the FEN no longer says either. Appended to the metadata field that already exists
-          // rather than given a row of its own — it is one short qualifier on a label already there,
-          // and a dedicated row would sit empty for every other variant.
-          //
-          // Written as "is there a number?" rather than "is it null?". `GameMetadataState` declares
-          // `number | null` and `GameController` is its only writer (`?? null` on the snapshot), so the
-          // two forms are equivalent for every value the type permits — but this is the same single
-          // check in its positive form, not a second guard, and it degrades to the plain label for
-          // anything the type does not permit rather than rendering "#undefined". Raised in the Qodo
-          // review of PR #12; the normalisation itself is pinned by chess960-metadata.test.ts.
-          metaVariantEl.textContent =
-            typeof state.chess960StartId === 'number'
-              ? `${label} · #${state.chess960StartId}`
-              : label;
-        }
-        if (metaTimeEl && state.timeControl) {
-          metaTimeEl.textContent = formatTimeControl(state.timeControl);
-        }
-
-        if (metaLiveStatusEl && liveAnnouncement) {
-          metaLiveStatusEl.textContent = liveAnnouncement.trim();
-        }
+        renderMetadata(state);
       },
       onActionState: (state) => {
-        isGamePlayer = state.isPlayer;
-        isHumanGame = state.isHumanGame;
-        gameOver = state.isOver;
-        refreshGameReview();
-        refreshAnalysisControls();
-        refreshPuzzleControls();
-        refreshOpeningControls();
-        refreshCoachControls();
-        refreshExplainControls();
-        refreshAssessControls();
-        if (actionsPanelEl) {
-          // The authoritative game status, not transport or request state, ends the live controls.
-          // Move focus before hiding a currently focused action or confirmation.
-          if (state.isOver && !actionsPanelEl.hidden && doc.activeElement && actionsPanelEl.contains(doc.activeElement)) {
-            statusEl?.focus();
-          }
-          actionsPanelEl.hidden = !state.isPlayer || state.isOver;
-        }
-        if (!state.isPlayer) return;
-
-        const disabled = !state.connected || state.isOver || state.pendingAction !== null;
-
-        if (btnOfferDraw) {
-          if (state.drawOffer === 'sent') {
-            btnOfferDraw.textContent = 'Draw offered';
-            btnOfferDraw.disabled = true;
-          } else {
-            btnOfferDraw.textContent = 'Offer draw';
-            btnOfferDraw.disabled = disabled || state.drawOffer !== 'none';
-          }
-        }
-        if (btnClaimFlag) btnClaimFlag.disabled = disabled;
-
-        if (btnResign) {
-          btnResign.disabled = disabled;
-          if (disabled && confirmResignEl && !confirmResignEl.hidden) {
-            confirmResignEl.hidden = true;
-            if (confirmResignYes) (confirmResignYes as HTMLButtonElement).disabled = true;
-            if (confirmResignNo) (confirmResignNo as HTMLButtonElement).disabled = true;
-            btnResign.hidden = false;
-            statusEl?.focus();
-          }
-        }
-
-        if (btnAbort) {
-          btnAbort.hidden = !state.canAbort;
-          btnAbort.disabled = disabled;
-          if ((disabled || !state.canAbort) && confirmAbortEl && !confirmAbortEl.hidden) {
-            confirmAbortEl.hidden = true;
-            if (confirmAbortYes) (confirmAbortYes as HTMLButtonElement).disabled = true;
-            if (confirmAbortNo) (confirmAbortNo as HTMLButtonElement).disabled = true;
-            btnAbort.hidden = !state.canAbort;
-            statusEl?.focus();
-          }
-        }
-
-        if (drawOfferReceivedEl) {
-          drawOfferReceivedEl.hidden = state.drawOffer !== 'received' || state.isOver;
-        }
-        if (btnAcceptDraw) {
-          (btnAcceptDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
-        }
-        if (btnDeclineDraw) {
-          (btnDeclineDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
-        }
-
-        if (actionErrorEl) {
-          actionErrorEl.hidden = state.lastReject === null;
-          actionErrorEl.textContent = state.lastReject ?? '';
-        }
+        lastActionState = state;
+        renderActionState(state);
       },
     },
   });
@@ -1374,21 +1488,43 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (statusEl) statusEl.textContent = authoritativeGameStatus;
   };
 
+  const classificationLabel = (name: string): string => {
+    switch (name) {
+      case 'Brilliant': return i18n.t('game.review.classification.brilliant');
+      case 'Great': return i18n.t('game.review.classification.great');
+      case 'Best': return i18n.t('game.review.classification.best');
+      case 'Best move': return i18n.t('game.review.classification.bestMove');
+      case 'Excellent': return i18n.t('game.review.classification.excellent');
+      case 'Good': return i18n.t('game.review.classification.good');
+      case 'Good move': return i18n.t('game.review.classification.goodMove');
+      case 'Book': return i18n.t('game.review.classification.book');
+      case 'Inaccuracy': return i18n.t('game.review.classification.inaccuracy');
+      case 'Mistake': return i18n.t('game.review.classification.mistake');
+      case 'Miss': return i18n.t('game.review.classification.miss');
+      case 'Blunder': return i18n.t('game.review.classification.blunder');
+      case 'Missed win': return i18n.t('game.review.classification.missedWin');
+      default: return i18n.t('game.review.classification.unrated');
+    }
+  };
+
   /** Render a controller-approved review and its navigable pre-move positions. */
   const renderGameReview = (review: Awaited<ReturnType<GambitClient['games']['review']>>): void => {
+    lastReviewResult = review;
+    currentReviewNoteKey = null;
+    currentReviewErrorKey = null;
     if (gameReviewSummaryEl) {
       const summary = [
-        ['Brilliant', '!!', review.summary.brilliant, 'brilliant'],
-        ['Great', '!', review.summary.great, 'great'],
-        ['Best', '★', review.summary.best, 'best'],
-        ['Excellent', '✓', review.summary.excellent, 'excellent'],
-        ['Good', '✓', review.summary.good, 'good'],
-        ['Book', '📖', review.summary.book, 'book'],
-        ['Inaccuracy', '?!', review.summary.inaccuracy, 'inaccuracy'],
-        ['Mistake', '?', review.summary.mistake, 'mistake'],
-        ['Miss', '×', review.summary.miss, 'miss'],
-        ['Blunder', '??', review.summary.blunder, 'blunder'],
-        ['Missed win', '×', review.summary.missed_win, 'missed_win'],
+        [classificationLabel('Brilliant'), '!!', review.summary.brilliant, 'brilliant'],
+        [classificationLabel('Great'), '!', review.summary.great, 'great'],
+        [classificationLabel('Best'), '★', review.summary.best, 'best'],
+        [classificationLabel('Excellent'), '✓', review.summary.excellent, 'excellent'],
+        [classificationLabel('Good'), '✓', review.summary.good, 'good'],
+        [classificationLabel('Book'), '📖', review.summary.book, 'book'],
+        [classificationLabel('Inaccuracy'), '?!', review.summary.inaccuracy, 'inaccuracy'],
+        [classificationLabel('Mistake'), '?', review.summary.mistake, 'mistake'],
+        [classificationLabel('Miss'), '×', review.summary.miss, 'miss'],
+        [classificationLabel('Blunder'), '??', review.summary.blunder, 'blunder'],
+        [classificationLabel('Missed win'), '×', review.summary.missed_win, 'missed_win'],
       ] as const;
       gameReviewSummaryEl.replaceChildren(...summary.map(([label, symbol, count, tone]) => {
         const stat = doc.createElement('div');
@@ -1413,14 +1549,20 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           : ` · ${move.assessment.centipawnLoss} cp`;
         const moveLabel = doc.createElement('span');
         moveLabel.textContent = `${move.ply}. ${move.san}`;
+        applyLtrIsolation(moveLabel);
         const verdict = doc.createElement('strong');
-        verdict.textContent = `${annotation.symbol} ${annotation.label}${loss}`;
+        verdict.textContent = `${annotation.symbol} ${classificationLabel(annotation.label)}${loss}`;
         row.replaceChildren(moveLabel, verdict);
         row.addEventListener('click', () => {
           board.setPosition(move.fenBefore);
           board.setTurn(false);
           if (move.move.length >= 4) board.setLastMove(move.move.slice(0, 2), move.move.slice(2, 4));
-          if (statusEl) statusEl.textContent = `Reviewing ${move.san}. Best move: ${move.assessment.bestMove ?? 'not available'}.`;
+          if (statusEl) {
+            statusEl.textContent = i18n.t('game.review.statusReviewing', {
+              san: move.san,
+              bestMove: move.assessment.bestMove ?? i18n.t('game.review.bestMoveNotAvailable'),
+            });
+          }
         });
         return row;
       }));
@@ -1429,9 +1571,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       if (review.isPartial) {
         const analyzed = review.analyzedPlayerMoves ?? review.moves.length;
         const total = review.totalPlayerMoves ?? analyzed;
-        gameReviewNoteEl.textContent = `Partial review: first ${analyzed} of ${total} player moves analyzed due to move limit. Select a move to see the position before it was played.`;
+        gameReviewNoteEl.textContent = i18n.t('game.review.partialNote', {
+          analyzed: String(analyzed),
+          total: String(total),
+        });
       } else {
-        gameReviewNoteEl.textContent = 'Select a move to see the position before it was played.';
+        gameReviewNoteEl.textContent = i18n.t('game.review.selectMoveNote');
       }
     }
   };
@@ -1444,14 +1589,15 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       onPhase: (phase) => {
         gameReviewPending = phase === 'loading';
         if (gameReviewMovesEl) gameReviewMovesEl.setAttribute('aria-busy', String(gameReviewPending));
-        if (phase === 'loading' && gameReviewNoteEl) gameReviewNoteEl.textContent = 'Reviewing your moves…';
+        currentReviewNoteKey = phase === 'loading' ? 'game.review.reviewingMoves' : null;
         refreshGameReview();
       },
       onResult: renderGameReview,
       onFailure: () => {
+        currentReviewErrorKey = 'game.review.unavailableError';
         if (gameReviewErrorEl) {
           gameReviewErrorEl.hidden = false;
-          gameReviewErrorEl.textContent = 'The review is not available right now. Please try again.';
+          gameReviewErrorEl.textContent = i18n.t(currentReviewErrorKey);
         }
       },
       onInvalidated: invalidateGameReviewPresentation,
@@ -1459,7 +1605,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   });
 
   bindClick(gameReviewRunBtn, () => {
-    if (!gameOver || !gameReviewSupportsVariant(gameReviewCapabilities, currentVariant)) return;
+    if (!gameOver || gameReviewPending || !gameReviewSupportsVariant(gameReviewCapabilities, currentVariant)) return;
     invalidateGameReviewPresentation();
     void gameReviewController.review();
   });
@@ -1689,6 +1835,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       // social region. Raised in the Qodo review of PR #152.
       if (!isUserAuthenticated()) coachController.targetLost();
       refreshCoachControls();
+    },
+    dispose: () => {
+      unsubscribeLocale();
+      controller.dispose();
     },
   };
 }

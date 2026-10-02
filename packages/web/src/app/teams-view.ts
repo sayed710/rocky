@@ -7,18 +7,25 @@ import { el } from './dom.js';
 import { appendPanelRow, renderEmpty } from './render-helpers.js';
 import { shortId } from '../api/graphql.js';
 import type { JoinRequestView, SocialPlayer, TeamMembership, TeamView } from '../api/models.js';
+import { applyAutoDirection } from '../i18n/bidi.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 export function renderTeamList(
   container: HTMLElement,
   teams: readonly TeamView[],
   searched: boolean,
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (teams.length === 0) {
     renderEmpty(container, {
       mark: '♜',
-      title: searched ? 'No teams match that search' : 'No teams yet',
-      body: searched ? 'Try a different term.' : 'Teams created by players will appear here.',
+      title: searched
+        ? i18n.t('community.teams.emptySearchTitle')
+        : i18n.t('community.teams.emptyListTitle'),
+      body: searched
+        ? i18n.t('community.teams.emptySearchBody')
+        : i18n.t('community.teams.emptyListBody'),
     });
     return;
   }
@@ -31,18 +38,21 @@ export function renderTeamList(
       { href: `/teams/${encodeURIComponent(team.slug)}`, 'data-route': 'team', class: 'row-link' },
       team.name,
     );
+    applyAutoDirection(link);
     // The row is `space-between`, so it holds exactly two children: everything identifying the
     // team leads, and the status tag trails. Three loose children would fling the description to
     // the far edge, detached from the name it describes.
     const leading: (Node | string)[] = [link];
     if (team.description) {
-      leading.push(el(doc, 'span', { class: 'count' }, team.description));
+      const descEl = el(doc, 'span', { class: 'count' }, team.description);
+      applyAutoDirection(descEl);
+      leading.push(descEl);
     }
     const row = el(doc, 'div', { class: 'panel-row' }, el(doc, 'span', { class: 'row-main' }, ...leading));
 
     // Only say "private" when it is; a "public" tag on every other row is noise.
     if (team.visibility === 'private') {
-      row.appendChild(el(doc, 'span', { class: 'count' }, 'private'));
+      row.appendChild(el(doc, 'span', { class: 'count' }, i18n.t('community.teams.privateTag')));
     }
 
     container.appendChild(row);
@@ -53,10 +63,15 @@ export function renderTeamMembers(
   container: HTMLElement,
   members: readonly TeamMembership[],
   names: ReadonlyMap<string, SocialPlayer>,
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (members.length === 0) {
-    renderEmpty(container, { title: 'No members', body: 'This team has no members yet.', inline: true });
+    renderEmpty(container, {
+      title: i18n.t('community.teams.emptyMembersTitle'),
+      body: i18n.t('community.teams.emptyMembersBody'),
+      inline: true,
+    });
     return;
   }
 
@@ -69,6 +84,7 @@ export function renderTeamMembers(
       { href: `/profile/${encodeURIComponent(handle)}`, 'data-route': 'profile', class: 'row-link' },
       handle,
     );
+    applyAutoDirection(name);
     // Every member has a role, so showing "member" on most rows would be filler; only the two
     // roles that carry authority are worth the ink.
     const children: (Node | string)[] = [name];
@@ -88,12 +104,13 @@ export function renderJoinRequests(
     readonly onAccept: (request: JoinRequestView) => void;
     readonly onDecline: (request: JoinRequestView) => void;
   },
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (requests.length === 0) {
     renderEmpty(container, {
-      title: 'No pending requests',
-      body: 'Requests to join this team will appear here.',
+      title: i18n.t('community.teams.emptyRequestsTitle'),
+      body: i18n.t('community.teams.emptyRequestsBody'),
       inline: true,
     });
     return;
@@ -105,8 +122,8 @@ export function renderJoinRequests(
       container,
       handle,
       [
-        { label: 'Accept', run: () => actions.onAccept(req) },
-        { label: 'Decline', run: () => actions.onDecline(req) },
+        { label: i18n.t('community.teams.accept'), run: () => actions.onAccept(req) },
+        { label: i18n.t('community.teams.decline'), run: () => actions.onDecline(req) },
       ],
       busy,
     );

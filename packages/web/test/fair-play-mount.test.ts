@@ -48,6 +48,7 @@ test('active human play hides every game-page assistance control', async (t) => 
     client: app.api,
     token: 'token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   t.after(() => {
     mounted.analysis.dispose();
@@ -154,6 +155,7 @@ test('an account-wide fair-play conflict explains each already-visible assistanc
     client: app.api,
     token: 'token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   t.after(() => {
     mounted.analysis.dispose();

@@ -3,6 +3,8 @@
  */
 import type { TimeControl } from '../net/ws-protocol.js';
 
+import type { I18nManager } from '../i18n/manager.js';
+
 /** Format clock milliseconds as `M:SS`. */
 export function formatClock(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -12,21 +14,33 @@ export function formatClock(ms: number): string {
 }
 
 /** Format a time control into a human-readable string. */
-export function formatTimeControl(tc: Pick<TimeControl, 'kind' | 'initialMs' | 'incrementMs' | 'delayMs'>): string {
-  if (tc.kind === 'unlimited') return 'Unlimited';
+export function formatTimeControl(
+  tc: Pick<TimeControl, 'kind' | 'initialMs' | 'incrementMs' | 'delayMs'>,
+  i18n: I18nManager,
+): string {
+  const t = i18n.t.bind(i18n);
+  if (tc.kind === 'unlimited') return t('timeControl.unlimited');
   if (tc.kind === 'sudden_death') {
     const sec = tc.initialMs / 1000;
-    return sec >= 60 && sec % 60 === 0 ? `${sec / 60} min` : `${sec} sec`;
+    if (sec >= 60 && sec % 60 === 0) {
+      const count = String(sec / 60);
+      return t('timeControl.min', { count });
+    }
+    const count = String(sec);
+    return t('timeControl.sec', { count });
   }
   if (tc.kind === 'increment') {
     return `${tc.initialMs / 60000}+${tc.incrementMs / 1000}`;
   }
   if (tc.kind === 'delay') {
     const sec = tc.initialMs / 1000;
-    const base = sec >= 60 && sec % 60 === 0 ? `${sec / 60} min` : `${sec} sec`;
-    return `${base} delay ${tc.delayMs / 1000}`;
+    const base = sec >= 60 && sec % 60 === 0
+      ? t('timeControl.min', { count: String(sec / 60) })
+      : t('timeControl.sec', { count: String(sec) });
+    const delay = String(tc.delayMs / 1000);
+    return t('timeControl.delay', { base, delay });
   }
-  return 'Unknown';
+  return t('timeControl.unknown');
 }
 
 /** Options for {@link renderEmpty}. */
@@ -111,6 +125,7 @@ export function appendPanelRow(
 
   const name = doc.createElement('span');
   name.textContent = label;
+  name.setAttribute('dir', 'auto');
   row.appendChild(name);
 
   if (actions.length > 0) {

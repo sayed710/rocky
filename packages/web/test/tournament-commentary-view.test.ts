@@ -11,10 +11,31 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   COMMENTARY_MESSAGES,
-  renderGameCommentary,
-  renderRoundRecap,
+  renderGameCommentary as renderGameCommentaryBase,
+  renderRoundRecap as renderRoundRecapBase,
 } from '../src/app/tournament-commentary-view.js';
+import { createI18nManager, type I18n } from '../src/i18n/index.js';
 import type { TournamentGameCommentary, TournamentRoundRecap } from '../src/api/models.js';
+
+const testI18n = createI18nManager();
+
+function renderGameCommentary(
+  doc: Document,
+  container: HTMLElement,
+  commentary: TournamentGameCommentary,
+  i18n: I18n = testI18n,
+): void {
+  renderGameCommentaryBase(doc, container, commentary, i18n);
+}
+
+function renderRoundRecap(
+  doc: Document,
+  container: HTMLElement,
+  recap: TournamentRoundRecap,
+  i18n: I18n = testI18n,
+): void {
+  renderRoundRecapBase(doc, container, recap, i18n);
+}
 import { FakeElement } from './support/analysis-fixtures.js';
 
 /**

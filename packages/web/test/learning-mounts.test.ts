@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { GambitClient } from '../src/api/client.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { mountCourseDetail, mountCourseList } from '../src/app/learning-mounts.js';
 import { httpErrorFrom } from '../src/net/errors.js';
+
+const defaultI18n = createI18nManager();
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
   let resolve!: () => void;
@@ -31,6 +34,7 @@ test('course detail waits for session restoration and disposal prevents its dela
     slug: 'openings',
     sessionPresent: false,
     restorePromise: restored.promise,
+    i18n: defaultI18n,
   });
   assert.equal(requests, 0);
 
@@ -64,7 +68,7 @@ test('course list renders the existing unavailable state for an unconfigured ser
     },
   } as unknown as GambitClient;
 
-  mountCourseList({ doc, client, surface });
+  mountCourseList({ doc, client, surface, i18n: defaultI18n });
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(child, {

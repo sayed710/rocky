@@ -13,8 +13,19 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mountSearch } from '../src/app/search-mount.js';
+import { mountSearch as mountSearchBase } from '../src/app/search-mount.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { GambitClient } from '../src/api/client.js';
+
+const testI18n = createI18nManager();
+
+function mountSearch(
+  doc: Document,
+  client: GambitClient,
+  loadFlags?: () => Promise<unknown>,
+) {
+  return mountSearchBase(doc, client, testI18n, loadFlags);
+}
 import { FakeTransport, json } from './support/fake-transport.js';
 import { FakeElement } from './support/analysis-fixtures.js';
 

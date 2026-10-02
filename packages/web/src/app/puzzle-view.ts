@@ -2,51 +2,63 @@
 import type { PuzzleEvidence, PuzzleGenerationResponse } from '../api/models.js';
 import { formatEvaluation, formatPrincipalVariation } from './analysis-format.js';
 
-export const PUZZLE_MESSAGES = {
-  idle: 'Find a tactic in the position on the board.',
-  running: 'Searching for a tactic…',
-  positionChanged: 'Position changed. Search again.',
-  signedOut: 'Sign in to find tactics.',
-  noTactic: 'No tactic met the server’s fixed evidence threshold.',
-  insufficient: 'The engine returned insufficient evidence for a conclusion.',
-  terminal: 'This position is already decided.',
-  rateLimited: 'Too many tactic searches. Try again shortly.',
-  unavailable: 'Tactic search is unavailable right now.',
-  activeGame: 'Tactic search is unavailable while you are playing a live human game.',
-  unsupportedVariant: 'Tactic search is not available for this variant.',
-  rejected: 'This position cannot be searched for tactics.',
-  failed: 'Could not search for a tactic.',
-} as const;
+import type { I18nManager } from '../i18n/manager.js';
+import type { MessageKey } from '../i18n/catalog/index.js';
+
+export const PUZZLE_MESSAGE_KEYS = {
+  idle: 'ai.puzzle.idle',
+  running: 'ai.puzzle.running',
+  positionChanged: 'ai.puzzle.positionChanged',
+  signedOut: 'ai.puzzle.signedOut',
+  noTactic: 'ai.puzzle.noTactic',
+  insufficient: 'ai.puzzle.insufficient',
+  terminal: 'ai.puzzle.terminal',
+  rateLimited: 'ai.puzzle.rateLimited',
+  unavailable: 'ai.puzzle.unavailable',
+  activeGame: 'ai.puzzle.activeGame',
+  unsupportedVariant: 'ai.puzzle.unsupportedVariant',
+  rejected: 'ai.puzzle.rejected',
+  failed: 'ai.puzzle.failed',
+} as const satisfies Record<string, MessageKey>;
+
+export type PuzzleMessageKey = keyof typeof PUZZLE_MESSAGE_KEYS;
+
+export function puzzleMessage(key: PuzzleMessageKey, i18n: I18nManager): string {
+  return i18n.t(PUZZLE_MESSAGE_KEYS[key]);
+}
 
 export function renderPuzzleResult(
   rows: HTMLElement,
   resultEl: HTMLElement,
   result: PuzzleGenerationResponse,
+  i18n: I18nManager,
 ): string | null {
   rows.innerHTML = '';
   if (result.kind === 'insufficient') {
     resultEl.hidden = true;
-    return result.reason === 'terminal_position' ? PUZZLE_MESSAGES.terminal : PUZZLE_MESSAGES.insufficient;
+    return result.reason === 'terminal_position'
+      ? i18n.t('ai.puzzle.terminal')
+      : i18n.t('ai.puzzle.insufficient');
   }
 
   const doc = rows.ownerDocument ?? document;
   if (result.kind === 'puzzle') {
-    rows.appendChild(row(doc, 'Solution', result.solutionMove));
-    rows.appendChild(row(doc, 'Line', formatPrincipalVariation(result.solutionLine)));
-    rows.appendChild(row(doc, 'Evidence', evidenceLabel(result.evidence)));
-    rows.appendChild(row(doc, 'Difficulty', result.difficulty));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.solution'), result.solutionMove));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.line'), formatPrincipalVariation(result.solutionLine)));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.evidence'), evidenceLabel(result.evidence, i18n)));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.difficulty'), result.difficulty));
   } else {
-    rows.appendChild(row(doc, 'Best move', result.bestMove));
-    rows.appendChild(row(doc, 'Alternative', result.comparisonMove));
-    rows.appendChild(row(doc, 'Evidence', evidenceLabel(result.evidence)));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.bestMove'), result.bestMove));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.alternative'), result.comparisonMove));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.evidence'), evidenceLabel(result.evidence, i18n)));
     rows.appendChild(row(
       doc,
-      'Evaluations',
+      i18n.t('ai.puzzle.label.evaluations'),
       `${formatEvaluation(result.bestEvaluation, result.fen)} / ${formatEvaluation(result.comparisonEvaluation, result.fen)}`,
     ));
   }
   resultEl.hidden = false;
-  return result.kind === 'no_tactic' ? PUZZLE_MESSAGES.noTactic : null;
+  return result.kind === 'no_tactic' ? i18n.t('ai.puzzle.noTactic') : null;
 }
 
 export function clearPuzzle(rows: HTMLElement, result: HTMLElement): void {
@@ -69,12 +81,16 @@ export function renderPuzzleError(el: HTMLElement, text: string | null): void {
   el.hidden = text === null;
 }
 
-function evidenceLabel(evidence: PuzzleEvidence): string {
-  if (evidence.kind === 'centipawn_gap') return `${(evidence.gapCp / 100).toFixed(2)} pawn gap`;
+function evidenceLabel(evidence: PuzzleEvidence, i18n: I18nManager): string {
+  if (evidence.kind === 'centipawn_gap') return i18n.t('ai.puzzle.pawnGap', { gap: (evidence.gapCp / 100).toFixed(2) });
   const relation = evidence.relation.replaceAll('_', ' ');
   if (evidence.distanceGap === null) return relation;
-  const unit = evidence.distanceGap === 1 ? 'move' : 'moves';
-  return `${relation} · ${evidence.distanceGap} ${unit}`;
+  const unit = evidence.distanceGap === 1 ? i18n.t('ai.puzzle.move') : i18n.t('ai.puzzle.moves');
+  return i18n.t('ai.puzzle.distanceGap', {
+    relation,
+    count: String(evidence.distanceGap),
+    unit,
+  });
 }
 
 function row(doc: Document, labelText: string, valueText: string): HTMLElement {

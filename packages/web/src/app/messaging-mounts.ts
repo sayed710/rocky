@@ -3,15 +3,19 @@ import { shortId } from '../api/graphql.js';
 import { MessagesController } from './messages-controller.js';
 import type { MessagesCallbacks } from './messages-controller.js';
 import { renderInbox, renderThread } from './messages-view.js';
+import { applyAutoDirection } from '../i18n/bidi.js';
+import type { I18n } from '../i18n/manager.js';
+import type { ConversationSummary, MessageView, SocialPlayer } from '../api/models.js';
 
-interface MessagingMountDependencies {
+export interface MessagingMountDependencies {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly sessionPresent: boolean;
   readonly restorePromise: Promise<unknown>;
+  readonly i18n: I18n;
 }
 
-interface ConversationMountDependencies extends MessagingMountDependencies {
+export interface ConversationMountDependencies extends MessagingMountDependencies {
   readonly conversationId: string;
 }
 
@@ -37,51 +41,21 @@ function loadAfterSessionRestore(
   else void restorePromise.then(() => load()).catch(() => undefined);
 }
 
-function createInboxCallbacks(
-  elements: InboxElements,
-  currentUserId: () => string | null,
-): MessagesCallbacks {
-  return {
-    onInbox: (items, names) => {
-      if (elements.error) elements.error.textContent = '';
-      if (elements.inbox) renderInbox(elements.inbox, items, names, currentUserId());
-    },
-    onThread: () => {},
-    onLoading: (loading) => {
-      if (elements.inbox) elements.inbox.setAttribute('aria-busy', loading ? 'true' : 'false');
-    },
-    onError: (message) => {
-      if (elements.error) elements.error.textContent = message;
-    },
-  };
-}
-
-function createConversationCallbacks(
-  elements: ConversationElements,
-  currentUserId: () => string | null,
-): MessagesCallbacks {
-  return {
-    onInbox: () => {},
-    onThread: (_id, messages, names, otherParticipantId) => {
-      if (elements.error) elements.error.textContent = '';
-      if (elements.thread) renderThread(elements.thread, messages, names, currentUserId());
-
-      if (elements.participant) {
-        // A conversation's participants, rather than its messages, identify the other person when
-        // the viewer is the only participant who has posted so far.
-        elements.participant.textContent =
-          otherParticipantId === null
-            ? 'Conversation'
-            : `Conversation with ${names.get(otherParticipantId)?.handle ?? shortId(otherParticipantId)}`;
-      }
-    },
-    onLoading: (loading) => {
-      if (elements.thread) elements.thread.setAttribute('aria-busy', loading ? 'true' : 'false');
-    },
-    onError: (message) => {
-      if (elements.error) elements.error.textContent = message;
-    },
-  };
+function updateParticipantHeader(
+  headerEl: HTMLElement | null,
+  names: ReadonlyMap<string, SocialPlayer>,
+  otherParticipantId: string | null,
+  i18n: I18n,
+): void {
+  if (!headerEl) return;
+  if (otherParticipantId === null) {
+    headerEl.textContent = i18n.t('community.messages.conversation');
+    headerEl.removeAttribute('dir');
+  } else {
+    const handle = names.get(otherParticipantId)?.handle ?? shortId(otherParticipantId);
+    headerEl.textContent = i18n.t('community.messages.conversationWith', { handle });
+    applyAutoDirection(headerEl);
+  }
 }
 
 function bindComposer(
@@ -90,6 +64,7 @@ function bindComposer(
   conversationId: string,
   sessionPresent: boolean,
   restorePromise: Promise<unknown>,
+  i18n: I18n,
 ): () => void {
   if (!elements.composer || !elements.input) return () => {};
   const composer = elements.composer;
@@ -124,7 +99,9 @@ function bindComposer(
       if (composer.onsubmit !== onSubmit) return;
       input.disabled = false;
       if (elements.error) {
-        elements.error.textContent = error instanceof Error ? error.message : 'Message could not be sent';
+        elements.error.textContent = error instanceof Error
+          ? error.message
+          : i18n.t('community.messages.sendFailed');
       }
     });
   };
@@ -141,14 +118,46 @@ export function mountMessagesInbox({
   client,
   sessionPresent,
   restorePromise,
+  i18n,
 }: MessagingMountDependencies): MessagesController {
   const elements: InboxElements = {
     inbox: doc.getElementById('messages-inbox'),
     error: doc.getElementById('messages-error'),
   };
+
+  let lastItems: readonly ConversationSummary[] | null = null;
+  let lastNames: ReadonlyMap<string, SocialPlayer> | null = null;
+
+  const currentUserId = (): string | null => client.session.current?.user.id ?? null;
+
+  const callbacks: MessagesCallbacks = {
+    onInbox: (items, names) => {
+      lastItems = items;
+      lastNames = names;
+      if (elements.error) elements.error.textContent = '';
+      if (elements.inbox) renderInbox(elements.inbox, items, names, currentUserId(), i18n);
+    },
+    onThread: () => {},
+    onLoading: (loading) => {
+      if (elements.inbox) elements.inbox.setAttribute('aria-busy', loading ? 'true' : 'false');
+    },
+    onError: (message) => {
+      if (elements.error) elements.error.textContent = message;
+    },
+  };
+
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
+    if (lastItems !== null && lastNames !== null && elements.inbox) {
+      renderInbox(elements.inbox, lastItems, lastNames, currentUserId(), i18n);
+    }
+  });
+
   const controller = new MessagesController({
     client,
-    callbacks: createInboxCallbacks(elements, () => client.session.current?.user.id ?? null),
+    callbacks,
+    onDispose: () => {
+      unsubscribeLocale();
+    },
   });
 
   loadAfterSessionRestore(sessionPresent, restorePromise, () => void controller.loadInbox());
@@ -161,6 +170,7 @@ export function mountConversation({
   conversationId,
   sessionPresent,
   restorePromise,
+  i18n,
 }: ConversationMountDependencies): MessagesController {
   const elements: ConversationElements = {
     thread: doc.getElementById('conversation-thread'),
@@ -169,17 +179,64 @@ export function mountConversation({
     composer: doc.getElementById('conversation-composer') as HTMLFormElement | null,
     input: doc.getElementById('composer-input') as HTMLInputElement | null,
   };
+
+  let lastThread: {
+    readonly conversationId: string;
+    readonly messages: readonly MessageView[];
+    readonly names: ReadonlyMap<string, SocialPlayer>;
+    readonly otherParticipantId: string | null;
+  } | null = null;
+
+  const currentUserId = (): string | null => client.session.current?.user.id ?? null;
+
+  const callbacks: MessagesCallbacks = {
+    onInbox: () => {},
+    onThread: (id, messages, names, otherParticipantId) => {
+      lastThread = { conversationId: id, messages, names, otherParticipantId };
+      if (elements.error) elements.error.textContent = '';
+      if (elements.thread) renderThread(elements.thread, messages, names, currentUserId(), i18n);
+      updateParticipantHeader(elements.participant, names, otherParticipantId, i18n);
+    },
+    onLoading: (loading) => {
+      if (elements.thread) elements.thread.setAttribute('aria-busy', loading ? 'true' : 'false');
+    },
+    onError: (message) => {
+      if (elements.error) elements.error.textContent = message;
+    },
+  };
+
+  const unsubscribeLocale = i18n.onLocaleChange(() => {
+    if (lastThread !== null) {
+      if (elements.thread) {
+        renderThread(elements.thread, lastThread.messages, lastThread.names, currentUserId(), i18n);
+      }
+      updateParticipantHeader(
+        elements.participant,
+        lastThread.names,
+        lastThread.otherParticipantId,
+        i18n,
+      );
+    }
+  });
+
   let unbindComposer = (): void => {};
   const controller = new MessagesController({
     client,
-    callbacks: createConversationCallbacks(
-      elements,
-      () => client.session.current?.user.id ?? null,
-    ),
-    onDispose: () => unbindComposer(),
+    callbacks,
+    onDispose: () => {
+      unbindComposer();
+      unsubscribeLocale();
+    },
   });
 
-  unbindComposer = bindComposer(elements, controller, conversationId, sessionPresent, restorePromise);
+  unbindComposer = bindComposer(
+    elements,
+    controller,
+    conversationId,
+    sessionPresent,
+    restorePromise,
+    i18n,
+  );
   loadAfterSessionRestore(sessionPresent, restorePromise, () => {
     void controller.loadThread(conversationId);
     controller.startPolling(conversationId);
