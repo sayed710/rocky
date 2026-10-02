@@ -269,3 +269,22 @@ test('setPosition clears selection but gestures resume afterwards', () => {
   assert.equal(bi.highlights().selected, null);
   assert.equal(bi.tap('d2').kind, 'select');
 });
+
+test('with input disabled (a finished game) gestures do nothing and nothing stays queued', () => {
+  const bi = make(START_BLACK, { myTurn: false, playerColor: 'white' });
+  bi.tap('e2');
+  bi.tap('e4'); // a premove queued while the game was live
+  bi.tap('g1'); // and a live selection
+  bi.setInputEnabled(false);
+  assert.equal(bi.hasPremove, false, 'queued premoves are dropped');
+  assert.equal(bi.highlights().selected, null, 'the selection is dropped');
+  assert.equal(bi.tap('d2').kind, 'none');
+  assert.equal(bi.dragStart('d2').kind, 'none');
+  assert.equal(bi.drop('d2', 'd4').kind, 'none');
+  assert.equal(bi.hasPremove, false, 'no premove can be queued on a finished board');
+
+  bi.setTurn(true);
+  assert.equal(bi.tap('e2').kind, 'none', 'not even on our turn');
+  bi.setInputEnabled(true);
+  assert.equal(bi.tap('e2').kind, 'select');
+});

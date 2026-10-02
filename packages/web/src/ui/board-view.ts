@@ -173,6 +173,17 @@ export class BoardView {
   setTurn(myTurn: boolean): void {
     this.interaction.setTurn(myTurn);
     // A surviving selection's destinations change with the turn; show and describe them now.
+    // Without a selection nothing visible changed, so the DOM is left alone.
+    if (this.interaction.highlights().selected !== null) this.render();
+  }
+
+  /** Accept or ignore move input; disabling also dismisses an open promotion chooser. */
+  setInputEnabled(enabled: boolean): void {
+    // Called on every action-state update; re-rendering each time replaces the cells under anyone
+    // measuring or focusing them, so only a real change touches the DOM.
+    if (enabled === this.interaction.acceptsInput) return;
+    if (!enabled && this.overlay) this.cancelPromotion();
+    this.interaction.setInputEnabled(enabled);
     this.render();
   }
 

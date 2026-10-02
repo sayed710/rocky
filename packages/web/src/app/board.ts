@@ -74,6 +74,8 @@ export interface MountedBoard {
   setLastMove: (from: string | null, to: string | null) => void;
   /** Update whose turn it is (affects legal highlights + premoves). */
   setTurn: (myTurn: boolean) => void;
+  /** Accept or ignore move input (off once the game is over). */
+  setInputEnabled: (enabled: boolean) => void;
   /** Set the board orientation ('white' or 'black' perspective). */
   setOrientation: (orientation: 'white' | 'black') => void;
   /**
@@ -245,6 +247,10 @@ export function mountBoard(
     setTurn: (myTurn: boolean) => {
       clearFeedback();
       view.setTurn(myTurn);
+    },
+    setInputEnabled: (enabled: boolean) => {
+      clearFeedback();
+      view.setInputEnabled(enabled);
     },
     setOrientation: (orientation: 'white' | 'black') => {
       if (view.orientationColor !== orientation) view.flip();

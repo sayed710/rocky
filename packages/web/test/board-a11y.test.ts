@@ -786,6 +786,38 @@ test('a selection that survives the turn arriving shows its destinations at once
   );
 });
 
+test('turn and input updates that change nothing visible leave the cells in place', () => {
+  // The game route calls these on every sync and action-state update. Rebuilding the grid each time
+  // detached cells under anything measuring or focusing them (reproduced as flaky geometry tests).
+  const { root, board } = mountWithFeedback();
+  const cell = root.querySelector('[data-square="a1"]');
+  board.setInputEnabled(true);
+  board.setInputEnabled(true);
+  board.setTurn(false);
+  board.setTurn(true);
+  assert.equal(root.querySelector('[data-square="a1"]'), cell, 'the same cell, not a re-rendered copy');
+});
+
+test('a finished board accepts no gestures: no rejection, no premove, nothing submitted', () => {
+  const { root, feedback, moves, board, press } = mountWithFeedback();
+  board.setTurn(false);
+  press('e2');
+  press('e4'); // premove queued while the game was live
+  assert.equal(root.querySelector('[data-square="e4"]')?.getAttribute('aria-description'), 'premove');
+
+  board.setInputEnabled(false);
+  assert.equal(root.querySelector('[data-square="e4"]')?.getAttribute('aria-description'), null, 'the queued premove is gone');
+  press('e2');
+  press('e5');
+  board.setTurn(true);
+  press('e2');
+  press('e5');
+  assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-selected'), 'false');
+  assert.equal(root.querySelector('[data-square="e5"]')?.getAttribute('aria-description'), null);
+  assert.equal(feedback.children.length, 0);
+  assert.deepEqual(moves, []);
+});
+
 test('a repeated identical rejection is announced again as a fresh live-region addition', () => {
   const { feedback, press, announced } = mountWithFeedback();
   press('e2');

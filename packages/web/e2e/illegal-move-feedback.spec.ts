@@ -120,6 +120,23 @@ test('a keyboard player hears a rejected move, nothing is sent, and the next leg
     } finally {
       await spectatorContext.close();
     }
+
+    // Once the game is over the board takes no gestures: no premove, no rejection, status untouched.
+    await page.click('#action-resign');
+    await page.click('#confirm-resign-yes');
+    await expect(status).toHaveText(/resignation/i, { timeout: 15_000 });
+    const finalStatus = await status.textContent();
+    // It ended on Black's turn; off-turn the board offers the side to move, so try Black's pawn.
+    await board.locator('[data-square="e7"]').focus();
+    await page.keyboard.press('Enter');
+    await expect(board.locator('[data-square="e7"]')).toHaveAttribute('aria-selected', 'false');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await expect(board.locator('[data-square="e5"]')).not.toHaveAttribute('aria-description', /premove/);
+    await expect(status).toHaveText(finalStatus ?? '');
+    await expect(feedback).toBeEmpty();
+    expect(sentMoves).toEqual(['e2e4']);
   } finally {
     await context.close();
   }
@@ -169,6 +186,21 @@ test('a touch rejection at 390px in a right-to-left document fits without layout
     await board.locator('[data-square="e2"]').tap();
     await board.locator('[data-square="e4"]').tap();
     await expect(board.locator('[data-square="e4"]')).toHaveAttribute('aria-label', 'e4, white pawn', { timeout: 15_000 });
+    await expect(feedback).toBeEmpty();
+    expect(sentMoves).toEqual(['e2e4']);
+
+    // Resign on our own turn: the ending keeps the turn, and the finished board must take no premove.
+    const status = page.locator('#status');
+    await expect(status).toHaveText(/your move/i, { timeout: 15_000 });
+    await page.locator('#action-resign').tap();
+    await page.locator('#confirm-resign-yes').tap();
+    await expect(status).toHaveText(/resignation/i, { timeout: 15_000 });
+    const finalStatus = await status.textContent();
+    await board.locator('[data-square="d2"]').tap();
+    await expect(board.locator('[data-square="d2"]')).toHaveAttribute('aria-selected', 'false');
+    await board.locator('[data-square="d4"]').tap();
+    await expect(board.locator('[data-square="d4"]')).not.toHaveAttribute('aria-description', /premove|legal/);
+    await expect(status).toHaveText(finalStatus ?? '');
     await expect(feedback).toBeEmpty();
     expect(sentMoves).toEqual(['e2e4']);
   } finally {

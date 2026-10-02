@@ -71,6 +71,7 @@ export class BoardInteraction {
   private legal: readonly Square[] = [];
   private lastMove: readonly [Square, Square] | null = null;
   private pending: Pending | null = null;
+  private inputEnabled = true;
 
   constructor(options: BoardInteractionOptions) {
     this.oracle = options.oracle;
@@ -103,6 +104,23 @@ export class BoardInteraction {
     // made off-turn survives it. Judge that selection by this turn's destinations, not the empty
     // off-turn list, or a legal move would be reported illegal.
     if (this.selected !== null) this.setSelection(this.selected);
+  }
+
+  /**
+   * Accept or ignore gestures. A finished game takes none: off-turn is not "anything goes", so
+   * without this a finished board would still select pieces and queue premoves.
+   */
+  setInputEnabled(enabled: boolean): void {
+    if (enabled === this.inputEnabled) return;
+    this.inputEnabled = enabled;
+    if (enabled) return;
+    this.clearSelection();
+    this.pending = null;
+    this.premoves.clear();
+  }
+
+  get acceptsInput(): boolean {
+    return this.inputEnabled;
   }
 
   get hasPremove(): boolean {
@@ -149,14 +167,14 @@ export class BoardInteraction {
 
   /** Begin a drag on `sq`; selects it if it is a movable piece. */
   dragStart(sq: Square): GestureResult {
-    if (this.pending) return { kind: 'none' };
+    if (this.pending || !this.inputEnabled) return { kind: 'none' };
     if (!this.isOwnPiece(sq)) return { kind: 'none' };
     return this.select(sq);
   }
 
   /** Complete a drag from `from` onto `to`. */
   drop(from: Square, to: Square): GestureResult {
-    if (this.pending) return { kind: 'none' };
+    if (this.pending || !this.inputEnabled) return { kind: 'none' };
     if (!isSquare(from) || !isSquare(to) || from === to) {
       this.clearSelection();
       return { kind: 'deselect' };
@@ -167,7 +185,7 @@ export class BoardInteraction {
 
   /** Handle a click/tap on a square (click-to-move). */
   tap(sq: Square): GestureResult {
-    if (this.pending) return { kind: 'none' };
+    if (this.pending || !this.inputEnabled) return { kind: 'none' };
     if (this.selected === null) {
       return this.isOwnPiece(sq) ? this.select(sq) : { kind: 'none' };
     }
