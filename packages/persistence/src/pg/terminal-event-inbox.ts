@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
-import type { Termination } from '@chess-platform/game';
+import type { ResultString, Termination } from '@chess-platform/game';
 import { upcast, type ClaimedTerminalEvent, type TerminalConsumer, type TerminalEventFailure, type TerminalEventInbox, type TerminalEventLease, type TerminalEventPosition, type TerminalEventWork } from '../event-store';
 import { assertTerminalConsumer, terminalDeadline, terminalRetryDelay, TERMINAL_LEASE_MS, TERMINAL_MAX_FAILURES } from '../terminal-event-retry';
 
@@ -144,19 +144,21 @@ export class PgTerminalEventInbox implements TerminalEventInbox {
   }
 }
 
-const TERMINATIONS: Readonly<Record<Termination, true>> = {
-  checkmate: true, resignation: true, timeout: true, stalemate: true, agreement: true,
-  insufficient_material: true, fifty_move: true, threefold: true, variant: true,
-  aborted: true, no_show: true,
+// Derived from Game's terminal-event producers, including variant draws and tournament no-shows.
+const TERMINATIONS: Readonly<Record<Termination, readonly ResultString[]>> = {
+  checkmate: ['1-0', '0-1'], resignation: ['1-0', '0-1'], timeout: ['1-0', '0-1'],
+  stalemate: ['1/2-1/2'], agreement: ['1/2-1/2'], insufficient_material: ['1/2-1/2'],
+  fifty_move: ['1/2-1/2'], threefold: ['1/2-1/2'], variant: ['1-0', '0-1', '1/2-1/2'],
+  aborted: ['*'], no_show: ['1-0', '0-1', '*'],
 };
+const WINNERS: Readonly<Record<ResultString, 'w' | 'b' | null>> = { '1-0': 'w', '0-1': 'b', '1/2-1/2': null, '*': null };
 
 function decodeTerminalRow(row: TerminalRow): TerminalEventWork {
   try {
     const event = upcast('GameEnded', Number(row.event_version), row.payload);
     if (!event || event.type !== 'GameEnded' || !['1-0', '0-1', '1/2-1/2', '*'].includes(event.result)
       || typeof event.termination !== 'string' || !Object.hasOwn(TERMINATIONS, event.termination)
-      || !['w', 'b', null].includes(event.winner)
-      || (event.result === '*' && (event.winner !== null || !['aborted', 'no_show'].includes(event.termination)))
+      || !TERMINATIONS[event.termination].includes(event.result) || event.winner !== WINNERS[event.result]
       || !Number.isSafeInteger(event.at) || event.at < 0) {
       throw new Error('invalid terminal event shape');
     }

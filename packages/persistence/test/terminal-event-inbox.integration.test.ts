@@ -274,6 +274,42 @@ test('malformed current-version endings cannot become successful abort receipts'
   });
 });
 
+test('result winner and termination contradictions remain unreceipted while authority endings are accepted', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    const inbox = new PgTerminalEventInbox(pool);
+    const cases = [
+      ['1-0', 'resignation', null, false], ['1-0', 'checkmate', 'b', false],
+      ['0-1', 'timeout', 'w', false], ['1/2-1/2', 'agreement', 'w', false],
+      ['1/2-1/2', 'checkmate', null, false], ['1/2-1/2', 'resignation', null, false],
+      ['1/2-1/2', 'timeout', null, false], ['1/2-1/2', 'no_show', null, false],
+      ['1-0', 'stalemate', 'w', false], ['1-0', 'aborted', 'w', false],
+      ['1-0', 'checkmate', 'w', true], ['0-1', 'checkmate', 'b', true],
+      ['1-0', 'resignation', 'w', true], ['0-1', 'resignation', 'b', true],
+      ['1-0', 'timeout', 'w', true], ['0-1', 'timeout', 'b', true],
+      ['1-0', 'variant', 'w', true], ['0-1', 'variant', 'b', true],
+      ['1/2-1/2', 'variant', null, true], ['1/2-1/2', 'stalemate', null, true],
+      ['1/2-1/2', 'agreement', null, true], ['1/2-1/2', 'insufficient_material', null, true],
+      ['1/2-1/2', 'fifty_move', null, true], ['1/2-1/2', 'threefold', null, true],
+      ['1-0', 'no_show', 'w', true], ['0-1', 'no_show', 'b', true],
+      ['*', 'no_show', null, true], ['*', 'aborted', null, true],
+    ] as const;
+    for (const [result, termination, winner, valid] of cases) {
+      const id = randomUUID();
+      await pool.query('INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, $2, 1, $3)',
+        [id, 'GameEnded', { type: 'GameEnded', result, termination, winner, at: 0 }]);
+      const claim = await inbox.claimAfter('bot-analysis', null);
+      assert.ok(claim);
+      assert.equal('stored' in claim.work, valid, `${result}/${termination}/${winner}`);
+      if (valid) assert.equal(await inbox.acknowledge(claim.lease), true);
+      else {
+        assert.equal((await inbox.fail(claim.lease))?.failures, 1);
+        assert.equal((await pool.query('SELECT 1 FROM terminal_event_receipts WHERE game_id = $1', [id])).rowCount, 0);
+      }
+    }
+  });
+});
+
 test('0047 upgrade preserves receipts and reports, manufactures no attempts, and enforces retry constraints', { skip }, async () => {
   const prior = mkdtempSync(join(tmpdir(), 'trust-retry-schema-'));
   for (const migration of migrationFiles(migrationsDir())) {

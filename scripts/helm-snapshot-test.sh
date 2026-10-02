@@ -462,9 +462,9 @@ check "Trust worker: terminationGracePeriodSeconds lets a long analysis finish (
 check "Trust worker: disabled, the API NetworkPolicy no longer admits it" "$([ "$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="api") | .spec.ingress[].from[].podSelector.matchLabels."app.kubernetes.io/component"' "$TMPDIR/trust-off.yaml" 2>/dev/null | grep -c 'trust-worker' || true)" = "0" ] && echo 0 || echo 1)"
 check "Trust worker: positive control - the refused renders differ from one that succeeds" "$(helm template "$CHART_DIR" "${HELM_SECRETS[@]}" --set trustWorker.enabled=true --set trustWorker.botAnalysis=true --set trustWorker.antiCheatAnalysis=false >/dev/null 2>&1 && echo 0 || echo 1)"
 check "Trust worker: declares only its health port (no WebSocket port)" "$([ "$(trust_doc "$TMPDIR/default.yaml" | grep -c 'containerPort' || true)" = "1" ] && echo 0 || echo 1)"
-TW_SURGE=$(trust_doc "$TMPDIR/default.yaml" | grep -c 'maxSurge: 1' || true)
-TW_UNAVAIL=$(trust_doc "$TMPDIR/default.yaml" | grep -c 'maxUnavailable: 0' || true)
-check "Trust worker: rolls with maxSurge 1 / maxUnavailable 0" "$([ "$TW_SURGE" = "1" ] && [ "$TW_UNAVAIL" = "1" ] && echo 0 || echo 1)"
+TW_RECREATE=$(trust_doc "$TMPDIR/default.yaml" | grep -c 'type: Recreate' || true)
+TW_ROLLING_FIELDS=$(trust_doc "$TMPDIR/default.yaml" | grep -Ec 'rollingUpdate:|maxSurge:|maxUnavailable:' || true)
+check "Trust worker: Recreate prevents legacy/new revision overlap with no rolling fields" "$([ "$TW_RECREATE" = "1" ] && [ "$TW_ROLLING_FIELDS" = "0" ] && echo 0 || echo 1)"
 check "Trust worker: NetworkPolicy admits no inbound traffic" "$([ "$(yq 'select(.kind=="NetworkPolicy" and .metadata.labels."app.kubernetes.io/component"=="trust-worker") | .spec.ingress | length' "$TMPDIR/default.yaml" 2>/dev/null | tr -d '
 -')" = "0" ] && echo 0 || echo 1)"
 check "Trust worker: carries no access-token secret" "$([ "$(trust_doc "$TMPDIR/default.yaml" | grep -c 'ACCESS_TOKEN_SECRET' || true)" = "0" ] && echo 0 || echo 1)"

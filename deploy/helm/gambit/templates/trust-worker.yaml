@@ -14,10 +14,11 @@ Notes:
   only port is the health port the kubelet probes.
 - Work comes from the durable terminal-event inbox (committed GameEnded rows
   plus per-consumer receipts), rescanned on start and periodically; Redis only
-  wakes it early. So RollingUpdate with maxSurge 1 / maxUnavailable 0 is safe:
-  upgraded workers use fenced per-consumer leases to prevent duplicate analysis;
-  expired leases recover work after a crash. Drain legacy workers when first
-  upgrading to migration 0048 (ADR-0155), since they do not participate in claims.
+  wakes it early. Recreate terminates the old revision before creating its
+  replacement, preventing legacy/new overlap on the first upgrade (ADR-0155).
+  The brief worker gap loses no durable work. Fenced per-consumer leases protect
+  accidental overlap between upgraded workers; expiry recovers crashed work.
+  Drain any separately deployed legacy workers, which do not acquire leases.
 - Not part of rollout.strategy: blue/green and canary apply to api and web.
 */}}
 {{- range $key := list "enabled" "botAnalysis" "antiCheatAnalysis" }}
@@ -40,10 +41,7 @@ spec:
   # Pinned to 1 on purpose — see the header comment. Do not parameterize.
   replicas: 1
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    type: Recreate
   selector:
     matchLabels:
       {{- include "gambit.selectorLabels" . | nindent 6 }}

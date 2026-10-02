@@ -61,6 +61,16 @@ Successful acknowledgement writes the receipt and deletes retry state in one
 transaction; both roll back if receipt writing fails. Receipts remain the
 authoritative suppression predicate, including previously completed history.
 
+Trust-worker report upserts also carry the claim and cancellation signal.
+Their short transaction validates the consumer and batch game, locks the event
+then current retry row, and checks token, expiry and absence of a receipt.
+It rechecks ownership and cancellation immediately before commit. Replacement
+claims cannot cross that locked write boundary; a delayed stale batch or a batch
+that expires during writing rolls back instead of overwriting replacement results.
+Fenced report transactions use five-second lock, statement and idle-transaction
+timeouts. Analysis runs before these locks; existing unleased repository callers
+and domain report interfaces retain their contract.
+
 Failure increments `failures` exactly once, saturating at PostgreSQL's signed
 integer maximum, **2,147,483,647**. For failure number `n >= 1`, delay is:
 
@@ -88,7 +98,10 @@ Stop checks both before and after each awaited claim.
 ## Operations and scope
 
 Failure logs contain consumer, game ID, sequence, coarse failure class, recorded
-failure number and next retry timestamp. Raw exception text is excluded from
+failure number and next retry timestamp. A closed whitelist of PostgreSQL,
+engine and socket failure codes distinguishes known causes, including missing
+schema and query timeouts. Unknown codes are null; arbitrary names, routines,
+messages and stacks are excluded, including startup and scan failures. Raw exception text is excluded from
 the reconciler's default logger, trust-worker failure logger and source replay
 logger. Replay errors use a fixed class because exception text can embed stored
 FENs. Readiness still
@@ -98,12 +111,17 @@ metrics exporter. This increment uses structured logs and adds no telemetry
 subsystem. Retry state has no public API or admin UI.
 
 Compose and Helm keep the dedicated process and singleton production topology.
-There are no new environment flags or values; Helm comments describe fenced
-overlap. Apply migrations before upgraded workers start. During upgrade, stop or
-finish draining pre-0048 workers: legacy workers do not participate in claims and
-can still duplicate analysis with upgraded workers. Leases protect overlap
-between upgraded instances. Existing report upserts tolerate replay if analysis
-succeeded but the process died before its receipt committed.
+There are no new environment flags or values. Helm uses `Recreate`: during an
+upgrade, Kubernetes waits for the old revision's pods to terminate before creating
+the replacement. This enforces legacy/new separation on the first upgrade;
+pre-0048 workers do not acquire leases. Apply migration 0048 before upgraded
+workers start, and drain any legacy workers deployed outside this Deployment.
+The worker serves no client traffic, and its rollout gap loses no committed
+endings; unfinished leased work becomes eligible at expiry. Recreate does not
+prevent overlap after manual pod deletion or in separately started processes,
+so fenced leases still protect overlapping upgraded instances. Existing report
+upserts tolerate replay if analysis succeeded but the process died before its
+receipt committed.
 
 Moderation thresholds, engine depth/nodes/MultiPV, sanctions and D-13/D-14 policy
 remain outside this increment. Finished-game PGN work is independent.

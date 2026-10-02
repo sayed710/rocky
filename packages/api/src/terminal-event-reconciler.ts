@@ -1,5 +1,6 @@
 import type { GameEndedEvent } from '@chess-platform/game';
-import { TERMINAL_RENEW_MS, TERMINAL_RENEW_TIMEOUT_MS, type ClaimedTerminalEvent, type TerminalConsumer, type TerminalEventFailure, type TerminalEventInbox } from '@chess-platform/persistence';
+import { TERMINAL_RENEW_MS, TERMINAL_RENEW_TIMEOUT_MS, type ClaimedTerminalEvent, type TerminalConsumer, type TerminalEventFailure, type TerminalEventInbox, type TerminalEventLease } from '@chess-platform/persistence';
+import { safeTrustFailureCode } from './trust-failure-code';
 import { gamesEndedChannel, type PubSub } from '@chess-platform/realtime-gateway';
 
 export interface TerminalReconcilerErrorMetadata {
@@ -30,7 +31,7 @@ export class TerminalEventReconciler {
     private readonly pubsub: PubSub,
     private readonly inbox: TerminalEventInbox,
     private readonly consumer: TerminalConsumer,
-    private readonly consume: (gameId: string, ending: GameEndedEvent, signal: AbortSignal) => Promise<void>,
+    private readonly consume: (gameId: string, ending: GameEndedEvent, signal: AbortSignal, lease: TerminalEventLease) => Promise<void>,
     private readonly options: ReconcilerOptions = {},
   ) {}
 
@@ -119,7 +120,7 @@ export class TerminalEventReconciler {
       const stored = work.stored;
       if (stored.event.type !== 'GameEnded') throw new Error('terminal inbox returned a non-terminal event');
       errorClass = 'consumer-error';
-      await this.consume(stored.gameId, stored.event, controller.signal);
+      await this.consume(stored.gameId, stored.event, controller.signal, lease);
       controller.signal.throwIfAborted();
       errorClass = 'acknowledgement-error';
       if (!await this.inbox.acknowledge(lease)) throw new Error('terminal lease ownership lost before acknowledgement');
@@ -156,7 +157,7 @@ export class TerminalEventReconciler {
   private report(gameId: string, error: unknown, metadata?: TerminalReconcilerErrorMetadata): void {
     try {
       if (this.options.onError) this.options.onError(gameId, error, metadata);
-      else console.error('Terminal reconciliation failed', { consumer: this.consumer, gameId, ...metadata });
+      else console.error('Terminal reconciliation failed', { consumer: this.consumer, gameId, ...metadata, failureCode: safeTrustFailureCode(error) });
     } catch {
       console.error('Terminal reconciliation error hook failed', { consumer: this.consumer, gameId });
     }

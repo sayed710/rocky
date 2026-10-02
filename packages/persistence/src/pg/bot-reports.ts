@@ -10,6 +10,7 @@ import type {
   StoredBotReport,
   BotBehaviorReport,
 } from '@chess-platform/anti-cheat';
+import { assertTerminalReportFence, lockTerminalReportFence, validateTerminalReportFence, type TerminalReportFence } from './terminal-report-fence';
 
 interface BotReportDbRow {
   player_id: string;
@@ -38,14 +39,18 @@ async function rollback(client: PoolClient): Promise<void> {
 }
 
 export class PgBotBehaviorReportRepository implements BotBehaviorReportRepository {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool, private readonly fence?: TerminalReportFence) {}
 
   async saveBatch(records: readonly StoredBotReport[]): Promise<void> {
+    validateTerminalReportFence(this.fence, 'bot-analysis', records);
     if (records.length === 0) return;
     const client = await this.pool.connect();
     try {
+      this.fence?.signal?.throwIfAborted();
       await client.query('BEGIN');
+      if (this.fence) await lockTerminalReportFence(client, this.fence);
       for (const record of records) {
+        this.fence?.signal?.throwIfAborted();
         await client.query(
           `INSERT INTO bot_reports (player_id, game_id, color, report, updated_at)
            VALUES ($1, $2, $3, $4::jsonb, now())
@@ -59,6 +64,8 @@ export class PgBotBehaviorReportRepository implements BotBehaviorReportRepositor
           ],
         );
       }
+      if (this.fence) await assertTerminalReportFence(client, this.fence);
+      this.fence?.signal?.throwIfAborted();
       await client.query('COMMIT');
     } catch (error) {
       await rollback(client);
