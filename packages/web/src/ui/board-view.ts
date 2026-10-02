@@ -183,6 +183,13 @@ export class BoardView {
     // measuring or focusing them, so only a real change touches the DOM.
     if (enabled === this.interaction.acceptsInput) return;
     if (!enabled && this.overlay) this.cancelPromotion();
+    if (!enabled) {
+      // A drag in progress ends here: drop the floating piece and forget the gesture, so later
+      // pointer events find nothing to move or release.
+      this.endFloat();
+      this.dragging = false;
+      this.dragFrom = null;
+    }
     this.interaction.setInputEnabled(enabled);
     this.render();
   }

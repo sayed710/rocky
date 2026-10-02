@@ -786,6 +786,25 @@ test('a selection that survives the turn arriving shows its destinations at once
   );
 });
 
+test('a game ending mid-drag drops the floating piece and the drag cannot resume', () => {
+  withDragGlobals((win) => {
+    const { root, board, moves } = mountWithFeedback();
+    const body = (globalThis.document as unknown as { body: FakeDOMNode }).body;
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
+    win.dispatchEvent('pointermove', { ...centreOf('e3'), pointerId: 1 });
+    assert.equal(body.children.length, 1, 'the drag shows a floating piece');
+
+    board.setInputEnabled(false);
+    assert.equal(body.children.length, 0, 'the floating piece is removed when the game ends');
+    assert.equal(root.querySelector('.cb-dragging'), null);
+
+    win.dispatchEvent('pointermove', { ...centreOf('e4'), pointerId: 1 });
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 1 });
+    assert.equal(body.children.length, 0, 'later pointer events do not resume the drag');
+    assert.deepEqual(moves, []);
+  });
+});
+
 test('turn and input updates that change nothing visible leave the cells in place', () => {
   // The game route calls these on every sync and action-state update. Rebuilding the grid each time
   // detached cells under anything measuring or focusing them (reproduced as flaky geometry tests).
