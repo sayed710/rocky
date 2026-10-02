@@ -152,16 +152,17 @@ VISUAL BOUNDARY: V3 (Must wait for owner visual approval before landing in produ
 ================================================================================
 ```
 * **Why Required:** Users need an accessible control to toggle between English and Arabic.
-* **Current Verified State:** Topbar contains: Logo/Brand, Nav Links (`Lobby`, `Tournaments`), Connection Status Indicator, and User Profile badge. No language control exists.
+* **Historical Gemini shell inventory (superseded):** Gemini described Logo/Brand, Nav Links (`Lobby`, `Tournaments`), Connection Status Indicator, and User Profile badge. This is not the current shell inventory.
+* **Codex current-main correction:** `packages/web/index.html` contains brand/navigation links and standalone auth status, logout, theme and board-flip controls. No language switcher, avatar dropdown, mobile menu/drawer or unified Settings surface exists. The menu or Settings surface required by a selected option below would be new implementation work, including anonymous access; no option is selected.
 * **Codex option-label correction:** Gemini originally described A as topbar-only and recommended desktop A/mobile B, while the response sheet called that combination A. For a single unambiguous response, A now consistently denotes the combination; the original distinction is recorded here. No selection is made.
 * **Options (Codex-harmonized D-02 labels):**
-  * **Option A:** Desktop Topbar / Mobile Menu. On desktop, a compact button in the topbar utility area (adjacent to user menu) reading `"عربي"` when in English, and `"English"` when in Arabic; on mobile, the same control is a menu row.
+  * **Option A:** Desktop Topbar / Mobile Menu. On desktop, a proposed compact button in the topbar utility area reading `"عربي"` when in English, and `"English"` when in Arabic; on mobile, the same control would be a row in a new menu that must be implemented if this option is selected.
     * *Historical Gemini tradeoffs for the former topbar-only A:* Single-click switching; universally discoverable; accessible without opening menus; consumes 48px–64px horizontal space in the topbar (critical on mobile).
     * *Codex clarification for harmonized A:* Desktop retains a direct control; mobile requires opening the menu and avoids adding the toggle to its topbar. Exact sizes and breakpoint require design/measurement, not the historical estimates.
-  * **Option B:** User/Settings Menu Only (All Viewports). Place a "Language / اللغة" row inside the existing user avatar menu dropdown (and mobile drawer).
+  * **Option B:** User/Settings Menu Only (All Viewports). Place a "Language / اللغة" row inside a proposed user/settings menu on desktop and mobile. Those menu surfaces do not currently exist and must be implemented, with guest access, if this option is selected. Gemini's original claim of an existing avatar dropdown/mobile drawer is superseded.
     * *Pros:* Keeps topbar uncluttered on small viewports.
     * *Cons:* Discovered only after opening the menu; anonymous/unauthenticated users must have access to a guest menu.
-  * **Option C:** Settings Surface Only. Language selection lives exclusively inside the Settings dialog (`/settings`).
+  * **Option C:** Settings Surface Only. Language selection would live exclusively inside a proposed Settings surface, which must be implemented if this option is selected. Gemini proposed a dialog at `/settings`; that route is not currently registered.
     * *Pros:* Centralizes all preferences.
     * *Cons:* Highest friction to change language; poor UX for a first-time Arabic visitor who cannot read English to navigate to Settings.
 * **Recommended Default:** **Desktop topbar / mobile menu combination (historically A/B; now harmonized as Option A)** — *Gemini recommendation — pending Codex review and owner decision.*
