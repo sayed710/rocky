@@ -14,6 +14,8 @@ import {
   type GameCreatedEvent,
   type GameEndedEvent,
   type MovePlayedEvent,
+  type ResultString,
+  type Termination,
   type TimeControl,
 } from '@chess-platform/game';
 import {
@@ -83,21 +85,44 @@ export function readFinishedGame(gameId: string, stream: readonly StoredEvent[])
   return { created, moves, ended };
 }
 
-/** Terminations that can only be draws, and the only ones that may leave no result. */
-const DRAW_ONLY = new Set(['stalemate', 'agreement', 'insufficient_material', 'fifty_move', 'threefold']);
-const UNDECIDED = new Set(['aborted', 'no_show']);
+const DECISIVE: readonly ResultString[] = ['1-0', '0-1'];
+const DRAW: readonly ResultString[] = ['1/2-1/2'];
+
+/**
+ * The results each termination can carry, exactly as `packages/game/src/game.ts` writes them. It is the
+ * only producer of `GameEnded`:
+ *
+ * - checkmate, resignation and timeout are always decisive. A flag against a side that cannot win is
+ *   recorded as `insufficient_material`, not as a drawn `timeout` (`endByTimeout`).
+ * - a variant ending is a variant win or a variant draw (`terminalEventFor`).
+ * - an abort has no result.
+ * - a no-show is `*` (a seek, or neither seat ready) or a forfeit win (`noShowVerdict`), never a draw.
+ *
+ * A `Record` over the whole union, so a new termination fails to compile until its results are decided.
+ */
+const RESULTS_BY_TERMINATION: Readonly<Record<Termination, readonly ResultString[]>> = {
+  checkmate: DECISIVE,
+  resignation: DECISIVE,
+  timeout: DECISIVE,
+  stalemate: DRAW,
+  agreement: DRAW,
+  insufficient_material: DRAW,
+  fifty_move: DRAW,
+  threefold: DRAW,
+  variant: [...DECISIVE, ...DRAW],
+  aborted: ['*'],
+  no_show: ['*', ...DECISIVE],
+};
 
 /** Why an ending's result, winner and termination disagree, or `null` when they agree. */
 function endingContradiction(ended: GameEndedEvent): string | null {
+  const allowed = Object.hasOwn(RESULTS_BY_TERMINATION, ended.termination)
+    ? RESULTS_BY_TERMINATION[ended.termination]
+    : undefined;
+  if (allowed === undefined) return `has unknown termination ${JSON.stringify(ended.termination)}`;
+  if (!allowed.includes(ended.result)) return `records ${ended.termination} with result ${ended.result}`;
   const winner = ended.result === '1-0' ? 'w' : ended.result === '0-1' ? 'b' : null;
   if (ended.winner !== winner) return `names winner ${String(ended.winner)} for result ${ended.result}`;
-  if (DRAW_ONLY.has(ended.termination) && ended.result !== '1/2-1/2') {
-    return `records ${ended.termination} with result ${ended.result}`;
-  }
-  if (ended.result === '*' && !UNDECIDED.has(ended.termination)) {
-    return `records ${ended.termination} with no result`;
-  }
-  if (ended.termination === 'aborted' && ended.result !== '*') return `records an abort with result ${ended.result}`;
   return null;
 }
 

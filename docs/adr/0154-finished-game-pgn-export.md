@@ -33,9 +33,22 @@ A finished game's moves exist in one place: its append-only event stream (`GameC
   accepting the `0-0` castling spelling. A SAN for another move (`d4` stored for `e2e4`) would
   describe a different game, and text that is not SAN at all could forge movetext or tags (for
   example `1-0 [Evil "x"]`). Both are refused. The stored text is still what is written.
-- **Ending agreement**: `GameEnded.winner` must match the result (`w` for `1-0`, `b` for `0-1`, none
-  otherwise). Draw-only terminations must be `1/2-1/2`, and only `aborted` or `no_show` may leave
-  `*`. An abort must be `*`.
+- **Ending agreement**: `GameEnded` must be an ending the authority can write. Its only producer is
+  `packages/game/src/game.ts`, and the check is a table over the whole `Termination` union, so adding
+  a termination fails to compile until its results are decided. An unknown stored termination is
+  refused.
+
+  | Termination | Allowed results |
+  | --- | --- |
+  | `checkmate`, `resignation`, `timeout` | `1-0`, `0-1` |
+  | `stalemate`, `agreement`, `insufficient_material`, `fifty_move`, `threefold` | `1/2-1/2` |
+  | `variant` | `1-0`, `0-1`, `1/2-1/2` |
+  | `aborted` | `*` |
+  | `no_show` | `*`, `1-0`, `0-1` |
+
+  `timeout` is never a draw: a flag against a side that cannot win is recorded as
+  `insufficient_material`. A no-show is never a draw either. In every case `winner` must be `w` for
+  `1-0`, `b` for `0-1`, and null for `1/2-1/2` and `*`.
 - A refused stream raises `CorruptGameStreamError` (HTTP 500, logged). A prefix is never exported.
 - A valid stream without `GameEnded` is not finished (409). The `games` row is never read, so it
   cannot override `GameEnded`.

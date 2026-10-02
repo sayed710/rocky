@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Game, type GameEvent, type TimeControl } from '@chess-platform/game';
+import { Game, type GameEvent, type ResultString, type Termination, type TimeControl } from '@chess-platform/game';
 import type { Variant } from '@chess-platform/core';
 import {
   CorruptGameStreamError,
@@ -203,27 +203,122 @@ test('a stored SAN that names a different move than its UCI is refused', () => {
   }
 });
 
-test('a GameEnded whose winner or termination contradicts its result is refused', () => {
+/**
+ * The authority's result contract (packages/game/src/game.ts), written out independently of the
+ * implementation's table so a change to either one fails here.
+ */
+const EXPECTED_RESULTS: Record<Termination, readonly ResultString[]> = {
+  checkmate: ['1-0', '0-1'],
+  resignation: ['1-0', '0-1'],
+  timeout: ['1-0', '0-1'],
+  stalemate: ['1/2-1/2'],
+  agreement: ['1/2-1/2'],
+  insufficient_material: ['1/2-1/2'],
+  fifty_move: ['1/2-1/2'],
+  threefold: ['1/2-1/2'],
+  variant: ['1-0', '0-1', '1/2-1/2'],
+  aborted: ['*'],
+  no_show: ['*', '1-0', '0-1'],
+};
+
+function endingStream(patch: { result: string; winner: string | null; termination: string }): StoredEvent[] {
   const played = play({ moves: ['e2e4'] });
-  const ending = (patch: object): StoredEvent[] => played.stream.map((entry) =>
-    entry.event.type === 'GameEnded' ? stored(entry.seq, { ...entry.event, ...patch }) : entry);
-  for (const patch of [
-    { result: '1-0', winner: null, termination: 'resignation' },
-    { result: '1-0', winner: 'b', termination: 'resignation' },
-    { result: '1/2-1/2', winner: 'w', termination: 'agreement' },
-    { result: '1-0', winner: 'w', termination: 'agreement' },
-    { result: '1-0', winner: 'w', termination: 'aborted' },
-    { result: '*', winner: null, termination: 'resignation' },
-  ]) {
-    assert.throws(() => readFinishedGame(GAME_ID, ending(patch)), CorruptGameStreamError, JSON.stringify(patch));
+  return played.stream.map((entry) =>
+    entry.event.type === 'GameEnded' ? stored(entry.seq, { ...entry.event, ...patch } as GameEvent) : entry);
+}
+
+const accepts = (patch: { result: string; winner: string | null; termination: string }): boolean => {
+  try {
+    return readFinishedGame(GAME_ID, endingStream(patch)) !== null;
+  } catch (err) {
+    if (err instanceof CorruptGameStreamError) return false;
+    throw err;
   }
+};
+
+test('every termination x result x winner combination is accepted exactly when the authority could write it', () => {
+  let accepted = 0;
+  for (const [termination, results] of Object.entries(EXPECTED_RESULTS)) {
+    for (const result of ['1-0', '0-1', '1/2-1/2', '*'] as const) {
+      for (const winner of ['w', 'b', null] as const) {
+        const matching = result === '1-0' ? 'w' : result === '0-1' ? 'b' : null;
+        const expected = results.includes(result) && winner === matching;
+        assert.equal(accepts({ result, winner, termination }), expected, `${termination} ${result} winner=${String(winner)}`);
+        if (expected) accepted += 1;
+      }
+    }
+  }
+  assert.equal(accepted, 18, 'the 18 combinations the authority can write');
+  assert.equal(accepts({ result: '1-0', winner: 'w', termination: 'forfeit' }), false, 'an unknown termination is refused');
+});
+
+test('the contradictions found in review are refused, and every legitimate ending kind is kept', () => {
   for (const patch of [
+    { result: '1/2-1/2', winner: null, termination: 'checkmate' },
+    { result: '1/2-1/2', winner: null, termination: 'resignation' },
     { result: '1/2-1/2', winner: null, termination: 'timeout' },
-    { result: '0-1', winner: 'b', termination: 'no_show' },
-    { result: '1-0', winner: 'w', termination: 'variant' },
+    { result: '1/2-1/2', winner: null, termination: 'no_show' },
+    { result: '*', winner: null, termination: 'checkmate' },
+    { result: '*', winner: null, termination: 'variant' },
+    { result: '1-0', winner: 'w', termination: 'stalemate' },
+    { result: '0-1', winner: 'b', termination: 'agreement' },
+    { result: '1-0', winner: 'b', termination: 'checkmate' },
+    { result: '0-1', winner: null, termination: 'resignation' },
+    { result: '1/2-1/2', winner: 'w', termination: 'agreement' },
+    { result: '*', winner: 'b', termination: 'aborted' },
+    { result: '1-0', winner: 'w', termination: 'aborted' },
   ]) {
-    assert.ok(readFinishedGame(GAME_ID, ending(patch)), JSON.stringify(patch));
+    assert.equal(accepts(patch), false, JSON.stringify(patch));
   }
+  for (const patch of [
+    { result: '1-0', winner: 'w', termination: 'checkmate' },
+    { result: '0-1', winner: 'b', termination: 'resignation' },
+    { result: '1-0', winner: 'w', termination: 'timeout' },
+    { result: '1/2-1/2', winner: null, termination: 'stalemate' },
+    { result: '1/2-1/2', winner: null, termination: 'agreement' },
+    { result: '1/2-1/2', winner: null, termination: 'insufficient_material' },
+    { result: '1/2-1/2', winner: null, termination: 'fifty_move' },
+    { result: '1/2-1/2', winner: null, termination: 'threefold' },
+    { result: '0-1', winner: 'b', termination: 'variant' },
+    { result: '1/2-1/2', winner: null, termination: 'variant' },
+    { result: '*', winner: null, termination: 'no_show' },
+    { result: '1-0', winner: 'w', termination: 'no_show' },
+    { result: '*', winner: null, termination: 'aborted' },
+  ]) {
+    assert.equal(accepts(patch), true, JSON.stringify(patch));
+  }
+});
+
+test('endings the real authority writes are all exported', () => {
+  const tc: TimeControl = { kind: 'sudden_death', initialMs: 10_000, incrementMs: 0, delayMs: 0 };
+  // A decisive flag, and a flag against a side that cannot win, which the authority records as an
+  // insufficient-material draw rather than a drawn timeout.
+  const flagged = play({ moves: ['e2e4'], timeControl: tc, finish: (game, at) => game.claimFlag(at + 60_000) });
+  const flaggedDraw = play({
+    initialFen: '3qk3/8/8/8/8/8/8/4K3 w - - 0 1', moves: ['e1e2'], timeControl: tc,
+    finish: (game, at) => game.claimFlag(at + 60_000),
+  });
+  const threefold = play({ moves: ['g1f3', 'g8f6', 'f3g1', 'f6g8', 'g1f3', 'g8f6', 'f3g1', 'f6g8'], finish: null });
+  const kingOfTheHill = play({ variant: 'kingofthehill', moves: ['e2e4', 'a7a6', 'e1e2', 'a6a5', 'e2e3', 'a5a4', 'e3d4'], finish: null });
+
+  const endings = [flagged, flaggedDraw, threefold, kingOfTheHill].map((played) => {
+    const record = readFinishedGame(GAME_ID, played.stream);
+    assert.ok(record);
+    return `${record.ended.termination} ${record.ended.result}`;
+  });
+  assert.deepEqual(endings, ['timeout 1-0', 'insufficient_material 1/2-1/2', 'threefold 1/2-1/2', 'variant 1-0']);
+
+  // A tournament no-show with one ready seat is a forfeit win.
+  const created = Game.create({
+    gameId: GAME_ID, players: { white: WHITE, black: BLACK }, timeControl: BLITZ, at: CREATED_AT,
+    source: 'tournament', noShowAfterMs: 30_000,
+  });
+  const ready = created.game.markReady('b', CREATED_AT + 1_000);
+  const forfeit = ready.game.expireNoShow(CREATED_AT + 30_000);
+  const stream = [...created.events, ...ready.events, ...forfeit.events].map((event, seq) => stored(seq, event));
+  const record = readFinishedGame(GAME_ID, stream);
+  assert.ok(record);
+  assert.equal(`${record.ended.termination} ${record.ended.result} ${String(record.ended.winner)}`, 'no_show 0-1 b');
 });
 
 test('a Three-Check FEN that ends with its check counters still numbers from its fullmove', () => {
