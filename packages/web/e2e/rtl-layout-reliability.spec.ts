@@ -112,6 +112,19 @@ const ROUTES: readonly RouteFixture[] = [
     surfaceSelector: '#email-verify',
   },
   {
+    name: 'about',
+    path: '/about',
+    // The repository URL is the longest unbroken token on any route; it must wrap, not overflow.
+    readySelector: '#public-document a[data-source-link="repository"]',
+    surfaceSelector: '#public-document',
+  },
+  {
+    name: 'privacy',
+    path: '/privacy',
+    readySelector: '#public-document article h2',
+    surfaceSelector: '#public-document',
+  },
+  {
     name: 'offline-board',
     path: '/game/test-offline-board',
     readySelector: '.cb-board',

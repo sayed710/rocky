@@ -22,6 +22,24 @@ export const enMessages = {
   'shell.notFound.description': 'The requested page or position does not exist or has been moved.',
   'shell.notFound.returnPlay': 'Return to Play',
 
+  // Public documents (/privacy, /terms, /fair-play, /about). Publication-state copy only: the
+  // authoritative policy text is owner/legal content and is deliberately absent (ADR-0153).
+  'publicDocument.documentTitle': '{page} · {brand}',
+  'publicDocument.publicationStatus': 'Publication status',
+  'publicDocument.privacy.title': 'Privacy',
+  'publicDocument.privacy.pending': 'The authoritative Rookzen privacy policy has not been published yet. This page is not the final published policy.',
+  'publicDocument.terms.title': 'Terms',
+  'publicDocument.terms.pending': 'The authoritative Rookzen terms have not been published yet. This page is not the final published terms.',
+  'publicDocument.fairPlay.title': 'Fair Play',
+  'publicDocument.fairPlay.pending': 'The authoritative Rookzen fair play policy has not been published yet. This page is not the final published policy.',
+  'publicDocument.about.title': 'About Rookzen',
+  'publicDocument.about.intro': 'Rookzen is an open-source chess platform.',
+  'publicDocument.about.sourceHeading': 'Source code',
+  'publicDocument.about.license': 'The Rookzen source code is licensed under the GNU Affero General Public License, version 3 or any later version (AGPL-3.0-or-later).',
+  'publicDocument.about.repositoryLabel': 'Source repository',
+  'publicDocument.about.revisionLabel': 'Build revision',
+  'publicDocument.about.revisionUnavailable': 'This build does not record its source revision.',
+
   // Top Navigation
   'nav.play': 'Play',
   'nav.learn': 'Learn',

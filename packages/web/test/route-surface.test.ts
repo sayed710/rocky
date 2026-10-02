@@ -27,6 +27,7 @@ const SURFACE_IDS = [
   'password-reset',
   'email-verify',
   'not-found',
+  'public-document',
 ] as const;
 
 interface RouteCase {
@@ -64,6 +65,10 @@ const ROUTE_CASES: Readonly<Record<Route['name'], RouteCase>> = {
   'password-reset': { route: { name: 'password-reset' }, activeSurfaceId: 'password-reset' },
   'email-verify': { route: { name: 'email-verify' }, activeSurfaceId: 'email-verify' },
   'not-found': { route: { name: 'not-found' }, activeSurfaceId: 'not-found' },
+  'public-document': {
+    route: { name: 'public-document', document: 'privacy' },
+    activeSurfaceId: 'public-document',
+  },
 };
 
 interface SurfaceDocument {
@@ -110,5 +115,15 @@ test('every route shows only its top-level surface and exposes game controls onl
     assert.equal(surfaceDocument.bodyClasses.has('route-game'), isGameRoute);
     assert.equal(surfaceDocument.elements.get('flip')?.hidden, !isGameRoute);
     assert.equal(surfaceDocument.elements.get('skip-board')?.hidden, !isGameRoute);
+  }
+});
+
+test('all four public documents share one surface', () => {
+  for (const document of ['privacy', 'terms', 'fair-play', 'about'] as const) {
+    const surfaceDocument = createSurfaceDocument();
+    applyRouteSurface(surfaceDocument.doc, { name: 'public-document', document });
+    assert.equal(surfaceDocument.elements.get('public-document')?.hidden, false, document);
+    assert.equal(surfaceDocument.elements.get('not-found')?.hidden, true, document);
+    assert.equal(surfaceDocument.elements.get('lobby')?.hidden, true, document);
   }
 });

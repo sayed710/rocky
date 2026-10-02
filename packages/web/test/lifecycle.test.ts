@@ -45,6 +45,7 @@ function createMockBootstrapped(
     connectivity: disposables.connectivity as Bootstrapped['connectivity'],
     analysis: disposables.analysis as Bootstrapped['analysis'],
     shellLocalization: disposables.shellLocalization as Bootstrapped['shellLocalization'],
+    publicDocument: disposables.publicDocument as Bootstrapped['publicDocument'],
   };
 }
 

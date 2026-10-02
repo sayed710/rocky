@@ -17,7 +17,19 @@
  * - `/search` → search
  * - `/password-reset` → password recovery form (optional ?token=...)
  * - `/email-verify` → email verification (optional ?token=...)
+ * - `/privacy`, `/terms`, `/fair-play`, `/about` → public documents (exact paths only)
  */
+
+/**
+ * Public, unauthenticated document pages. Each id is also its exact path segment, so parsing and
+ * serializing are the same lookup and stay symmetric by construction.
+ */
+export const PUBLIC_DOCUMENT_IDS = ['privacy', 'terms', 'fair-play', 'about'] as const;
+export type PublicDocumentId = (typeof PUBLIC_DOCUMENT_IDS)[number];
+
+function isPublicDocumentId(segment: string): segment is PublicDocumentId {
+  return (PUBLIC_DOCUMENT_IDS as readonly string[]).includes(segment);
+}
 
 export type Route =
   | { readonly name: 'lobby' }
@@ -42,6 +54,7 @@ export type Route =
   | { readonly name: 'study-chapter'; readonly id: string; readonly chapterId: string }
   | { readonly name: 'password-reset' }
   | { readonly name: 'email-verify' }
+  | { readonly name: 'public-document'; readonly document: PublicDocumentId }
   | { readonly name: 'not-found' };
 
 /** Parse a URL pathname into a typed route. */
@@ -65,6 +78,10 @@ export function parseRoute(pathname: string): Route {
   }
   if (segments[0] === 'email-verify') {
     return segments.length === 1 ? { name: 'email-verify' } : { name: 'not-found' };
+  }
+  const head = segments[0]!;
+  if (isPublicDocumentId(head)) {
+    return segments.length === 1 ? { name: 'public-document', document: head } : { name: 'not-found' };
   }
   if (segments[0] === 'leaderboard') {
     if (segments.length === 1) return { name: 'leaderboard' };
@@ -180,6 +197,8 @@ export function routeToPath(route: Route): string {
       return '/password-reset';
     case 'email-verify':
       return '/email-verify';
+    case 'public-document':
+      return `/${route.document}`;
     case 'not-found':
       return '/not-found';
   }

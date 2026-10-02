@@ -58,6 +58,8 @@ import { mountPasswordRecovery } from './password-recovery-mount.js';
 import { mountEmailVerification } from './email-verification-mount.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
 import { parseRoute } from './router.js';
+import { mountPublicDocument, type MountedPublicDocument } from './public-document.js';
+import { readBuildSourceMetadata } from './source-metadata.js';
 import { applyRouteSurface } from './route-surface.js';
 import { localizeShell } from '../i18n/index.js';
 
@@ -88,6 +90,7 @@ export interface BootstrappedDisposables {
   readonly connectivity: { dispose: () => void } | null;
   readonly analysis: { dispose: () => void } | null;
   readonly shellLocalization: { dispose: () => void } | null;
+  readonly publicDocument: MountedPublicDocument | null;
 }
 
 /** Everything the bootstrap wired, returned for later increments and tests. */
@@ -129,6 +132,7 @@ function createBootstrapped(
     emailVerification: null,
     connectivity: null,
     analysis: null,
+    publicDocument: null,
     shellLocalization: activeDisposables.shellLocalization ?? shellLocalization,
     theme,
     ...activeDisposables,
@@ -152,6 +156,11 @@ export interface BootstrapDependencies extends Partial<AppDependencies> {
   readonly token?: string;
   /** Override native WebAuthn ceremonies for tests or alternate browser hosts. */
   readonly webauthnAdapter?: WebAuthnAdapter;
+  /**
+   * True when this run follows an in-app navigation (link, form, back/forward) rather than the
+   * initial page load. Route surfaces that move focus to their heading do so only then.
+   */
+  readonly inAppNavigation?: boolean;
 }
 
 /**
@@ -199,7 +208,9 @@ export function bootstrap(
   const showEmailVerify = route.name === 'email-verify';
   const activeResetToken = showPasswordReset ? captureAndStripToken('/password-reset') : null;
   const activeVerificationToken = showEmailVerify ? captureAndStripToken('/email-verify') : null;
-  const hideAuthSection = showPasswordReset || showEmailVerify || route.name === 'not-found';
+  // Complete route surfaces of their own: the sign-in form would sit above the page's content.
+  const hideAuthSection = showPasswordReset || showEmailVerify || route.name === 'not-found'
+    || route.name === 'public-document';
 
   const config = deps?.config ?? resolveConfig();
   const appDeps: AppDependencies = {
@@ -430,6 +441,21 @@ export function bootstrap(
   // do not fall through to the legacy standalone-board fallback hidden inside #game-main.
   if (route.name === 'not-found') {
     return createBootstrapped(app, auth, theme, shellLocalization, {});
+  }
+
+  // --- Public documents (/privacy, /terms, /fair-play, /about): public, no session required ---
+  const publicDocumentEl = doc.getElementById('public-document');
+  if (publicDocumentEl && route.name === 'public-document') {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
+      publicDocument: mountPublicDocument({
+        doc,
+        surface: publicDocumentEl,
+        document: route.document,
+        i18n: app.i18n,
+        source: readBuildSourceMetadata(),
+        focusHeading: deps?.inAppNavigation ?? false,
+      }),
+    });
   }
 
   // --- Game view ---
