@@ -4931,4 +4931,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - `setTurn` refresh removed
   - not cleared on a new position
   - not cleared on disposal
+- **Validation** (on `a27cf5a`, sequentially):
+  - build, lint, every `check:*` guard, `check:test-topology` and `test:scripts` (312);
+  - web unit (1,416) and 19 hermetic workspaces (3,891), with zero skips;
+  - static Playwright (187) and `GAMBIT_E2E_BACKEND=1` Playwright with 4 workers and 0 retries (231), with 0 failures and 0 skips; Avast Web/Network Shield was off for the final browser runs only.
+- **Independent review**: none was available. Codex rejected its configured model on this account, the Gemini CLI tier is ineligible, and agy returned a 429 quota error. The review was first-party only.
 - **Deliberate limits**: no reason text (the oracle exposes none); no feedback for a queued premove invalidated later (no production caller applies premoves today, so this is separate scope); no sound, vibration or animation; the board's own English ARIA labels remain outside the catalog as before. The owner performs the merge.
