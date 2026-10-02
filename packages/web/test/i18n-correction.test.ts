@@ -10,6 +10,7 @@ import { mountLesson } from '../src/app/learning-mounts.js';
 import { mountStudyChapter } from '../src/app/studies-mounts.js';
 import { mountEmailVerification } from '../src/app/email-verification-mount.js';
 import { mountEndgames } from '../src/app/endgame-mount.js';
+import { getEndgameMessage } from '../src/app/endgame-view.js';
 import { mountGame } from '../src/app/game-mount.js';
 import { CreateGamePanel } from '../src/app/create-game-panel.js';
 import type { GambitClient } from '../src/api/client.js';
@@ -18,7 +19,7 @@ import { FakeTransport, json } from './support/fake-transport.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
 import { makeState, sampleAnalysisResponse } from './support/analysis-fixtures.js';
 import { STARTING_FEN } from '../src/core/position.js';
-import { ServiceUnavailableError } from '../src/net/errors.js';
+import { RateLimitError, ServiceUnavailableError } from '../src/net/errors.js';
 
 const CAPABILITIES = { capabilities: { analysis: true, mistakePrediction: true, openingExplorer: true, puzzleGeneration: true, coach: true }, analysisVariants: ['standard'], puzzleVariants: ['standard'] };
 
@@ -154,6 +155,51 @@ test('correction: create-game variant labels change without resetting selection'
     assert.equal(radio.checked, true);
   } finally { panel.dispose(); }
 });
+
+for (const note of ['loading', 'judging', 'rateLimited', 'unavailable'] as const) {
+  test(`correction: endgame authentication display preserves ${note} semantic status`, async () => {
+    const { doc, elements } = documentWith(['endgame-next', 'endgame-submit', 'endgame-move', 'endgame-form', 'endgame-note', 'endgame-error', 'endgame-result', 'endgame-rows', 'endgame-position-rows']);
+    let authenticated = true;
+    let calls = 0;
+    const pending = deferred<unknown>();
+    const position = { id: 'p1', type: 'KQ_vs_K', name: 'Mate', fen: STARTING_FEN, sideToMove: 'w', objective: 'mate', difficulty: 'beginner', technique: 'Box' };
+    const client = { analysis: {
+      nextEndgame: () => { calls++; return note === 'loading' ? pending.promise : Promise.resolve(position); },
+      attemptEndgame: () => {
+        calls++;
+        if (note === 'rateLimited') throw new RateLimitError({ status: 429, code: 'rate-limited', message: 'Too many', retryable: true });
+        if (note === 'unavailable') throw new ServiceUnavailableError({ status: 503, code: 'unavailable', message: 'Unavailable', retryable: true });
+        return pending.promise;
+      },
+    } } as unknown as GambitClient;
+    const i18n = locale();
+    const mounted = mountEndgames({ doc, client, isAuthenticated: () => authenticated, i18n });
+    try {
+      elements.get('endgame-next')!.click(); await settle();
+      if (note !== 'loading') {
+        elements.get('endgame-move')!.value = 'e2e4';
+        elements.get('endgame-form')!.dispatchEvent({ type: 'submit' }); await settle();
+      }
+      assert.equal(elements.get('endgame-note')!.textContent, getEndgameMessage(note, i18n));
+      const initialCalls = calls;
+      authenticated = false; mounted.onSessionChange();
+      i18n.setLocale('ar');
+      assert.equal(elements.get('endgame-note')!.textContent, getEndgameMessage('signedOut', i18n));
+      authenticated = true; mounted.onSessionChange();
+      assert.equal(elements.get('endgame-note')!.textContent, getEndgameMessage(note, i18n));
+      i18n.setLocale('en');
+      assert.equal(elements.get('endgame-note')!.textContent, getEndgameMessage(note, i18n));
+      assert.equal(calls, initialCalls, 'authentication and locale replay must not restart the request');
+      if (note === 'loading') {
+        pending.resolve(position); await settle();
+        assert.equal(elements.get('endgame-note')!.textContent, getEndgameMessage('yourMove', i18n));
+      } else if (note === 'judging') {
+        pending.resolve({ kind: 'terminal', id: 'p1', move: 'e2e4', fenAfter: STARTING_FEN, terminal: { reason: 'checkmate', result: '1-0' } }); await settle();
+        assert.equal(elements.get('endgame-note')!.hidden, true);
+      }
+    } finally { mounted.dispose(); }
+  });
+}
 
 for (const outcome of ['terminal', 'judged', 'failed'] as const) {
   test(`correction: endgame sign-out overrides ${outcome} presentation and relocalizes`, async () => {
