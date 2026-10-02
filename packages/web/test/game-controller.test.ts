@@ -492,6 +492,23 @@ test('R2#3: submit → onTurn(false) fires even when turn is held constant', () 
   sync.stop();
 });
 
+test('a game that ends on our turn is no longer our turn', () => {
+  // `ended` empties the legal-move map but leaves `turn` alone, so without this a resignation or a
+  // flag on our turn left the board judging every move against an empty oracle ("not legal").
+  const { factory, sync, controller, turns } = setup();
+  controller.start();
+  sync.start();
+  factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w', 'startpos') });
+  assert.equal(turns.at(-1), true);
+  turns.length = 0;
+  factory.last.emit({ t: 'ended', gameId: 'g1', result: '1-0', termination: 'resignation', winner: 'w', serverTs: 5 });
+  assert.equal(sync.getState().turn, 'w', 'the server turn is unchanged by the ending');
+  assert.deepEqual(turns, [false]);
+  controller.stop();
+  sync.stop();
+});
+
 test('R2#3: reject rollback → onTurn(true) fires even when turn is held constant', () => {
   const { factory, sync, controller, turns } = setup();
   controller.start();

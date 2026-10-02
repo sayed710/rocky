@@ -741,11 +741,15 @@ test('a drag the oracle rejects is announced once and submits nothing', () => {
     assert.equal(feedback.replacements, 1);
     assert.deepEqual(moves, []);
 
-    // Starting a drag reports nothing, so unlike a tap-to-reselect nothing clears the message
-    // between two identical drags: the second must still be a new node to be heard again.
+    // Picking the piece up again is a new gesture, so it clears the stale message; the identical
+    // rejection that follows is a new node and is heard again.
     const first = feedback.children[0];
-    drag(root, win, 'e2', 'e5');
-    assert.equal(feedback.replacements, 2, 'one announcement per drag');
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
+    win.dispatchEvent('pointermove', { ...centreOf('e5'), pointerId: 1 });
+    assert.equal(announced(), '', 'starting a drag clears the earlier rejection');
+    win.dispatchEvent('pointerup', { ...centreOf('e5'), pointerId: 1 });
+    assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+    assert.equal(feedback.replacements, 3, 'one clear and one announcement for the second drag');
     assert.notEqual(feedback.children[0], first, 'a repeated drag rejection is a fresh addition');
     assert.deepEqual(moves, []);
 
@@ -753,6 +757,33 @@ test('a drag the oracle rejects is announced once and submits nothing', () => {
     assert.deepEqual(moves, ['e2e4'], 'a legal drag still submits exactly once');
     assert.equal(announced(), '', 'and clears the stale rejection');
   });
+});
+
+test('any later gesture clears a rejection, including taps that change nothing', () => {
+  const { click, press, announced } = mountWithFeedback();
+  press('e2');
+  press('e5');
+  click('e4'); // empty square with nothing selected: a `none` result
+  assert.equal(announced(), '', 'an empty-square tap clears it');
+
+  press('e2');
+  press('e5');
+  click('e7'); // opponent piece with nothing selected
+  assert.equal(announced(), '', 'an opponent-piece tap clears it');
+});
+
+test('a selection that survives the turn arriving shows its destinations at once', () => {
+  const { root, board, press } = mountWithFeedback();
+  board.setTurn(false);
+  press('e2');
+  assert.equal(root.querySelector('[data-square="e4"]')?.getAttribute('aria-description'), null);
+  board.setTurn(true);
+  assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-selected'), 'true');
+  assert.equal(
+    root.querySelector('[data-square="e4"]')?.getAttribute('aria-description'),
+    'legal move',
+    'the refreshed destinations are rendered and described without waiting for another gesture',
+  );
 });
 
 test('a repeated identical rejection is announced again as a fresh live-region addition', () => {

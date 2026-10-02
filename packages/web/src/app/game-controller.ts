@@ -422,7 +422,9 @@ export class GameController {
       && state.myColor !== null
       && state.turn === state.myColor
       && state.pending === null
-      && !awaitingReadiness(state);
+      && !awaitingReadiness(state)
+      // `ended` empties the legal-move map but keeps `turn`: a finished game is nobody's turn.
+      && state.status?.over !== true;
     if (myTurn !== this.currentMyTurn) {
       this.currentMyTurn = myTurn;
       this.callbacks.onTurn(myTurn);

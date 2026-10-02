@@ -172,6 +172,8 @@ export class BoardView {
   /** Inform the interaction layer whose turn it is, enabling or disabling move input. */
   setTurn(myTurn: boolean): void {
     this.interaction.setTurn(myTurn);
+    // A surviving selection's destinations change with the turn; show and describe them now.
+    this.render();
   }
 
   /** Toggle the board between white-at-bottom and black-at-bottom orientations. */
@@ -303,6 +305,7 @@ export class BoardView {
         return;
       }
       this.dragging = true;
+      this.onFeedback({ kind: 'clear' });
       this.beginFloat(this.dragFrom);
       this.render();
     }
@@ -333,6 +336,7 @@ export class BoardView {
   private dispatch(result: GestureResult): void {
     switch (result.kind) {
       case 'none':
+        this.onFeedback({ kind: 'clear' });
         this.render();
         return;
       case 'illegal':

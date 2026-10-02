@@ -4931,9 +4931,16 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - `setTurn` refresh removed
   - not cleared on a new position
   - not cleared on disposal
-- **Validation** (on `a27cf5a`, sequentially):
+- **Exact-head review corrections** (Qodo 3 bugs and Greptile 2 P2 on `6a8257d`, all valid; RED tests first):
+  - `ended` empties the legal-move map but keeps `turn`, so after a resignation or a flag on our turn every attempt read "not legal". `GameController` now derives `myTurn` as false once `status.over`.
+  - `BoardView.setTurn` re-renders, so a selection refreshed by the turn arriving shows and describes its destinations at once.
+  - The message also clears on `none` results (empty or opponent taps with nothing selected, gestures during a pending promotion) and when a drag starts, matching "clears on any other gesture".
+  - The message uses the existing `.error` (Ember) primitive: the design system reserves Ember for error states, and the text remains the signal. `.move-feedback:empty` cancels its reserved line.
+- **CI correction**: `scripts/test/check-test-topology.test.mjs` pins the discovered Playwright spec count. It is now 31 (it was 30), and the new spec is asserted backend-only. The first local `test:scripts` run predated the spec file, so it did not catch this; CI did.
+- **Falsification after the corrections**: 17 mutations, the 13 above plus four that undo each correction (no render on `setTurn`; a finished game still our turn; no clear on `none`; no clear on drag start). 15 were killed by tests and none by compile errors. Two survive as equivalent mutants: "reuse the node on repeat" and "no clear on a legal move". Every rejection and every legal move now needs a selecting gesture first (a tap that selects, or a drag start), and that gesture already clears the message, so those paths cannot change what is rendered or announced.
+- **Validation** (final tree, sequentially):
   - build, lint, every `check:*` guard, `check:test-topology` and `test:scripts` (312);
-  - web unit (1,416) and 19 hermetic workspaces (3,891), with zero skips;
-  - static Playwright (187) and `GAMBIT_E2E_BACKEND=1` Playwright with 4 workers and 0 retries (231), with 0 failures and 0 skips; Avast Web/Network Shield was off for the final browser runs only.
+  - web unit (1,419) and 19 hermetic workspaces (3,894), with zero skips;
+  - static Playwright (187) and `GAMBIT_E2E_BACKEND=1` Playwright with 4 workers and 0 retries (231), with 0 failures and 0 skips. Avast Web/Network Shield was off for the final browser runs only.
 - **Independent review**: none was available. Codex rejected its configured model on this account, the Gemini CLI tier is ineligible, and agy returned a 429 quota error. The review was first-party only.
 - **Deliberate limits**: no reason text (the oracle exposes none); no feedback for a queued premove invalidated later (no production caller applies premoves today, so this is separate scope); no sound, vibration or animation; the board's own English ARIA labels remain outside the catalog as before. The owner performs the merge.
