@@ -65,6 +65,8 @@ import { AchievementRuleError } from '@chess-platform/achievements';
 import { StudyRuleError, MAX_PGN_BYTES } from '@chess-platform/studies';
 import { LearningRuleError } from '@chess-platform/learning';
 import { CorePositionReader } from './studies/position-reader';
+import { RepositoryPlayerHandles } from './commentary/composition';
+import { FinishedGamePgnService, PGN_CONTENT_TYPE } from './game-export/finished-game-pgn';
 import {
   antiCheatAggregateView,
   antiCheatGameReportView,
@@ -1920,6 +1922,39 @@ export function buildRouter(deps: RouteDeps): Router {
       ]);
       const outcome = await service.review({ gameId, userId: identity.userId, signal: ctx.signal }, charge);
       return json(200, gameReviewView(outcome));
+    },
+  );
+
+  // Public like `GET /v1/games/:id` and the spectator join, which already serve every move of any
+  // game to an anonymous caller (ADR-0004, ADR-0154). Built from the event log, never the projection.
+  const finishedGamePgn = new FinishedGamePgnService(repos.events, new RepositoryPlayerHandles(repos.users));
+  router.get(
+    '/v1/games/:id/export.pgn',
+    doc({
+      summary: 'Download a finished game as PGN, written from its durable event log',
+      tags: ['games'],
+      params: [pathParam('id', 'Game id (UUID)')],
+      responses: {
+        200: ['PgnDocument', 'The finished game as one PGN game', PGN_DOWNLOAD_HEADERS, PGN_MEDIA_TYPE],
+        404: ['Error', 'No such game'],
+        409: ['Error', 'The game has not finished'],
+        422: ['Error', 'Malformed game id'],
+        503: ['Error', 'The request was cancelled'],
+      },
+    }),
+    PUBLIC,
+    async (ctx) => {
+      const gameId = parseUuid(ctx.params['id']!, 'id');
+      const pgn = await finishedGamePgn.export(gameId, ctx.signal);
+      return {
+        status: 200,
+        headers: {
+          'Content-Type': PGN_CONTENT_TYPE,
+          // The id passed the UUID check above, so the filename holds only hex digits and hyphens.
+          'Content-Disposition': `attachment; filename="game-${gameId}.pgn"`,
+        },
+        body: pgn,
+      };
     },
   );
 
@@ -5385,7 +5420,7 @@ export function buildRouter(deps: RouteDeps): Router {
         { name: 'chapterId', in: 'query', required: false, schema: { type: 'string', format: 'uuid' }, description: 'Optional chapter ID' },
       ],
       responses: {
-        200: ['PgnExport', 'Exported PGN text'],
+        200: ['PgnExport', 'Exported PGN text', PGN_DOWNLOAD_HEADERS, PGN_MEDIA_TYPE],
         404: ['Error', 'Study or chapter not found'],
         422: ['Error', 'Malformed ID'],
         503: ['Error', 'Studies service unavailable'],
@@ -6570,8 +6605,22 @@ interface DocSpec {
   requestSchema?: string;
   requestBodyRequired?: boolean;
   params?: RouteDoc['params'];
-  responses: Record<number, [string | undefined, string, RouteDoc['responses'][number]['headers']?]>;
+  responses: Record<
+    number,
+    [string | undefined, string, RouteDoc['responses'][number]['headers']?, RouteDoc['responses'][number]['mediaType']?]
+  >;
 }
+
+/** The PGN media type, exactly as both PGN exports send it in `Content-Type`. */
+const PGN_MEDIA_TYPE = 'application/x-chess-pgn';
+
+/** The download header a PGN export sends with its 200. */
+const PGN_DOWNLOAD_HEADERS = {
+  'Content-Disposition': {
+    description: 'Always `attachment` with a server-chosen `.pgn` filename built only from validated ids',
+    schema: { type: 'string' },
+  },
+} as const;
 
 /** The `Retry-After` header every refused admission sends with its 429. */
 const RETRY_AFTER_HEADER = {
@@ -6583,11 +6632,12 @@ const RETRY_AFTER_HEADER = {
 
 function doc(spec: DocSpec): RouteDoc {
   const responses: Record<number, RouteDoc['responses'][number]> = {};
-  for (const [status, [schema, description, headers]] of Object.entries(spec.responses)) {
+  for (const [status, [schema, description, headers, mediaType]] of Object.entries(spec.responses)) {
     responses[Number(status)] = {
       description,
       ...(schema ? { schema } : {}),
       ...(headers ? { headers } : {}),
+      ...(mediaType ? { mediaType } : {}),
     };
   }
   return {

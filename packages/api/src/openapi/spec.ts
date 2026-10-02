@@ -22,8 +22,8 @@ export interface OpenApiInfo {
 /** The generated OpenAPI document (typed loosely — it is emitted as JSON). */
 export type OpenApiDocument = Record<string, unknown>;
 
-const bodyRef = (schema: string): Record<string, unknown> => ({
-  content: { 'application/json': { schema: { $ref: `#/components/schemas/${schema}` } } },
+const bodyRef = (schema: string, mediaType = 'application/json'): Record<string, unknown> => ({
+  content: { [mediaType]: { schema: { $ref: `#/components/schemas/${schema}` } } },
 });
 
 function operationFor(route: RouteDef): Record<string, unknown> {
@@ -31,7 +31,7 @@ function operationFor(route: RouteDef): Record<string, unknown> {
   const responses: Record<string, unknown> = {};
   for (const [status, resp] of Object.entries(doc.responses)) {
     const response: Record<string, unknown> = resp.schema
-      ? { description: resp.description, ...bodyRef(resp.schema) }
+      ? { description: resp.description, ...bodyRef(resp.schema, resp.mediaType) }
       : { description: resp.description };
     if (resp.headers) response['headers'] = resp.headers;
     responses[status] = response;

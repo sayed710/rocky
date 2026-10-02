@@ -239,6 +239,53 @@ describe('PGN serialization', () => {
     assert.equal(tagValue(second, 'Annotator'), tagValue(first, 'Annotator'));
   });
 
+  it('keeps a tag value on its own line when it carries a newline or other control character', () => {
+    // A tag value is a PGN string, and the parser ends a string at a newline. Writing one verbatim
+    // splits the tag across lines and turns the rest of it into movetext (or a parse failure), so the
+    // serializer writes each non-printing character as a space, which is what PGN asks of a writer.
+    const text = serializePgn({
+      tags: [{ key: 'White', value: 'a"]\n[Black "forged"]\r\n\t\u0000\u007f\\x' }],
+      preComments: [],
+      moves: [],
+      result: '*',
+    });
+
+    assert.equal(text.split('\n')[0], '[White "a\\"] [Black \\"forged\\"]     \\\\x"]');
+    const reparsed = parsePgn(text)[0];
+    assert.ok(reparsed);
+    assert.deepEqual(reparsed.tags, [{ key: 'White', value: 'a"] [Black "forged"]     \\x' }]);
+  });
+
+  it('keeps Unicode in tag values unchanged', () => {
+    const { first, second } = roundTrip('[White "Ünïcødé ☃ لاعب"]\n\n*\n');
+    assert.equal(tagValue(second, 'White'), 'Ünïcødé ☃ لاعب');
+    assert.deepEqual(second, first);
+  });
+
+  it('numbers movetext from a stated starting move, including a black first move', () => {
+    const game: PgnGame = {
+      tags: [],
+      preComments: [],
+      startingMove: { number: 12, color: 'b' },
+      moves: ['Nf6', 'Nc3', 'd5'].map((san) => ({ san, nags: [], comments: [], variations: [] })),
+      result: '0-1',
+    };
+
+    assert.equal(serializePgn(game), '12... Nf6 13. Nc3 d5 0-1\n');
+    assert.deepEqual(parsePgn(serializePgn(game))[0]?.moves.map((m) => m.san), ['Nf6', 'Nc3', 'd5']);
+  });
+
+  it('numbers from 1. with White when no starting move is stated', () => {
+    const game: PgnGame = {
+      tags: [],
+      preComments: [],
+      moves: ['e4', 'e5'].map((san) => ({ san, nags: [], comments: [], variations: [] })),
+      result: '*',
+    };
+
+    assert.equal(serializePgn(game), '1. e4 e5 *\n');
+  });
+
   it('neutralises braces in a comment so the export still parses', () => {
     // PGN gives `{...}` no escape mechanism at all — a comment ends at the first `}`. Writing one
     // verbatim does not make a lossy file, it makes a broken one: everything after the brace is

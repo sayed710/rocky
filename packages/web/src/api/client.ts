@@ -111,6 +111,9 @@ import type {
   GameReviewResponse,
 } from './models.js';
 
+/** The media type of a PGN document. */
+export const PGN_MEDIA_TYPE = 'application/x-chess-pgn';
+
 /** A request spec plus whether it requires authentication. */
 export type ExecSpec = RequestSpec & { readonly auth?: boolean | 'optional' };
 
@@ -624,6 +627,19 @@ export class GamesApi {
 
   createVsBot(body: CreateBotGameRequest): Promise<GameSummary> {
     return this.execute<GameSummary>({ method: 'POST', path: '/v1/games/bot', body, auth: true });
+  }
+
+  /**
+   * The finished game's PGN exactly as the server wrote it from the durable event log. Public, so no
+   * token is sent; the caller owns cancellation.
+   */
+  exportPgn(id: string, signal?: AbortSignal): Promise<string> {
+    return this.execute<string>({
+      method: 'GET',
+      path: `/v1/games/${encodeURIComponent(id)}/export.pgn`,
+      text: { mediaType: PGN_MEDIA_TYPE },
+      ...(signal !== undefined ? { signal } : {}),
+    });
   }
 
   /** Request the authenticated player's completed-game review with caller-owned cancellation. */

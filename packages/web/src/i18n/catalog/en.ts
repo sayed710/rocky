@@ -213,6 +213,13 @@ export const enMessages = {
   'game.actions.declineDraw': 'Decline',
   'game.actions.playComputer': 'Play computer',
 
+  // Finished-game PGN export
+  'game.export.title': 'Export',
+  'game.export.downloadPgn': 'Download PGN',
+  'game.export.preparing': 'Preparing the PGN file…',
+  'game.export.started': 'PGN download started.',
+  'game.export.unavailableError': 'The PGN file could not be downloaded. Please try again.',
+
   // Game Review
   'game.review.title': 'Game review',
   'game.review.noteWaiting': 'Available when the game ends.',

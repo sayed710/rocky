@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-02 — M15 Increment 83: Truthful opponent pool ratings in lobby seeks._
+_Last updated: 2026-10-02 — M15 Increment 84: Durable finished-game PGN export._
+
+Prior: _Last updated: 2026-10-02 — M15 Increment 83: Truthful opponent pool ratings in lobby seeks._
 
 Prior: _Last updated: 2026-10-02 — M15 Increment 82: Policy and source-disclosure engineering infrastructure._
 
@@ -4809,3 +4811,91 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Concurrency: normally merged current main `499a861b9258e3892d04d8019d4baac6787ff727` after policy/source-disclosure PR #84 landed. Its Increment 82 and all history are preserved; this entry is now Increment 83. Both new browser specs remain reachable (30 full specs; 11 offline), with only the genuine documentation/topology conflicts resolved. No other implementation branch was inspected or incorporated directly.
 - Independent read-only Claude Sonnet 4.6 Thinking reviewed candidate `c4923a941f55fb8cad4f4f173005d438e9f8ba76` and identified three small corrections: atomic screen-reader announcement, API two-decimal rounding consistency, and malformed-UUID parity in the in-memory batch fake. Focused regressions failed before the corrections; all three are corrected. A fresh exact-final-head review remains required.
 - Validation: full build and lint/TypeScript; all eight `check:*` guards; OpenAPI regeneration with zero byte drift; 19 hermetic workspaces, 3,805 tests (API 1,166; web 1,377), zero skips; scripts 312 and load harness 86; pgvector PostgreSQL 16 persistence 188/API 77 plus backup/restore drill 1; clean-installed gateway build/lint and 86 tests with PostgreSQL/Redis in Linux; real Nginx trusted-edge 8 and web-delivery 12; POSIX API 2 and load 1. API PostgreSQL, clean gateway/Linux POSIX, full hermetic checks and the caught/restored pool-swap mutation were refreshed after the review corrections. After the main merge, full local checks, OpenAPI drift, the caught/restored mutation and Nginx 8/12 were refreshed again. The native Windows gateway SIGTERM assertion failed because process termination reports a signal rather than exit 0; its complete Linux rerun passed. An earlier backend Playwright run passed all 207 tests; refreshed runs encountered startup timeouts and unexpected Chromium context closures. The latest direct full run before merging main had 205 passed, two failed (existing profile achievement/session checks), zero skips/retries; all new seek-rating browser cases passed. The merged full backend browser suite (228 tests) and fresh exact-head review remain execution gates; no push readiness is claimed.
+
+## M15 Increment 84 — Durable finished-game PGN export (2026-10-02)
+
+- Addresses the open Fable + Astra P1 item "Game PGN export — still open for finished-game download" (`CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md`), reverified on `origin/main` `499a861`. The only PGN route was the study export, and a finished game could not be downloaded. Decisions are recorded in ADR-0154. This is not D-12 personal-data export.
+- **Event log as source** (`packages/api/src/game-export/finished-game-pgn.ts`):
+  - One `EventStore.load`. Stream invariants come from the projection's own `projectGameStream`: gaps, a missing or duplicate `GameCreated`, skipped plies and events after `GameEnded` are refused.
+  - Every stored UCI is replayed through `Game.fromEvents`. A foreign `GameCreated` id, a non-PGN result, a `GameEnded` outside the authority's exhaustive termination/result/winner contract (ADR-0154 table: checkmate, resignation and timeout decisive only; the five draw terminations draw only; variant decisive or draw; aborted `*`; no-show `*` or decisive), and a stored SAN that is not chess-core's SAN for its UCI move (apart from suffixes and `0-0`) are also refused (`CorruptGameStreamError`, HTTP 500). A prefix is never exported.
+  - Moves are the stored SAN in committed order, and the result is `GameEnded.result`. The `games` projection is never read.
+  - Zero-move endings (resignation before a move, abort, no-show) export as a result-only movetext.
+- **Serializer**: the studies `serializePgn` is reused, not duplicated. It gains an optional `PgnGame.startingMove` (a Black-to-move or later-fullmove start; study output is unchanged without it). Tag values now write control characters as spaces after the existing `\`/`"` escapes; a raw newline previously split a tag.
+- **Tags**:
+  - Seven Tag Roster with `?` for `Event`/`Site`/`Round`, and `Date` as the UTC date of `GameCreated.at`.
+  - `Variant` is the Rookzen id for every non-standard variant (`chess960`, `kingofthehill`, `atomic`, `crazyhouse`, `threecheck`, `horde`, `racingkings`), as the study export already writes it.
+  - `SetUp "1"` + `FEN` = `initialFen` for any non-standard start, and always for Chess960 (position 518 has the standard FEN). A historical Chess960 game without a start id exports from its FEN and is never given 518. There is no start-id tag.
+  - `TimeControl`: `base+inc`, `base` for sudden death, PGN's `-` for unlimited, and omitted for delay or fractional seconds.
+  - No Elo, ECO, Termination, titles or clocks.
+- **Names**: one batched `findByIds` for both seats, then the account handle, else the engine bot's catalogue handle, else `?`. Never the seat id. Handles of finished games are already public through search, profiles, seeks and leaderboards.
+- **Route `GET /v1/games/:id/export.pgn`** (PUBLIC):
+  - Access evidence: ADR-0004's anonymous spectator join already receives every move, and `GET /v1/games/:id` is public.
+  - Responses: UUID-validated id (422), 404 unknown, 409 not finished, 503 cancelled.
+  - `200`: `application/x-chess-pgn; charset=utf-8` with `Content-Disposition: attachment; filename="game-<uuid>.pgn"`. The global `nosniff` applies, and nginx `/v1/` and the service worker are unchanged.
+  - Cost: one stream read and one identity read; no engine and no Game Review.
+  - OpenAPI gained a per-response media type: both PGN exports are documented as `application/x-chess-pgn` (the study export had claimed JSON), with a new `PgnDocument` schema. `openapi.json` is regenerated.
+- **Web**:
+  - A "Download PGN" control in a new `#game-export` section (`packages/web/src/app/game-pgn-export.ts`). It is shown only when the authoritative state is over, to players and spectators; a live game has no PGN control.
+  - `GamesApi.exportPgn` uses a new `HttpClient` `text` mode: it sends `Accept` with the media type, refuses any other 2xx media type (no HTML fallback saved as PGN) and returns the body unmodified.
+  - The bytes are saved through a Blob and a detached `download` link (no navigation), and the object URL is always revoked on a timer. The filename is `game-<uuid>.pgn`, or `game.pgn` for a non-UUID route id.
+  - One request at a time, using `aria-disabled` so focus stays. A `role=status` line, a `role=alert` failure, and abort plus drop of late answers on dispose.
+  - English keys only. RTL is tested with the test-only Arabic catalog, and the saved document is never direction-transformed.
+- **Tests**:
+  - `finished-game-pgn.test.ts` (42):
+    - white/black/draw/`*` results, checkmate, stored-SAN fidelity, zero-move resignation/abort/no-show, and live games;
+    - corrupt streams: missing creation, gap, event after end, skipped ply, illegal UCI, foreign id, bad result, forged or wrong-move SAN, all 132 termination x result x winner combinations (exactly 18 accepted), endings produced by the real authority (decisive and insufficient-material flags, threefold, King of the Hill win, tournament no-show forfeit), and a Three-Check FEN ending in check counters;
+    - hostile and Unicode names, the UTC date, no invented tags, and the time-control table;
+    - every non-standard variant identifiable and replayed from the export alone through `CorePositionReader`, Chess960 0/518/959, a historical Chess960 game, and a Black-to-move custom FEN;
+    - one stream read and one batched identity read, bot and unknown seats, 404/409 without identity reads, and cancellation;
+    - HTTP headers and exact body, malformed ids, a public 409, and a disagreeing projection.
+  - OpenAPI media-type coupling, studies serializer tests (numbering, control characters, Unicode), and HTTP-client text-mode tests.
+  - `game-pgn-export.test.ts`: filename safety, exact Blob bytes, revocation (including when the click throws), live/finished visibility, double activation, failure and retry, a throwing save, stale response and failure after dispose, a clean remount, and Arabic relocalization.
+  - Game-mount integration for players and spectators.
+  - A backend Playwright test: no control or export during play (409); then keyboard download whose saved bytes equal the server's; filename, MIME and nosniff; focus retained; no navigation; an anonymous RTL 390 px touch spectator with a ≥ 44 px target and no overflow; and an error alert with nothing saved.
+- **Falsification**: 36 disposable mutations, with sources backed up to disk and restored by SHA-256. Compile and test steps were separated, and 36/36 were killed by tests (none by compile errors):
+  - change one SAN
+  - swap White/Black
+  - use the projection result
+  - drop SetUp/FEN for Chess960
+  - claim a result for a live stream
+  - omit Variant
+  - remove tag escaping
+  - remove control-character handling
+  - allow events after GameEnded
+  - reverse the move order
+  - skip replay
+  - ignore the starting side
+  - write delay as increment
+  - skip the game-id check
+  - fall back to the seat id
+  - make the route AUTHED
+  - skip id validation
+  - render the control during a live game
+  - allow double activation
+  - save after dispose
+  - never revoke the URL
+  - put the raw route id in the filename
+  - accept any media type
+  - skip the SAN-for-UCI check
+  - allow a drawn timeout
+  - allow a drawn checkmate
+  - allow a drawn resignation
+  - allow a drawn no-show
+  - allow a variant ending with no result
+  - allow a decisive abort
+  - allow a decisive stalemate
+  - skip the winner check
+  - skip the result-per-termination check
+  - restore the partial ending rules of `fe67730`
+  - read the fullmove from the last FEN field
+  - report a thrown save as started
+- **Validation**:
+  - build, lint, every `check:*` guard and `test:scripts` (312);
+  - 19 hermetic workspaces (3,861, zero skips, rerun after the review corrections);
+  - static Playwright (184; the first run had one lobby create-game failure in sign-in restore timing, unrelated to this change, and passed on a clean full rerun);
+  - `GAMBIT_E2E_BACKEND=1` Playwright with 4 workers and 0 retries (226), 0 failures and 0 skips, both before and after the review corrections;
+  - real-nginx `test:web-delivery` (12) and `test:trusted-edge` (8).
+- **Review corrections** (Qodo and Greptile on `66f4989`): the stored SAN must denote its UCI move (it was only shape-checked), contradictory `GameEnded` events are refused, and the starting fullmove comes from the parsed FEN so a trailing-counter Three-Check FEN numbers correctly.
+- **Owner exact-head review correction** (on `fe67730`): the ending check enforced only part of the contract, so drawn checkmate, resignation, timeout and no-show endings passed. It is now an exhaustive `Record<Termination, …>` derived from `packages/game/src/game.ts`, and the earlier test that accepted a drawn `timeout` was wrong and was replaced. The new matrix tests fail against `fe67730`.
+- **Concurrency**: implemented on `499a861`. PR #86 (seek creator pool ratings, M15 Increment 83) merged first as `f9144a2` and was merged normally into this branch (no rebase, no force). Its Increment 83 entry, seek-rating contract, tests and browser topology are preserved unchanged; this entry is renumbered to Increment 84. The only conflict was this file. Validation recorded above predates the merge; post-merge validation is recorded below.
+- **Deliberate limits**: single-game export only (no bulk or monthly archives); no `%clk` clock comments, annotations, Termination, ratings or ECO; no rate-limit bucket (comparable public reads are unmetered); a future private-game policy must cover the spectator join, the game summary and this route together. Engineering review was first-party only (no Gemini, no delegation); external exact-head evidence belongs to the PR handoff. The owner performs the merge.

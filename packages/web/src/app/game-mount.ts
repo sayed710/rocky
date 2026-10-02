@@ -103,6 +103,7 @@ import { formatClock, formatTimeControl } from './render-helpers.js';
 import type { AuthSession } from './auth-controller.js';
 import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
+import { mountGamePgnExport } from './game-pgn-export.js';
 import { isEngineBotUserId } from '@chess-platform/game';
 import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
 import { createI18nManager } from '../i18n/manager.js';
@@ -212,6 +213,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const gameReviewErrorEl = doc.getElementById('game-review-error');
   const gameReviewSummaryEl = doc.getElementById('game-review-summary');
   const gameReviewMovesEl = doc.getElementById('game-review-moves');
+  // Public and engine-free, so it is offered to players and spectators alike once the game is over.
+  const pgnExport = mountGamePgnExport({
+    doc,
+    gameId,
+    i18n,
+    requestPgn: (requestedGameId, signal) => deps.client.games.exportPgn(requestedGameId, signal),
+  });
   let gameReviewCapabilities: unknown = null;
   let gameOver = false;
   let isGamePlayer = false;
@@ -1289,6 +1297,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     isGamePlayer = state.isPlayer;
     isHumanGame = state.isHumanGame;
     gameOver = state.isOver;
+    pgnExport.setFinished(state.isOver);
     refreshGameReview();
     refreshAnalysisControls();
     refreshPuzzleControls();
@@ -1358,6 +1367,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   const unsubscribeLocale = i18n.onLocaleChange(() => {
     refreshGameReview();
+    pgnExport.relocalize();
     if (lastMetadataState) {
       renderMetadata(lastMetadataState);
     }
@@ -1780,6 +1790,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       openingController.dispose();
       coachController.dispose();
       gameReviewController.dispose();
+      pgnExport.dispose();
     },
   };
 

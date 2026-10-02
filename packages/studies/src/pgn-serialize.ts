@@ -1,8 +1,16 @@
 import type { PgnGame, PgnMoveNode } from './pgn-model';
 
-/** Escapes the two characters PGN reserves inside a tag value. */
+/**
+ * Escapes the two characters PGN reserves inside a tag value, and writes each non-printing
+ * character as a space.
+ *
+ * PGN strings may not contain non-printing characters, and the parser ends a string at a newline.
+ * Writing a newline verbatim splits the tag across lines, and the rest of it is read as movetext.
+ * A space keeps the value on its own line; dropping the character instead would join the words on
+ * either side of it.
+ */
 function escapeTagValue(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
 
 /**
@@ -45,7 +53,7 @@ export function serializePgn(game: PgnGame): string {
 
   // Move numbering is regenerated rather than remembered. The tree is the source of truth for
   // order, so a number carried over from the input could only ever contradict it.
-  writeMoves(parts, game.moves, 1, 'w');
+  writeMoves(parts, game.moves, game.startingMove?.number ?? 1, game.startingMove?.color ?? 'w');
   parts.push(game.result);
 
   lines.push(wrap(parts.join(' '), 80));

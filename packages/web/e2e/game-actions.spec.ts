@@ -5,6 +5,7 @@
  */
 import { test, expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
 test.skip(!process.env['GAMBIT_E2E_BACKEND'], 'requires running backend');
 
@@ -224,6 +225,114 @@ test.describe('Game actions flow', () => {
 
     } finally {
       await ctx.close();
+    }
+  });
+
+  test('a finished game downloads exactly the server PGN, for players and anonymous spectators', async ({ browser, request }) => {
+    const ctx1 = await browser.newContext({ acceptDownloads: true });
+    const ctx2 = await browser.newContext();
+    // An anonymous spectator on a phone-sized, coarse-pointer screen with the document forced to RTL.
+    const ctx3 = await browser.newContext({ acceptDownloads: true, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const page1 = await ctx1.newPage();
+    const page2 = await ctx2.newPage();
+    const page3 = await ctx3.newPage();
+
+    try {
+      const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+      const handle1 = `e2e-pgn1-${suffix}`;
+      const handle2 = `e2e-pgn2-${suffix}`;
+      const password = 'test-password-123';
+
+      const reg1 = await request.post('/v1/auth/register', { data: { handle: handle1, password, email: `${handle1}@example.test` } });
+      expect(reg1.ok()).toBeTruthy();
+      const auth1 = await reg1.json();
+      const reg2 = await request.post('/v1/auth/register', { data: { handle: handle2, password, email: `${handle2}@example.test` } });
+      expect(reg2.ok()).toBeTruthy();
+      const auth2 = await reg2.json();
+
+      await ctx1.addCookies([{ name: 'gambit_refresh', value: auth1.tokens.refreshToken, domain: 'localhost', path: '/v1/auth', httpOnly: true, secure: false, sameSite: 'Strict' }]);
+      await ctx2.addCookies([{ name: 'gambit_refresh', value: auth2.tokens.refreshToken, domain: 'localhost', path: '/v1/auth', httpOnly: true, secure: false, sameSite: 'Strict' }]);
+      await page1.addInitScript(({ handle, uid }) => { localStorage.setItem('gambit-session', JSON.stringify({ handle, userId: uid })); }, { handle: handle1, uid: auth1.user.id });
+      await page2.addInitScript(({ handle, uid }) => { localStorage.setItem('gambit-session', JSON.stringify({ handle, userId: uid })); }, { handle: handle2, uid: auth2.user.id });
+      await page3.addInitScript(() => {
+        document.addEventListener('DOMContentLoaded', () => document.documentElement.setAttribute('dir', 'rtl'));
+      });
+
+      const gReq = await request.post('/e2e/games', { data: { whiteId: auth1.user.id, blackId: auth2.user.id } });
+      expect(gReq.ok()).toBeTruthy();
+      const gameId: string = (await gReq.json()).gameId;
+
+      await page1.goto(`/game/${gameId}`);
+      await page2.goto(`/game/${gameId}`);
+      await page3.goto(`/game/${gameId}`);
+      const status1 = page1.locator('#status');
+      await expect(status1).toHaveText(/your move/i, { timeout: 15_000 });
+      await expect(page2.locator('#status')).toHaveText(/white to move/i, { timeout: 15_000 });
+      await expect(page3.locator('#status')).toHaveText(/white to move/i, { timeout: 15_000 });
+
+      // A live game offers no PGN control at all, to players or spectators, and the API refuses it.
+      const download1 = page1.getByRole('button', { name: 'Download PGN' });
+      const download3 = page3.getByRole('button', { name: 'Download PGN' });
+      await expect(download1).toHaveCount(0);
+      await expect(download3).toHaveCount(0);
+      expect((await request.get(`/v1/games/${gameId}/export.pgn`)).status()).toBe(409);
+
+      await page1.locator('[data-square="e2"]').click();
+      await page1.locator('[data-square="e4"]').click();
+      await expect(page2.locator('#status')).toHaveText(/your move/i, { timeout: 10_000 });
+      await page2.click('#action-resign');
+      await page2.click('#confirm-resign-yes');
+      await expect(status1).toHaveText(/White wins by resignation|White wins \(resignation\)/i, { timeout: 10_000 });
+
+      // The server's document: one request, read as raw bytes.
+      const served = await request.get(`/v1/games/${gameId}/export.pgn`);
+      expect(served.status()).toBe(200);
+      expect(served.headers()['content-type']).toBe('application/x-chess-pgn; charset=utf-8');
+      expect(served.headers()['content-disposition']).toBe(`attachment; filename="game-${gameId}.pgn"`);
+      expect(served.headers()['x-content-type-options']).toBe('nosniff');
+      const servedBytes = await served.body();
+      const servedText = servedBytes.toString('utf8');
+      expect(servedText).not.toContain('<');
+      expect(servedText).toContain(`[White "${handle1}"]`);
+      expect(servedText).toContain(`[Black "${handle2}"]`);
+      expect(servedText).toContain('[Result "1-0"]');
+      expect(servedText.endsWith('\n\n1. e4 1-0\n')).toBe(true);
+
+      // Keyboard activation saves exactly those bytes under the id filename, and focus stays put.
+      await expect(download1).toBeVisible();
+      await download1.focus();
+      const [saved1] = await Promise.all([page1.waitForEvent('download'), page1.keyboard.press('Enter')]);
+      expect(saved1.suggestedFilename()).toBe(`game-${gameId}.pgn`);
+      const savedBytes1 = await readFile(await saved1.path());
+      expect(Buffer.compare(savedBytes1, servedBytes)).toBe(0);
+      await expect(download1).toBeFocused();
+      await expect(page1.locator('#game-pgn-status')).toHaveText('PGN download started.');
+      await expect(page1).toHaveURL(new RegExp(`/game/${gameId}$`));
+
+      // The anonymous RTL spectator gets the same public document, with a 44px coarse-pointer target
+      // and no horizontal overflow.
+      await expect(page3.locator('html')).toHaveAttribute('dir', 'rtl');
+      await expect(download3).toBeVisible({ timeout: 10_000 });
+      const box = await download3.boundingBox();
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+      expect(await page3.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+      const [saved3] = await Promise.all([page3.waitForEvent('download'), download3.tap()]);
+      expect(saved3.suggestedFilename()).toBe(`game-${gameId}.pgn`);
+      expect(Buffer.compare(await readFile(await saved3.path()), servedBytes)).toBe(0);
+
+      // A refused request is a perceivable alert, and nothing is saved.
+      await page1.route('**/v1/games/*/export.pgn', (route) =>
+        route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: { code: 'not_found', message: 'game not found' } }) }));
+      let unexpectedDownload = false;
+      page1.on('download', () => { unexpectedDownload = true; });
+      await download1.click();
+      const alert = page1.getByRole('alert').filter({ hasText: 'The PGN file could not be downloaded. Please try again.' });
+      await expect(alert).toBeVisible();
+      expect(unexpectedDownload).toBe(false);
+    } finally {
+      await ctx1.close();
+      await ctx2.close();
+      await ctx3.close();
     }
   });
 });

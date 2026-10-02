@@ -83,6 +83,28 @@ test('Game Review documents unsupported variants among its validation outcomes',
   }
 });
 
+test('both PGN exports document a PGN body, never JSON, and the finished-game export its outcomes', async () => {
+  const h = await startHarness();
+  try {
+    const doc = h.server.openapiDocument() as any;
+    const game = doc.paths['/v1/games/{id}/export.pgn'].get;
+    assert.equal(game.security, undefined, 'public, like the game summary and the spectator join');
+    assert.deepEqual(Object.keys(game.responses['200'].content), ['application/x-chess-pgn']);
+    assert.equal(game.responses['200'].content['application/x-chess-pgn'].schema.$ref, '#/components/schemas/PgnDocument');
+    assert.ok(game.responses['200'].headers['Content-Disposition']);
+    assert.deepEqual(Object.keys(game.responses).sort(), ['200', '400', '404', '409', '422', '503']);
+    for (const status of ['404', '409', '422']) {
+      assert.deepEqual(Object.keys(game.responses[status].content), ['application/json'], `${status} is the JSON error envelope`);
+    }
+    assert.equal(doc.components.schemas.PgnDocument.type, 'string');
+
+    const study = doc.paths['/v1/studies/{id}/export.pgn'].get;
+    assert.deepEqual(Object.keys(study.responses['200'].content), ['application/x-chess-pgn']);
+  } finally {
+    await h.close();
+  }
+});
+
 test('Study Partner publishes only the private five-route lifecycle and its safe turn contract', async () => {
   const h = await startHarness();
   try {
