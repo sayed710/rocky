@@ -44,11 +44,24 @@ export interface PgnMoveNode {
   readonly variations: readonly (readonly PgnMoveNode[])[];
 }
 
+/** The move number and side of a game's first move. */
+export interface PgnStartingMove {
+  /** The FEN fullmove number of the starting position, at least 1. */
+  readonly number: number;
+  readonly color: 'w' | 'b';
+}
+
 /** One game: its tags, its movetext, and its result token. */
 export interface PgnGame {
   readonly tags: readonly PgnTag[];
   /** Comments appearing before the first move. */
   readonly preComments: readonly string[];
+  /**
+   * Where move numbering starts. Absent means `1.` with White, which is what the parser and the
+   * study export assume. A game exported from a position with Black to move needs it, or its first
+   * move is numbered as White's.
+   */
+  readonly startingMove?: PgnStartingMove;
   readonly moves: readonly PgnMoveNode[];
   /** The result token as written: `1-0`, `0-1`, `1/2-1/2`, or `*`. */
   readonly result: string;

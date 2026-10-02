@@ -404,6 +404,11 @@ export function createFakeDoc(elementMap = new Map<string, FakeElement>()): Docu
 }
 
 const testArabicCatalog: Partial<MessagesCatalog> = {
+  'game.export.title': 'تصدير',
+  'game.export.downloadPgn': 'تنزيل PGN',
+  'game.export.preparing': 'جارٍ تجهيز ملف PGN…',
+  'game.export.started': 'بدأ تنزيل PGN.',
+  'game.export.unavailableError': 'تعذّر تنزيل ملف PGN. حاول مرة أخرى.',
   // Shell
   'shell.brand': 'روك زن',
   // Public documents (test-only strings; not an approved production translation)

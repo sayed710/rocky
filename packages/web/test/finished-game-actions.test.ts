@@ -139,3 +139,26 @@ test('spectator never sees player actions on live or terminal state', () => {
     game.dispose();
   }
 });
+
+test('Download PGN is absent on a live game and appears for players and spectators at the end', () => {
+  for (const role of ['white', 'spectator'] as const) {
+    const game = setup(role);
+    try {
+      assert.equal(game.elements.get('game-export')!.hidden, true, `${role}: no PGN control during play`);
+      game.socket.emit({ t: 'ended', gameId: 'g-test-1', result: '0-1', termination: 'resignation', winner: 'b', serverTs: 1 });
+      assert.equal(game.elements.get('game-export')!.hidden, false, `${role}: PGN offered once over`);
+    } finally {
+      game.dispose();
+    }
+  }
+});
+
+test('joining an already finished game offers Download PGN immediately', () => {
+  const game = setup('spectator', true);
+  try {
+    assert.equal(game.elements.get('game-export')!.hidden, false);
+    assert.equal(game.elements.get('game-pgn-download')!.getAttribute('aria-disabled'), 'false');
+  } finally {
+    game.dispose();
+  }
+});

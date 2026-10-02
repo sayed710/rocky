@@ -55,6 +55,12 @@ export interface RequestSpec {
    * Set to `'include'` for cookie-based auth (M12 inc 2: refresh/logout).
    */
   readonly credentials?: 'include' | 'omit' | 'same-origin';
+  /**
+   * Read a 2xx body as a text document of this media type instead of as JSON: it is asked for in
+   * `accept`, a 2xx of any other media type is a {@link DecodeError} (an HTML fallback page is not a
+   * PGN), and the body is returned exactly as received. Error statuses still read the JSON envelope.
+   */
+  readonly text?: { readonly mediaType: string };
 }
 
 export interface HttpClientOptions {
@@ -115,7 +121,7 @@ export class HttpClient {
         error instanceof HttpError ? error.retryAfterMs : undefined,
     });
 
-    return this.decode<T>(response);
+    return spec.text ? (this.decodeText(response, spec.text.mediaType) as T) : this.decode<T>(response);
   }
 
   private async sendOnce(method: HttpMethod, url: string, spec: RequestSpec): Promise<HttpResponse> {
@@ -137,7 +143,7 @@ export class HttpClient {
     const request: HttpRequest = {
       method,
       url,
-      headers: this.buildHeaders(spec.headers, hasBody),
+      headers: this.buildHeaders(spec.text ? { accept: spec.text.mediaType, ...spec.headers } : spec.headers, hasBody),
       signal: controller.signal,
       ...(hasBody ? { body: JSON.stringify(spec.body) } : {}),
       ...(spec.credentials !== undefined ? { credentials: spec.credentials } : {}),
@@ -173,6 +179,17 @@ export class HttpClient {
         error,
       );
     }
+  }
+
+  private decodeText(response: HttpResponse, mediaType: string): string {
+    const received = (response.headers['content-type'] ?? '').split(';')[0]!.trim().toLowerCase();
+    if (received !== mediaType) {
+      throw new DecodeError(
+        `expected a ${mediaType} response body, got ${received || 'no content type'} (status ${response.status})`,
+        response.status,
+      );
+    }
+    return response.body;
   }
 
   private parseEnvelope(body: string): ApiErrorEnvelope | undefined {

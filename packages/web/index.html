@@ -131,6 +131,12 @@
           <div id="game-review-summary" class="panel-list game-review-summary" hidden></div>
           <div id="game-review-moves" class="panel-list" aria-busy="false"></div>
         </section>
+        <section id="game-export" class="analysis-panel game-export" aria-labelledby="game-export-heading" hidden>
+          <h2 id="game-export-heading" class="analysis-title" data-i18n="game.export.title">Export</h2>
+          <button id="game-pgn-download" type="button" class="button" aria-disabled="false" data-i18n="game.export.downloadPgn">Download PGN</button>
+          <p id="game-pgn-status" class="count" role="status" aria-live="polite"></p>
+          <div id="game-pgn-error" class="error" role="alert" hidden></div>
+        </section>
         <section id="analysis" class="analysis-panel" aria-labelledby="analysis-heading" hidden>
           <h2 id="analysis-heading" class="analysis-title" data-i18n="game.analysis.title">Engine</h2>
           <div class="analysis-controls">

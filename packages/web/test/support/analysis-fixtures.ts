@@ -157,6 +157,10 @@ export const GAME_ELEMENT_IDS = [
   'draw-offer-received',
   'action-accept-draw',
   'action-decline-draw',
+  'game-export',
+  'game-pgn-download',
+  'game-pgn-status',
+  'game-pgn-error',
   'game-review',
   'game-review-run',
   'game-review-note',
@@ -221,6 +225,8 @@ export function createGameDocument(): {
       id === 'confirm-resign' ||
       id === 'confirm-abort' ||
       id === 'draw-offer-received' ||
+      id === 'game-export' ||
+      id === 'game-pgn-error' ||
       id === 'game-review' ||
       id === 'game-review-error' ||
       id === 'game-review-summary' ||

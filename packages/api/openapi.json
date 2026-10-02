@@ -2902,6 +2902,96 @@
         ]
       }
     },
+    "/v1/games/{id}/export.pgn": {
+      "get": {
+        "summary": "Download a finished game as PGN, written from its durable event log",
+        "tags": [
+          "games"
+        ],
+        "operationId": "get_v1_games_by_id_export_pgn",
+        "responses": {
+          "200": {
+            "description": "The finished game as one PGN game",
+            "content": {
+              "application/x-chess-pgn": {
+                "schema": {
+                  "$ref": "#/components/schemas/PgnDocument"
+                }
+              }
+            },
+            "headers": {
+              "Content-Disposition": {
+                "description": "Always `attachment` with a server-chosen `.pgn` filename built only from validated ids",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such game",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The game has not finished",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed game id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The request was cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Game id (UUID)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/v1/analysis": {
       "post": {
         "summary": "Analyze a position with the engine",
@@ -11582,9 +11672,17 @@
           "200": {
             "description": "Exported PGN text",
             "content": {
-              "application/json": {
+              "application/x-chess-pgn": {
                 "schema": {
                   "$ref": "#/components/schemas/PgnExport"
+                }
+              }
+            },
+            "headers": {
+              "Content-Disposition": {
+                "description": "Always `attachment` with a server-chosen `.pgn` filename built only from validated ids",
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -17490,6 +17588,10 @@
       "PgnExport": {
         "type": "string",
         "description": "PGN exported text"
+      },
+      "PgnDocument": {
+        "type": "string",
+        "description": "One finished game in PGN, written from its durable event log: the Seven Tag Roster with \"?\" for facts the log does not hold, the Rookzen variant id in Variant for a non-standard game, SetUp and FEN for any start other than the standard one (always for chess960), TimeControl where PGN can state it exactly, the stored SAN in order, and the GameEnded result. UTF-8, LF line endings, final newline."
       },
       "CourseView": {
         "type": "object",

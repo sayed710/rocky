@@ -103,6 +103,8 @@ export interface DocResponse {
   readonly description: string;
   /** Component name (key under `components.schemas`) for the body, if any. */
   readonly schema?: string;
+  /** The body's media type. Defaults to `application/json`; a text document such as PGN states its own. */
+  readonly mediaType?: string;
   readonly headers?: Readonly<Record<string, DocHeader>>;
 }
 

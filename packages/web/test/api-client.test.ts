@@ -532,6 +532,19 @@ test('games.review posts to the completed-game review endpoint with authenticati
   assert.equal(t.calls[1]!.headers['authorization'], 'Bearer tok-A');
 });
 
+test('games.exportPgn reads the public PGN export as text, without authentication', async () => {
+  const pgn = '[Event "?"]\n\n1. e4 1-0\n';
+  const t = new FakeTransport(() => ({ status: 200, headers: { 'content-type': 'application/x-chess-pgn; charset=utf-8' }, body: pgn }));
+  const c = make(t);
+  const controller = new AbortController();
+
+  assert.equal(await c.games.exportPgn('game 1', controller.signal), pgn);
+  assert.equal(t.calls[0]!.url, 'https://api.test/v1/games/game%201/export.pgn');
+  assert.equal(t.calls[0]!.method, 'GET');
+  assert.equal(t.calls[0]!.headers['authorization'], undefined);
+  assert.equal(t.calls[0]!.headers['accept'], 'application/x-chess-pgn');
+});
+
 test('games.review cancellation reaches the in-flight transport request', async () => {
   const hangingTransport = abortableHang();
   let callIndex = 0;

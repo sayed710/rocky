@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-02 — M15 Increment 82: Policy and source-disclosure engineering infrastructure._
+_Last updated: 2026-10-02 — M15 Increment 83: Durable finished-game PGN export._
+
+Prior: _Last updated: 2026-10-02 — M15 Increment 82: Policy and source-disclosure engineering infrastructure._
 
 Prior: _Last updated: 2026-10-02 — M15 Increment 81: Moderation and trust operations: player reports, first admin, trust worker._
 
@@ -4795,3 +4797,77 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - Docker `Dockerfile.web` built stamped, unstamped and malformed: the SHA is present only in the stamped bundle, the malformed build fails, and the runtime user is uid 101. The CI embed check passed on the stamped image and failed on the unstamped one.
   - Helm and Compose are untouched.
 - Engineering review was first-party only (Gemini quota exhausted, no delegation); independent exact-head Codex and external reviewer evidence belongs to the PR handoff. Owner performs the merge.
+
+## M15 Increment 83 — Durable finished-game PGN export (2026-10-02)
+
+- Addresses the open Fable + Astra P1 item "Game PGN export — still open for finished-game download" (`CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md`), reverified on `origin/main` `499a861`. The only PGN route was the study export, and a finished game could not be downloaded. Decisions are recorded in ADR-0154. This is not D-12 personal-data export.
+- **Event log as source** (`packages/api/src/game-export/finished-game-pgn.ts`):
+  - One `EventStore.load`. Stream invariants come from the projection's own `projectGameStream`: gaps, a missing or duplicate `GameCreated`, skipped plies and events after `GameEnded` are refused.
+  - Every stored UCI is replayed through `Game.fromEvents`. A foreign `GameCreated` id, a non-PGN result and a stored SAN that is not SAN-shaped are also refused (`CorruptGameStreamError`, HTTP 500). A prefix is never exported.
+  - Moves are the stored SAN in committed order, and the result is `GameEnded.result`. The `games` projection is never read.
+  - Zero-move endings (resignation before a move, abort, no-show) export as a result-only movetext.
+- **Serializer**: the studies `serializePgn` is reused, not duplicated. It gains an optional `PgnGame.startingMove` (a Black-to-move or later-fullmove start; study output is unchanged without it). Tag values now write control characters as spaces after the existing `\`/`"` escapes; a raw newline previously split a tag.
+- **Tags**:
+  - Seven Tag Roster with `?` for `Event`/`Site`/`Round`, and `Date` as the UTC date of `GameCreated.at`.
+  - `Variant` is the Rookzen id for every non-standard variant (`chess960`, `kingofthehill`, `atomic`, `crazyhouse`, `threecheck`, `horde`, `racingkings`), as the study export already writes it.
+  - `SetUp "1"` + `FEN` = `initialFen` for any non-standard start, and always for Chess960 (position 518 has the standard FEN). A historical Chess960 game without a start id exports from its FEN and is never given 518. There is no start-id tag.
+  - `TimeControl`: `base+inc`, `base` for sudden death, PGN's `-` for unlimited, and omitted for delay or fractional seconds.
+  - No Elo, ECO, Termination, titles or clocks.
+- **Names**: one batched `findByIds` for both seats, then the account handle, else the engine bot's catalogue handle, else `?`. Never the seat id. Handles of finished games are already public through search, profiles, seeks and leaderboards.
+- **Route `GET /v1/games/:id/export.pgn`** (PUBLIC):
+  - Access evidence: ADR-0004's anonymous spectator join already receives every move, and `GET /v1/games/:id` is public.
+  - Responses: UUID-validated id (422), 404 unknown, 409 not finished, 503 cancelled.
+  - `200`: `application/x-chess-pgn; charset=utf-8` with `Content-Disposition: attachment; filename="game-<uuid>.pgn"`. The global `nosniff` applies, and nginx `/v1/` and the service worker are unchanged.
+  - Cost: one stream read and one identity read; no engine and no Game Review.
+  - OpenAPI gained a per-response media type: both PGN exports are documented as `application/x-chess-pgn` (the study export had claimed JSON), with a new `PgnDocument` schema. `openapi.json` is regenerated.
+- **Web**:
+  - A "Download PGN" control in a new `#game-export` section (`packages/web/src/app/game-pgn-export.ts`). It is shown only when the authoritative state is over, to players and spectators; a live game has no PGN control.
+  - `GamesApi.exportPgn` uses a new `HttpClient` `text` mode: it sends `Accept` with the media type, refuses any other 2xx media type (no HTML fallback saved as PGN) and returns the body unmodified.
+  - The bytes are saved through a Blob and a detached `download` link (no navigation), and the object URL is always revoked on a timer. The filename is `game-<uuid>.pgn`, or `game.pgn` for a non-UUID route id.
+  - One request at a time, using `aria-disabled` so focus stays. A `role=status` line, a `role=alert` failure, and abort plus drop of late answers on dispose.
+  - English keys only. RTL is tested with the test-only Arabic catalog, and the saved document is never direction-transformed.
+- **Tests**:
+  - `finished-game-pgn.test.ts` (37):
+    - white/black/draw/`*` results, checkmate, stored-SAN fidelity, zero-move resignation/abort/no-show, and live games;
+    - corrupt streams: missing creation, gap, event after end, skipped ply, illegal UCI, foreign id, bad result, forged SAN;
+    - hostile and Unicode names, the UTC date, no invented tags, and the time-control table;
+    - every non-standard variant identifiable and replayed from the export alone through `CorePositionReader`, Chess960 0/518/959, a historical Chess960 game, and a Black-to-move custom FEN;
+    - one stream read and one batched identity read, bot and unknown seats, 404/409 without identity reads, and cancellation;
+    - HTTP headers and exact body, malformed ids, a public 409, and a disagreeing projection.
+  - OpenAPI media-type coupling, studies serializer tests (numbering, control characters, Unicode), and HTTP-client text-mode tests.
+  - `game-pgn-export.test.ts`: filename safety, exact Blob bytes, revocation (including when the click throws), live/finished visibility, double activation, failure and retry, a throwing save, stale response and failure after dispose, a clean remount, and Arabic relocalization.
+  - Game-mount integration for players and spectators.
+  - A backend Playwright test: no control or export during play (409); then keyboard download whose saved bytes equal the server's; filename, MIME and nosniff; focus retained; no navigation; an anonymous RTL 390 px touch spectator with a ≥ 44 px target and no overflow; and an error alert with nothing saved.
+- **Falsification**: 25 disposable mutations, with sources backed up to disk and restored by SHA-256. Compile and test steps were separated, and 25/25 were killed by tests:
+  - change one SAN
+  - swap White/Black
+  - use the projection result
+  - drop SetUp/FEN for Chess960
+  - claim a result for a live stream
+  - omit Variant
+  - remove tag escaping
+  - remove control-character handling
+  - allow events after GameEnded
+  - reverse the move order
+  - skip replay
+  - ignore the starting side
+  - write delay as increment
+  - skip the game-id check
+  - fall back to the seat id
+  - make the route AUTHED
+  - skip id validation
+  - render the control during a live game
+  - allow double activation
+  - save after dispose
+  - never revoke the URL
+  - put the raw route id in the filename
+  - accept any media type
+  - skip the SAN-shape check
+  - report a thrown save as started
+- **Validation**:
+  - build, lint, every `check:*` guard and `test:scripts` (312);
+  - 19 hermetic workspaces (3,857, zero skips; run before the SAN-shape guard, whose suite was rerun at 37/37);
+  - static Playwright (184; the first run had one lobby create-game failure in sign-in restore timing, unrelated to this change, and passed on a clean full rerun);
+  - `GAMBIT_E2E_BACKEND=1` Playwright with 4 workers and 0 retries (226), 0 failures and 0 skips;
+  - real-nginx `test:web-delivery` (12) and `test:trusted-edge` (8).
+- **Deliberate limits**: single-game export only (no bulk or monthly archives); no `%clk` clock comments, annotations, Termination, ratings or ECO; no rate-limit bucket (comparable public reads are unmetered); a future private-game policy must cover the spectator join, the game summary and this route together. Engineering review was first-party only (no Gemini, no delegation); external exact-head evidence belongs to the PR handoff. The owner performs the merge.

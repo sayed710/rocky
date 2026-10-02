@@ -47,6 +47,38 @@ test('204 / empty body decodes to undefined', async () => {
   assert.equal(out, undefined);
 });
 
+const PGN = '[Event "?"]\n[White "Ünïcødé"]\n\n1. e4 e5 1-0\n';
+
+test('a text request asks for its media type and returns the body exactly as received', async () => {
+  const t = new FakeTransport(() => ({
+    status: 200,
+    headers: { 'content-type': 'application/x-chess-pgn; charset=utf-8' },
+    body: PGN,
+  }));
+  const out = await client(t).request<string>({ method: 'GET', path: '/v1/x', text: { mediaType: 'application/x-chess-pgn' } });
+  assert.equal(out, PGN, 'no JSON decoding and no newline or whitespace change');
+  assert.equal(t.calls[0]!.headers['accept'], 'application/x-chess-pgn');
+});
+
+test('a text request refuses a 2xx body of any other media type, such as an HTML fallback page', async () => {
+  for (const contentType of ['text/html; charset=utf-8', 'application/json', '', 'application/x-chess-pgn-evil']) {
+    const t = new FakeTransport(() => ({ status: 200, headers: contentType ? { 'content-type': contentType } : {}, body: '<!doctype html>' }));
+    await assert.rejects(
+      client(t).request({ method: 'GET', path: '/v1/x', text: { mediaType: 'application/x-chess-pgn' } }),
+      DecodeError,
+      contentType,
+    );
+  }
+});
+
+test('a text request still maps a JSON error envelope to a typed HttpError', async () => {
+  const t = new FakeTransport(() => json(404, { error: { code: 'not_found', message: 'game not found' } }));
+  await assert.rejects(
+    client(t).request({ method: 'GET', path: '/v1/x', text: { mediaType: 'application/x-chess-pgn' } }),
+    NotFoundError,
+  );
+});
+
 test('maps a non-2xx envelope to a typed HttpError', async () => {
   const t = new FakeTransport(() =>
     json(404, { error: { code: 'not_found', message: 'missing', requestId: 'r1' } }),

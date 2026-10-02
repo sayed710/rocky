@@ -1607,6 +1607,15 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
     description: 'PGN exported text',
   },
 
+  PgnDocument: {
+    type: 'string',
+    description:
+      'One finished game in PGN, written from its durable event log: the Seven Tag Roster with "?" for '
+      + 'facts the log does not hold, the Rookzen variant id in Variant for a non-standard game, SetUp and FEN '
+      + 'for any start other than the standard one (always for chess960), TimeControl where PGN can state it '
+      + 'exactly, the stored SAN in order, and the GameEnded result. UTF-8, LF line endings, final newline.',
+  },
+
   // --- Learning & Courses ---
   CourseView: {
     type: 'object',
