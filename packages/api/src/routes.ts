@@ -22,6 +22,7 @@ import {
 } from '@chess-platform/persistence';
 import { moderationReportSummaryView, moderationReportView, playerReportReceiptView } from './moderation/report-presenters';
 import { AuthService } from './auth/service';
+import { seekViews } from './seek-views';
 import type { RequestMeta } from './auth/service';
 import { EMAIL_ADDRESS_PATTERN } from './email/address.js';
 import type { Repositories } from './deps';
@@ -1585,9 +1586,9 @@ export function buildRouter(deps: RouteDeps): Router {
             ? s
             : { ...s, creatorHandle: userMap.get(s.creatorId) ?? null },
         );
-        return json(200, enrichedSeeks.map(seekView));
+        return json(200, await seekViews(enrichedSeeks, repos.ratings));
       }
-      return json(200, seeks.map(seekView));
+      return json(200, await seekViews(seeks, repos.ratings));
     },
   );
 
@@ -1619,6 +1620,7 @@ export function buildRouter(deps: RouteDeps): Router {
         { key: `seek-create:user:${identity.userId}`, limit: config.rateLimit.seekCreation.perUser },
         { key: `seek-create:ip:${ctx.ip ?? 'unknown'}`, limit: config.rateLimit.seekCreation.perIp },
       ]);
+      const creatorRating = await repos.ratings.get(identity.userId, variant, classifySpeed(timeControl));
       const seek = await repos.seeks.create({
         id: ids.next(),
         creatorId: identity.userId,
@@ -1630,7 +1632,7 @@ export function buildRouter(deps: RouteDeps): Router {
         minRating: minRating ?? null,
         maxRating: maxRating ?? null,
       });
-      return json(201, seekView({ ...seek, creatorHandle: seek.creatorHandle ?? identity.handle }));
+      return json(201, seekView({ ...seek, creatorHandle: seek.creatorHandle ?? identity.handle }, creatorRating));
     },
   );
 
@@ -1722,6 +1724,9 @@ export function buildRouter(deps: RouteDeps): Router {
         }
       }
 
+      // Resolve display data before claiming the seek so a read failure cannot turn a committed
+      // match into an apparent failed acceptance.
+      const creatorRating = await repos.ratings.get(seek.creatorId, seek.variant, classifySpeed(seek.timeControl));
       let whiteId: string;
       let blackId: string;
       if (seek.color === 'white') {
@@ -1779,7 +1784,7 @@ export function buildRouter(deps: RouteDeps): Router {
 
       if (!updatedSeek) throw HttpError.notFound('seek not found or already accepted');
       const creatorHandle = updatedSeek.creatorHandle ?? seek.creatorHandle ?? (await repos.users.findById(seek.creatorId))?.handle ?? null;
-      return json(200, seekView({ ...updatedSeek, creatorHandle }));
+      return json(200, seekView({ ...updatedSeek, creatorHandle }, creatorRating));
     },
   );
 

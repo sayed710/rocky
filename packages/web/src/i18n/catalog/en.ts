@@ -137,6 +137,8 @@ export const enMessages = {
   'lobby.incrementSeconds': 'Increment (seconds)',
   'lobby.modeHint': 'Rated games affect your rating; casual games don’t.',
   'lobby.ratingOpponent': 'Opponent rating',
+  'lobby.creatorUnrated': 'Unrated',
+  'lobby.creatorRatingAria': 'Rating in {variant} · {speed}: {rating}',
   'lobby.ratingMinLabel': 'Minimum',
   'lobby.ratingMaxLabel': 'Maximum',
   'lobby.ratingHint': 'Leave blank for no restriction.',

@@ -535,6 +535,21 @@ const RATING_COLS = 'user_id, variant, speed, rating, rd, vol, updated_at';
 export class PgRatingsRepository implements RatingsRepository {
   constructor(private readonly pool: Pool) {}
 
+  /** Batch exact pool keys without one database round trip per lobby row. */
+  async getMany(pools: readonly Pick<RatingRow, 'userId' | 'variant' | 'speed'>[]): Promise<RatingRow[]> {
+    const keys = pools.filter((p) => isCanonicalUuid(p.userId));
+    if (keys.length === 0) return [];
+    const res = await this.pool.query<RatingDbRow>(
+      `SELECT r.user_id, r.variant, r.speed, r.rating, r.rd, r.vol, r.updated_at
+       FROM ratings r
+       JOIN (SELECT DISTINCT * FROM unnest($1::uuid[], $2::text[], $3::text[])
+         AS pools(user_id, variant, speed)) p
+         ON r.user_id = p.user_id AND r.variant = p.variant AND r.speed = p.speed`,
+      [keys.map((p) => p.userId), keys.map((p) => p.variant), keys.map((p) => p.speed)],
+    );
+    return res.rows.map(toRating);
+  }
+
   async get(userId: string, variant: Variant, speed: Speed): Promise<RatingRow | null> {
     const res = await this.pool.query<RatingDbRow>(
       `SELECT ${RATING_COLS} FROM ratings WHERE user_id = $1 AND variant = $2 AND speed = $3`,

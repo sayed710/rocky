@@ -324,6 +324,17 @@ export class InMemoryRatingsRepository implements RatingsRepository {
 
   constructor(private readonly clock: Clock = systemClock) {}
 
+  async getMany(pools: readonly Pick<RatingRow, 'userId' | 'variant' | 'speed'>[]): Promise<RatingRow[]> {
+    // Match PostgreSQL's malformed UUID guard without pulling its driver into the fake.
+    const keys = new Set(pools
+      .filter((p) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.userId))
+      .map((p) => ratingKey(p.userId, p.variant, p.speed)));
+    return [...keys].flatMap((key) => {
+      const row = this.byKey.get(key);
+      return row ? [row] : [];
+    });
+  }
+
   async get(userId: string, variant: Variant, speed: Speed): Promise<RatingRow | null> {
     return this.byKey.get(ratingKey(userId, variant, speed)) ?? null;
   }

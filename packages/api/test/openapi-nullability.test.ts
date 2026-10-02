@@ -165,7 +165,7 @@ test('optional and nullable are independent axes, and the migration moved only o
  * field is added or removed, and that is the point: a migration that silently dropped nullability
  * from a field would otherwise leave every remaining field still well-formed.
  */
-test('every nullable schema in the document is well-formed, and there are 74 of them', async () => {
+test('every nullable schema in the document is well-formed, and there are 75 of them', async () => {
   const { doc, close } = await schemas();
   try {
     const nullables: { path: string; schema: JsonSchema }[] = [];
@@ -185,8 +185,9 @@ test('every nullable schema in the document is well-formed, and there are 74 of 
 
     // 63 since `RegisterRequest.email` became required and non-nullable (audit P1-1); 74 with the
     // eleven nullable player-report fields (ADR-0152): receipt gameId/detail, summary
-    // gameId/assignedTo/closedAt, page nextAfter, and the full report's five.
-    assert.equal(nullables.length, 74, `nullable field count changed: ${nullables.length}`);
+    // gameId/assignedTo/closedAt, page nextAfter, and the full report's five. SeekView.creatorRating
+    // adds one persisted exact-pool value that is null when the creator or pool is absent.
+    assert.equal(nullables.length, 75, `nullable field count changed: ${nullables.length}`);
 
     for (const { path, schema } of nullables) {
       const types = schema.type as readonly string[];
