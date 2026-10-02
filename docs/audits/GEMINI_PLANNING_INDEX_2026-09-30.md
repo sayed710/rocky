@@ -1,5 +1,8 @@
 # Gemini Planning Index & Evidence Registry (2026-09-30)
 
+> **Codex adjudication — 2026-10-02:** Independent Codex review of this entire historical document against current main `07946b9b03538ed73a3f7b773e7ad5a327d83805` is complete. Read the [current-main correction and disposition ledger](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md) before using any claim or sequence below. The original Gemini snapshot, recommendations and then-pending review status are preserved as historical evidence, not current implementation instructions or owner approval.
+
+
 > [!IMPORTANT]
 > **STATUS AND AUTHORITY NOTICE**
 > - **Gemini-Generated Planning/Review Artifact**: This document and its associated planning dossiers were produced by Gemini during read-only planning audits on 2026-09-30.
@@ -27,10 +30,10 @@ This index preserves the complete evidentiary provenance of that work, documents
 
 | Document | Source Gemini Task | Original Target SHA | Description |
 | :--- | :--- | :--- | :--- |
-| [`GEMINI_I18N_PLANNING_2026-09-30.md`](file:///docs/audits/GEMINI_I18N_PLANNING_2026-09-30.md) | Task 1 (Audit) & Task 2 (Correction) | `553751c628f69436600987ddbf649a13f2b9eb2d` | Comprehensive implementation plan for EN/AR shell localization, bidi isolation, and typography. |
-| [`GEMINI_POLICY_DISCLOSURE_PLANNING_2026-09-30.md`](file:///docs/audits/GEMINI_POLICY_DISCLOSURE_PLANNING_2026-09-30.md) | Task 3 (Audit) & Task 4 (Correction) | `553751c628f69436600987ddbf649a13f2b9eb2d` | Concrete engineering plan for Privacy Policy, Terms, Fair Play, and AGPL source code disclosure. |
-| [`GEMINI_P1_SEQUENCING_2026-09-30.md`](file:///docs/audits/GEMINI_P1_SEQUENCING_2026-09-30.md) | Task 5 (P1 Audit) | `553751c628f69436600987ddbf649a13f2b9eb2d` | Reverified inventory and concrete execution sequencing for all 14 P1 capabilities post-PR #76. |
-| [`GEMINI_OWNER_DECISION_DOSSIER_2026-09-30.md`](file:///docs/audits/GEMINI_OWNER_DECISION_DOSSIER_2026-09-30.md) | Task 6 (Owner Dossier) | `553751c628f69436600987ddbf649a13f2b9eb2d` | Structured inventory of 17 candidate owner decisions across language, policy, challenges, data privacy, and moderation. |
+| [`GEMINI_I18N_PLANNING_2026-09-30.md`](GEMINI_I18N_PLANNING_2026-09-30.md) | Task 1 (Audit) & Task 2 (Correction) | `553751c628f69436600987ddbf649a13f2b9eb2d` | Comprehensive implementation plan for EN/AR shell localization, bidi isolation, and typography. |
+| [`GEMINI_POLICY_DISCLOSURE_PLANNING_2026-09-30.md`](GEMINI_POLICY_DISCLOSURE_PLANNING_2026-09-30.md) | Task 3 (Audit) & Task 4 (Correction) | `553751c628f69436600987ddbf649a13f2b9eb2d` | Concrete engineering plan for Privacy Policy, Terms, Fair Play, and AGPL source code disclosure. |
+| [`GEMINI_P1_SEQUENCING_2026-09-30.md`](GEMINI_P1_SEQUENCING_2026-09-30.md) | Task 5 (P1 Audit) | `553751c628f69436600987ddbf649a13f2b9eb2d` | Reverified inventory and concrete execution sequencing for all 14 P1 capabilities post-PR #76. |
+| [`GEMINI_OWNER_DECISION_DOSSIER_2026-09-30.md`](GEMINI_OWNER_DECISION_DOSSIER_2026-09-30.md) | Task 6 (Owner Dossier) | `553751c628f69436600987ddbf649a13f2b9eb2d` | Structured inventory of 17 candidate owner decisions across language, policy, challenges, data privacy, and moderation. |
 
 ---
 
@@ -91,8 +94,12 @@ All findings in these Gemini planning artifacts must be evaluated in conjunction
 
 ---
 
-## 5. Next Steps
+## 5. Historical Next Steps (superseded by Codex adjudication)
 
 1. **Mandatory Codex Review**: Submit these planning artifacts for independent adjudication by Codex.
-2. **Owner Decision Response**: The repository owner may use the response sheet in [`GEMINI_OWNER_DECISION_DOSSIER_2026-09-30.md`](file:///docs/audits/GEMINI_OWNER_DECISION_DOSSIER_2026-09-30.md#7-owner-response-sheet) to record formal choices for Batches 1, 2, and 3.
+2. **Owner Decision Response**: The repository owner may use the response sheet in [`GEMINI_OWNER_DECISION_DOSSIER_2026-09-30.md`](GEMINI_OWNER_DECISION_DOSSIER_2026-09-30.md#7-owner-response-sheet) to record formal choices for Batches 1, 2, and 3.
 3. **Execution Authorization**: Implementation PRs (beginning with i18n PR 1 and Policy PR 1) will be authored only after the owner and Codex approve the respective scope boundaries.
+
+## 6. Codex adjudication completed
+
+The mandatory independent Codex adjudication is recorded in the [2026-10-02 ledger](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md). It covers all five artifacts, all 14 P1 entries, all 17 candidate owner decisions and the seven original Greptile findings. PR #76 is merged as Increment 78; #81 and #83 are merged as Increments 80 and 81. The historical snapshot SHA above is unchanged. No owner options were selected and no feature implementation is authorized by this documentation PR.

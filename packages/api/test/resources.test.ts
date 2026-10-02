@@ -109,29 +109,75 @@ test('a created seek is listed with its derived speed', async () => {
   }
 });
 
-test('ratings and leaderboard reflect stored ratings', async () => {
+test('the leaderboard serves exactly the requested variant and speed pool', async () => {
   const h = await startHarness();
   try {
     const a = await h.makeUser('rank-a', ['user']);
     const b = await h.makeUser('rank-b', ['user']);
-    await h.repos.ratings.upsert({ userId: a.userId, variant: 'standard', rating: 2200, rd: 45, vol: 0.06 });
-    await h.repos.ratings.upsert({ userId: b.userId, variant: 'standard', rating: 1900, rd: 60, vol: 0.06 });
+    await h.repos.ratings.upsert({ userId: a.userId, variant: 'standard', speed: 'blitz', rating: 2200, rd: 45, vol: 0.06 });
+    await h.repos.ratings.upsert({ userId: b.userId, variant: 'standard', speed: 'blitz', rating: 1900, rd: 60, vol: 0.06 });
+    await h.repos.ratings.upsert({ userId: a.userId, variant: 'standard', speed: 'rapid', rating: 1400, rd: 70, vol: 0.06 });
+    await h.repos.ratings.upsert({ userId: b.userId, variant: 'standard', speed: 'classical', rating: 2500, rd: 80, vol: 0.06 });
+    await h.repos.ratings.upsert({ userId: b.userId, variant: 'crazyhouse', speed: 'blitz', rating: 2600, rd: 80, vol: 0.06 });
 
-    const board = await h.json('GET', '/v1/leaderboard/standard?limit=10');
-    assert.equal(board.status, 200);
-    assert.equal(board.body.length, 2);
-    assert.equal(board.body[0].userId, a.userId); // highest first
-    assert.equal(board.body[0].rating, 2200);
+    const blitz = await h.json('GET', '/v1/leaderboard/standard/blitz?limit=10');
+    assert.equal(blitz.status, 200);
+    assert.deepEqual(blitz.body, [
+      { userId: a.userId, variant: 'standard', speed: 'blitz', rating: 2200, rd: 45 },
+      { userId: b.userId, variant: 'standard', speed: 'blitz', rating: 1900, rd: 60 },
+    ]);
+    assert.deepEqual((await h.json('GET', '/v1/leaderboard/standard/rapid')).body.map((e: { userId: string }) => e.userId), [a.userId]);
+    assert.deepEqual((await h.json('GET', '/v1/leaderboard/standard/classical')).body.map((e: { userId: string }) => e.userId), [b.userId]);
+    assert.deepEqual((await h.json('GET', '/v1/leaderboard/standard/bullet')).body, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a profile lists every rating pool separately, never collapsed by variant', async () => {
+  const h = await startHarness();
+  try {
+    const a = await h.makeUser('rank-a', ['user']);
+    await h.repos.ratings.upsert({ userId: a.userId, variant: 'standard', speed: 'rapid', rating: 1400, rd: 70, vol: 0.06 });
+    await h.repos.ratings.upsert({ userId: a.userId, variant: 'standard', speed: 'blitz', rating: 2200, rd: 45, vol: 0.06 });
+    await h.repos.ratings.upsert({ userId: a.userId, variant: 'crazyhouse', speed: 'correspondence', rating: 1600, rd: 90, vol: 0.06 });
 
     const ratings = await h.json('GET', '/v1/users/rank-a/ratings');
     assert.equal(ratings.status, 200);
-    assert.equal(ratings.body.length, 1);
-    assert.equal(ratings.body[0].variant, 'standard');
+    const pools = (rows: Array<{ variant: string; speed: string; rating: number }>) => rows.map((r) => `${r.variant}/${r.speed}:${r.rating}`);
+    assert.deepEqual(pools(ratings.body), ['crazyhouse/correspondence:1600', 'standard/blitz:2200', 'standard/rapid:1400']);
 
     const profile = await h.json('GET', '/v1/users/rank-a');
     assert.equal(profile.status, 200);
     assert.equal(profile.body.user.handle, 'rank-a');
-    assert.equal(profile.body.ratings.length, 1);
+    assert.deepEqual(pools(profile.body.ratings), pools(ratings.body));
+  } finally {
+    await h.close();
+  }
+});
+
+test("a seek rating range checks the acceptor's rating in the seek's own variant and speed pool only", async () => {
+  const h = await startHarness();
+  try {
+    const creator = await h.makeUser('range-creator', ['user']);
+    const joiner = await h.makeUser('range-joiner', ['user']);
+    const seek = async (): Promise<string> => {
+      const res = await h.json('POST', '/v1/seeks', { token: creator.token, body: { variant: 'standard', timeControl: INC, minRating: 1800 } });
+      assert.equal(res.status, 201);
+      return res.body.id;
+    };
+    const accept = async (id: string): Promise<number> => (await h.json('POST', `/v1/seeks/${id}/accept`, { token: joiner.token })).status;
+
+    // A high rating in other pools does not qualify for a blitz seek; the unrated blitz start (1500) does not either.
+    await h.repos.ratings.upsert({ userId: joiner.userId, variant: 'standard', speed: 'rapid', rating: 2400, rd: 50, vol: 0.06 });
+    await h.repos.ratings.upsert({ userId: joiner.userId, variant: 'crazyhouse', speed: 'blitz', rating: 2400, rd: 50, vol: 0.06 });
+    const first = await seek();
+    assert.equal(await accept(first), 403);
+    await h.repos.ratings.upsert({ userId: joiner.userId, variant: 'standard', speed: 'blitz', rating: 1700, rd: 50, vol: 0.06 });
+    assert.equal(await accept(first), 403);
+
+    await h.repos.ratings.upsert({ userId: joiner.userId, variant: 'standard', speed: 'blitz', rating: 1850, rd: 50, vol: 0.06 });
+    assert.equal(await accept(first), 200);
   } finally {
     await h.close();
   }
@@ -152,11 +198,14 @@ test('a fresh user profile has no ratings and unknown users are 404', async () =
   }
 });
 
-test('leaderboard rejects an invalid variant and a bad limit', async () => {
+test('the leaderboard requires an explicit valid speed and rejects a bad variant or limit', async () => {
   const h = await startHarness();
   try {
-    assert.equal((await h.json('GET', '/v1/leaderboard/notavariant')).status, 422);
-    assert.equal((await h.json('GET', '/v1/leaderboard/standard?limit=-3')).status, 422);
+    assert.equal((await h.json('GET', '/v1/leaderboard/notavariant/blitz')).status, 422);
+    assert.equal((await h.json('GET', '/v1/leaderboard/standard/hyperbullet')).status, 422);
+    assert.equal((await h.json('GET', '/v1/leaderboard/standard/blitz?limit=-3')).status, 422);
+    // No speed means no pool: there is no default speed to fall back to.
+    assert.equal((await h.json('GET', '/v1/leaderboard/standard')).status, 404);
   } finally {
     await h.close();
   }

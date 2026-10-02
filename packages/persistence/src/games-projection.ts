@@ -8,7 +8,7 @@
 import { classifySpeed, type ResultString, type Termination } from '@chess-platform/game';
 import type { Variant } from '@chess-platform/core';
 import type { StoredEvent } from './event-store';
-import { PersistenceError } from './errors';
+import { CorruptGameStreamError } from './errors';
 import type { Speed } from './repositories';
 
 /** Every `games` column the event log determines. `opening_eco` is not in the log and is not projected. */
@@ -31,7 +31,7 @@ export interface GameProjection {
 /**
  * Fold a complete committed stream (ascending `seq` from 0) into its projection.
  *
- * Throws {@link PersistenceError} for a stream no authority could have written: a gap, a first event
+ * Throws {@link CorruptGameStreamError} for a stream no authority could have written: a gap, a first event
  * that is not `GameCreated`, a second creation, or anything after `GameEnded`. Such a stream is
  * reported and retried by the projector, never partially projected.
  */
@@ -82,6 +82,6 @@ function isTimeControlShaped(tc: unknown): tc is Parameters<typeof classifySpeed
   return kind === 'unlimited' || (Number.isFinite(initialMs) && Number.isFinite(incrementMs));
 }
 
-function corrupt(gameId: string, reason: string): PersistenceError {
-  return new PersistenceError(`game ${gameId}: ${reason}`);
+function corrupt(gameId: string, reason: string): CorruptGameStreamError {
+  return new CorruptGameStreamError(gameId, reason);
 }

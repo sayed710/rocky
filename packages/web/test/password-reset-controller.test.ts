@@ -2,7 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PasswordResetController } from '../src/app/password-reset-controller.js';
 import type { PasswordResetCallbacks } from '../src/app/password-reset-controller.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { GambitClient } from '../src/api/client.js';
+
+const testI18n = createI18nManager();
 import { FakeTransport, empty, json } from './support/fake-transport.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
 
@@ -30,7 +33,7 @@ function makeHarness(transport: HttpTransport) {
   };
 
   const client = makeClient(transport);
-  const controller = new PasswordResetController({ client, callbacks });
+  const controller = new PasswordResetController({ client, callbacks, i18n: testI18n });
 
   return { controller, pendingLogs, errorLogs, successLogs, getInvalidatedCount: () => invalidatedCount };
 }

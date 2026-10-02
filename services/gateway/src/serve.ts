@@ -34,10 +34,9 @@
  *   result reporter (ADR-0025) in this process; requires `DATABASE_URL`.
  * - `TOURNAMENT_REPORTER_SCAN_MS` (default 30000) — how often the reporter
  *   re-scans running tournaments for games launched by other processes.
- * - `BOT_AUTO_ANALYZE` (optional, "1" to enable) — hosts the bot-detection
- *   auto-analyzer in this process; requires `DATABASE_URL`; needs no engine.
- * - `ANTICHEAT_AUTO_ANALYZE` (optional, "1" to enable) — hosts the anti-cheat
- *   auto-analyzer; requires `DATABASE_URL` and an engine binary (`STOCKFISH_PATH`).
+ * - `BOT_AUTO_ANALYZE`, `ANTICHEAT_AUTO_ANALYZE` — refused here. Trust analysis runs only in the
+ *   dedicated trust worker (`trust-worker.ts`, ADR-0152); a gateway Deployment cannot vary env per
+ *   pod, so hosting it here would analyze every game once per replica.
  * - `SEARCH_INDEXER` (optional, "1" to enable) — hosts the live search index
  *   worker (ADR-0056); requires `DATABASE_URL`. Dedup is process-local, so set
  *   this on exactly ONE replica: every replica that enables it will index every
@@ -108,6 +107,7 @@ import {
 } from '@chess-platform/api';
 import type { TournamentResultReporter, LaunchInput } from '@chess-platform/api';
 import type { EventStore } from '@chess-platform/persistence';
+import type { RatingOutcome } from '@chess-platform/persistence/pg';
 
 /** A TokenVerifier backed by the API's AccessTokenService (shared secret). */
 class SharedSecretTokenVerifier implements TokenVerifier {
@@ -169,6 +169,13 @@ async function main(): Promise<void> {
   const trustProxy = resolveTrustProxyEnv(process.env['TRUST_PROXY']);
 
   const logger = new JsonLogger({ service: 'realtime-gateway', nodeId });
+  // A leftover "0" asks for nothing, so it is tolerated; anything else would expect analysis here.
+  for (const moved of ['BOT_AUTO_ANALYZE', 'ANTICHEAT_AUTO_ANALYZE']) {
+    if (process.env[moved] !== undefined && process.env[moved] !== '0') {
+      logger.error(`${moved} is not a gateway setting: trust analysis runs only in the trust worker (trust-worker.js, ADR-0152)`);
+      process.exit(1);
+    }
+  }
   const metrics = new InMemoryMetrics();
 
   const logExporter = new LoggingSpanExporter(logger);
@@ -302,32 +309,6 @@ async function main(): Promise<void> {
     }
   }
 
-  // --- Bot Detection Auto-Analyzer (M12 inc 6, ADR-0041) ---
-  let botAutoAnalyzer: { stop(): void } | undefined;
-  if (process.env['BOT_AUTO_ANALYZE'] === '1') {
-    if (!pgPool || !eventStore) {
-      logger.warn('BOT_AUTO_ANALYZE requires DATABASE_URL to be set');
-    } else {
-      const { PgBotBehaviorReportRepository, PgTerminalEventInbox } = await import('@chess-platform/persistence/pg');
-      const api = await import('@chess-platform/api');
-
-      const botRepo = new PgBotBehaviorReportRepository(pgPool);
-      const source = new api.EventStoreBotTimingSource(eventStore);
-      const analysis = new api.BotAnalysisService(source, botRepo);
-
-      const worker = new api.TerminalEventReconciler(
-        pubsub, new PgTerminalEventInbox(pgPool), 'bot-analysis',
-        async (gameId, ending) => {
-          if (ending.result === '*') return;
-          if (!(await analysis.analyzeAndStore(gameId))) throw new Error(`no finished game for ${gameId}`);
-        },
-      );
-      void worker.start().catch((error: unknown) => logger.error('Bot terminal recovery failed', { error: String(error) }));
-      botAutoAnalyzer = worker;
-      logger.info('BotAutoAnalyzer is enabled');
-    }
-  }
-
   // Shared engine instance provider helper
   let sharedEngineProvider: ReturnType<typeof import('@chess-platform/api')['createEngineProviderFromEnv']> | undefined;
   let engineCreated = false;
@@ -339,42 +320,6 @@ async function main(): Promise<void> {
     }
     return sharedEngineProvider;
   };
-
-  // --- Anti-Cheat Auto-Analyzer (M12 inc 8, ADR-0043) ---
-  let antiCheatAutoAnalyzer: { stop(): void } | undefined;
-  if (process.env['ANTICHEAT_AUTO_ANALYZE'] === '1') {
-    if (!pgPool || !eventStore) {
-      logger.warn('ANTICHEAT_AUTO_ANALYZE requires DATABASE_URL to be set');
-    } else {
-      const { PgAntiCheatReportRepository } = await import('@chess-platform/persistence/pg');
-      const api = await import('@chess-platform/api');
-
-      const engine = await getSharedEngine();
-      if (!engine) {
-        logger.warn('ANTICHEAT_AUTO_ANALYZE requires an engine binary (set STOCKFISH_PATH)');
-      } else {
-        // The logger matters here more than anywhere: this is the *automatic* path, so a game whose
-        // stored events cannot be replayed is skipped with nobody watching. `AntiCheatAutoAnalyzer`
-        // reports only rejected promises, and a contained failure resolves to `null`. Raised in the
-        // Qodo review of PR #12, against a fix that had wired the logger in `bootstrap` and missed
-        // this second production construction site.
-        const source = new api.EventStoreGameSource(eventStore, logger);
-        const repo = new PgAntiCheatReportRepository(pgPool);
-        const service = api.createEngineBackedAnalysisService(source, engine, repo);
-        const { PgTerminalEventInbox } = await import('@chess-platform/persistence/pg');
-        const worker = new api.TerminalEventReconciler(
-          pubsub, new PgTerminalEventInbox(pgPool), 'anti-cheat-analysis',
-          async (gameId, ending) => {
-            if (ending.result === '*') return;
-            if (!(await service.analyzeAndStore(gameId))) throw new Error(`no analyzable game for ${gameId}`);
-          },
-        );
-        void worker.start().catch((error: unknown) => logger.error('Anti-cheat terminal recovery failed', { error: String(error) }));
-        antiCheatAutoAnalyzer = worker;
-        logger.info('AntiCheatAutoAnalyzer is enabled');
-      }
-    }
-  }
 
   // --- Search Index Worker (M11 inc 8, ADR-0056) ---
   let searchIndexWorker: { stop(): void; drain(): Promise<void> } | undefined;
@@ -478,6 +423,59 @@ async function main(): Promise<void> {
     worker.start();
     gamesProjection = worker;
     logger.info('Games projection is enabled');
+  }
+
+  // --- Ratings (ADR-0150) ---
+  // Always on with a database: every rated result must reach both players exactly once. Every replica
+  // runs one; the checkpoint row lock lets exactly one apply at a time, and each poll re-reads the
+  // committed log, so no wake is needed and none can be lost.
+  let ratingsApplier: { stop(): Promise<void> } | undefined;
+  if (pgPool) {
+    const { PgRatingsApplier, GamesProjectionWorker } = await import('@chess-platform/persistence/pg');
+    const outcomes = ['applied', 'already_applied', 'ineligible', 'blocked', 'already_blocked'] as const satisfies readonly RatingOutcome[];
+    const outcomeCounters = new Map(outcomes.map((outcome) => [outcome, metrics.counter('ratings_games_total', { outcome })]));
+    const batchFailures = metrics.counter('ratings_batch_failures_total');
+    const backlogAge = metrics.gauge('ratings_oldest_pending_ending_age_seconds');
+    const backlogSampleFailures = metrics.counter('ratings_backlog_sample_failures_total');
+    const applier = new PgRatingsApplier(pgPool);
+    let backlogSample: Promise<void> | undefined;
+    const sampleBacklog = (): void => {
+      if (backlogSample) return;
+      backlogSample = applier.oldestPendingEndingAgeSeconds()
+        .then((age) => backlogAge.set(age))
+        .catch((error: unknown) => {
+          backlogSampleFailures.inc();
+          logger.warn('Ratings backlog sample failed', { error: String(error) });
+        })
+        .finally(() => { backlogSample = undefined; });
+    };
+    const backlogTimer = setInterval(sampleBacklog, 10_000);
+    backlogTimer.unref();
+    sampleBacklog();
+    const worker = new GamesProjectionWorker(applier, {
+      onBatch: (batch) => {
+        if (batch.rewound) logger.warn('Ratings checkpoint was ahead of this database; replaying endings from the start (the ledger skips applied games)');
+        for (const outcome of outcomes) {
+          if (batch.outcomes[outcome] > 0) outcomeCounters.get(outcome)!.inc(batch.outcomes[outcome]);
+        }
+        for (const blocked of batch.blocked) {
+          logger.error('A finished game could not be proven rateable; it is recorded in rating_blocked_games and will not be rated', { gameId: blocked.gameId, error: blocked.error });
+        }
+      },
+      onError: (error) => {
+        batchFailures.inc();
+        logger.error('Ratings batch failed; nothing was applied and it is retried with backoff', {
+          error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+        });
+      },
+    });
+    worker.start();
+    ratingsApplier = { stop: async () => {
+      clearInterval(backlogTimer);
+      await worker.stop();
+      await backlogSample;
+    } };
+    logger.info('Ratings applier is enabled');
   }
 
   // --- Command router: local (single-node) or Redis (multi-node) (M14 inc 5) ---
@@ -805,8 +803,6 @@ async function main(): Promise<void> {
     shuttingDown = true;
     clearInterval(heartbeat);
     reporter?.stop();
-    botAutoAnalyzer?.stop();
-    antiCheatAutoAnalyzer?.stop();
     engineBotMover?.stop();
     // No new no-show or flag pass starts from here; an in-flight one may still be routing a command
     // through Redis and the database, so it is awaited below before either closes.
@@ -815,6 +811,8 @@ async function main(): Promise<void> {
     // No new projection batch starts from here. The in-flight one is awaited before the wake consumers
     // unsubscribe and before pub/sub and the pool close, so a wake it publishes still has listeners.
     const projectionStopped = gamesProjection?.stop();
+    // An in-flight rating batch commits or rolls back before the pool closes.
+    const ratingsStopped = ratingsApplier?.stop();
     // Start engine (subprocess) shutdown now so it runs concurrently with the
     // socket drain, but await it below before process.exit so cleanup can't be cut short.
     const engineShutdown = sharedEngineProvider?.shutdown().catch((err: unknown) =>
@@ -835,6 +833,7 @@ async function main(): Promise<void> {
           await ownershipRegistry.releaseAll();
         }
         await projectionStopped;
+        await ratingsStopped;
         searchIndexWorker?.stop();
         achievementsAwardWorker?.stop();
         // Indexing or awarding started by the last wake must finish before the pool closes.

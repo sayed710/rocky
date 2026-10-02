@@ -24,18 +24,23 @@ import type { KeyValueStorage, TokenStore } from '../net/session.js';
 import type { HttpTransport } from '../ports/http.js';
 import type { WebSocketFactory } from '../ports/ws.js';
 import type { AppConfig } from './config.js';
+import { createI18n, I18n, LocaleStorage } from '../i18n/index.js';
 
 /** Injectable seams for the composition root. Omit any to use browser defaults. */
 export interface AppDependencies {
   readonly config: AppConfig;
   /** HTTP transport seam; defaults to the platform `fetch` adapter. */
-  readonly httpTransport?: HttpTransport;
+  readonly httpTransport?: HttpTransport | undefined;
   /** WebSocket factory seam; defaults to the browser `WebSocket` adapter. */
-  readonly wsFactory?: WebSocketFactory;
+  readonly wsFactory?: WebSocketFactory | undefined;
   /** Explicit token store; takes precedence over {@link AppDependencies.storage}. */
-  readonly tokenStore?: TokenStore;
+  readonly tokenStore?: TokenStore | undefined;
   /** Web Storage used to persist the session; defaults to `localStorage`. */
-  readonly storage?: KeyValueStorage;
+  readonly storage?: KeyValueStorage | undefined;
+  /** Injected i18n manager for localized messaging. */
+  readonly i18n?: I18n | undefined;
+  /** Injected target Document for document-level localization. */
+  readonly doc?: Document | undefined;
 }
 
 /** The wired application services produced by {@link createApp}. */
@@ -45,6 +50,8 @@ export interface App {
   readonly api: GambitClient;
   /** Realtime client (connection lifecycle, reconnect, heartbeat). Not yet connected. */
   readonly ws: WsClient;
+  /** Injected or default internationalization manager. */
+  readonly i18n: I18n;
   /** Release the app-owned realtime connection and its timers. */
   dispose(): void;
   /** Build a per-game synchronization layer over the shared realtime client. */
@@ -83,10 +90,19 @@ export function createApp(deps: AppDependencies): App {
     ...(deps.wsFactory !== undefined ? { factory: deps.wsFactory } : {}),
   });
 
+  const i18n = deps.i18n ?? createI18n({
+    doc: deps.doc,
+    storage: new LocaleStorage({ storage: deps.storage }),
+  });
+  if (deps.i18n && deps.doc) {
+    deps.i18n.setDocument(deps.doc);
+  }
+
   return {
     config: deps.config,
     api,
     ws,
+    i18n,
     dispose: (): void => ws.close(1000, 'app-disposed'),
     createGameSync: (options: GameSyncOptions): GameSync => new GameSync(ws, options),
     createGameOracle: (gameSync: GameSync): AuthoritativeMoveOracle =>

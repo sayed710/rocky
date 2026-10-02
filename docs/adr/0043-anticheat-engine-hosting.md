@@ -1,5 +1,7 @@
 # ADR-0043 — Anti-Cheat Automated Auto-Analyzer Production Engine Hosting
 
+> **Superseded in part by [ADR-0152](0152-moderation-and-trust-operations.md):** anti-cheat analysis now runs only in the dedicated single-replica trust worker; the gateway refuses `ANTICHEAT_AUTO_ANALYZE`.
+
 | Field      | Value                                                            |
 |------------|------------------------------------------------------------------|
 | **Status** | Accepted                                                         |

@@ -245,10 +245,10 @@ test('read endpoints encode query params and path segments', async () => {
     () => json(200, { id: 'g1' }),
   );
   const c = make(t);
-  await c.leaderboard('standard', { limit: 5 });
+  await c.leaderboard('standard', 'blitz', { limit: 5 });
   await c.users.games('bob', { limit: 3 });
   await c.games.byId('g 1');
-  assert.equal(t.calls[0]!.url, 'https://api.test/v1/leaderboard/standard?limit=5');
+  assert.equal(t.calls[0]!.url, 'https://api.test/v1/leaderboard/standard/blitz?limit=5');
   assert.equal(t.calls[1]!.url, 'https://api.test/v1/users/bob/games?limit=3');
   assert.equal(t.calls[2]!.url, 'https://api.test/v1/games/g%201');
 });

@@ -7,7 +7,7 @@
 
 import type { Variant } from '@chess-platform/core';
 import type { TimeControl } from '@chess-platform/game';
-import type { Role, SeekColor } from '@chess-platform/persistence';
+import { SPEEDS, type Role, type SeekColor, type Speed } from '@chess-platform/persistence';
 import { HttpError } from './http/errors';
 import { asObject, oneOf } from './http/validate';
 
@@ -116,6 +116,11 @@ export function parseVariant(value: string, key = 'variant'): Variant {
  */
 export function parseCreatableVariant(value: string, key = 'variant'): Variant {
   return oneOf(value, CREATABLE_VARIANTS, key);
+}
+
+/** Parse a speed class; with a variant it names one rating pool (ADR-0150). There is no default. */
+export function parseSpeed(value: string, key = 'speed'): Speed {
+  return oneOf(value, SPEEDS, key);
 }
 
 /** Parse a role code from an arbitrary string. */

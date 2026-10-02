@@ -39,11 +39,13 @@ export interface StudiesCallbacks {
 export interface StudiesControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: StudiesCallbacks;
+  readonly onDispose?: (() => void) | undefined;
 }
 
 export class StudiesController {
   private readonly client: GambitClient;
   private readonly callbacks: StudiesCallbacks;
+  private readonly onDispose?: (() => void) | undefined;
   private requestGeneration = 0;
   private disposed = false;
   private unavailable = false;
@@ -51,6 +53,7 @@ export class StudiesController {
   constructor(opts: StudiesControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.onDispose = opts.onDispose;
   }
 
   /**
@@ -173,6 +176,7 @@ export class StudiesController {
 
   dispose(): void {
     this.disposed = true;
+    this.onDispose?.();
   }
 
   /**

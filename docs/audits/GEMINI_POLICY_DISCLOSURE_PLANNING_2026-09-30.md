@@ -1,5 +1,8 @@
 # Gemini Planning Artifact: Policy Surfaces & AGPL Source Disclosure
 
+> **Codex adjudication — 2026-10-02:** Independent Codex review of this entire historical document against current main `07946b9b03538ed73a3f7b773e7ad5a327d83805` is complete. Read the [current-main correction and disposition ledger](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md) before using any claim or sequence below. The original Gemini snapshot, recommendations and then-pending review status are preserved as historical evidence, not current implementation instructions or owner approval.
+
+
 > [!IMPORTANT]
 > **STATUS AND AUTHORITY NOTICE**
 > - **Gemini-Generated Planning/Review Artifact**: This document was produced during Gemini read-only implementation-planning audits on 2026-09-30.
@@ -22,7 +25,9 @@ A comprehensive inspection of the client routing table (`packages/web/src/router
 3. **Fair Play Policy (`/fair-play`):** Defining prohibited unauthorized assistance (chess engines, opening books, multi-accounting), detection protocols, and penalties.
 4. **AGPL-3.0 Source Code Disclosure:** Providing network users with prominent access to corresponding source code as required by the AGPL-3.0 copyleft license.
 
-### 1.2 Current Data and Practice Inventory
+### 1.2 Historical Data and Practice Inventory — contains factual errors
+**Codex correction:** The following is Gemini's original claim, retained verbatim for provenance. It was not an accurate inventory even at the historical target. Do not use it as policy copy; see the [verified storage/auth and telemetry corrections](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md#policy-and-data-practice-corrections).
+
 Engineering verified the following live data practices in the existing codebase that any future Privacy Policy must accurately reflect:
 * **Account Credentials & Auth:** Stores email addresses, password hashes (Argon2id/bcrypt), WebAuthn credentials, and JWT session tokens.
 * **Cookies & Local Storage:**
@@ -37,9 +42,9 @@ Engineering verified the following live data practices in the existing codebase 
   * WebSocket connection metrics.
   * Sentry/Pino error telemetry.
 
-### 1.3 Current Repository, License, and Source Disclosure Inventory
+### 1.3 Historical Repository, License, and Source Disclosure Inventory
 * Root of repository contains `LICENSE` (GNU Affero General Public License v3.0).
-* Git commit metadata and GitHub repository URL (`sayed710/rocky`) are embedded during production Docker builds.
+* **Historical claim — factually incorrect at both reviewed SHAs; proposed plumbing remains open (see [Codex correction](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md#policy-and-data-practice-corrections)):** Git commit metadata and GitHub repository URL (`sayed710/rocky`) are embedded during production Docker builds.
 * Currently, **no public link or UI affordance exists in the web shell** pointing network players to the source repository.
 
 ### 1.4 Clear Separation of Responsibilities

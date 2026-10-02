@@ -128,13 +128,17 @@ gateway:
   replicas: 2  # M14 inc 5: safe to scale (single-owner authority + command forwarding, ADR-0010)
   port: 4175
   healthPort: 4176  # port+1, same as compose
-  # M9 inc 13 (ADR-0025): host the tournament result reporter in the gateway.
-  # When enabled, EVERY gateway replica runs a reporter; optimistic concurrency
-  # (version CAS on tournaments) makes duplicate recording attempts safe — the
-  # losing replica logs a benign already-recorded error. A dedicated
-  # single-replica reporter Deployment is a possible later increment.
+  # M9 inc 13 (ADR-0025, ADR-0152): the tournament result reporter, which
+  # records committed game results and launches the next round. On by default:
+  # the chart serves tournaments, and without a reporter their rounds never
+  # advance. EVERY gateway replica runs one — launch ids are deterministic, a
+  # launch never links another pairing's game (it takes the next slot), and the tournaments
+  # table is version-CAS'd, so a duplicate attempt changes nothing. It stays on
+  # the replicated gateway rather than a singleton so results keep flowing
+  # through a pod restart or rollout, with no single point to lose.
+  # `false` is the explicit operator kill switch. Must be a boolean.
   tournamentReporter:
-    enabled: false
+    enabled: true
     scanIntervalMs: 30000
   # ADR-0080: the engine bot that makes Play vs Computer moves. On by default, as in Compose:
   # without it the lobby still offers the mode and the bot never moves. Safe on every replica —
@@ -165,6 +169,34 @@ gateway:
     limits:
       cpu: 500m
       memory: 512Mi
+
+# --- Trust worker (ADR-0152) ---
+# The one host of bot-timing and engine anti-cheat analysis of finished games:
+# a dedicated Deployment pinned to one replica (hard-coded, not a value), from
+# the gateway image (which ships Stockfish), running the thin trust-worker
+# entrypoint — no WebSocket server, no game authority, no Service, no Ingress.
+# It works from the durable terminal-event inbox, so a restart or a rollout
+# overlap repeats at most the game in progress. The gateway refuses the
+# analyzer flags, so nothing else can run a copy. All three must be booleans;
+# turning both analyzers off is refused — set enabled: false instead.
+#
+# First rollout: the work list is every committed game ending with no receipt
+# for the consumer, so on an installation with existing history the worker
+# first analyzes all of it, one game at a time, at up to its CPU limit. That is
+# a one-off backfill, not a fault; size the limit, or start with
+# antiCheatAnalysis: false (bot timing needs no engine) and enable it later.
+trustWorker:
+  enabled: true
+  botAnalysis: true
+  antiCheatAnalysis: true
+  # One Stockfish search at a time (each consumer analyzes one game at a time).
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
 
 # --- Application network boundary ---
 # API and gateway trust proxy-derived client identity, so arbitrary workload

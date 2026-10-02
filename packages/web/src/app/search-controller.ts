@@ -21,17 +21,20 @@ export interface SearchCallbacks {
 export interface SearchControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: SearchCallbacks;
+  readonly onDispose?: (() => void) | undefined;
 }
 
 export class SearchController {
   private readonly client: GambitClient;
   private readonly callbacks: SearchCallbacks;
+  private readonly onDispose: (() => void) | undefined;
   private requestGeneration = 0;
   private disposed = false;
 
   constructor(opts: SearchControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.onDispose = opts.onDispose;
   }
 
   async search(q: string, mode?: SearchMode): Promise<void> {
@@ -61,7 +64,9 @@ export class SearchController {
   }
 
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.onDispose?.();
   }
 
   /**

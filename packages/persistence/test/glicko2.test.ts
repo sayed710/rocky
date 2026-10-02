@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { updateRating, initialRating } from '../src/glicko2';
+import { updateRating, initialRating, rateGame } from '../src/glicko2';
 
 // Glickman (2013), "Example of the Glicko-2 system": a 1500/200/0.06 player who
 // beats 1400/30, loses to 1550/100 and 1700/300, with tau=0.5, ends at
@@ -29,4 +29,39 @@ test('an empty rating period inflates RD only', () => {
 
 test('initialRating defaults match Glicko-2 conventions', () => {
   assert.deepEqual(initialRating(), { rating: 1500, rd: 350, vol: 0.06 });
+});
+
+test("rateGame updates each side against the other side's pre-game rating", () => {
+  const white = { rating: 1600, rd: 120, vol: 0.06 };
+  const black = { rating: 1450, rd: 200, vol: 0.06 };
+  const rated = rateGame(white, black, 1);
+  assert.deepEqual(rated.white, updateRating(white, [{ rating: 1450, rd: 200, score: 1 }]));
+  assert.deepEqual(rated.black, updateRating(black, [{ rating: 1600, rd: 120, score: 0 }]));
+  assert.ok(rated.white.rating > white.rating && rated.black.rating < black.rating);
+});
+
+test('rateGame scores a draw one half each way and is symmetric between equal players', () => {
+  const rated = rateGame(initialRating(), initialRating(), 0.5);
+  assert.deepEqual(rated.white, rated.black);
+  assert.equal(rated.white.rating, 1500);
+  assert.ok(rated.white.rd < 350);
+});
+
+test('a tiny positive stored volatility stays positive after a valid game', () => {
+  const next = updateRating(
+    { rating: 1500, rd: 100, vol: 1e-162 },
+    [{ rating: 1500, rd: 100, score: 1 }],
+  );
+  assert.ok(next.vol > 0 && Number.isFinite(next.vol));
+});
+
+test('repeated valid games can raise RD beyond the former database cap without losing finite state', () => {
+  let winner = initialRating();
+  const newOpponent = initialRating();
+  for (let i = 0; i < 100_000; i += 1) {
+    winner = rateGame(winner, newOpponent, 1).white;
+    assert.ok(Number.isFinite(winner.rating) && Number.isFinite(winner.rd) && Number.isFinite(winner.vol));
+    assert.ok(winner.rd > 0 && winner.vol > 0);
+  }
+  assert.ok(winner.rd > 1000);
 });

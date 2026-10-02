@@ -104,6 +104,7 @@ function setup(transport: HttpTransport) {
     client: app.api,
     token: 'token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   return { sockets, elements, mounted, app, doc };
 }

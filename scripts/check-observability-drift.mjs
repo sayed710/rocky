@@ -126,12 +126,14 @@ function collectReferenced() {
       //   "..."            string literals
       //   {...}            label matchers      -> status=~"5.."
       //   [...]            range selectors     -> [5m]; otherwise the unit letter reads as a series
+      //   offset <d>       offset durations    -> offset 15m, for the same reason
       //   by/without(...)  grouping clauses    -> by (route)
       const cleaned = raw
         .replace(/"(?:[^"\\]|\\.)*"/g, ' ')
         .replace(/'(?:[^'\\]|\\.)*'/g, ' ')
         .replace(/\{[^}]*\}/g, ' ')
         .replace(/\[[^\]]*\]/g, ' ')
+        .replace(/\boffset\s+-?(?:\d+(?:ms|[smhdwy]))+/g, ' ')
         .replace(/\b(?:by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)/g, ' ');
 
       // What remains: a metric name is a whole identifier that is not immediately a function call.

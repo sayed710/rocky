@@ -10,6 +10,8 @@ import type { Variant } from '@chess-platform/core';
 import type { ResultString, Termination, TimeControl, GameEvent } from '@chess-platform/game';
 /** Time-control speed bucket (mirror of `classifySpeed` in @chess-platform/game). */
 export type Speed = 'ultrabullet' | 'bullet' | 'blitz' | 'rapid' | 'classical' | 'correspondence';
+/** Every speed, fastest first; with a variant, each names an independent rating pool (ADR-0150). */
+export const SPEEDS: readonly Speed[] = ['ultrabullet', 'bullet', 'blitz', 'rapid', 'classical', 'correspondence'];
 
 /** RBAC roles enforced at the gateway and re-checked in services. */
 export type Role = 'user' | 'coach' | 'tournament_director' | 'moderator' | 'admin';
@@ -263,25 +265,26 @@ export interface SessionsRepository {
 
 // --- Ratings ---------------------------------------------------------------
 
+/** One player's rating in one pool. A pool is a variant and a speed; pools never share a rating. */
 export interface RatingRow {
   readonly userId: string;
   readonly variant: Variant;
+  readonly speed: Speed;
   readonly rating: number;
   readonly rd: number;
   readonly vol: number;
   readonly updatedAt: Date;
 }
 
+/**
+ * Read-only: ratings change only through the rating applier (`PgRatingsApplier`), which applies each
+ * rated result exactly once from the event log.
+ */
 export interface RatingsRepository {
-  get(userId: string, variant: Variant): Promise<RatingRow | null>;
-  upsert(row: {
-    userId: string;
-    variant: Variant;
-    rating: number;
-    rd: number;
-    vol: number;
-  }): Promise<void>;
-  leaderboard(variant: Variant, limit: number): Promise<RatingRow[]>;
+  get(userId: string, variant: Variant, speed: Speed): Promise<RatingRow | null>;
+  /** Every pool the player has a rating in, by variant and then fastest speed first. */
+  listForUser(userId: string): Promise<RatingRow[]>;
+  leaderboard(variant: Variant, speed: Speed, limit: number): Promise<RatingRow[]>;
 }
 
 // --- Games projection ------------------------------------------------------

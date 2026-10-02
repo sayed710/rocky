@@ -97,10 +97,10 @@ function ok(res) {
 export function readPath() {
   const responses = http.batch([
     ['GET', `${BASE}/v1/health`, null, { tags: { name: 'health' } }],
-    // `standard` is a VARIANT. `blitz` is a speed — passing it here returns 422, which the first
-    // run of this script did 9,039 times while looking like healthy traffic. The two vocabularies
-    // are deliberately separate (M11 inc 7, ADR-0055).
-    ['GET', `${BASE}/v1/leaderboard/standard?limit=20`, null, { tags: { name: 'leaderboard' } }],
+    // A rating pool is a variant AND a speed (ADR-0150): `standard` is the variant, `blitz` the
+    // speed. The first run of this script passed `blitz` as the variant and got 9,039 silent 422s;
+    // the two vocabularies are deliberately separate (M11 inc 7, ADR-0055).
+    ['GET', `${BASE}/v1/leaderboard/standard/blitz?limit=20`, null, { tags: { name: 'leaderboard' } }],
     ['GET', `${BASE}/v1/search?q=defense&limit=20`, null, { tags: { name: 'search' } }],
     ['GET', `${BASE}/v1/tournaments?limit=20`, null, { tags: { name: 'tournaments' } }],
     ['GET', `${BASE}/v1/seeks?limit=20`, null, { tags: { name: 'seeks' } }],

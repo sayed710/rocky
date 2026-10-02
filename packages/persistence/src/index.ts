@@ -15,7 +15,10 @@ export * from './event-store';
 export * from './repositories';
 export * from './study-partner';
 export * from './in-memory-study-partner';
+export * from './player-reports';
+export * from './in-memory-player-reports';
 export * from './search-backfill';
 
 export * from './analysis-cache';
 export * from './games-projection';
+export * from './rating-eligibility';

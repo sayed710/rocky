@@ -4,7 +4,10 @@ import type {
   ForumThread,
   SocialPlayer,
   TeamMembership,
+  TeamView,
 } from '../api/models.js';
+import { applyAutoDirection } from '../i18n/bidi.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { ForumController } from './forum-controller.js';
 import type { ForumCallbacks } from './forum-controller.js';
 import {
@@ -21,6 +24,7 @@ interface ForumMountDependencies {
   readonly slug: string;
   readonly sessionPresent: boolean;
   readonly restorePromise: Promise<unknown>;
+  readonly i18n: I18nManager;
 }
 
 interface ThreadMountDependencies extends ForumMountDependencies {
@@ -51,12 +55,14 @@ interface ForumRenderDependencies {
   readonly slug: string;
   readonly viewerId: () => string | null;
   readonly setTeamId: (teamId: string) => void;
+  readonly i18n: I18nManager;
 }
 
 interface ThreadRenderDependencies {
   readonly elements: ThreadElements;
   readonly viewerId: () => string | null;
   readonly setTeamId: (teamId: string) => void;
+  readonly i18n: I18nManager;
 }
 
 interface ThreadRenderData {
@@ -93,21 +99,54 @@ function forumElements(doc: Document): ForumElements {
   };
 }
 
-function createForumCallbacks(dependencies: ForumRenderDependencies): ForumCallbacks {
-  const { elements, slug, viewerId, setTeamId } = dependencies;
+function renderForumIdentity(
+  elements: ForumElements,
+  slug: string,
+  team: TeamView,
+  threads: readonly ForumThread[],
+  members: readonly TeamMembership[],
+  names: ReadonlyMap<string, SocialPlayer>,
+  viewerId: string | null,
+  i18n: I18nManager,
+): void {
+  if (elements.error) elements.error.textContent = '';
+  if (elements.title) {
+    elements.title.textContent = i18n.t('community.forum.teamForumTitle', { name: team.name });
+    applyAutoDirection(elements.title);
+  }
+  if (elements.list) renderThreadList(elements.list, slug, threads, names, i18n);
+
+  const ability = canStartThread(members, viewerId);
+  if (elements.form) elements.form.hidden = ability.kind !== 'allowed';
+  if (elements.note) {
+    elements.note.textContent =
+      ability.kind === 'allowed' ? '' : abilityExplanation(ability.reason, i18n);
+  }
+}
+
+function renderForumNotFound(elements: ForumElements, i18n: I18nManager): void {
+  if (elements.title) elements.title.textContent = i18n.t('community.teams.notFoundTitle');
+  if (elements.list) elements.list.replaceChildren();
+  if (elements.form) elements.form.hidden = true;
+  if (elements.note) elements.note.textContent = i18n.t('community.teams.notFoundBody');
+}
+
+function createForumCallbacks(
+  dependencies: ForumRenderDependencies,
+  onThreadsLoaded?: (state: {
+    team: TeamView;
+    threads: readonly ForumThread[];
+    members: readonly TeamMembership[];
+    names: ReadonlyMap<string, SocialPlayer>;
+  }) => void,
+  onNotFoundTriggered?: () => void,
+): ForumCallbacks {
+  const { elements, slug, viewerId, setTeamId, i18n } = dependencies;
   return {
     onThreads: (team, threads, members, names) => {
       setTeamId(team.id);
-      if (elements.error) elements.error.textContent = '';
-      if (elements.title) elements.title.textContent = `${team.name} forum`;
-      if (elements.list) renderThreadList(elements.list, slug, threads, names);
-
-      const ability = canStartThread(members, viewerId());
-      if (elements.form) elements.form.hidden = ability.kind !== 'allowed';
-      if (elements.note) {
-        elements.note.textContent =
-          ability.kind === 'allowed' ? '' : abilityExplanation(ability.reason);
-      }
+      onThreadsLoaded?.({ team, threads, members, names });
+      renderForumIdentity(elements, slug, team, threads, members, names, viewerId(), i18n);
     },
     onThread: () => {},
     onLoading: (loading) => {
@@ -117,10 +156,8 @@ function createForumCallbacks(dependencies: ForumRenderDependencies): ForumCallb
       if (elements.error) elements.error.textContent = message;
     },
     onNotFound: () => {
-      if (elements.title) elements.title.textContent = 'Team not found';
-      if (elements.list) elements.list.replaceChildren();
-      if (elements.form) elements.form.hidden = true;
-      if (elements.note) elements.note.textContent = 'No such team, or it is private.';
+      onNotFoundTriggered?.();
+      renderForumNotFound(elements, i18n);
     },
   };
 }
@@ -166,26 +203,43 @@ function renderThreadDetail(
   elements: ThreadElements,
   data: ThreadRenderData,
   viewerId: string | null,
+  i18n: I18nManager,
 ): void {
   const { thread, posts, members, names } = data;
   if (elements.error) elements.error.textContent = '';
-  if (elements.title) elements.title.textContent = threadDisplayTitle(thread);
-  if (elements.posts) renderPosts(elements.posts, posts, names, viewerId);
+  if (elements.title) {
+    elements.title.textContent = threadDisplayTitle(thread, i18n);
+    applyAutoDirection(elements.title);
+  }
+  if (elements.posts) renderPosts(elements.posts, posts, names, viewerId, i18n);
 
   const ability = canReply(thread, members, viewerId);
   if (elements.form) elements.form.hidden = ability.kind !== 'allowed';
   if (elements.note) {
-    elements.note.textContent = ability.kind === 'allowed' ? '' : abilityExplanation(ability.reason);
+    elements.note.textContent = ability.kind === 'allowed' ? '' : abilityExplanation(ability.reason, i18n);
   }
 }
 
-function createThreadCallbacks(dependencies: ThreadRenderDependencies): ForumCallbacks {
-  const { elements, viewerId, setTeamId } = dependencies;
+function renderThreadNotFound(elements: ThreadElements, i18n: I18nManager): void {
+  if (elements.title) elements.title.textContent = i18n.t('community.forum.threadNotFoundTitle');
+  if (elements.posts) elements.posts.replaceChildren();
+  if (elements.form) elements.form.hidden = true;
+  if (elements.note) elements.note.textContent = i18n.t('community.forum.threadNotFoundBody');
+}
+
+function createThreadCallbacks(
+  dependencies: ThreadRenderDependencies,
+  onThreadLoaded?: (data: ThreadRenderData) => void,
+  onNotFoundTriggered?: () => void,
+): ForumCallbacks {
+  const { elements, viewerId, setTeamId, i18n } = dependencies;
   return {
     onThreads: () => {},
     onThread: (team, thread, posts, members, names) => {
       setTeamId(team.id);
-      renderThreadDetail(elements, { thread, posts, members, names }, viewerId());
+      const data: ThreadRenderData = { thread, posts, members, names };
+      onThreadLoaded?.(data);
+      renderThreadDetail(elements, data, viewerId(), i18n);
     },
     onLoading: (loading) => {
       if (elements.posts) elements.posts.setAttribute('aria-busy', loading ? 'true' : 'false');
@@ -194,10 +248,8 @@ function createThreadCallbacks(dependencies: ThreadRenderDependencies): ForumCal
       if (elements.error) elements.error.textContent = message;
     },
     onNotFound: () => {
-      if (elements.title) elements.title.textContent = 'Thread not found';
-      if (elements.posts) elements.posts.replaceChildren();
-      if (elements.form) elements.form.hidden = true;
-      if (elements.note) elements.note.textContent = 'No such thread, or the team is private.';
+      onNotFoundTriggered?.();
+      renderThreadNotFound(elements, i18n);
     },
   };
 }
@@ -235,20 +287,61 @@ export function mountForum({
   slug,
   sessionPresent,
   restorePromise,
+  i18n,
 }: ForumMountDependencies): ForumController {
   const elements = forumElements(doc);
   let teamId: string | null = null;
+  let isNotFound = false;
+  let lastThreadsState: {
+    team: TeamView;
+    threads: readonly ForumThread[];
+    members: readonly TeamMembership[];
+    names: ReadonlyMap<string, SocialPlayer>;
+  } | null = null;
+  let unsubscribeLocale: (() => void) | undefined;
+
   const controller = new ForumController({
     client,
-    callbacks: createForumCallbacks({
-      elements,
-      slug,
-      viewerId: () => client.session.current?.user.id ?? null,
-      setTeamId: (id) => {
-        teamId = id;
+    callbacks: createForumCallbacks(
+      {
+        elements,
+        slug,
+        viewerId: () => client.session.current?.user.id ?? null,
+        setTeamId: (id) => {
+          teamId = id;
+        },
+        i18n,
       },
-    }),
+      (state) => {
+        isNotFound = false;
+        lastThreadsState = state;
+      },
+      () => {
+        isNotFound = true;
+      },
+    ),
+    onDispose: () => {
+      unsubscribeLocale?.();
+    },
   });
+
+  unsubscribeLocale = i18n.onLocaleChange(() => {
+    if (isNotFound) {
+      renderForumNotFound(elements, i18n);
+    } else if (lastThreadsState) {
+      renderForumIdentity(
+        elements,
+        slug,
+        lastThreadsState.team,
+        lastThreadsState.threads,
+        lastThreadsState.members,
+        lastThreadsState.names,
+        client.session.current?.user.id ?? null,
+        i18n,
+      );
+    }
+  });
+
   bindNewThreadComposer({ elements, controller, slug, teamId: () => teamId });
   loadAfterSessionRestore(sessionPresent, restorePromise, () => void controller.loadThreads(slug));
   return controller;
@@ -261,19 +354,51 @@ export function mountForumThread({
   threadId,
   sessionPresent,
   restorePromise,
+  i18n,
 }: ThreadMountDependencies): ForumController {
   const elements = threadElements(doc);
   let teamId: string | null = null;
+  let isNotFound = false;
+  let lastThreadData: ThreadRenderData | null = null;
+  let unsubscribeLocale: (() => void) | undefined;
+
   const controller = new ForumController({
     client,
-    callbacks: createThreadCallbacks({
-      elements,
-      viewerId: () => client.session.current?.user.id ?? null,
-      setTeamId: (id) => {
-        teamId = id;
+    callbacks: createThreadCallbacks(
+      {
+        elements,
+        viewerId: () => client.session.current?.user.id ?? null,
+        setTeamId: (id) => {
+          teamId = id;
+        },
+        i18n,
       },
-    }),
+      (data) => {
+        isNotFound = false;
+        lastThreadData = data;
+      },
+      () => {
+        isNotFound = true;
+      },
+    ),
+    onDispose: () => {
+      unsubscribeLocale?.();
+    },
   });
+
+  unsubscribeLocale = i18n.onLocaleChange(() => {
+    if (isNotFound) {
+      renderThreadNotFound(elements, i18n);
+    } else if (lastThreadData) {
+      renderThreadDetail(
+        elements,
+        lastThreadData,
+        client.session.current?.user.id ?? null,
+        i18n,
+      );
+    }
+  });
+
   bindReplyComposer({ elements, controller, slug, threadId, teamId: () => teamId });
   loadAfterSessionRestore(sessionPresent, restorePromise, () =>
     void controller.loadThread(slug, threadId),

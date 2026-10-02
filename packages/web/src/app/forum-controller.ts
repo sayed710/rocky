@@ -41,17 +41,20 @@ export interface ForumCallbacks {
 export interface ForumControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: ForumCallbacks;
+  readonly onDispose?: (() => void) | undefined;
 }
 
 export class ForumController {
   private readonly client: GambitClient;
   private readonly callbacks: ForumCallbacks;
+  private readonly onDispose?: (() => void) | undefined;
   private requestGeneration = 0;
   private disposed = false;
 
   constructor(opts: ForumControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.onDispose = opts.onDispose;
   }
 
   /** Load a team's thread list, with the members needed to decide who may start a thread. */
@@ -148,6 +151,7 @@ export class ForumController {
 
   dispose(): void {
     this.disposed = true;
+    this.onDispose?.();
   }
 
   /** One batched lookup per render, de-duplicated by the read layer. */

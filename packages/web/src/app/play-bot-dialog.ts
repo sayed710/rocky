@@ -9,9 +9,11 @@
  * component owns its DOM and form state, delegating submission to `onSubmit`.
  */
 import type { BotLevel, SeekColor, TimeControl } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { el } from './dom.js';
 import { BOT_LEVELS, DEFAULT_BOT_LEVEL, parseBotLevel } from './bot-levels.js';
 import { TIME_PRESETS, DEFAULT_PRESET_ID, presetToTimeControl, estimateSpeed } from './time-presets.js';
+import { getSpeedLabel } from './variant-labels.js';
 
 export interface CreateBotGameParams {
   readonly level: BotLevel;
@@ -33,37 +35,47 @@ export interface PlayBotDialogOptions {
   readonly mount: HTMLElement;
   readonly callbacks: PlayBotDialogCallbacks;
   readonly initialAuthenticated?: boolean;
+  readonly i18n: I18nManager;
 }
 
 interface ColorOption {
   readonly value: SeekColor;
-  readonly label: string;
+  readonly labelKey: 'bot.color.white' | 'bot.color.random' | 'bot.color.black';
   readonly glyph: string;
 }
 
 const COLOR_OPTIONS: readonly ColorOption[] = [
-  { value: 'white', label: 'White', glyph: '♔' },
-  { value: 'random', label: 'Random', glyph: '½' },
-  { value: 'black', label: 'Black', glyph: '♚' },
+  { value: 'white', labelKey: 'bot.color.white', glyph: '♔' },
+  { value: 'random', labelKey: 'bot.color.random', glyph: '½' },
+  { value: 'black', labelKey: 'bot.color.black', glyph: '♚' },
 ];
 
 export class PlayBotDialog {
   private readonly doc: Document;
   private readonly callbacks: PlayBotDialogCallbacks;
+  private readonly i18n: I18nManager;
+  private readonly unsubscribeLocale: () => void;
 
   private readonly trigger: HTMLButtonElement;
   private readonly dialog: HTMLDialogElement;
   private readonly form: HTMLFormElement;
+  private readonly titleEl: HTMLElement;
+  private readonly levelLegend: HTMLElement;
+  private readonly colorLegend: HTMLElement;
+  private readonly timeLegend: HTMLElement;
+  private readonly unratedNote: HTMLElement;
   private readonly levelHint: HTMLParagraphElement;
   private readonly errorEl: HTMLParagraphElement;
   private readonly submitBtn: HTMLButtonElement;
   private readonly cancelBtn: HTMLButtonElement;
 
   private pending = false;
+  private authenticated = false;
 
   constructor(opts: PlayBotDialogOptions) {
     this.doc = opts.doc;
     this.callbacks = opts.callbacks;
+    this.i18n = opts.i18n;
     const d = this.doc;
 
     // --- Trigger ---
@@ -76,24 +88,25 @@ export class PlayBotDialog {
       id: 'play-bot',
       type: 'button',
     });
-    this.trigger.textContent = 'Play vs Computer';
+    this.trigger.textContent = this.i18n.t('bot.title');
 
     // --- Title ---
-    const title = el(d, 'h2', { id: 'pb-dialog-title' }, 'Play vs Computer');
+    this.titleEl = el(d, 'h2', { id: 'pb-dialog-title' }, this.i18n.t('bot.title'));
 
     // --- Difficulty fieldset ---
     this.levelHint = el(d, 'p', { class: 'cg-hint', id: 'pb-level-hint' });
     const levelSeg = el(d, 'div', { class: 'cg-segmented' });
     for (const lvl of BOT_LEVELS) {
       levelSeg.append(
-        this.segment('pb-level', lvl.id, lvl.label, lvl.id === DEFAULT_BOT_LEVEL),
+        this.segment('pb-level', lvl.id, this.i18n.t(lvl.labelKey), lvl.id === DEFAULT_BOT_LEVEL),
       );
     }
+    this.levelLegend = el(d, 'legend', {}, this.i18n.t('bot.level'));
     const levelField = el(
       d,
       'fieldset',
       { class: 'cg-field' },
-      el(d, 'legend', {}, 'Difficulty'),
+      this.levelLegend,
       levelSeg,
       this.levelHint,
     );
@@ -105,14 +118,15 @@ export class PlayBotDialog {
     const colorSeg = el(d, 'div', { class: 'cg-segmented' });
     for (const c of COLOR_OPTIONS) {
       colorSeg.append(
-        this.segment('pb-color', c.value, c.label, c.value === 'random', c.glyph),
+        this.segment('pb-color', c.value, this.i18n.t(c.labelKey), c.value === 'random', c.glyph),
       );
     }
+    this.colorLegend = el(d, 'legend', {}, this.i18n.t('bot.color'));
     const colorField = el(
       d,
       'fieldset',
       { class: 'cg-field' },
-      el(d, 'legend', {}, 'Color'),
+      this.colorLegend,
       colorSeg,
     );
 
@@ -121,23 +135,24 @@ export class PlayBotDialog {
     for (const p of TIME_PRESETS) {
       const speed = estimateSpeed(presetToTimeControl(p.minutes, p.increment));
       presets.append(
-        this.chip('pb-time', p.id, p.id, p.id === DEFAULT_PRESET_ID, speed),
+        this.chip('pb-time', p.id, p.id, p.id === DEFAULT_PRESET_ID, getSpeedLabel(speed, this.i18n)),
       );
     }
+    this.timeLegend = el(d, 'legend', {}, this.i18n.t('bot.timeControl'));
     const timeField = el(
       d,
       'fieldset',
       { class: 'cg-field' },
-      el(d, 'legend', {}, 'Time control'),
+      this.timeLegend,
       presets,
     );
 
     // --- Unrated notice ---
-    const unratedNote = el(
+    this.unratedNote = el(
       d,
       'p',
       { class: 'cg-hint pb-unrated-note' },
-      'Games against the computer are unrated.',
+      this.i18n.t('bot.unratedNote'),
     );
 
     // --- Error region ---
@@ -150,21 +165,21 @@ export class PlayBotDialog {
 
     // --- Actions ---
     this.submitBtn = el(d, 'button', { type: 'submit', class: 'cg-submit' });
-    this.submitBtn.textContent = 'Start game';
+    this.submitBtn.textContent = this.i18n.t('bot.start');
     this.cancelBtn = el(d, 'button', { type: 'button', class: 'cg-cancel' });
-    this.cancelBtn.textContent = 'Cancel';
+    this.cancelBtn.textContent = this.i18n.t('bot.cancel');
     const actions = el(d, 'div', { class: 'cg-actions' }, this.submitBtn, this.cancelBtn);
 
     // --- Form ---
     this.form = el(d, 'form', { class: 'cg-form' });
-    this.form.append(levelField, colorField, timeField, unratedNote, this.errorEl, actions);
+    this.form.append(levelField, colorField, timeField, this.unratedNote, this.errorEl, actions);
 
     // --- Dialog ---
     this.dialog = el(d, 'dialog', {
       class: 'pb-dialog',
       'aria-labelledby': 'pb-dialog-title',
     });
-    this.dialog.append(title, this.form);
+    this.dialog.append(this.titleEl, this.form);
 
     // --- Event Handlers ---
     this.trigger.addEventListener('click', () => this.open());
@@ -188,6 +203,10 @@ export class PlayBotDialog {
       if (t instanceof HTMLInputElement && t.name === 'pb-level') {
         this.updateLevelHint();
       }
+    });
+
+    this.unsubscribeLocale = this.i18n.onLocaleChange(() => {
+      this.relocalize();
     });
 
     opts.mount.replaceChildren(this.trigger, this.dialog);
@@ -226,7 +245,7 @@ export class PlayBotDialog {
   private updateLevelHint(): void {
     const selectedId = parseBotLevel(this.readChecked('pb-level'));
     const option = BOT_LEVELS.find((opt) => opt.id === selectedId);
-    this.levelHint.textContent = option ? option.blurb : '';
+    this.levelHint.textContent = option ? this.i18n.t(option.blurbKey) : '';
   }
 
   private gather(): CreateBotGameParams {
@@ -287,15 +306,71 @@ export class PlayBotDialog {
   setPending(pending: boolean): void {
     this.pending = pending;
     this.submitBtn.disabled = pending;
-    this.submitBtn.textContent = pending ? 'Starting…' : 'Start game';
+    this.submitBtn.textContent = pending
+      ? this.i18n.t('bot.starting')
+      : this.i18n.t('bot.start');
     this.cancelBtn.disabled = pending;
   }
 
   setAuthenticated(authed: boolean): void {
+    this.authenticated = authed;
     this.trigger.disabled = !authed;
-    this.trigger.title = authed ? '' : 'Sign in to play the computer';
+    this.trigger.title = authed
+      ? ''
+      : this.i18n.t('bot.signInToPlay');
     if (!authed && this.dialog.open) {
       this.close();
     }
+  }
+
+  relocalize(): void {
+    this.trigger.textContent = this.i18n.t('bot.title');
+    this.titleEl.textContent = this.i18n.t('bot.title');
+    this.levelLegend.textContent = this.i18n.t('bot.level');
+    this.colorLegend.textContent = this.i18n.t('bot.color');
+    this.timeLegend.textContent = this.i18n.t('bot.timeControl');
+    this.unratedNote.textContent = this.i18n.t('bot.unratedNote');
+    this.cancelBtn.textContent = this.i18n.t('bot.cancel');
+    this.submitBtn.textContent = this.pending ? this.i18n.t('bot.starting') : this.i18n.t('bot.start');
+    if (!this.authenticated) {
+      this.trigger.title = this.i18n.t('bot.signInToPlay');
+    }
+
+    // Retranslate difficulty option labels without disturbing checked radio states
+    for (const lvl of BOT_LEVELS) {
+      const radio = this.form.querySelector<HTMLInputElement>(`input[name="pb-level"][value="${lvl.id}"]`);
+      const segLabel = radio?.closest('label')?.querySelector('.cg-seg-label');
+      if (segLabel) {
+        segLabel.textContent = this.i18n.t(lvl.labelKey);
+      }
+    }
+
+    // Retranslate color option labels without disturbing checked radio states
+    for (const c of COLOR_OPTIONS) {
+      const radio = this.form.querySelector<HTMLInputElement>(`input[name="pb-color"][value="${c.value}"]`);
+      const segLabel = radio?.closest('label')?.querySelector('.cg-seg-label');
+      if (segLabel) {
+        segLabel.replaceChildren(
+          el(this.doc, 'span', { class: 'cg-seg-glyph', 'aria-hidden': 'true' }, c.glyph),
+          this.doc.createTextNode(this.i18n.t(c.labelKey)),
+        );
+      }
+    }
+
+    // Retranslate time preset speed chips without disturbing checked radio states
+    for (const p of TIME_PRESETS) {
+      const radio = this.form.querySelector<HTMLInputElement>(`input[name="pb-time"][value="${p.id}"]`);
+      const speedSpan = radio?.closest('label')?.querySelector('.cg-chip-speed');
+      if (speedSpan) {
+        const speed = estimateSpeed(presetToTimeControl(p.minutes, p.increment));
+        speedSpan.textContent = getSpeedLabel(speed, this.i18n);
+      }
+    }
+
+    this.updateLevelHint();
+  }
+
+  dispose(): void {
+    this.unsubscribeLocale();
   }
 }

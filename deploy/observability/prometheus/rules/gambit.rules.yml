@@ -161,6 +161,60 @@ groups:
   # Not SLO burn: conditions that mean a signal is being lost, or that something is being attacked.
   - name: gambit-operational
     rules:
+      - alert: GambitRatingsBacklogAging
+        expr: max(ratings_oldest_pending_ending_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "Ratings have an ending waiting more than five minutes"
+          description: >-
+            The oldest committed ending after the ratings checkpoint is {{ $value | humanizeDuration }} old.
+            Check the ratings runbook for a held transaction, failed worker, or restore mismatch.
+          runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-lag-or-blocked-games"
+
+      - alert: GambitRatingsBatchFailing
+        expr: sum(rate(ratings_batch_failures_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "Ratings batches keep failing"
+          description: >-
+            A failed batch applies nothing and leaves the checkpoint where it was. One checkpoint orders every pool,
+            so a failure that repeats on the same ending stops all ratings until its cause is fixed.
+          runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-batch-failures"
+
+      - alert: GambitRatingsGameBlocked
+        # increase() over a window: only blocks recorded recently fire it, however many exist from before.
+        # increase() needs two samples, so a block a gateway records before its first scrape (during the
+        # startup backfill) is caught by the second term: a series first seen within 15 minutes, non-zero.
+        expr: >-
+          sum(increase(ratings_games_total{outcome="blocked"}[15m])) > 0
+          or sum(ratings_games_total{outcome="blocked"} unless ratings_games_total{outcome="blocked"} offset 15m) > 0
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "A finished game was blocked from rating"
+          description: >-
+            The ratings applier recorded a new game in rating_blocked_games in the last 15 minutes. A blocked game
+            is never rated automatically. Replaying an earlier block counts as already_blocked and does not fire this.
+          runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-lag-or-blocked-games"
+
+      - alert: GambitRatingsBacklogSampleFailing
+        expr: sum(rate(ratings_backlog_sample_failures_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: gateway
+        annotations:
+          summary: "Ratings backlog sampling is failing"
+          description: "The age gauge may be stale; inspect gateway logs and PostgreSQL connectivity."
+          runbook_url: "https://github.com/sayed710/rocky/blob/main/docs/RUNBOOKS.md#ratings-lag-or-blocked-games"
+
       - alert: GambitSpanExportFailing
         expr: gambit:span_export_loss:ratio_rate5m > 0.05
         for: 10m

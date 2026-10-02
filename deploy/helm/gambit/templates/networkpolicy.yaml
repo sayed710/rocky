@@ -60,6 +60,13 @@ spec:
               {{- include "gambit.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: search-indexer
         {{- end }}
+        {{- if .Values.trustWorker.enabled }}
+        {{- /* Only its init container's readiness wait: the API runs migrations. */}}
+        - podSelector:
+            matchLabels:
+              {{- include "gambit.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: trust-worker
+        {{- end }}
       ports:
         - protocol: TCP
           port: {{ .Values.api.port }}
@@ -87,4 +94,23 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.gateway.port }}
+{{- if .Values.trustWorker.enabled }}
+---
+# The trust worker takes no traffic (ADR-0152): no ingress rule admits anything.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gambit.fullname" . }}-trust-worker
+  labels:
+    {{- include "gambit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: trust-worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gambit.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: trust-worker
+  policyTypes:
+    - Ingress
+  ingress: []
+{{- end }}
 {{- end }}

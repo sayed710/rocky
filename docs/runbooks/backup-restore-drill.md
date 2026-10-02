@@ -17,6 +17,8 @@ This runbook defines the operational procedure to:
 3. Validate that all durable application data, triggers, indexes, and extensions survived.
 4. Ensure safety: destructive actions are strictly guarded against touching the primary or production databases.
 
+The isolated logical restore proves backup integrity, not that the restored database can serve as a live ratings primary. ADR-0150 supports automatic ratings recovery only from a physical restore preserving PostgreSQL transaction history. A cross-cluster logical restore needs an operator-controlled ending-order reconciliation before gateways connect; the ratings applier detects only some unsafe counter states.
+
 ---
 
 ## 2. Automated Drill Execution

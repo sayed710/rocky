@@ -6,23 +6,31 @@
  * the server publishes none and this file must not manufacture one from what it does publish.
  */
 import type { OpeningContinuationView, OpeningExplorationResponse } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
+import type { MessageKey } from '../i18n/catalog/index.js';
 
-export const OPENING_MESSAGES = {
-  idle: 'Identify the opening played in this game.',
-  running: 'Looking up the opening…',
-  sequenceChanged: 'The game has moved on. Identify again.',
-  signedOut: 'Sign in to identify openings.',
-  noOpening: 'No known opening matches this move order.',
-  unsupportedVariant: 'Opening identification covers standard chess only.',
-  noMoves: 'No moves have been played yet.',
-  noSequence: 'The full move order for this game is not available.',
-  beyondOpening: 'This game is past the opening phase the book covers.',
-  rateLimited: 'Too many opening look-ups. Try again shortly.',
-  unavailable: 'Opening identification is unavailable right now.',
-  activeGame: 'Opening identification is unavailable while you are playing a live human game.',
-  rejected: 'This move sequence cannot be identified.',
-  failed: 'Could not identify the opening.',
-} as const;
+export const OPENING_MESSAGE_KEYS = {
+  idle: 'ai.opening.idle',
+  running: 'ai.opening.running',
+  sequenceChanged: 'ai.opening.sequenceChanged',
+  signedOut: 'ai.opening.signedOut',
+  noOpening: 'ai.opening.noOpening',
+  unsupportedVariant: 'ai.opening.unsupportedVariant',
+  noMoves: 'ai.opening.noMoves',
+  noSequence: 'ai.opening.noSequence',
+  beyondOpening: 'ai.opening.beyondOpening',
+  rateLimited: 'ai.opening.rateLimited',
+  unavailable: 'ai.opening.unavailable',
+  activeGame: 'ai.opening.activeGame',
+  rejected: 'ai.opening.rejected',
+  failed: 'ai.opening.failed',
+} as const satisfies Record<string, MessageKey>;
+
+export type OpeningMessageKey = keyof typeof OPENING_MESSAGE_KEYS;
+
+export function openingMessage(key: OpeningMessageKey, i18n: I18nManager): string {
+  return i18n.t(OPENING_MESSAGE_KEYS[key]);
+}
 
 /**
  * Render the result, returning the note that belongs beside it (or `null` when the rows say
@@ -33,18 +41,19 @@ export function renderOpeningResult(
   rows: HTMLElement,
   resultEl: HTMLElement,
   result: OpeningExplorationResponse,
+  i18n: I18nManager,
 ): string | null {
   rows.innerHTML = '';
   if (!result.found) {
     resultEl.hidden = true;
-    return OPENING_MESSAGES.noOpening;
+    return openingMessage('noOpening', i18n);
   }
 
   const doc = rows.ownerDocument ?? document;
-  if (result.name !== null) rows.appendChild(row(doc, 'Opening', result.name));
-  if (result.eco !== null) rows.appendChild(row(doc, 'ECO', result.eco));
-  rows.appendChild(row(doc, 'Book depth', plies(result.matchedMoves)));
-  rows.appendChild(row(doc, 'Position', result.outOfBook ? 'Out of book' : 'In book'));
+  if (result.name !== null) rows.appendChild(row(doc, i18n.t('ai.opening.label.opening'), result.name));
+  if (result.eco !== null) rows.appendChild(row(doc, i18n.t('ai.opening.label.eco'), result.eco));
+  rows.appendChild(row(doc, i18n.t('ai.opening.label.bookDepth'), plies(result.matchedMoves, i18n)));
+  rows.appendChild(row(doc, i18n.t('ai.opening.label.position'), result.outOfBook ? i18n.t('ai.opening.outOfBook') : i18n.t('ai.opening.inBook')));
   for (const continuation of result.continuations) {
     rows.appendChild(row(doc, moveLabel(continuation), continuationName(continuation)));
   }
@@ -93,8 +102,8 @@ export function renderOpeningError(el: HTMLElement, text: string | null): void {
 }
 
 /** Plies, said plainly. `matchedMoves` counts half-moves, and calling them "moves" would halve it. */
-function plies(count: number): string {
-  return `${count} ${count === 1 ? 'ply' : 'plies'}`;
+export function plies(count: number, i18n: I18nManager): string {
+  return count === 1 ? i18n.t('ai.opening.ply', { count: '1' }) : i18n.t('ai.opening.plies', { count: String(count) });
 }
 
 /** SAN when the dataset has it, UCI when it does not — never a SAN derived here from the UCI. */

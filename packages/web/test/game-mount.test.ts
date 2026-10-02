@@ -183,6 +183,7 @@ function gameServices(app: ReturnType<typeof createTestApp>) {
     createGameOracle: app.createGameOracle,
     getAccessToken: () => app.api.session.current?.tokens.accessToken,
     client: app.api,
+    i18n: app.i18n,
   };
 }
 

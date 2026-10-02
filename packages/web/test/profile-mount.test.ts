@@ -1,8 +1,17 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GambitClient } from '../src/api/client.js';
-import { mountProfile } from '../src/app/profile-mount.js';
+import { mountProfile as mountProfileBase } from '../src/app/profile-mount.js';
+import { createI18nManager, type I18nManager } from '../src/i18n/index.js';
 import type { AuthSession } from '../src/app/auth-controller.js';
+
+const testI18n = createI18nManager();
+
+function mountProfile(
+  deps: Omit<Parameters<typeof mountProfileBase>[0], 'i18n'> & { i18n?: I18nManager },
+): ReturnType<typeof mountProfileBase> {
+  return mountProfileBase({ ...deps, i18n: deps.i18n ?? testI18n });
+}
 import type { WebAuthnAdapter } from '../src/ports/webauthn.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { FakeTransport, json } from './support/fake-transport.js';
@@ -885,4 +894,35 @@ test('achievements unavailable and error rendering', async () => {
 
   assert.equal(elements2.get('achievements')!.hidden, false, '500 error reveals achievements section');
   assert.equal(elements2.get('achievements-error')!.textContent, 'HTTP 500');
+});
+
+test('a profile shows each rating pool on its own row, named by variant and speed', async () => {
+  const { doc, elements } = createProfileDocument();
+  const transport = new FakeTransport().onEach((req) => {
+    const path = new URL(req.url).pathname;
+    if (req.method === 'GET' && path === '/v1/users/bob') {
+      return json(200, {
+        user: { id: 'u2', handle: 'bob', country: null, createdAt: '2026-01-01T00:00:00Z' },
+        ratings: [
+          { variant: 'standard', speed: 'blitz', rating: 1712.4, rd: 61.2, vol: 0.06, updatedAt: null },
+          { variant: 'standard', speed: 'correspondence', rating: 1480, rd: 300, vol: 0.06, updatedAt: null },
+        ],
+      });
+    }
+    if (req.method === 'GET' && path === '/v1/users/bob/games') return json(200, []);
+    if (req.method === 'GET' && path.startsWith('/v1/social/')) return json(200, { items: [], followerCount: 0, followingCount: 0, followers: [], following: [], named: true });
+    return json(404, {});
+  });
+
+  mountProfile({
+    doc,
+    client: createTestClient(transport, false),
+    handle: 'bob',
+    getCurrentSession: () => null,
+    restorePromise: Promise.resolve(null),
+  });
+  await flush();
+
+  const rows = Array.from(elements.get('profile-ratings')!.children).map((row) => row.textContent);
+  assert.deepEqual(rows, ['Standard · Blitz: 1712 (RD 61)', 'Standard · Correspondence: 1480 (RD 300)']);
 });

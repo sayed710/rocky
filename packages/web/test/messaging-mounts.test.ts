@@ -2,7 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { GambitClient } from '../src/api/client.js';
 import { MessagesController } from '../src/app/messages-controller.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { mountConversation, mountMessagesInbox } from '../src/app/messaging-mounts.js';
+
+const defaultI18n = createI18nManager();
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
   let resolve!: () => void;
@@ -35,6 +38,7 @@ test('inbox waits for session restoration and disposal prevents its delayed requ
     client,
     sessionPresent: false,
     restorePromise: restored.promise,
+    i18n: defaultI18n,
   });
   assert.equal(requests, 0);
 
@@ -78,6 +82,7 @@ test('a message submitted during session restoration waits and sends the retaine
     conversationId: 'c-1',
     sessionPresent: false,
     restorePromise: restored.promise,
+    i18n: defaultI18n,
   });
   try {
     composer.onsubmit?.({ preventDefault: () => {} } as Event);
@@ -134,6 +139,7 @@ test('an abandoned restore cannot leave a later composer disabled or change its 
     conversationId: 'c-1',
     sessionPresent: false,
     restorePromise: restored.promise,
+    i18n: defaultI18n,
   });
   composer.onsubmit?.({ preventDefault: () => {} } as Event);
   assert.equal(input.disabled, true);
@@ -145,6 +151,7 @@ test('an abandoned restore cannot leave a later composer disabled or change its 
     conversationId: 'c-1',
     sessionPresent: true,
     restorePromise: Promise.resolve(),
+    i18n: defaultI18n,
   });
   try {
     assert.equal(input.disabled, false, 'a new mount owns an enabled composer');
@@ -194,6 +201,7 @@ test('disposing a pending conversation unbinds its form without focusing an aban
     conversationId: 'c-1',
     sessionPresent: false,
     restorePromise: restored.promise,
+    i18n: defaultI18n,
   });
 
   composer.onsubmit?.({ preventDefault: () => {} } as Event);
@@ -248,6 +256,7 @@ test('re-mounting a conversation replaces its composer handler and retains text 
     conversationId: 'c-1',
     sessionPresent: true,
     restorePromise: neverRestored,
+    i18n: defaultI18n,
   });
   const second = mountConversation({
     doc,
@@ -257,6 +266,7 @@ test('re-mounting a conversation replaces its composer handler and retains text 
     conversationId: 'c-1',
     sessionPresent: true,
     restorePromise: neverRestored,
+    i18n: defaultI18n,
   });
 
   composer.onsubmit?.({ preventDefault: () => {} } as Event);

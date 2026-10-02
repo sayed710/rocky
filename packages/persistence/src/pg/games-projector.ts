@@ -254,28 +254,37 @@ export class PgGamesProjector {
     }
   }
 
-  private async inTransaction<T>(
+  private inTransaction<T>(
     work: (client: PoolClient) => Promise<T>,
     isolation: 'READ COMMITTED' | 'REPEATABLE READ' = 'READ COMMITTED',
   ): Promise<T> {
-    const client = await this.pool.connect();
-    let broken: Error | undefined;
+    return inTransaction(this.pool, work, isolation);
+  }
+}
+
+/** Run `work` in one transaction on its own connection; also used by the rating applier. */
+export async function inTransaction<T>(
+  pool: Pool,
+  work: (client: PoolClient) => Promise<T>,
+  isolation: 'READ COMMITTED' | 'REPEATABLE READ' = 'READ COMMITTED',
+): Promise<T> {
+  const client = await pool.connect();
+  let broken: Error | undefined;
+  try {
+    await client.query(`BEGIN ISOLATION LEVEL ${isolation}`);
+    const result = await work(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
     try {
-      await client.query(`BEGIN ISOLATION LEVEL ${isolation}`);
-      const result = await work(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
-      try {
-        await client.query('ROLLBACK');
-      } catch (rollbackError) {
-        broken = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
-      }
-      throw error;
-    } finally {
-      // A connection that could not roll back must not return to the pool mid-transaction.
-      client.release(broken);
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      broken = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
     }
+    throw error;
+  } finally {
+    // A connection that could not roll back must not return to the pool mid-transaction.
+    client.release(broken);
   }
 }
 
@@ -306,7 +315,7 @@ async function gamesAwaitingLiveBatch(client: PoolClient, ids: readonly string[]
 }
 
 /** Errors caused by a stream's own content, which retrying the same bytes cannot fix. */
-function isStreamDataFailure(error: unknown): boolean {
+export function isStreamDataFailure(error: unknown): boolean {
   if (error instanceof PersistenceError || error instanceof TypeError || error instanceof RangeError) return true;
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
   // SQLSTATE classes 22 (data exception) and 23 (integrity constraint violation).
@@ -331,7 +340,8 @@ async function retrySerialization<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-async function loadStream(client: PoolClient, gameId: string): Promise<StoredEvent[]> {
+/** A game's complete committed stream, upcast, in `seq` order. */
+export async function loadStream(client: PoolClient, gameId: string): Promise<StoredEvent[]> {
   const res = await client.query<StreamRow>(
     `SELECT seq, type, event_version, payload, server_ts FROM game_events WHERE game_id = $1 ORDER BY seq`,
     [gameId],
@@ -371,26 +381,29 @@ function endingOf(p: GameProjection): ProjectedEnding {
   return { gameId: p.id, result: p.result!, termination: p.termination!, endedAt: p.endedAt! };
 }
 
-export interface GamesProjectionWorkerOptions {
+export interface GamesProjectionWorkerOptions<B = GamesProjectionBatch> {
   /** Delay between batches once caught up (default 1000 ms). */
   readonly idleMs?: number;
   /** Ceiling for the exponential delay after consecutive failed batches (default 30 s). */
   readonly maxBackoffMs?: number;
   /** Called after every committed batch; a throwing hook is reported, not fatal. */
-  readonly onBatch?: (batch: GamesProjectionBatch) => void;
+  readonly onBatch?: (batch: B) => void;
   readonly onError?: (error: unknown) => void;
 }
 
-/** Runs {@link PgGamesProjector.runBatch} continuously: back-to-back while behind, polling when idle, backing off on errors. */
-export class GamesProjectionWorker {
+/**
+ * Runs a checkpointed batch (the games projector's or the rating applier's) continuously: back-to-back
+ * while behind, polling when idle, backing off on errors.
+ */
+export class GamesProjectionWorker<B extends { readonly more: boolean } = GamesProjectionBatch> {
   private stopped = true;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running: Promise<void> | undefined;
   private consecutiveErrors = 0;
 
   constructor(
-    private readonly projector: Pick<PgGamesProjector, 'runBatch'>,
-    private readonly options: GamesProjectionWorkerOptions = {},
+    private readonly projector: { runBatch(): Promise<B> },
+    private readonly options: GamesProjectionWorkerOptions<B> = {},
   ) {}
 
   start(): void {
@@ -419,7 +432,7 @@ export class GamesProjectionWorker {
 
   private async tick(): Promise<void> {
     const idleMs = this.options.idleMs ?? 1000;
-    let batch: GamesProjectionBatch;
+    let batch: B;
     try {
       batch = await this.projector.runBatch();
     } catch (error) {

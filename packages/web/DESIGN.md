@@ -256,6 +256,7 @@ Flat at rest, everywhere. Depth on static layouts comes from theme-aware Panel T
 - **Row composition** follows the standard two-child rule: rank (`#1`, `#2`) and the player handle or `shortId` travel together in `.row-main`; rating and rating deviation (`2100 (±35)`) trail in `.count`.
 - **Link Policy**: Resolved handles render as links to the player profile (`.row-link`, `data-route="profile"`). Bare, unresolved user IDs render as plain text fallback without links to avoid broken profile navigations.
 - **Variant Selector**: The `<select id="leaderboard-variant-select">` uses the single `cg-select` form control treatment, declaring options from `OFFERED_VARIANTS` with human-readable `VARIANT_LABELS`.
+- **Time-control Selector**: `<select id="leaderboard-speed-select">` uses the same `cg-select` treatment with `SPEED_LABELS`. A rating pool is a variant and a speed (ADR-0150), and the page chooses no speed for the viewer: it opens on a disabled `Choose…` prompt and a `Choose a time control` status, and loads standings only once a speed is picked. The controls row wraps so both selectors fit a 320px viewport.
 
 ### Passkeys (account security profile section)
 

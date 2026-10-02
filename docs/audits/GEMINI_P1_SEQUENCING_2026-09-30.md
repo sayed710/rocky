@@ -1,5 +1,8 @@
 # Gemini Planning Artifact: Post-Gate P1 Implementation Sequencing
 
+> **Codex adjudication — 2026-10-02:** Independent Codex review of this entire historical document against current main `07946b9b03538ed73a3f7b773e7ad5a327d83805` is complete. Read the [current-main correction and disposition ledger](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md) before using any claim or sequence below. The original Gemini snapshot, recommendations and then-pending review status are preserved as historical evidence, not current implementation instructions or owner approval.
+
+
 > [!IMPORTANT]
 > **STATUS AND AUTHORITY NOTICE**
 > - **Gemini-Generated Planning/Review Artifact**: This document was produced during Gemini read-only implementation-planning audits on 2026-09-30.
@@ -54,7 +57,7 @@ flowchart TD
 
 ---
 
-## 2. Reverified P1 Capability Inventory
+## 2. Historical P1 Capability Inventory (2026-09-30; superseded below)
 
 Every P1 item from historical audits was reverified against fresh `origin/main` (`553751c628f69436600987ddbf649a13f2b9eb2d`):
 
@@ -95,7 +98,7 @@ To avoid regressions and duplicated effort during sequencing, the following engi
 
 ---
 
-## 4. Recommended Concrete Engineering Sequencing
+## 4. Historical Gemini Sequencing (superseded; not an execution checklist)
 
 > [!NOTE]
 > All sequences below are **planning recommendations** prepared by Gemini and are subject to Codex adjudication and owner authorization.
@@ -164,3 +167,15 @@ flowchart TD
   * `reporting-moderation`: In-game player reporting modal feeding internal operator review table.
   * `mobile-ergonomics`: 44px+ touch target enforcement and mobile navigation drawer.
   * `game-review-depth`: Extended web worker evaluation for games exceeding 40 moves.
+
+## 5. Codex corrected current-main sequence
+
+Read the [all-14-item disposition table](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md#p1-capability-disposition). PR #76 is merged; PR #81 already supplies i18n infrastructure/runtime migration/bidi; PR #83 already supplies the report/triage backend, first-admin bootstrap, trust analyzers and Helm reporter parity. Do not implement these twice.
+
+1. **Remaining release-gate work:** Production Arabic catalog (historical **i18n PR 3**) with owner-approved terminology, approved switcher/typography choices, count/plural handling where required and full Arabic browser/bidi acceptance; policy/source scaffolding and approved publication with discoverable links. These streams can proceed independently; scaffolding or English-only runtime migration is not release-gate completion.
+2. **Open engineering follow-ups:** Seek creator's pool rating display, finished-game PGN download (reuse the existing studies serializer where appropriate), explicit illegal-gesture feedback. Existing not-found and unavailable views must be inspected surface by surface, not rebuilt as wholly missing.
+3. **Owner-scoped gameplay work:** Casual direct challenges and rematch need product/UX scope, not a rating prerequisite. Rated direct challenges use the **already-merged** rating pools plus their own authorization/anti-abuse contracts. Casual challenges have no dependency on rating integration.
+4. **Owner/policy-dependent work:** Settings scope, mobile pattern only if current evidence warrants a structural change, account deletion/retention, personal export, report/triage **web UI**, and sanction/appeal policy. Backend reporting and trust deployment are already implemented; they do not establish owner approval of new sanctions.
+5. **Long-game review proposals:** Any extension is a server/API budget and contract change, not web-worker work. Current partial review is already supported. Critical-moment scanning, resume/pagination and depth changes remain proposals; no option is selected.
+
+No wave ordering here promotes historical P2/P3 proposals into launch blockers. Current responsive CSS and 44px target rules also mean the historical blanket mobile-defect claim needs fresh measurements before changes.

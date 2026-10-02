@@ -44,6 +44,7 @@ function createMockBootstrapped(
     emailVerification: disposables.emailVerification as Bootstrapped['emailVerification'],
     connectivity: disposables.connectivity as Bootstrapped['connectivity'],
     analysis: disposables.analysis as Bootstrapped['analysis'],
+    shellLocalization: disposables.shellLocalization as Bootstrapped['shellLocalization'],
   };
 }
 

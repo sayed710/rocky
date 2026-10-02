@@ -1099,7 +1099,7 @@
     },
     "/v1/users/{handle}/ratings": {
       "get": {
-        "summary": "Get a user's ratings across variants",
+        "summary": "Get a user's ratings in every rating pool (variant and speed) they have played",
         "tags": [
           "users",
           "ratings"
@@ -1832,13 +1832,421 @@
         ]
       }
     },
-    "/v1/leaderboard/{variant}": {
+    "/v1/reports": {
+      "post": {
+        "summary": "Report a player to the moderators",
+        "tags": [
+          "player-reports"
+        ],
+        "operationId": "post_v1_reports",
+        "responses": {
+          "201": {
+            "description": "Report filed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlayerReportReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such player",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed request, self-report, or a game the reported player did not play",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the rejected rate-limit bucket admits another request",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          }
+        },
+        "description": "Plain-text `detail` is stored verbatim (trimmed) and never interpreted as HTML. The response carries only what the reporter submitted.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePlayerReportRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/moderation/player-reports": {
       "get": {
-        "summary": "Top players for a variant",
+        "summary": "List player reports in one status, oldest first",
+        "tags": [
+          "moderation",
+          "player-reports"
+        ],
+        "operationId": "get_v1_moderation_player_reports",
+        "responses": {
+          "200": {
+            "description": "One page of reports, without report text",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModerationReportPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a moderator or admin, or asking for reports about yourself",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Missing or malformed status, subject, cursor or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Reports the caller filed or is the subject of are never listed. Re-read from the first page on each visit: the queue is keyset-paged by time-ordered id, so a report committed late behind a cursor shows up on the next pass from the head.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": true,
+            "description": "Queue to list.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "reviewing",
+                "resolved",
+                "dismissed"
+              ]
+            }
+          },
+          {
+            "name": "subjectId",
+            "in": "query",
+            "required": false,
+            "description": "Only reports about this player.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Keyset cursor: the `nextAfter` of the previous page.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Maximum number of results.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      }
+    },
+    "/v1/moderation/player-reports/{id}": {
+      "get": {
+        "summary": "Read one player report, including its text and the moderator note",
+        "tags": [
+          "moderation",
+          "player-reports"
+        ],
+        "operationId": "get_v1_moderation_player_reports_by_id",
+        "responses": {
+          "200": {
+            "description": "The report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModerationReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a moderator or admin, or you filed the report or are its subject",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed report ID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Report ID (UUID)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/moderation/player-reports/{id}/transition": {
+      "post": {
+        "summary": "Claim, resolve or dismiss a player report",
+        "tags": [
+          "moderation",
+          "player-reports"
+        ],
+        "operationId": "post_v1_moderation_player_reports_by_id_transition",
+        "responses": {
+          "200": {
+            "description": "The report after the transition",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModerationReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a moderator or admin, a party to the report, or closing a report someone else claimed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale expectedVersion, or the report is not in a state that allows this action",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "description": "Compare-and-set on `expectedVersion`. `claim` takes an open report; `resolve` and `dismiss` close one under review and may carry an internal note. Only the moderator who claimed a report, or an admin, may close it. Resolved and dismissed are final.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Report ID (UUID)",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModerationReportTransitionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/leaderboard/{variant}/{speed}": {
+      "get": {
+        "summary": "Top players in one rating pool (a variant and a speed)",
         "tags": [
           "ratings"
         ],
-        "operationId": "get_v1_leaderboard_by_variant",
+        "operationId": "get_v1_leaderboard_by_variant_by_speed",
         "responses": {
           "200": {
             "description": "Leaderboard",
@@ -1861,7 +2269,7 @@
             }
           },
           "422": {
-            "description": "Bad variant",
+            "description": "Bad variant or speed",
             "content": {
               "application/json": {
                 "schema": {
@@ -1877,6 +2285,15 @@
             "in": "path",
             "required": true,
             "description": "Variant code",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "speed",
+            "in": "path",
+            "required": true,
+            "description": "Speed class; each variant and speed is its own pool",
             "schema": {
               "type": "string"
             }
@@ -4897,12 +5314,41 @@
               }
             }
           },
+          "404": {
+            "description": "No such player",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Self relation or malformed ID",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the rejected rate-limit bucket admits another request",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               }
             }
@@ -5218,6 +5664,16 @@
               }
             }
           },
+          "404": {
+            "description": "No such player",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "409": {
             "description": "Conflict or already exists",
             "content": {
@@ -5234,6 +5690,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the rejected rate-limit bucket admits another request",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               }
             }
@@ -6770,6 +7245,25 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the rejected rate-limit bucket admits another request",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
           "503": {
             "description": "Community service unavailable",
             "content": {
@@ -7166,6 +7660,25 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the rejected rate-limit bucket admits another request",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
           "503": {
             "description": "Community service unavailable",
             "content": {
@@ -7539,6 +8052,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the rejected rate-limit bucket admits another request",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               }
             }
@@ -8133,6 +8665,25 @@
               }
             }
           },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the rejected rate-limit bucket admits another request",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
           "503": {
             "description": "Community service unavailable",
             "content": {
@@ -8605,6 +9156,25 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds until the rejected rate-limit bucket admits another request",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
                 }
               }
             }
@@ -13365,6 +13935,7 @@
         "type": "object",
         "required": [
           "variant",
+          "speed",
           "rating",
           "rd",
           "vol",
@@ -13382,6 +13953,17 @@
               "threecheck",
               "horde",
               "racingkings"
+            ]
+          },
+          "speed": {
+            "type": "string",
+            "enum": [
+              "ultrabullet",
+              "bullet",
+              "blitz",
+              "rapid",
+              "classical",
+              "correspondence"
             ]
           },
           "rating": {
@@ -13407,6 +13989,7 @@
         "required": [
           "userId",
           "variant",
+          "speed",
           "rating",
           "rd"
         ],
@@ -13426,6 +14009,17 @@
               "threecheck",
               "horde",
               "racingkings"
+            ]
+          },
+          "speed": {
+            "type": "string",
+            "enum": [
+              "ultrabullet",
+              "bullet",
+              "blitz",
+              "rapid",
+              "classical",
+              "correspondence"
             ]
           },
           "rating": {
@@ -15535,6 +16129,314 @@
             }
           }
         }
+      },
+      "CreatePlayerReportRequest": {
+        "type": "object",
+        "required": [
+          "subjectId",
+          "reason"
+        ],
+        "properties": {
+          "subjectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "gameId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A game the reported player played in."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "cheating",
+              "harassment",
+              "spam",
+              "other"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "Plain text, trimmed. Never interpreted as HTML."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PlayerReportReceipt": {
+        "type": "object",
+        "description": "What the reporter submitted. Carries no moderation state.",
+        "required": [
+          "id",
+          "subjectId",
+          "gameId",
+          "reason",
+          "detail",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "subjectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "gameId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "cheating",
+              "harassment",
+              "spam",
+              "other"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Plain text."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModerationReportSummary": {
+        "type": "object",
+        "description": "A queue row. Omits the report text and the moderator note.",
+        "required": [
+          "id",
+          "reporterId",
+          "subjectId",
+          "gameId",
+          "reason",
+          "status",
+          "assignedTo",
+          "version",
+          "createdAt",
+          "closedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reporterId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "subjectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "gameId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "cheating",
+              "harassment",
+              "spam",
+              "other"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "reviewing",
+              "resolved",
+              "dismissed"
+            ]
+          },
+          "assignedTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The compare-and-set token for the next transition."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "closedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModerationReportPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "nextAfter"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModerationReportSummary"
+            }
+          },
+          "nextAfter": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Pass as `after` for the next page; null on the last."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModerationReport": {
+        "type": "object",
+        "description": "The full report, for moderators and admins only. Reading it is audited.",
+        "required": [
+          "id",
+          "reporterId",
+          "subjectId",
+          "gameId",
+          "reason",
+          "status",
+          "assignedTo",
+          "version",
+          "createdAt",
+          "closedAt",
+          "detail",
+          "moderatorNote"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reporterId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "subjectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "gameId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "cheating",
+              "harassment",
+              "spam",
+              "other"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "reviewing",
+              "resolved",
+              "dismissed"
+            ]
+          },
+          "assignedTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "closedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Plain text written by the reporter."
+          },
+          "moderatorNote": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Internal; never shown to players."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModerationReportTransitionRequest": {
+        "type": "object",
+        "required": [
+          "action",
+          "expectedVersion"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "claim",
+              "resolve",
+              "dismiss"
+            ]
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Internal note, on resolve or dismiss only. Plain text."
+          }
+        },
+        "additionalProperties": false
       },
       "SendFriendRequestRequest": {
         "type": "object",

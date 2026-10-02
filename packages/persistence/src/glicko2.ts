@@ -2,8 +2,8 @@
  * @packageDocumentation
  * Glicko-2 rating system (Glickman, 2013). Pure functions — no state, no I/O —
  * so ratings are deterministic and unit-testable against the reference worked
- * example. Ratings are stored per (user, variant); a rating period here is a
- * single batch of results (we update per game or per small batch).
+ * example. Ratings are stored per (user, variant, speed) pool, and every rated game is
+ * its own rating period ({@link rateGame}); no inactivity RD growth is applied (ADR-0150).
  */
 
 /** A player's Glicko-2 rating triple on the original (1500-centered) scale. */
@@ -44,7 +44,7 @@ function expectedScore(mu: number, muJ: number, phiJ: number): number {
 
 /** Solve for the new volatility via the Illinois algorithm (Glickman step 5). */
 function newVolatility(vol: number, delta: number, phi: number, v: number, tau: number): number {
-  const a = Math.log(vol * vol);
+  const a = 2 * Math.log(vol);
   const d2 = delta * delta;
   const pv = phi * phi + v;
 
@@ -118,4 +118,21 @@ export function updateRating(
   const newMu = mu + newPhi * newPhi * dSum;
 
   return { rating: newMu * SCALE + DEFAULT_RATING, rd: newPhi * SCALE, vol };
+}
+
+/** Both players' ratings after one game, the game being its own rating period. */
+export interface RatedGame {
+  readonly white: Glicko2Rating;
+  readonly black: Glicko2Rating;
+}
+
+/**
+ * Rate one game from both players' pre-game states. Each side is updated against the other's
+ * rating from before the game, never against an already-updated opponent.
+ */
+export function rateGame(white: Glicko2Rating, black: Glicko2Rating, whiteScore: 0 | 0.5 | 1): RatedGame {
+  return {
+    white: updateRating(white, [{ rating: black.rating, rd: black.rd, score: whiteScore }]),
+    black: updateRating(black, [{ rating: white.rating, rd: white.rd, score: 1 - whiteScore }]),
+  };
 }

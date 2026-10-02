@@ -1,5 +1,8 @@
 # Gemini Planning Artifact: EN/AR Shell Localization & Mixed-Direction Text
 
+> **Codex adjudication — 2026-10-02:** Independent Codex review of this entire historical document against current main `07946b9b03538ed73a3f7b773e7ad5a327d83805` is complete. Read the [current-main correction and disposition ledger](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md) before using any claim or sequence below. The original Gemini snapshot, recommendations and then-pending review status are preserved as historical evidence, not current implementation instructions or owner approval.
+
+
 > [!IMPORTANT]
 > **STATUS AND AUTHORITY NOTICE**
 > - **Gemini-Generated Planning/Review Artifact**: This document was produced during Gemini read-only implementation-planning audits on 2026-09-30.
@@ -143,3 +146,7 @@ flowchart LR
    * Ingests owner-approved Arabic translations (`ar.json`) conforming to approved glossary (`D-03`).
    * Validates full end-to-end browser rendering in Arabic across all routes.
    * Satisfies the owner release gate.
+
+## 3. Codex current-main correction
+
+PR #81 implemented typed locale infrastructure, English TypeScript catalog, runtime renderer migration, semantic relocalization and bidi foundations. The historical PR 1/2 decomposition above is not an outstanding implementation checklist. Current symbols/paths are `I18n` / `createI18nManager`, `catalog/en.ts`, `rookzen_locale_v1`, `src/app/router.ts` and `src/style.css`, rather than the proposed `LocaleManager`, JSON catalog and `cb_locale` names. A production Arabic catalog, owner-approved terminology, a visible switcher and production Arabic acceptance remain open; infrastructure alone does not satisfy the EN/AR release gate. See the [i18n adjudication](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md#localization-adjudication) for evidence and limits.

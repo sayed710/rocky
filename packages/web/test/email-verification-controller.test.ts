@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EmailVerificationController } from '../src/app/email-verification-controller.js';
 import type { EmailVerificationCallbacks } from '../src/app/email-verification-controller.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { GambitClient } from '../src/api/client.js';
 import { FakeTransport, empty, json } from './support/fake-transport.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
@@ -30,7 +31,7 @@ function makeHarness(transport: HttpTransport) {
   };
 
   const client = makeClient(transport);
-  const controller = new EmailVerificationController({ client, callbacks });
+  const controller = new EmailVerificationController({ client, callbacks, i18n: createI18nManager() });
 
   return {
     controller,
@@ -173,7 +174,7 @@ test('verify: completion after dispose() invokes no callback at all', async () =
   };
 
   const client = makeClient(deferTransport);
-  const controller = new EmailVerificationController({ client, callbacks });
+  const controller = new EmailVerificationController({ client, callbacks, i18n: createI18nManager() });
 
   const p1 = controller.verify('my-token');
   // Initial pending callback fired before dispose

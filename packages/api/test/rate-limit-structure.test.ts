@@ -111,6 +111,17 @@ function routeNamed(path: string, verb?: string): Route {
   return match;
 }
 
+/** The community creation routes (all POST) and the buckets each must charge in one admission. */
+const COMMUNITY_ADMISSIONS: Record<string, readonly string[]> = {
+  '/v1/social/follows/:playerId': ['social-initiate:user:', 'social-initiate:ip:'],
+  '/v1/social/friend-requests': ['social-initiate:user:', 'social-initiate:ip:', 'friend-request:pair:'],
+  '/v1/teams': ['team-create:user:', 'team-create:ip:'],
+  '/v1/teams/:id/members': ['team-join:user:', 'team-join:ip:'],
+  '/v1/teams/:id/join-requests': ['team-join:user:', 'team-join:ip:'],
+  '/v1/teams/:id/forum/threads': ['forum-thread:user:', 'forum-thread:ip:'],
+  '/v1/teams/:id/forum/threads/:threadId/posts': ['forum-post:user:', 'forum-post:ip:'],
+};
+
 test('the limiter port is reached through exactly one call site in the whole route table', () => {
   const direct: ts.CallExpression[] = [];
   walk(SOURCE, (n) => {
@@ -155,6 +166,8 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
     '/v1/seeks': ['seek-create:user:', 'seek-create:ip:'],
     '/v1/messages/conversations': ['message-open:user:', 'message-open:ip:'],
     '/v1/messages/conversations/:id/messages': ['message-send:user:', 'message-send:ip:'],
+    ...COMMUNITY_ADMISSIONS,
+    '/v1/reports': ['player-report:user:', 'player-report:user-day:', 'player-report:ip:', 'player-report:pair:'],
     '/v1/analysis': ['analysis:user:', 'analysis:ip:'],
     '/v1/analysis/mistake-prediction': ['mistake-prediction:user:', 'mistake-prediction:ip:'],
     '/v1/ai/move-explanation': ['move-explanation:user:', 'move-explanation:ip:'],
@@ -191,6 +204,110 @@ test('every multi-bucket route hands both buckets to a single admission', () => 
   }
 });
 
+/**
+ * A write bucket keyed by the player or team a write is aimed at would let strangers spend
+ * that target's budget, or let one caller lock others out of a team. So each key interpolates
+ * the caller or the caller's address and nothing else, with one exception. The friend-request
+ * pair bucket names the recipient too, but only after the sender, so only the sender can charge it.
+ */
+test('authenticated-write buckets are keyed only by the caller and the caller\'s address', () => {
+  const writes = [...Object.keys(COMMUNITY_ADMISSIONS), '/v1/seeks', '/v1/messages/conversations', '/v1/messages/conversations/:id/messages', '/v1/reports'];
+  for (const path of writes) {
+    const argument = admissions(routeNamed(path, 'post').node)[0]!.arguments[0];
+    assert.ok(argument && ts.isArrayLiteralExpression(argument));
+    const keyed = argument.elements.map((element) => {
+      assert.ok(ts.isObjectLiteralExpression(element));
+      const key = element.properties.find(
+        (p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'key',
+      );
+      assert.ok(key && ts.isTemplateExpression(key.initializer), `${path}: keys must be template literals`);
+      return key.initializer.templateSpans.map((span) => span.expression.getText(SOURCE));
+    });
+    // `/v1/seeks` names the caller `identity.userId`; every other route calls it `actorId`.
+    const caller = path === '/v1/seeks' ? 'identity.userId' : 'actorId';
+    // `/v1/reports` also has a daily bucket for the same caller.
+    const expected = path === '/v1/reports' ? [[caller], [caller], ["ctx.ip ?? 'unknown'"]] : [[caller], ["ctx.ip ?? 'unknown'"]];
+    if (path === '/v1/social/friend-requests') expected.push(['actorId', 'addresseeId.toLowerCase()']);
+    // The reported player appears only after the reporter, and only the reporter charges it.
+    if (path === '/v1/reports') expected.push(['actorId', 'subjectId']);
+    assert.deepEqual(keyed, expected, `${path} must key by caller, then address (then sender → recipient)`);
+  }
+});
+
+/** A refusal is only harmless if nothing was written yet: the admission comes before the repository. */
+test('community creation routes charge before they touch the repository', () => {
+  for (const path of Object.keys(COMMUNITY_ADMISSIONS)) {
+    const route = routeNamed(path, 'post');
+    let firstWrite: ts.CallExpression | undefined;
+    walk(route.node, (n) => {
+      if (firstWrite !== undefined || !ts.isCallExpression(n)) return;
+      const callee = n.expression;
+      if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === 'repo') {
+        firstWrite = n;
+      }
+    });
+    assert.ok(firstWrite, `${path} should call its repository`);
+    assert.ok(
+      admissions(route.node)[0]!.getStart(SOURCE) < firstWrite.getStart(SOURCE),
+      `${path} must be admitted before ${firstWrite.expression.getText(SOURCE)}`,
+    );
+  }
+});
+
+/**
+ * A refused report must cost nothing downstream: the admission precedes the subject lookup, the
+ * game check and the insert, so neither a refusal nor a probe for user ids runs unmetered work.
+ */
+test('player reports charge before they read or write any repository', () => {
+  const route = routeNamed('/v1/reports', 'post');
+  const touches: ts.CallExpression[] = [];
+  walk(route.node, (n) => {
+    if (!ts.isCallExpression(n) || !ts.isPropertyAccessExpression(n.expression)) return;
+    const owner = n.expression.expression;
+    if (ts.isPropertyAccessExpression(owner) && ts.isIdentifier(owner.expression) && owner.expression.text === 'repos') touches.push(n);
+  });
+  assert.deepEqual(touches.map((n) => n.expression.getText(SOURCE)), ['repos.users.findById', 'repos.events.load', 'repos.playerReports.create']);
+  const [admission] = admissions(route.node);
+  assert.ok(admission);
+  for (const touch of touches) {
+    assert.ok(admission.getStart(SOURCE) < touch.getStart(SOURCE), `/v1/reports must be admitted before ${touch.expression.getText(SOURCE)}`);
+  }
+});
+
+/** Moderator reads and decisions are never metered: a busy queue must not lock moderators out. */
+test('moderation report routes make no admission decision', () => {
+  for (const [verb, path] of [['get', '/v1/moderation/player-reports'], ['get', '/v1/moderation/player-reports/:id'], ['post', '/v1/moderation/player-reports/:id/transition']] as const) {
+    assert.equal(admissions(routeNamed(path, verb).node).length, 0, `${verb.toUpperCase()} ${path} must stay unmetered`);
+  }
+});
+
+/**
+ * Safety, clean-up and governance routes stay unmetered on purpose: blocking an abuser, declining a
+ * request or removing a post must never fail because a creation budget ran out. Metering one of
+ * them is a policy change, and should fail here until it is argued for.
+ */
+test('community safety and clean-up routes make no admission decision', () => {
+  const unmetered: Array<[verb: string, path: string]> = [
+    ['delete', '/v1/social/follows/:playerId'],
+    ['post', '/v1/social/friend-requests/:id/respond'],
+    ['post', '/v1/social/blocks/:playerId'],
+    ['delete', '/v1/social/blocks/:playerId'],
+    ['patch', '/v1/teams/:id'],
+    ['delete', '/v1/teams/:id/members/:playerId'],
+    ['patch', '/v1/teams/:id/members/:playerId'],
+    ['post', '/v1/teams/:id/transfer-ownership'],
+    ['post', '/v1/teams/:id/join-requests/:reqId/respond'],
+    ['delete', '/v1/teams/:id/join-requests/:reqId'],
+    ['patch', '/v1/teams/:id/forum/threads/:threadId'],
+    ['delete', '/v1/teams/:id/forum/threads/:threadId'],
+    ['patch', '/v1/forum/posts/:postId'],
+    ['delete', '/v1/forum/posts/:postId'],
+  ];
+  for (const [verb, path] of unmetered) {
+    assert.equal(admissions(routeNamed(path, verb).node).length, 0, `${verb.toUpperCase()} ${path} must stay unmetered`);
+  }
+});
+
 test('public password reset has only a per-IP admission bucket', () => {
   const path = '/v1/auth/password-reset/request';
   const calls = admissions(routeNamed(path).node);
@@ -207,7 +324,8 @@ test('public password reset has only a per-IP admission bucket', () => {
  * from malformed bodies, such as a code that is not eight digits.
  */
 test('validated routes parse the body before they charge for it', () => {
-  for (const path of ['/v1/seeks', '/v1/messages/conversations', '/v1/messages/conversations/:id/messages', '/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation', '/v1/auth/login']) {
+  for (const path of ['/v1/seeks', '/v1/messages/conversations', '/v1/messages/conversations/:id/messages',
+    '/v1/social/friend-requests', '/v1/reports', '/v1/teams', '/v1/teams/:id/forum/threads', '/v1/teams/:id/forum/threads/:threadId/posts', '/v1/analysis', '/v1/analysis/mistake-prediction', '/v1/ai/move-explanation', '/v1/auth/login']) {
     const route = routeNamed(path, 'post');
 
     let parse: ts.CallExpression | undefined;

@@ -123,6 +123,7 @@ function setup(opts?: {
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   return { sockets, elements, mounted, requests, app };
@@ -598,6 +599,7 @@ test('both controls read the same move without either disturbing the other', asy
     client: app.api,
     token: 'test-token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
 
   await tick();

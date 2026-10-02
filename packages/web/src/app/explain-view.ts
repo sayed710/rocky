@@ -14,45 +14,57 @@
  */
 
 import type { MoveExplanationResponse, MoveOutcome } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
+import type { MessageKey } from '../i18n/catalog/index.js';
 
-export const EXPLAIN_MESSAGES = {
-  idle: 'Explain the last move played.',
-  noMove: 'No move to explain yet.',
-  signedOut: 'Sign in to explain moves.',
-  running: 'Explaining…',
-  rateLimited: 'Too many explanations. Try again shortly.',
-  unavailable: 'Move explanation is unavailable right now.',
-  activeGame: 'Move explanation is unavailable while you are playing a live human game.',
-  rejected: 'This position cannot be explained.',
-  failed: 'Could not explain the move.',
-} as const;
+export const EXPLAIN_MESSAGE_KEYS = {
+  idle: 'ai.explain.idle',
+  noMove: 'ai.explain.noMove',
+  signedOut: 'ai.explain.signedOut',
+  running: 'ai.explain.running',
+  rateLimited: 'ai.explain.rateLimited',
+  unavailable: 'ai.explain.unavailable',
+  activeGame: 'ai.explain.activeGame',
+  rejected: 'ai.explain.rejected',
+  failed: 'ai.explain.failed',
+} as const satisfies Record<string, MessageKey>;
+
+export type ExplainMessageKey = keyof typeof EXPLAIN_MESSAGE_KEYS;
+
+export function explainMessage(key: ExplainMessageKey, i18n: I18nManager): string {
+  return i18n.t(EXPLAIN_MESSAGE_KEYS[key]);
+}
 
 /** Human wording for a terminal result, from the structured reason — never from prose. */
-export function describeOutcome(outcome: Extract<MoveOutcome, { kind: 'terminal' }>): string {
-  const winner = outcome.result === '1-0' ? 'White' : outcome.result === '0-1' ? 'Black' : null;
+export function describeOutcome(
+  outcome: Extract<MoveOutcome, { kind: 'terminal' }>,
+  i18n: I18nManager,
+): string {
+  const winner =
+    outcome.result === '1-0' ? i18n.t('game.player.white') : outcome.result === '0-1' ? i18n.t('game.player.black') : null;
   switch (outcome.reason) {
     case 'checkmate':
-      return winner ? `Checkmate — ${winner} wins` : 'Checkmate';
+      return winner ? i18n.t('ai.explain.outcome.checkmateWinner', { winner }) : i18n.t('ai.explain.outcome.checkmate');
     case 'stalemate':
-      return 'Stalemate — draw';
+      return i18n.t('ai.explain.outcome.stalemate');
     case 'insufficient_material':
-      return 'Insufficient material — draw';
+      return i18n.t('ai.explain.outcome.insufficientMaterial');
     case 'fifty_move':
-      return 'Fifty-move rule — draw';
+      return i18n.t('ai.explain.outcome.fiftyMove');
     case 'variant_win':
-      return winner ? `Variant win — ${winner} wins` : 'Variant win';
+      return winner ? i18n.t('ai.explain.outcome.variantWinWinner', { winner }) : i18n.t('ai.explain.outcome.variantWin');
     case 'variant_draw':
-      return 'Variant draw';
+      return i18n.t('ai.explain.outcome.variantDraw');
     default:
       // A reason this client does not know yet still has an authoritative result, so show that
       // rather than nothing. Falling back to an evaluation would be the original defect again.
-      return `Game over — ${outcome.result}`;
+      return i18n.t('ai.explain.outcome.gameOver', { result: outcome.result });
   }
 }
 
 /** What the move achieved, as a single scannable value. */
-function outcomeLabel(outcome: MoveOutcome): string {
-  return outcome.kind === 'terminal' ? describeOutcome(outcome) : outcome.evalLabel;
+function outcomeLabel(outcome: MoveOutcome, i18n: I18nManager): string {
+  return outcome.kind === 'terminal' ? describeOutcome(outcome, i18n) : outcome.evalLabel;
 }
 
 /**
@@ -61,18 +73,24 @@ function outcomeLabel(outcome: MoveOutcome): string {
  * Two rows at most, and the second is omitted when the move *is* the engine's choice — a row saying
  * "best move: the move you just asked about" is noise, and the absence is itself the answer.
  */
-export function renderEvidence(container: HTMLElement, result: MoveExplanationResponse): void {
+export function renderEvidence(
+  container: HTMLElement,
+  result: MoveExplanationResponse,
+  i18n: I18nManager,
+): void {
   container.innerHTML = '';
   const doc = container.ownerDocument ?? document;
   const { citation } = result;
 
   container.appendChild(
-    evidenceRow(doc, result.move, outcomeLabel(citation.moveOutcome)),
+    evidenceRow(doc, result.move, outcomeLabel(citation.moveOutcome, i18n)),
   );
 
   const playedTheBest = citation.bestMove !== null && citation.bestMove === result.move;
   if (!playedTheBest && citation.bestMove !== null) {
-    container.appendChild(evidenceRow(doc, citation.bestMove, citation.evalLabel, 'Engine prefers'));
+    container.appendChild(
+      evidenceRow(doc, citation.bestMove, citation.evalLabel, i18n.t('ai.explain.enginePrefers')),
+    );
   }
 }
 
@@ -114,8 +132,12 @@ export function renderProse(el: HTMLElement, result: MoveExplanationResponse): v
  * and to know it is a different kind of claim from the numbers above it. Provider and model are the
  * only provider-facing values the API returns; there is no usage or cost to show.
  */
-export function renderSource(el: HTMLElement, result: MoveExplanationResponse): void {
-  el.textContent = `Generated by ${result.providerId} · ${result.model}`;
+export function renderSource(
+  el: HTMLElement,
+  result: MoveExplanationResponse,
+  i18n: I18nManager,
+): void {
+  el.textContent = i18n.t('ai.generatedBy', { provider: result.providerId, model: result.model });
 }
 
 /** Show or hide the whole result group, and mark it busy while a request is in flight. */

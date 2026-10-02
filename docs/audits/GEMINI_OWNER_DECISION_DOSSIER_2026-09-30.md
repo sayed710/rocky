@@ -1,5 +1,8 @@
 # Gemini Planning Artifact: Owner-Decision Dossier
 
+> **Codex adjudication — 2026-10-02:** Independent Codex review of this entire historical document against current main `07946b9b03538ed73a3f7b773e7ad5a327d83805` is complete. Read the [current-main correction and disposition ledger](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md) before using any claim or sequence below. The original Gemini snapshot, recommendations and then-pending review status are preserved as historical evidence, not current implementation instructions or owner approval.
+
+
 > [!IMPORTANT]
 > **STATUS AND AUTHORITY NOTICE**
 > - **Gemini-Generated Planning/Review Artifact**: This document was produced during Gemini read-only implementation-planning audits on 2026-09-30.
@@ -150,17 +153,18 @@ VISUAL BOUNDARY: V3 (Must wait for owner visual approval before landing in produ
 ```
 * **Why Required:** Users need an accessible control to toggle between English and Arabic.
 * **Current Verified State:** Topbar contains: Logo/Brand, Nav Links (`Lobby`, `Tournaments`), Connection Status Indicator, and User Profile badge. No language control exists.
-* **Options:**
-  * **Option A:** Topbar Text Toggle. A compact button in the topbar utility area (adjacent to user menu) reading `"عربي"` when in English, and `"English"` when in Arabic.
-    * *Pros:* Single-click switching; universally discoverable; accessible without opening menus.
-    * *Cons:* Consumes 48px–64px horizontal space in the topbar (critical on mobile).
-  * **Option B:** Inside User/Settings Menu. Place a "Language / اللغة" row inside the existing user avatar menu dropdown (and mobile drawer).
+* **Codex option-label correction:** Gemini originally described A as topbar-only and recommended desktop A/mobile B, while the response sheet called that combination A. For a single unambiguous response, A now consistently denotes the combination; the original distinction is recorded here. No selection is made.
+* **Options (Codex-harmonized D-02 labels):**
+  * **Option A:** Desktop Topbar / Mobile Menu. On desktop, a compact button in the topbar utility area (adjacent to user menu) reading `"عربي"` when in English, and `"English"` when in Arabic; on mobile, the same control is a menu row.
+    * *Historical Gemini tradeoffs for the former topbar-only A:* Single-click switching; universally discoverable; accessible without opening menus; consumes 48px–64px horizontal space in the topbar (critical on mobile).
+    * *Codex clarification for harmonized A:* Desktop retains a direct control; mobile requires opening the menu and avoids adding the toggle to its topbar. Exact sizes and breakpoint require design/measurement, not the historical estimates.
+  * **Option B:** User/Settings Menu Only (All Viewports). Place a "Language / اللغة" row inside the existing user avatar menu dropdown (and mobile drawer).
     * *Pros:* Keeps topbar uncluttered on small viewports.
     * *Cons:* Discovered only after opening the menu; anonymous/unauthenticated users must have access to a guest menu.
-  * **Option C:** Dedicated Modal / Settings Surface. Language selection lives exclusively inside the Settings dialog (`/settings`).
+  * **Option C:** Settings Surface Only. Language selection lives exclusively inside the Settings dialog (`/settings`).
     * *Pros:* Centralizes all preferences.
     * *Cons:* Highest friction to change language; poor UX for a first-time Arabic visitor who cannot read English to navigate to Settings.
-* **Recommended Default:** **Option A for desktop / Option B for mobile viewport (<768px)** — *Gemini recommendation — pending Codex review and owner decision.*
+* **Recommended Default:** **Desktop topbar / mobile menu combination (historically A/B; now harmonized as Option A)** — *Gemini recommendation — pending Codex review and owner decision.*
 * **Decision Deadline:** Prior to i18n PR 2 (UI Integration).
 * **Dependencies:** D-01.
 * **Reversibility:** High.
@@ -274,11 +278,17 @@ VISUAL BOUNDARY: V3 (Notification chrome behavior)
 ```
 ================================================================================
 DECISION ID: D-15
-TITLE: Game Review 40-Move Engine Ceiling Resolution Strategy
+TITLE: Historical Game Review Proposal — wrong client-worker premise
 CANDIDATE CLASSIFICATION: OWNER PRODUCT & PERFORMANCE DECISION
 VISUAL BOUNDARY: V2 (Engine progress indicators and evaluation charts)
 ================================================================================
 ```
+**Codex adjudication — original D-15 premise and worker-specific recommendations below are superseded.** At both SHAs, finished-game review is `POST /v1/games/:id/review`, using server `GameReviewService` / `AnalysisPort`, limited to the first 40 moves **by the authenticated reviewed player**, not a global 80-ply cap. Longer games return `isPartial`, `totalPlayerMoves`, `analyzedPlayerMoves`, and `cutoffReason: 'move_limit'`. The server default deadline is 120 seconds. It does not freeze a client analysis worker. See [evidence and corrected decision boundary](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md#game-review-correction).
+
+**Corrected, unselected decision scope:** Whether to extend bounded server review beyond the current partial-review contract. A = proposed server critical-moment selection; B = proposed explicit server resume/pagination API and UI; C = proposed server budget/depth adaptation. None exists by virtue of this dossier; engineering must assess admission, cancellation, ownership and evidence quality before a separately authorized implementation. The current partial fallback is already implemented.
+
+**Original Gemini D-15 (historical only):**
+
 * **Why Required:** Full-game analysis currently evaluates up to ply 80 (40 full moves). In longer games (e.g., 70 moves), moves 41+ currently lack engine evaluation. We must decide how to handle games exceeding 40 moves within web-worker performance limits.
 * **Current Verified State:** Analysis engine web worker operates on client CPU. Running depth 18 across 100 plies can freeze lower-end devices or take over 60 seconds.
 * **Options:**
@@ -608,9 +618,9 @@ D-07 (Registration Consent UX):
 
 ### BATCH 2: FEATURE SCOPING
 D-02 (Language Switcher UI):
-  [ ] Option A: Topbar text button (Desktop) / Menu row (Mobile) [Gemini Recommendation]
-  [ ] Option B: Inside User Menu only
-  [ ] Option C: Inside Settings Modal only
+  [ ] Option A: Desktop Topbar / Mobile Menu [Gemini Recommendation]
+  [ ] Option B: User/Settings Menu Only (All Viewports)
+  [ ] Option C: Settings Surface Only
   [ ] Custom: _____________________________________________
 
 D-04 (Arabic Webfont Strategy):
@@ -634,9 +644,9 @@ D-10 (Incoming Challenge Notification):
   [ ] Custom: _____________________________________________
 
 D-15 (Game Review Engine Ceiling):
-  [ ] Option B: On-demand "Analyze Remaining Moves" button [Gemini Interim Recommendation]
-  [ ] Option A: Critical moments & tactical swings scan across full game
-  [ ] Option C: Dynamic depth reduction
+  [ ] Option B: Proposed server resume/pagination API + explicit UI [Historical Gemini interim preference, corrected architecture]
+  [ ] Option A: Proposed server critical-moment selection
+  [ ] Option C: Proposed server budget/depth adaptation
   [ ] Custom: _____________________________________________
 
 D-16 (Settings Surface Scope):
@@ -677,3 +687,7 @@ D-14 (Anti-Cheat Action Policy):
   [ ] Option B: Automated shadowban into cheater pool
   [ ] Custom: _____________________________________________
 ```
+
+## 8. Codex disposition of owner decisions
+
+The [17-row owner-decision adjudication](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md#owner-decision-adjudication) supersedes the historical deadlines/unblock matrix and unsupported effort, performance, legal and abuse-elimination claims. Existing engineering baselines do not prove formal owner selection of A/B/C. No checkbox has been selected. D-13's backend and D-14's deployment are already merged, while workflow/sanction policy and later web UI remain separate. D-15 is a potential server-budget enhancement, not an absent partial-review capability.

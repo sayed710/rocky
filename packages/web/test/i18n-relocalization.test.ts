@@ -1,0 +1,2213 @@
+/**
+ * Regression test: Dynamic controller copy re-localizes from preserved state.
+ *
+ * Verifies that when a controller or mounted route combines state/data with client-owned copy:
+ * 1. Every production route mount uses the SAME app.i18n instance created by the composition root.
+ * 2. Mounts subscribe to onLocaleChange and update automatically without manual renderer calls.
+ * 3. The underlying domain state/data is preserved across locale changes.
+ * 4. Disposed mounts unsubscribe from onLocaleChange and cease reacting.
+ * 5. Translated copy is rendered via safe DOM operations and never parsed as markup (XSS protection).
+ */
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { I18n, type I18nOptions } from '../src/i18n/manager.js';
+import { enMessages } from '../src/i18n/catalog/en.js';
+import type { MessagesCatalog } from '../src/i18n/catalog/index.js';
+import { createI18nManager } from '../src/i18n/index.js';
+import { createApp } from '../src/app/composition.js';
+import { bootstrap } from '../src/app/bootstrap.js';
+import { mountGame } from '../src/app/game-mount.js';
+import { mountLobby } from '../src/app/lobby-mount.js';
+import { mountProfile } from '../src/app/profile-mount.js';
+import {
+  mountLeaderboard,
+  mountTournamentCommentary,
+  mountTournamentDetail,
+  mountTournamentList,
+} from '../src/app/competition-mounts.js';
+import { mountForum } from '../src/app/forum-mounts.js';
+import { mountTeamDetail } from '../src/app/team-mounts.js';
+import { mountPasswordRecovery } from '../src/app/password-recovery-mount.js';
+import { mountEmailVerification } from '../src/app/email-verification-mount.js';
+import { renderLessonDetail } from '../src/app/learning-view.js';
+import { mountSearch } from '../src/app/search-mount.js';
+import { mountConversation } from '../src/app/messaging-mounts.js';
+import { renderEndgamePositionRows } from '../src/app/endgame-view.js';
+import { renderChapterDetail, renderStudyDetail } from '../src/app/studies-view.js';
+import { renderTeamList } from '../src/app/teams-view.js';
+import { renderTournamentList } from '../src/app/tournament-view.js';
+import { renderEmpty } from '../src/app/render-helpers.js';
+import { HttpError, NotFoundError, ServiceUnavailableError } from '../src/net/errors.js';
+import type { GambitClient } from '../src/api/client.js';
+import { FakeTransport, json } from './support/fake-transport.js';
+import { FakeSocketFactory } from './support/fake-socket.js';
+import { MemoryTokenStore, type KeyValueStorage } from '../src/net/session.js';
+import type {
+  EndgamePosition,
+  SeekView,
+  StudyView,
+  TeamView,
+  TournamentDetail,
+  UserProfile,
+  MessageView,
+  SocialPlayer,
+  TreeNodeView,
+  LessonView,
+  StepView,
+  ChapterView,
+} from '../src/api/models.js';
+import { PlayBotDialog } from '../src/app/play-bot-dialog.js';
+import { CreateGamePanel } from '../src/app/create-game-panel.js';
+import { assessMessage, classificationLabel } from '../src/app/assess-view.js';
+import { coachMessage, omissionReasonLabel } from '../src/app/coach-view.js';
+import { explainMessage, describeOutcome } from '../src/app/explain-view.js';
+import { openingMessage, plies } from '../src/app/opening-view.js';
+import { puzzleMessage } from '../src/app/puzzle-view.js';
+import { mountBoard } from '../src/app/board.js';
+import { formatTimestamp, formatInboxTimestamp, renderThread, renderInbox } from '../src/app/messages-view.js';
+import { TIME_PRESETS, presetToTimeControl } from '../src/app/time-presets.js';
+import { STARTING_FEN } from '../src/core/position.js';
+import { StaticMoveOracle } from '../src/ports/move-oracle.js';
+
+import { FakeElement, FakeHTMLButtonElement, createFakeDoc, createTestI18n } from './support/localization-dom.js';
+
+describe('mount subscription, state preservation, dynamic relocalization, and disposal', () => {
+  it('game mount: 10-step sequence (subscribes, preserves live state, auto-relocalizes, disposes without reaction)', () => {
+    const elements = new Map<string, FakeElement>();
+    const ids = [
+      'board', 'status', 'flip', 'meta-connection', 'meta-role',
+      'meta-white', 'meta-white-name', 'meta-black', 'meta-black-name',
+      'meta-spectators', 'meta-variant', 'meta-time', 'meta-live-status',
+      'game-actions', 'action-error', 'action-offer-draw', 'action-claim-flag', 'action-resign', 'action-abort',
+      'confirm-resign', 'confirm-resign-yes', 'confirm-resign-no',
+      'confirm-abort', 'confirm-abort-yes', 'confirm-abort-no',
+      'draw-offer-received', 'action-accept-draw', 'action-decline-draw',
+    ];
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+    const boardEl = elements.get('board')! as unknown as HTMLElement;
+
+    // 1. mount with injected/shared i18n
+    const i18n = createTestI18n();
+    const sockets = new FakeSocketFactory();
+    const app = createApp({
+      config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+      wsFactory: sockets.factory,
+      i18n,
+    });
+
+    const mounted = mountGame({
+      doc,
+      boardEl,
+      gameId: 'g-test-reloc',
+      createGameSync: app.createGameSync,
+      createGameOracle: app.createGameOracle,
+      getAccessToken: () => undefined,
+      client: app.api,
+      token: 'tok',
+      restorePromise: Promise.resolve(null),
+      i18n,
+    });
+
+    try {
+      // 2. establish live state
+      assert.equal(sockets.sockets.length, 1);
+      sockets.last.open();
+      sockets.last.emit({
+        t: 'joined',
+        role: 'white',
+        state: {
+          gameId: 'g-test-reloc',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          moves: [],
+          ply: 0,
+          turn: 'w',
+          clock: { whiteMs: 300000, blackMs: 300000, running: false, lastUpdate: 0 },
+          turnStartedAt: null,
+          status: { over: false },
+          drawOffer: null,
+          variant: 'standard',
+          players: { white: 'u1', black: 'u2' },
+          timeControl: { initialMs: 300000, incrementMs: 0, delayMs: 0, kind: 'increment' },
+          legalMoves: {},
+        },
+      });
+      sockets.last.emit({
+        t: 'presence',
+        gameId: 'g-test-reloc',
+        white: true,
+        black: true,
+        spectators: 7,
+      });
+
+      // 3. assert English UI + live data
+      const metaVariantEl = elements.get('meta-variant')!;
+      const metaSpectatorsEl = elements.get('meta-spectators')!;
+      assert.equal(metaVariantEl.textContent, 'Standard');
+      assert.equal(metaSpectatorsEl.textContent, '7');
+
+      // 4. call i18n.setLocale('ar')
+      // 5. DO NOT manually invoke renderer
+      i18n.setLocale('ar');
+
+      // 6. assert client-owned prose changed
+      assert.equal(metaVariantEl.textContent, 'قياسي');
+
+      // 7. assert live user/server data is unchanged
+      assert.equal(metaSpectatorsEl.textContent, '7');
+
+      // 8. dispose mount
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+
+      // 9. change locale again
+      i18n.setLocale('en');
+
+      // 10. assert the disposed mount no longer reacts
+      assert.equal(metaVariantEl.textContent, 'قياسي');
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      app.dispose();
+    }
+  });
+
+  it('lobby mount: 10-step sequence (subscribes, preserves seeks, auto-relocalizes, disposes without reaction)', async () => {
+    const elements = new Map<string, FakeElement>();
+    const ids = ['lobby', 'seek-list', 'create-game', 'create-seek', 'lobby-error', 'play-bot-dialog'];
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+
+    // 1. mount with injected/shared i18n
+    const i18n = createTestI18n();
+    const seek: SeekView = {
+      id: 'seek-1',
+      creatorId: 'u-alice',
+      creatorHandle: 'AliceMaster',
+      variant: 'standard',
+      speed: 'blitz',
+      timeControl: { initialMs: 180000, incrementMs: 2000, delayMs: 0, kind: 'increment' },
+      rated: true,
+      color: 'random',
+      minRating: 1500,
+      maxRating: 1800,
+      createdAt: '2026-01-01T00:00:00Z',
+      gameId: null,
+      acceptedAt: null,
+    };
+
+    const client = {
+      session: { current: null },
+      seeks: {
+        list: async () => [seek],
+      },
+      graphql: {
+        resolvePlayers: async () => new Map([
+          ['u-alice', { id: 'u-alice', handle: 'AliceMaster' }],
+        ]),
+      },
+    } as unknown as GambitClient;
+
+    const mounted = mountLobby({
+      doc,
+      client,
+      isAuthenticated: () => true,
+      i18n,
+    });
+
+    try {
+      // 2. establish live state
+      await new Promise((r) => setTimeout(r, 10));
+
+      // 3. assert English UI + data
+      const seekListEl = elements.get('seek-list')!;
+      const rowEl = seekListEl.children[0]!;
+      const infoEl = rowEl.querySelector('.seek-info')!;
+      const handleEl = rowEl.querySelector('.seek-opponent')!;
+      assert.ok(infoEl.textContent.includes('standard · blitz · 3+2 · rated'));
+      assert.equal(handleEl.textContent, 'AliceMaster');
+
+      // 4. call i18n.setLocale('ar')
+      // 5. DO NOT manually invoke renderer
+      i18n.setLocale('ar');
+
+      // 6. assert client-owned prose changed
+      const updatedRow = seekListEl.children[0]!;
+      const updatedInfoEl = updatedRow.querySelector('.seek-info')!;
+      const updatedHandleEl = updatedRow.querySelector('.seek-opponent')!;
+      assert.ok(updatedInfoEl.textContent.includes('قياسي · خاطف · 3+2 · مصنف'));
+
+      // 7. assert live user/server data is unchanged
+      assert.equal(updatedHandleEl.textContent, 'AliceMaster');
+
+      // 8. dispose mount
+      mounted.lobby.dispose();
+
+      // 9. change locale again
+      i18n.setLocale('en');
+
+      // 10. assert the disposed mount no longer reacts
+      assert.ok(updatedInfoEl.textContent.includes('قياسي · خاطف · 3+2 · مصنف'));
+    } finally {
+      mounted.lobby.dispose();
+    }
+  });
+
+  it('profile mount: 10-step sequence (subscribes, preserves user data, auto-relocalizes, disposes without reaction)', async () => {
+    const elements = new Map<string, FakeElement>();
+    const ids = ['profile', 'profile-handle', 'profile-ratings', 'profile-games', 'profile-error'];
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+
+    // 1. mount with injected/shared i18n
+    const i18n = createTestI18n();
+    const profileData: UserProfile = {
+      user: {
+        id: 'u-carlsen',
+        handle: 'MagnusCarlsen',
+        country: 'NO',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+      ratings: [{ variant: 'standard', speed: 'blitz', rating: 2882, rd: 32, vol: 0.06, updatedAt: '2026-01-01T00:00:00Z' }],
+    };
+
+    const client = {
+      users: {
+        byHandle: async () => profileData,
+        games: async () => [],
+      },
+      social: {
+        followers: async () => ({ followers: [], following: [], followerCount: 0, followingCount: 0 }),
+        relationship: async () => ({ state: 'none', incomingRequestId: null, outgoingRequestId: null }),
+        self: async () => ({ incoming: [], outgoing: [], friends: [], blocked: [] }),
+      },
+      games: {
+        listRecent: async () => [],
+      },
+      achievements: {
+        get: async () => ({ items: [], summary: { unlocked: 0, total: 0, score: 0 } }),
+      },
+      passkeys: {
+        list: async () => [],
+      },
+      auth: {
+        listSessions: async () => [],
+      },
+      graphql: {
+        resolvePlayers: async () => new Map(),
+      },
+    } as unknown as GambitClient;
+
+    const mounted = mountProfile({
+      doc,
+      client,
+      handle: 'MagnusCarlsen',
+      getCurrentSession: () => null,
+      restorePromise: Promise.resolve(null),
+      i18n,
+    });
+
+    try {
+      // 2. establish live state
+      await new Promise((r) => setTimeout(r, 10));
+
+      // 3. assert English UI + data
+      const handleEl = elements.get('profile-handle')!;
+      const ratingsEl = elements.get('profile-ratings')!;
+      assert.equal(handleEl.textContent, 'MagnusCarlsen');
+      assert.ok(ratingsEl.textContent.includes('Standard · Blitz: 2882 (RD 32)'));
+
+      // 4. call i18n.setLocale('ar')
+      // 5. DO NOT manually invoke renderer
+      i18n.setLocale('ar');
+
+      // 6. assert client-owned prose changed
+      assert.ok(ratingsEl.textContent.includes('قياسي · خاطف: 2882 (RD 32)'));
+
+      // 7. assert live user/server data is unchanged
+      assert.equal(handleEl.textContent, 'MagnusCarlsen');
+
+      // 8. dispose mount
+      mounted.profile.dispose();
+
+      // 9. change locale again
+      i18n.setLocale('en');
+
+      // 10. assert the disposed mount no longer reacts
+      assert.ok(ratingsEl.textContent.includes('قياسي · خاطف: 2882 (RD 32)'));
+    } finally {
+      mounted.profile.dispose();
+    }
+  });
+
+  it('tournament mount: 10-step sequence (subscribes, preserves tournament data, auto-relocalizes, disposes without reaction)', async () => {
+    const elements = new Map<string, FakeElement>();
+    const ids = ['tournament', 'tournament-meta', 'tournament-name', 'tournament-standings', 'tournament-live', 'tournament-error'];
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+
+    // 1. mount with injected/shared i18n
+    const i18n = createTestI18n();
+    const detail: TournamentDetail = {
+      id: 't-candidates',
+      name: 'Candidates Tournament 2026',
+      format: 'round_robin',
+      state: 'registration',
+      variant: 'standard',
+      timeControl: { initialMs: 300000, incrementMs: 3000, delayMs: 0, kind: 'increment' },
+      participants: [],
+      rounds: 14,
+      roundsGenerated: 3,
+      tiebreakOrder: [],
+    };
+
+    const client = {
+      tournaments: {
+        byId: async () => detail,
+        standings: async () => [],
+        live: async () => ({ standings: [], games: [] }),
+      },
+      graphql: {
+        resolvePlayers: async () => new Map(),
+      },
+    } as unknown as GambitClient;
+
+    const controller = mountTournamentDetail(doc, client, 't-candidates', i18n);
+
+    try {
+      // 2. establish live state
+      await new Promise((r) => setTimeout(r, 10));
+
+      // 3. assert English UI + data
+      const nameEl = elements.get('tournament-name')!;
+      const metaEl = elements.get('tournament-meta')!;
+      assert.equal(nameEl.textContent, 'Candidates Tournament 2026');
+      assert.ok(metaEl.textContent.includes('Round robin'));
+      assert.ok(metaEl.textContent.includes('Registration'));
+      assert.ok(metaEl.textContent.includes('Standard'));
+
+      // 4. call i18n.setLocale('ar')
+      // 5. DO NOT manually invoke renderer
+      i18n.setLocale('ar');
+
+      // 6. assert client-owned prose changed
+      assert.ok(metaEl.textContent.includes('دوري كامل'));
+      assert.ok(metaEl.textContent.includes('التسجيل مفتوح'));
+      assert.ok(metaEl.textContent.includes('قياسي'));
+
+      // 7. assert live user/server data is unchanged
+      assert.equal(nameEl.textContent, 'Candidates Tournament 2026');
+
+      // 8. dispose mount
+      controller.dispose();
+
+      // 9. change locale again
+      i18n.setLocale('en');
+
+      // 10. assert the disposed mount no longer reacts
+      assert.ok(metaEl.textContent.includes('دوري كامل'));
+      assert.ok(metaEl.textContent.includes('التسجيل مفتوح'));
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  it('search mount: 10-step sequence (subscribes, preserves query state, auto-relocalizes, disposes without reaction)', async () => {
+    const elements = new Map<string, FakeElement>();
+    const ids = ['search', 'search-mode', 'search-input', 'search-results', 'search-error'];
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+
+    // 1. mount with injected/shared i18n
+    const i18n = createTestI18n();
+    const client = {
+      search: {
+        query: async () => ({ total: 0, hits: [] }),
+      },
+    } as unknown as GambitClient;
+
+    const controller = mountSearch(
+      doc,
+      client,
+      i18n,
+      () => Promise.resolve({ capabilities: { search: true, semanticSearch: true } }),
+    );
+
+    try {
+      // 2. establish live state
+      await new Promise((r) => setTimeout(r, 10));
+
+      // 3. assert English UI + data
+      const resultsEl = elements.get('search-results')!;
+      const modeEl = elements.get('search-mode')!;
+      assert.ok(resultsEl.textContent.includes('Search Rookzen'));
+      assert.ok(modeEl.textContent.includes('Keyword'));
+      assert.ok(modeEl.textContent.includes('Semantic (experimental)'));
+
+      // 4. call i18n.setLocale('ar')
+      // 5. DO NOT manually invoke renderer
+      i18n.setLocale('ar');
+
+      // 6. assert client-owned prose changed
+      assert.ok(resultsEl.textContent.includes('البحث في المباريات'));
+      assert.ok(modeEl.textContent.includes('كلمة مفتاحية'));
+      assert.ok(modeEl.textContent.includes('دلالي (تجريبي)'));
+
+      // 7. assert live state preserved
+      assert.ok(elements.get('search-input') !== null);
+
+      // 8. dispose mount
+      controller.dispose();
+
+      // 9. change locale again
+      i18n.setLocale('en');
+
+      // 10. assert the disposed mount no longer reacts
+      assert.ok(resultsEl.textContent.includes('البحث في المباريات'));
+    } finally {
+      controller.dispose();
+    }
+  });
+
+  it('messages mount: 10-step sequence (subscribes, preserves user messages, auto-relocalizes, disposes without reaction)', async () => {
+    const elements = new Map<string, FakeElement>();
+    const ids = [
+      'conversation', 'conversation-thread', 'conversation-participant',
+      'conversation-error', 'conversation-composer', 'composer-input',
+    ];
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+
+    // 1. mount with injected/shared i18n
+    const i18n = createTestI18n();
+    const client = {
+      session: { current: { user: { id: 'u-me' } } },
+      messages: {
+        send: async () => ({}),
+        conversation: async () => ({
+          id: 'c-1',
+          participantA: 'u-me',
+          participantB: 'u-bob',
+          createdAt: '2026-01-01T10:00:00Z',
+          lastMessageAt: '2026-01-01T12:00:00Z',
+        }),
+        messages: async () => ({
+          total: 1,
+          items: [{
+            id: 'm-1',
+            conversationId: 'c-1',
+            senderId: 'u-bob',
+            body: 'Good luck in the upcoming round!',
+            sentAt: '2026-01-01T12:00:00Z',
+            editedAt: null,
+            deletedAt: null,
+          }],
+        }),
+        markRead: async () => ({}),
+      },
+      graphql: {
+        resolvePlayers: async () => new Map([
+          ['u-bob', { id: 'u-bob', handle: 'BobFischer' }],
+        ]),
+      },
+    } as unknown as GambitClient;
+
+    const controller = mountConversation({
+      doc,
+      client,
+      conversationId: 'c-1',
+      sessionPresent: true,
+      restorePromise: Promise.resolve(null),
+      i18n,
+    });
+
+    try {
+      // 2. establish live state
+      await new Promise((r) => setTimeout(r, 10));
+
+      // 3. assert English UI + data
+      const participantEl = elements.get('conversation-participant')!;
+      const threadEl = elements.get('conversation-thread')!;
+      assert.equal(participantEl.textContent, 'Conversation with BobFischer');
+      assert.ok(threadEl.textContent.includes('Good luck in the upcoming round!'));
+
+      // 4. call i18n.setLocale('ar')
+      // 5. DO NOT manually invoke renderer
+      i18n.setLocale('ar');
+
+      // 6. assert client-owned prose changed
+      assert.equal(participantEl.textContent, 'محادثة مع BobFischer');
+
+      // 7. assert live user/server data is unchanged
+      assert.ok(threadEl.textContent.includes('Good luck in the upcoming round!'));
+
+      // 8. dispose mount
+      controller.dispose();
+
+      // 9. change locale again
+      i18n.setLocale('en');
+
+      // 10. assert the disposed mount no longer reacts
+      assert.equal(participantEl.textContent, 'محادثة مع BobFischer');
+    } finally {
+      controller.dispose();
+    }
+  });
+});
+
+describe('bootstrap integration: shared app.i18n instance across production routes', () => {
+  it('bootstrap route receives the exact shared manager and auto-relocalizes without manual render', () => {
+    const ids = [
+      'board', 'status', 'flip', 'meta-connection', 'meta-role',
+      'meta-white', 'meta-white-name', 'meta-black', 'meta-black-name',
+      'meta-spectators', 'meta-variant', 'meta-time', 'meta-live-status',
+      'game-actions', 'action-error', 'action-offer-draw', 'action-claim-flag', 'action-resign', 'action-abort',
+      'confirm-resign', 'confirm-resign-yes', 'confirm-resign-no',
+      'confirm-abort', 'confirm-abort-yes', 'confirm-abort-no',
+      'draw-offer-received', 'action-accept-draw', 'action-decline-draw',
+      'theme-toggle', 'auth-status', 'auth', 'auth-submit', 'auth-register',
+    ];
+    const elements = new Map<string, FakeElement>();
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+
+    const customI18n = createTestI18n();
+    const sockets = new FakeSocketFactory();
+
+    // Bootstrap root with injected shared i18n on game route
+    const bootstrapped = bootstrap(doc, {
+      gameId: 'g-shared-route',
+      token: 'test-token',
+      config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+      httpTransport: new FakeTransport().onEach(() => json(200, {})),
+      wsFactory: sockets.factory,
+      tokenStore: new MemoryTokenStore(),
+      i18n: customI18n,
+    });
+
+    try {
+      // Assert that bootstrap preserved the exact shared manager
+      assert.strictEqual(bootstrapped.app.i18n, customI18n);
+
+      // Assert the game route mount received this exact manager
+      assert.ok(bootstrapped.controller);
+
+      // Simulate match joined
+      assert.equal(sockets.sockets.length, 1);
+      sockets.last.open();
+      sockets.last.emit({
+        t: 'joined',
+        role: 'white',
+        state: {
+          gameId: 'g-shared-route',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          moves: [],
+          ply: 0,
+          turn: 'w',
+          clock: { whiteMs: 300000, blackMs: 300000, running: false, lastUpdate: 0 },
+          turnStartedAt: null,
+          status: { over: false },
+          drawOffer: null,
+          variant: 'standard',
+          players: { white: 'u1', black: 'u2' },
+          timeControl: { initialMs: 300000, incrementMs: 0, delayMs: 0, kind: 'increment' },
+          legalMoves: {},
+        },
+      });
+
+      // Initial state rendered in English
+      const metaVariantEl = elements.get('meta-variant')!;
+      assert.equal(metaVariantEl.textContent, 'Standard');
+
+      // Change locale on bootstrapped.app.i18n directly (DO NOT invoke renderer manually)
+      bootstrapped.app.i18n.setLocale('ar');
+
+      // Prose changes automatically via the route mount's subscription to app.i18n
+      assert.equal(metaVariantEl.textContent, 'قياسي');
+    } finally {
+      bootstrapped.controller?.dispose();
+      bootstrapped.board?.dispose();
+      bootstrapped.connectivity?.dispose();
+      bootstrapped.app.dispose();
+    }
+  });
+
+  it('regression proof: an omitted or isolated i18n manager fails to receive app.i18n locale updates', () => {
+    // If a route mount were to create its own manager instead of using app.i18n:
+    const appI18n = createTestI18n();
+    const isolatedI18n = createI18nManager(); // isolated instance
+    let isolatedReactionCount = 0;
+    isolatedI18n.onLocaleChange(() => {
+      isolatedReactionCount++;
+    });
+
+    let sharedReactionCount = 0;
+    appI18n.onLocaleChange(() => {
+      sharedReactionCount++;
+    });
+
+    // Calling setLocale on app.i18n updates shared subscribers, NOT the isolated manager
+    appI18n.setLocale('ar');
+
+    assert.equal(sharedReactionCount, 1);
+    assert.equal(isolatedReactionCount, 0); // Isolated manager never received the update!
+  });
+});
+
+describe('XSS protection: translated strings with markup characters are rendered safely', () => {
+  it('translations containing < > & " \' remain literal text in textContent and never become DOM elements', () => {
+    const maliciousCatalog: Partial<MessagesCatalog> = {
+      'tournaments.emptyListTitle': '<img src=x onerror="alert(1)"> & "quotes"',
+      'tournaments.emptyListBody': '<b>Bold body</b> with <script>alert(2)</script>',
+      'lobby.emptySeeksTitle': '<svg onload="alert(3)"> & \'single\'',
+      'lobby.emptySeeksBody': '<iframe src="javascript:alert(4)">',
+    };
+
+    const xssI18n = new I18n({
+      catalogs: {
+        en: enMessages,
+        ar: maliciousCatalog as unknown as MessagesCatalog,
+      },
+    });
+    xssI18n.setLocale('ar');
+
+    const container = new FakeElement('div');
+    container.ownerDocument = createFakeDoc();
+
+    // 1. renderEmpty safe rendering
+    renderEmpty(container as unknown as HTMLElement, {
+      title: xssI18n.t('lobby.emptySeeksTitle'),
+      body: xssI18n.t('lobby.emptySeeksBody'),
+    });
+
+    assert.strictEqual(container.querySelector('svg'), null);
+    assert.strictEqual(container.querySelector('iframe'), null);
+    assert.ok(container.textContent.includes('<svg onload="alert(3)"> & \'single\''));
+    assert.ok(container.textContent.includes('<iframe src="javascript:alert(4)">'));
+
+    // 2. renderTournamentList safe rendering
+    const listContainer = new FakeElement('div');
+    listContainer.ownerDocument = createFakeDoc();
+
+    renderTournamentList(listContainer as unknown as HTMLElement, [], xssI18n);
+
+    assert.strictEqual(listContainer.querySelector('img'), null);
+    assert.strictEqual(listContainer.querySelector('b'), null);
+    assert.strictEqual(listContainer.querySelector('script'), null);
+    assert.ok(listContainer.textContent.includes('<img src=x onerror="alert(1)"> & "quotes"'));
+    assert.ok(listContainer.textContent.includes('<b>Bold body</b> with <script>alert(2)</script>'));
+  });
+});
+
+describe('dynamic controller copy re-localization from state (renderer unit tests)', () => {
+  it('endgame position rows: preserves position data while updating labels on locale change', () => {
+    const i18n = createTestI18n();
+    const position: EndgamePosition = {
+      id: 'kq-vs-k-01',
+      type: 'KQ_vs_K',
+      name: 'Queen vs King mate',
+      fen: '7k/8/6Q1/8/8/8/8/4K3 w - - 0 1',
+      sideToMove: 'w',
+      objective: 'mate',
+      difficulty: 'beginner',
+      technique: 'Box the king, then bring the king up.',
+    };
+
+    const rowsEl = new FakeElement('div');
+    rowsEl.ownerDocument = createFakeDoc();
+
+    // 1. Initial render in English
+    renderEndgamePositionRows(rowsEl.ownerDocument as unknown as Document, rowsEl as unknown as HTMLElement, position, i18n);
+
+    // Row 0: Endgame label & position.name
+    const row0 = rowsEl.children[0]!;
+    assert.equal(row0.children[0]!.textContent, 'Endgame');
+    assert.equal(row0.children[1]!.textContent, 'Queen vs King mate');
+    assert.equal(row0.children[1]!.getAttribute('dir'), 'auto');
+
+    // Row 1: Objective & deliverCheckmate
+    const row1 = rowsEl.children[1]!;
+    assert.equal(row1.children[0]!.textContent, 'Objective');
+    assert.equal(row1.children[1]!.textContent, 'Deliver checkmate');
+
+    // 2. Change locale to Arabic
+    i18n.setLocale('ar');
+    renderEndgamePositionRows(rowsEl.ownerDocument as unknown as Document, rowsEl as unknown as HTMLElement, position, i18n);
+
+    // Row 0: Translated label, same underlying position.name
+    const arRow0 = rowsEl.children[0]!;
+    assert.equal(arRow0.children[0]!.textContent, 'نهاية اللعبة');
+    assert.equal(arRow0.children[1]!.textContent, 'Queen vs King mate');
+    assert.equal(arRow0.children[1]!.getAttribute('dir'), 'auto');
+
+    // Row 1: Translated objective
+    const arRow1 = rowsEl.children[1]!;
+    assert.equal(arRow1.children[0]!.textContent, 'الهدف');
+    assert.equal(arRow1.children[1]!.textContent, 'تحقيق كش مات');
+  });
+
+  it('study detail: preserves study title/description while updating UI prose', () => {
+    const i18n = createTestI18n();
+    const study: StudyView = {
+      id: 's-123',
+      name: 'Ruy Lopez Deep Dive',
+      description: 'Comprehensive repertoire for tournament players.',
+      visibility: 'unlisted',
+      variant: 'standard',
+      ownerId: 'u-alice',
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-02T00:00:00Z',
+    };
+
+    const nameEl = new FakeElement('h2');
+    const descEl = new FakeElement('p');
+    const visEl = new FakeElement('span');
+    const elements = {
+      nameEl: nameEl as unknown as HTMLElement,
+      descEl: descEl as unknown as HTMLElement,
+      visEl: visEl as unknown as HTMLElement,
+      exportEl: null,
+      chaptersEl: null,
+      collabsEl: null,
+    };
+
+    // 1. English render
+    renderStudyDetail(elements, study, [], [], '/export', i18n);
+
+    assert.equal(nameEl.textContent, 'Ruy Lopez Deep Dive');
+    assert.equal(nameEl.getAttribute('dir'), 'auto');
+    assert.equal(descEl.textContent, 'Comprehensive repertoire for tournament players.');
+    assert.equal(descEl.getAttribute('dir'), 'auto');
+    assert.equal(visEl.textContent, 'Visibility: unlisted');
+
+    // 2. Arabic re-render
+    i18n.setLocale('ar');
+    renderStudyDetail(elements, study, [], [], '/export', i18n);
+
+    // Data survived
+    assert.equal(nameEl.textContent, 'Ruy Lopez Deep Dive');
+    assert.equal(nameEl.getAttribute('dir'), 'auto');
+    assert.equal(descEl.textContent, 'Comprehensive repertoire for tournament players.');
+    assert.equal(descEl.getAttribute('dir'), 'auto');
+    // Localized prose updated
+    assert.equal(visEl.textContent, 'الرؤية: unlisted');
+  });
+
+  it('team list: preserves team name while isolating auto direction and localizing empty/search states', () => {
+    const i18n = createTestI18n();
+    const teams: TeamView[] = [
+      {
+        id: 'team-cairo',
+        slug: 'cairo-chess',
+        name: 'فريق القاهرة للشطرنج',
+        description: 'نادي محبي الشطرنج في القاهرة',
+        visibility: 'public',
+        createdBy: 'u-1',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+    ];
+
+    const targetEl = new FakeElement('div');
+    targetEl.ownerDocument = createFakeDoc();
+    renderTeamList(targetEl as unknown as HTMLElement, teams, false, i18n);
+
+    assert.ok(targetEl.children.length > 0);
+    const rowEl = targetEl.children[0]!;
+    const linkEl = rowEl.querySelector('.row-link');
+    assert.ok(linkEl);
+    assert.equal(linkEl.textContent, 'فريق القاهرة للشطرنج');
+    assert.equal(linkEl.getAttribute('dir'), 'auto');
+
+    // Test empty state localization
+    i18n.setLocale('ar');
+    renderTeamList(targetEl as unknown as HTMLElement, [], false, i18n);
+    assert.ok(targetEl.children.length > 0);
+  });
+});
+
+describe('play-bot dialog: dynamic relocalization, option preservation, and disposal unsubscription', () => {
+  it('level options, blurbs, and color options re-localize while preserving checked state', () => {
+    const mount = new FakeElement('div');
+    const doc = createFakeDoc();
+    mount.ownerDocument = doc;
+    const i18n = createTestI18n();
+
+    const dialog = new PlayBotDialog({
+      doc,
+      mount: mount as unknown as HTMLElement,
+      callbacks: {
+        onSubmit: async () => 'g-1',
+      },
+      initialAuthenticated: true,
+      i18n,
+    });
+
+    try {
+      // 1. Initial English assertions
+      const trigger = mount.querySelector('#play-bot')!;
+      assert.equal(trigger.textContent, 'Play vs Computer');
+
+      const noviceRadio = mount.querySelector('input[name="pb-level"][value="novice"]')!;
+      const clubRadio = mount.querySelector('input[name="pb-level"][value="club"]')!;
+      const masterRadio = mount.querySelector('input[name="pb-level"][value="master"]')!;
+      assert.ok(noviceRadio);
+      assert.ok(clubRadio);
+      assert.ok(masterRadio);
+
+      const noviceLabel = noviceRadio.closest('label')?.querySelector('.cg-seg-label');
+      const clubLabel = clubRadio.closest('label')?.querySelector('.cg-seg-label');
+      const masterLabel = masterRadio.closest('label')?.querySelector('.cg-seg-label');
+      assert.equal(noviceLabel?.textContent, 'Novice');
+      assert.equal(clubLabel?.textContent, 'Club');
+      assert.equal(masterLabel?.textContent, 'Master');
+
+      const whiteRadio = mount.querySelector('input[name="pb-color"][value="white"]')!;
+      const randomRadio = mount.querySelector('input[name="pb-color"][value="random"]')!;
+      const blackRadio = mount.querySelector('input[name="pb-color"][value="black"]')!;
+      const whiteLabel = whiteRadio.closest('label')?.querySelector('.cg-seg-label');
+      const blackLabel = blackRadio.closest('label')?.querySelector('.cg-seg-label');
+      assert.ok(whiteLabel?.textContent.includes('White'));
+      assert.ok(blackLabel?.textContent.includes('Black'));
+
+      // Check default blurb (club)
+      const levelHint = mount.querySelector('#pb-level-hint')!;
+      assert.equal(
+        levelHint.textContent,
+        'Plays solid tactical moves with occasional inaccuracies. Suitable for casual players.',
+      );
+
+      // 2. Select novice and black
+      noviceRadio.checked = true;
+      const form = mount.querySelector('form')!;
+      form.dispatchEvent({ type: 'change', target: noviceRadio });
+      blackRadio.checked = true;
+
+      // Verify selected novice blurb in English
+      assert.equal(
+        levelHint.textContent,
+        'Makes frequent tactical errors. Best for beginners learning basic patterns.',
+      );
+
+      // 3. Switch to Arabic via shared i18n without manual renderer invocation
+      i18n.setLocale('ar');
+
+      // 4. Assert client-owned copy changed
+      assert.equal(trigger.textContent, 'اللعب ضد الحاسوب');
+      assert.equal(noviceLabel?.textContent, 'مبتدئ');
+      assert.equal(clubLabel?.textContent, 'نادي');
+      assert.equal(masterLabel?.textContent, 'أستاذ');
+      assert.ok(whiteLabel?.textContent.includes('الأبيض'));
+      assert.ok(blackLabel?.textContent.includes('الأسود'));
+      assert.equal(
+        levelHint.textContent,
+        'يرتكب أخطاء تكتيكية متكررة. الأفضل للمبتدئين في تعلم الأنماط الأساسية.',
+      );
+
+      // 5. Assert selected options and state preserved across relocalization
+      assert.equal(noviceRadio.checked, true);
+      assert.equal(blackRadio.checked, true);
+
+      // 6. Dispose dialog and test unsubscription
+      dialog.dispose();
+
+      // 7. Change locale back to English
+      i18n.setLocale('en');
+
+      // 8. Assert disposed dialog ceased reacting to locale change
+      assert.equal(trigger.textContent, 'اللعب ضد الحاسوب');
+      assert.equal(clubLabel?.textContent, 'نادي');
+    } finally {
+      dialog.dispose();
+    }
+  });
+});
+
+describe('create-game panel: validation error relocalization while preserving invalid inputs', () => {
+  it('rating and custom time validation errors re-localize on locale change while preserving invalid inputs', () => {
+    const mount = new FakeElement('div');
+    const doc = createFakeDoc();
+    mount.ownerDocument = doc;
+    const i18n = createTestI18n();
+
+    const panel = new CreateGamePanel({
+      doc,
+      mount: mount as unknown as HTMLElement,
+      callbacks: {
+        onSubmit: async () => true,
+        onError: () => {},
+      },
+      initialAuthenticated: true,
+      i18n,
+    });
+
+    try {
+      // Expand panel
+      const trigger = mount.querySelector('#create-seek')!;
+      trigger.click();
+
+      // --- Part A: Rating error relocalization ---
+      const minRatingInput = mount.querySelector('#cg-min-rating')!;
+      const maxRatingInput = mount.querySelector('#cg-max-rating')!;
+      const ratingError = mount.querySelector('#cg-rating-error')!;
+
+      // Enter invalid bounds: min > max
+      minRatingInput.value = '2500';
+      maxRatingInput.value = '1500';
+      minRatingInput.dispatchEvent({ type: 'input' });
+
+      // Rating error is displayed in English
+      assert.equal(ratingError.hidden, false);
+      assert.equal(
+        ratingError.textContent,
+        'Minimum rating must not exceed maximum rating.',
+      );
+
+      // Change locale to Arabic (NO manual renderer call)
+      i18n.setLocale('ar');
+
+      // Rating error prose is translated to Arabic
+      assert.equal(ratingError.hidden, false);
+      assert.equal(
+        ratingError.textContent,
+        'يجب ألا يتجاوز الحد الأدنى الحد الأقصى.',
+      );
+
+      // Invalid inputs are strictly preserved
+      assert.equal(minRatingInput.value, '2500');
+      assert.equal(maxRatingInput.value, '1500');
+
+      // --- Part B: Custom time error relocalization ---
+      // Switch time to custom
+      const customTimeRadio = mount.querySelector('input[name="cg-time"][value="custom"]')!;
+      customTimeRadio.checked = true;
+      customTimeRadio.dispatchEvent({ type: 'change' });
+
+      const customMinutesInput = mount.querySelector('#cg-minutes')!;
+      const customIncrementInput = mount.querySelector('#cg-increment')!;
+      const customError = mount.querySelector('#cg-custom-error')!;
+
+      // Enter invalid custom minutes: 0.1 (minimum is 0.5)
+      customMinutesInput.value = '0.1';
+      customIncrementInput.value = '5';
+
+      // Submit form to trigger custom validation
+      const form = mount.querySelector('form')!;
+      form.dispatchEvent({ type: 'submit' });
+
+      // Custom error is displayed in Arabic (since current locale is ar)
+      assert.equal(customError.hidden, false);
+      assert.equal(
+        customError.textContent,
+        'يجب أن تكون الدقائق بين 0.5 و 180 بخطوات 0.5 دقيقة.',
+      );
+      assert.equal(customMinutesInput.value, '0.1');
+
+      // Change locale back to English
+      i18n.setLocale('en');
+
+      // Custom error dynamically re-localizes to English
+      assert.equal(customError.hidden, false);
+      assert.equal(
+        customError.textContent,
+        'Minutes must be between 0.5 and 180 in 0.5-minute steps.',
+      );
+
+      // Input value is strictly preserved
+      assert.equal(customMinutesInput.value, '0.1');
+
+      // Rating error also re-localized to English with values preserved
+      assert.equal(ratingError.hidden, false);
+      assert.equal(
+        ratingError.textContent,
+        'Minimum rating must not exceed maximum rating.',
+      );
+      assert.equal(minRatingInput.value, '2500');
+      assert.equal(maxRatingInput.value, '1500');
+
+      // --- Part C: Disposal stops reactions ---
+      panel.dispose();
+      i18n.setLocale('ar');
+
+      // Prose does NOT change after disposal
+      assert.equal(
+        customError.textContent,
+        'Minutes must be between 0.5 and 180 in 0.5-minute steps.',
+      );
+    } finally {
+      panel.dispose();
+    }
+  });
+});
+
+describe('bootstrap play-bot auth title: dynamic relocalization from preserved auth state', () => {
+  it('play-bot button title dynamically re-localizes and preserves auth state transitions', () => {
+    const ids = [
+      'board', 'status', 'flip', 'meta-connection', 'meta-role',
+      'meta-white', 'meta-white-name', 'meta-black', 'meta-black-name',
+      'meta-spectators', 'meta-variant', 'meta-time', 'meta-live-status',
+      'game-actions', 'action-error', 'action-offer-draw', 'action-claim-flag', 'action-resign', 'action-abort',
+      'confirm-resign', 'confirm-resign-yes', 'confirm-resign-no',
+      'confirm-abort', 'confirm-abort-yes', 'confirm-abort-no',
+      'draw-offer-received', 'action-accept-draw', 'action-decline-draw',
+      'theme-toggle', 'auth-status', 'auth', 'auth-submit', 'auth-register',
+      'play-bot',
+    ];
+    const elements = new Map<string, FakeElement>();
+    for (const id of ids) {
+      const isButton = (id === 'play-bot' || id === 'auth-submit' || id === 'auth-register' || id === 'theme-toggle');
+      elements.set(id, isButton ? new FakeHTMLButtonElement('button', id) : new FakeElement('div', id));
+    }
+    const doc = createFakeDoc(elements);
+
+    const i18n = createTestI18n();
+    const sockets = new FakeSocketFactory();
+
+    const bootstrapped = bootstrap(doc, {
+      gameId: 'g-test-bot-auth',
+      token: 'test-token',
+      config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+      httpTransport: new FakeTransport().onEach(() => json(200, {})),
+      wsFactory: sockets.factory,
+      tokenStore: new MemoryTokenStore(),
+      i18n,
+    });
+
+    try {
+      const playBotBtn = elements.get('play-bot')!;
+
+      // 1. Initially unauthenticated in English
+      assert.equal(playBotBtn.disabled, true);
+      assert.equal(playBotBtn.title, 'Sign in to play the computer');
+
+      // 2. Change locale to Arabic (unauthenticated state preserved)
+      i18n.setLocale('ar');
+      assert.equal(playBotBtn.disabled, true);
+      assert.equal(playBotBtn.title, 'سجل الدخول للعب ضد الحاسوب');
+
+      // 3. Authenticate session
+      const auth = bootstrapped.auth as unknown as {
+        callbacks?: { onSessionChange?: (s: unknown) => void };
+      };
+      auth.callbacks?.onSessionChange?.({
+        userId: 'u-alice',
+        handle: 'Alice',
+        roles: [],
+        tokens: { accessToken: 'a', refreshToken: 'r', expiresAt: Date.now() + 60000 },
+      });
+
+      // 4. Assert button enabled and title cleared
+      assert.equal(playBotBtn.disabled, false);
+      assert.equal(playBotBtn.title, '');
+
+      // 5. Change locale while authenticated: title remains empty
+      i18n.setLocale('en');
+      assert.equal(playBotBtn.disabled, false);
+      assert.equal(playBotBtn.title, '');
+
+      // 6. Log out
+      auth.callbacks?.onSessionChange?.(null);
+
+      // 7. Assert button disabled and English title restored
+      assert.equal(playBotBtn.disabled, true);
+      assert.equal(playBotBtn.title, 'Sign in to play the computer');
+
+      // 8. Change locale to Arabic again
+      i18n.setLocale('ar');
+      assert.equal(playBotBtn.disabled, true);
+      assert.equal(playBotBtn.title, 'سجل الدخول للعب ضد الحاسوب');
+
+      // 9. Dispose shell localization and test unsubscription
+      bootstrapped.shellLocalization?.dispose();
+      i18n.setLocale('en');
+
+      // Title does NOT react after disposal
+      assert.equal(playBotBtn.title, 'سجل الدخول للعب ضد الحاسوب');
+    } finally {
+      bootstrapped.controller?.dispose();
+      bootstrapped.board?.dispose();
+      bootstrapped.connectivity?.dispose();
+      bootstrapped.app.dispose();
+    }
+  });
+});
+
+describe('AI views (assess, coach, explain, opening, puzzle): representative copy and game mount dynamic relocalization', () => {
+  it('representative message formatters and helpers react to locale changes', () => {
+    const i18n = createTestI18n();
+
+    // 1. English checks
+    assert.equal(assessMessage('idle', i18n), 'Assess the last move played.');
+    assert.equal(assessMessage('noMove', i18n), 'No move to assess yet.');
+    assert.equal(assessMessage('rateLimited', i18n), 'Too many assessments. Try again shortly.');
+    assert.equal(classificationLabel('ok', i18n), 'Good move');
+    assert.equal(classificationLabel('blunder', i18n), 'Blunder');
+    assert.equal(classificationLabel('inaccuracy', i18n), 'Inaccuracy');
+    assert.equal(classificationLabel('mistake', i18n), 'Mistake');
+
+    assert.equal(coachMessage('idle', i18n), 'Get coaching advice for the current position.');
+    assert.equal(coachMessage('noMove', i18n), 'Play or select a move to receive move-specific coaching.');
+    assert.equal(omissionReasonLabel('unsupported', i18n), 'Not available on this server');
+    assert.equal(omissionReasonLabel('not_applicable', i18n), 'Nothing to say here');
+
+    assert.equal(explainMessage('idle', i18n), 'Explain the last move played.');
+    assert.equal(
+      describeOutcome({ kind: 'terminal', reason: 'checkmate', result: '1-0' }, i18n),
+      'Checkmate — White wins',
+    );
+    assert.equal(
+      describeOutcome({ kind: 'terminal', reason: 'stalemate', result: '1/2-1/2' }, i18n),
+      'Stalemate — draw',
+    );
+
+    assert.equal(openingMessage('idle', i18n), 'Identify the opening played in this game.');
+    assert.equal(plies(1, i18n), '1 ply');
+    assert.equal(plies(4, i18n), '4 plies');
+
+    assert.equal(puzzleMessage('idle', i18n), 'Find a tactic in the position on the board.');
+    assert.equal(puzzleMessage('noTactic', i18n), 'No tactic met the server’s fixed evidence threshold.');
+
+    // 2. Switch to Arabic
+    i18n.setLocale('ar');
+
+    assert.equal(assessMessage('idle', i18n), 'قيّم النقلة الأخيرة.');
+    assert.equal(assessMessage('noMove', i18n), 'لا توجد نقلة للتقييم بعد.');
+    assert.equal(classificationLabel('ok', i18n), 'نقلة جيدة');
+    assert.equal(classificationLabel('blunder', i18n), 'خطأ فادح');
+
+    assert.equal(coachMessage('idle', i18n), 'المساعد متاح للتحليل.');
+    assert.equal(coachMessage('noMove', i18n), 'لا توجد نقلة للمساعدة.');
+    assert.equal(omissionReasonLabel('unsupported', i18n), 'غير متاح على هذا الخادم');
+    assert.equal(omissionReasonLabel('not_applicable', i18n), 'لا يوجد شيء هنا');
+
+    assert.equal(explainMessage('idle', i18n), 'شرح الموقف متاح.');
+    assert.equal(
+      describeOutcome({ kind: 'terminal', reason: 'checkmate', result: '1-0' }, i18n),
+      'كش مات — فوز الأبيض',
+    );
+    assert.equal(
+      describeOutcome({ kind: 'terminal', reason: 'stalemate', result: '1/2-1/2' }, i18n),
+      'تعادل بالمأزق',
+    );
+
+    assert.equal(openingMessage('idle', i18n), 'معلومات الافتتاح تظهر هنا.');
+    assert.equal(plies(1, i18n), 'نقلة واحدة');
+    assert.equal(plies(4, i18n), '4 نقلات');
+
+    assert.equal(puzzleMessage('idle', i18n), 'الألغاز التكتيكية تظهر هنا.');
+    assert.equal(puzzleMessage('noTactic', i18n), 'لا توجد ألغاز لهذا الموقف.');
+  });
+
+  it('game mount re-renders cached AI view states on locale change and stops upon disposal', () => {
+    const ids = [
+      'board', 'status', 'flip', 'meta-connection', 'meta-role',
+      'meta-white', 'meta-white-name', 'meta-black', 'meta-black-name',
+      'meta-spectators', 'meta-variant', 'meta-time', 'meta-live-status',
+      'game-actions', 'action-error', 'action-offer-draw', 'action-claim-flag', 'action-resign', 'action-abort',
+      'confirm-resign', 'confirm-resign-yes', 'confirm-resign-no',
+      'confirm-abort', 'confirm-abort-yes', 'confirm-abort-no',
+      'draw-offer-received', 'action-accept-draw', 'action-decline-draw',
+      'assess-note', 'coach-note', 'explain-note', 'opening-note', 'puzzle-note',
+    ];
+    const elements = new Map<string, FakeElement>();
+    for (const id of ids) elements.set(id, new FakeElement('div', id));
+    const doc = createFakeDoc(elements);
+    const boardEl = elements.get('board')! as unknown as HTMLElement;
+
+    const i18n = createTestI18n();
+    const sockets = new FakeSocketFactory();
+    const app = createApp({
+      config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+      wsFactory: sockets.factory,
+      i18n,
+    });
+
+    const mounted = mountGame({
+      doc,
+      boardEl,
+      gameId: 'g-ai-test',
+      createGameSync: app.createGameSync,
+      createGameOracle: app.createGameOracle,
+      getAccessToken: () => 'tok',
+      client: app.api,
+      token: 'tok',
+      restorePromise: Promise.resolve(null),
+      i18n,
+    });
+
+    try {
+      const assessNote = elements.get('assess-note')!;
+      const coachNote = elements.get('coach-note')!;
+      const explainNote = elements.get('explain-note')!;
+      const openingNote = elements.get('opening-note')!;
+      const puzzleNote = elements.get('puzzle-note')!;
+
+      // 1. Initial English prompts
+      assert.equal(assessNote.textContent, 'Assess the last move played.');
+      assert.equal(coachNote.textContent, 'Get coaching advice for the current position.');
+      assert.equal(explainNote.textContent, 'Explain the last move played.');
+      assert.equal(openingNote.textContent, 'Identify the opening played in this game.');
+      assert.equal(puzzleNote.textContent, 'Find a tactic in the position on the board.');
+
+      // 2. Switch locale to Arabic
+      i18n.setLocale('ar');
+
+      // 3. AI views automatically re-render in Arabic via onLocaleChange
+      assert.equal(assessNote.textContent, 'قيّم النقلة الأخيرة.');
+      assert.equal(coachNote.textContent, 'المساعد متاح للتحليل.');
+      assert.equal(explainNote.textContent, 'شرح الموقف متاح.');
+      assert.equal(openingNote.textContent, 'معلومات الافتتاح تظهر هنا.');
+      assert.equal(puzzleNote.textContent, 'الألغاز التكتيكية تظهر هنا.');
+
+      // 4. Dispose mount
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+
+      // 5. Switch locale to English
+      i18n.setLocale('en');
+
+      // 6. Disposed mount does NOT react
+      assert.equal(assessNote.textContent, 'قيّم النقلة الأخيرة.');
+      assert.equal(coachNote.textContent, 'المساعد متاح للتحليل.');
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      app.dispose();
+    }
+  });
+
+  it('speed labels: CreateGamePanel relocalizes speed chips and summaries from preserved selection and unsubscribes on dispose', () => {
+    const doc = createFakeDoc(new Map());
+    const mount = new FakeElement('div', 'create-seek-mount');
+    mount.ownerDocument = doc;
+    const i18n = createTestI18n();
+
+    const panel = new CreateGamePanel({
+      doc,
+      mount: mount as unknown as HTMLElement,
+      callbacks: {
+        onSubmit: async () => true,
+        onError: () => {},
+      },
+      initialAuthenticated: true,
+      i18n,
+    });
+
+    try {
+      // 1. In English: check speed chips
+      const chips = mount.querySelectorAll('.cg-chip-speed');
+      assert.ok(chips.length >= 10, 'must render speed chips for presets');
+      const blitzChip = mount.querySelector('input[name="cg-time"][value="3+0"]')
+        ?.closest('label')?.querySelector('.cg-chip-speed');
+      const rapidChip = mount.querySelector('input[name="cg-time"][value="10+0"]')
+        ?.closest('label')?.querySelector('.cg-chip-speed');
+      assert.equal(blitzChip?.textContent, 'Blitz');
+      assert.equal(rapidChip?.textContent, 'Rapid');
+
+      // Select 3+0 preset
+      const radio3plus0 = mount.querySelector('input[name="cg-time"][value="3+0"]')!;
+      radio3plus0.checked = true;
+      radio3plus0.dispatchEvent({ type: 'change' });
+
+      // Verify time summary in English
+      const timeSummary = mount.querySelector('.cg-time-summary')!;
+      assert.ok(timeSummary.textContent.includes('Blitz'));
+
+      // 2. Switch locale to Arabic
+      i18n.setLocale('ar');
+
+      // 3. Chips update to Arabic translations
+      assert.equal(blitzChip?.textContent, 'خاطف');
+      assert.equal(rapidChip?.textContent, 'سريع');
+
+      // 4. Selected radio value remains unchanged
+      assert.equal(radio3plus0.checked, true);
+      const selectedRadio = mount.querySelector('input[name="cg-time"]:checked') as FakeElement | null;
+      assert.equal(selectedRadio?.value, '3+0');
+
+      // 5. Time summary updates to translated Arabic speed name
+      assert.ok(timeSummary.textContent.includes('خاطف'));
+
+      // 6. Dispose panel
+      panel.dispose();
+
+      // 7. Switch locale back to English
+      i18n.setLocale('en');
+
+      // 8. Disposed panel does NOT react
+      assert.equal(blitzChip?.textContent, 'خاطف');
+      assert.equal(rapidChip?.textContent, 'سريع');
+      assert.ok(timeSummary.textContent.includes('خاطف'));
+    } finally {
+      panel.dispose();
+    }
+  });
+
+  it('speed labels: PlayBotDialog relocalizes speed chips while preserving checked time selection', () => {
+    const doc = createFakeDoc(new Map());
+    const mount = new FakeElement('div', 'play-bot-mount');
+    mount.ownerDocument = doc;
+    const i18n = createTestI18n();
+
+    const dialog = new PlayBotDialog({
+      doc,
+      mount: mount as unknown as HTMLElement,
+      callbacks: {
+        onSubmit: async () => 'g-bot-1',
+      },
+      initialAuthenticated: true,
+      i18n,
+    });
+
+    try {
+      // 1. Initial English speed chips
+      const blitzChip = mount.querySelector('input[name="pb-time"][value="3+0"]')
+        ?.closest('label')?.querySelector('.cg-chip-speed');
+      const rapidChip = mount.querySelector('input[name="pb-time"][value="10+0"]')
+        ?.closest('label')?.querySelector('.cg-chip-speed');
+      assert.equal(blitzChip?.textContent, 'Blitz');
+      assert.equal(rapidChip?.textContent, 'Rapid');
+
+      // Select 3+0 preset
+      const radio3plus0 = mount.querySelector('input[name="pb-time"][value="3+0"]')!;
+      radio3plus0.checked = true;
+      radio3plus0.dispatchEvent({ type: 'change' });
+
+      // 2. Switch locale to Arabic
+      i18n.setLocale('ar');
+
+      // 3. Chips update to Arabic translations
+      assert.equal(blitzChip?.textContent, 'خاطف');
+      assert.equal(rapidChip?.textContent, 'سريع');
+
+      // 4. Selected radio input value is preserved
+      assert.equal(radio3plus0.checked, true);
+
+      // 5. Dispose dialog
+      dialog.dispose();
+
+      // 6. Switch locale back to English
+      i18n.setLocale('en');
+
+      // 7. Disposed dialog does NOT react
+      assert.equal(blitzChip?.textContent, 'خاطف');
+      assert.equal(rapidChip?.textContent, 'سريع');
+    } finally {
+      dialog.dispose();
+    }
+  });
+
+  it('board mount: status copy relocalizes dynamically, isolates move tokens with dir="ltr" and bidi-ltr, inherits RTL prose, and supports promotion', () => {
+    const BIDI_CONTROL_REGEX = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+    const doc = createFakeDoc(new Map());
+    const prevDoc = (globalThis as unknown as { document?: unknown }).document;
+    (globalThis as unknown as { document: unknown }).document = doc;
+
+    const boardEl = new FakeElement('div', 'board');
+    boardEl.ownerDocument = doc;
+    const statusEl = new FakeElement('div', 'status');
+    statusEl.ownerDocument = doc;
+    (doc.body as unknown as FakeElement).appendChild(boardEl);
+    (doc.body as unknown as FakeElement).appendChild(statusEl);
+
+    const i18n = createTestI18n({ doc });
+
+    const promoFen = '8/4P3/8/8/8/8/8/8 w - - 0 1';
+    const board = mountBoard(
+      {
+        boardEl: boardEl as unknown as HTMLElement,
+        statusEl: statusEl as unknown as HTMLElement,
+      },
+      {
+        oracle: new StaticMoveOracle({
+          [STARTING_FEN]: { e2: ['e4'] },
+          [promoFen]: { e7: ['e8'] },
+        }),
+        i18n,
+      },
+    );
+
+    try {
+      // 1. Simulate playing move e2-e4 in standalone mode via click gestures
+      // e2 click: clientX=288, clientY=416
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 416 });
+      // e4 click: clientX=288, clientY=288
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 288 });
+
+      // 2. Status in English: overall sentence textContent and isolated LTR move span
+      assert.equal(statusEl.textContent, 'Played e2–e4.');
+      const enMoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(enMoveEl, 'move token must be rendered inside a .bidi-ltr element');
+      assert.equal(enMoveEl.getAttribute('dir'), 'ltr', 'move token element must explicitly have dir="ltr"');
+      assert.equal(enMoveEl.textContent, 'e2–e4');
+      assert.equal(statusEl.getAttribute('dir'), null, 'statusEl must not force LTR on the entire sentence');
+      assert.equal(BIDI_CONTROL_REGEX.test(statusEl.textContent), false, 'no bidi control characters in statusEl textContent');
+      assert.equal(BIDI_CONTROL_REGEX.test(enMoveEl.textContent), false, 'no bidi control characters in moveEl textContent');
+
+      // 3. Switch locale to Arabic
+      i18n.setLocale('ar');
+
+      // 4. Status dynamically relocalizes to Arabic prose while preserving LTR move token e2–e4
+      assert.equal(statusEl.textContent, 'تم لعب e2–e4.');
+      const arMoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(arMoveEl, 'Arabic status must also preserve .bidi-ltr move token');
+      assert.equal(arMoveEl.getAttribute('dir'), 'ltr', 'move token in Arabic must still have dir="ltr"');
+      assert.equal(arMoveEl.textContent, 'e2–e4');
+      // Arabic document has dir="rtl" and statusEl does not force LTR, so Arabic prose inherits RTL
+      assert.equal(doc.documentElement.getAttribute('dir'), 'rtl', 'document has dir="rtl" in Arabic');
+      assert.equal(statusEl.getAttribute('dir'), null, 'statusEl inherits RTL for prose without forcing LTR');
+      assert.equal(BIDI_CONTROL_REGEX.test(statusEl.textContent), false);
+      assert.equal(BIDI_CONTROL_REGEX.test(arMoveEl.textContent), false);
+
+      // 5. Test promotion move: position with white pawn on e7 moving to e8
+      board.setPosition(promoFen);
+      board.setTurn(true);
+      // Click e7 (clientX=288, clientY=96)
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 96 });
+      // Click e8 (clientX=288, clientY=32) -> opens promotion overlay
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 32 });
+      // Choose Queen promotion
+      const promoChoice = boardEl.querySelector('.cb-promo-choice');
+      assert.ok(promoChoice, 'promotion overlay choice button must be rendered');
+      promoChoice.click();
+
+      // Check promotion status in Arabic
+      assert.equal(statusEl.textContent, 'تم لعب e7–e8=Q.');
+      const arPromoMoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(arPromoMoveEl, 'promotion move token must be rendered in .bidi-ltr element');
+      assert.equal(arPromoMoveEl.getAttribute('dir'), 'ltr', 'promotion notation must have dir="ltr"');
+      assert.equal(arPromoMoveEl.textContent, 'e7–e8=Q');
+      assert.equal(BIDI_CONTROL_REGEX.test(statusEl.textContent), false);
+      assert.equal(BIDI_CONTROL_REGEX.test(arPromoMoveEl.textContent), false);
+
+      // Switch to English and verify promotion notation in English
+      i18n.setLocale('en');
+      assert.equal(statusEl.textContent, 'Played e7–e8=Q.');
+      const enPromoMoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(enPromoMoveEl);
+      assert.equal(enPromoMoveEl.getAttribute('dir'), 'ltr');
+      assert.equal(enPromoMoveEl.textContent, 'e7–e8=Q');
+
+      // 6. Test premove with promotion: set turn false and play e7-e8 premove
+      board.setPosition(promoFen);
+      board.setTurn(false);
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 96 });
+      boardEl.dispatchEvent({ type: 'click', clientX: 288, clientY: 32 });
+      const premovePromoChoice = boardEl.querySelector('.cb-promo-choice');
+      assert.ok(premovePromoChoice);
+      premovePromoChoice.click();
+
+      assert.equal(statusEl.textContent, 'Premove set: e7–e8=Q.');
+      const premoveEl = statusEl.querySelector('.bidi-ltr');
+      assert.ok(premoveEl);
+      assert.equal(premoveEl.getAttribute('dir'), 'ltr');
+      assert.equal(premoveEl.textContent, 'e7–e8=Q');
+
+      // Relocalize premove to Arabic
+      i18n.setLocale('ar');
+      assert.equal(statusEl.textContent, 'تم تحديد النقلة المسبقة: e7–e8=Q.');
+      assert.equal(statusEl.querySelector('.bidi-ltr')?.getAttribute('dir'), 'ltr');
+      assert.equal(statusEl.querySelector('.bidi-ltr')?.textContent, 'e7–e8=Q');
+
+      // 7. Dispose board
+      board.dispose();
+
+      // 8. Switch locale again after disposal
+      i18n.setLocale('en');
+
+      // 9. Disposed board ceases reacting
+      assert.equal(statusEl.textContent, 'تم تحديد النقلة المسبقة: e7–e8=Q.');
+    } finally {
+      board.dispose();
+      (globalThis as unknown as { document: unknown }).document = prevDoc;
+    }
+  });
+
+  it('message timestamps: formats with active i18n locale and relocalizes dynamic mounts without altering message content', () => {
+    const timestampIso = '2026-08-04T10:30:00Z';
+    const enTime = formatTimestamp(timestampIso, 'en');
+    const arTime = formatTimestamp(timestampIso, 'ar');
+    assert.ok(enTime.length > 0);
+    assert.ok(arTime.length > 0);
+    assert.notEqual(enTime, arTime, 'Arabic timestamp format should differ from English');
+
+    const doc = createFakeDoc(new Map());
+    const container = new FakeElement('div', 'conversation-thread');
+    container.ownerDocument = doc;
+    const messages: MessageView[] = [
+      {
+        id: 'm-1',
+        conversationId: 'c-1',
+        senderId: 'u-other',
+        body: 'Hello world!',
+        sentAt: timestampIso,
+        editedAt: null,
+        deletedAt: null,
+      },
+    ];
+    const names = new Map<string, SocialPlayer>([
+      ['u-other', { id: 'u-other', handle: 'GrandmasterAlice' }],
+    ]);
+
+    const i18n = createTestI18n();
+
+    // 1. Initial render in English
+    renderThread(container as unknown as HTMLElement, messages, names, 'u-me', i18n);
+    const sender = container.querySelector('.message-sender')!;
+    const body = container.querySelector('.message-body')!;
+    const time = container.querySelector('.count')!;
+    assert.equal(sender.textContent, 'GrandmasterAlice');
+    assert.equal(body.textContent, 'Hello world!');
+    assert.equal(time.textContent, enTime);
+
+    // 2. Switch locale to Arabic
+    i18n.setLocale('ar');
+    renderThread(container as unknown as HTMLElement, messages, names, 'u-me', i18n);
+
+    // 3. User content (handle, body, id) is preserved, timestamp reflects Arabic locale
+    const updatedSender = container.querySelector('.message-sender')!;
+    const updatedBody = container.querySelector('.message-body')!;
+    const updatedTime = container.querySelector('.count')!;
+    assert.equal(updatedSender.textContent, 'GrandmasterAlice');
+    assert.equal(updatedBody.textContent, 'Hello world!');
+    assert.equal(updatedTime.textContent, arTime);
+  });
+
+  describe('relocalization state integrity (Greptile + Qodo findings A-L)', () => {
+    it('finding A: leaderboard mount isolates pool data across locale changes and prevents stale entries from resurfacing', async () => {
+      const elements = new Map<string, FakeElement>();
+      const select = new FakeElement('select', 'leaderboard-variant-select');
+      const speedSelect = new FakeElement('select', 'leaderboard-speed-select');
+      const loading = new FakeElement('div', 'leaderboard-loading');
+      const results = new FakeElement('div', 'leaderboard-results');
+      const error = new FakeElement('div', 'leaderboard-error');
+      elements.set('leaderboard-variant-select', select);
+      elements.set('leaderboard-speed-select', speedSelect);
+      elements.set('leaderboard-loading', loading);
+      elements.set('leaderboard-results', results);
+      elements.set('leaderboard-error', error);
+      const doc = createFakeDoc(elements);
+
+      let resolveLeaderboard!: (entries: any) => void;
+      let rejectLeaderboard!: (err: any) => void;
+
+      const fakeClient = {
+        leaderboard: (_variant: any, _speed: any) => {
+          return new Promise((res, rej) => {
+            resolveLeaderboard = res;
+            rejectLeaderboard = rej;
+          });
+        },
+        graphql: {
+          resolvePlayers: async () => new Map([['u-1', { id: 'u-1', handle: 'BlitzMaster' }]]),
+        },
+      } as unknown as GambitClient;
+
+      const i18n = createTestI18n();
+      const mounted = mountLeaderboard(doc, fakeClient, i18n);
+
+      assert.ok(results.textContent.includes('Choose a time control'));
+
+      // 1. Load pool A (standard + blitz)
+      speedSelect.value = 'blitz';
+      speedSelect.dispatchEvent({ type: 'change', target: speedSelect });
+      resolveLeaderboard([{ userId: 'u-1', variant: 'standard', speed: 'blitz', rating: 2000, rd: 30 }]);
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.ok(results.textContent.includes('BlitzMaster'), 'Pool A entries must be rendered');
+
+      // 2. Switch to pool B (standard + rapid) -> new request begins
+      speedSelect.value = 'rapid';
+      speedSelect.dispatchEvent({ type: 'change', target: speedSelect });
+
+      // 3. While pool B is loading, change locale
+      i18n.setLocale('ar');
+
+      // 4. Stale pool A entries must NOT appear under pool B!
+      assert.equal(
+        results.textContent.includes('BlitzMaster'),
+        false,
+        'Stale pool A entries must not be rendered under pool B while loading',
+      );
+
+      // 5. Pool B fails
+      rejectLeaderboard(new Error('Pool B network failure'));
+      await new Promise((r) => setTimeout(r, 10));
+      assert.ok(error.textContent.includes('Pool B network failure'));
+
+      // 6. Locale change after failure: pool A entries still must NOT reappear
+      i18n.setLocale('en');
+      assert.equal(
+        results.textContent.includes('BlitzMaster'),
+        false,
+        'Pool A entries must not reappear after pool B failure',
+      );
+
+      mounted.dispose();
+    });
+
+    it('finding B: lobby mount disposes playBotDialog on controller disposal', () => {
+      const elements = new Map<string, FakeElement>();
+      const ids = [
+        'seek-list', 'lobby-error', 'create-game', 'play-bot-mount', 'play-bot-error',
+        'bot-level-novice', 'bot-level-club', 'bot-level-master',
+        'bot-color-random', 'bot-color-white', 'bot-color-black',
+        'bot-time-untimed', 'play-bot-submit', 'play-bot-cancel',
+      ];
+      for (const id of ids) elements.set(id, new FakeElement('div', id));
+      const doc = createFakeDoc(elements);
+
+      const i18n = createTestI18n();
+      const sockets = new FakeSocketFactory();
+      const app = createApp({
+        config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+        wsFactory: sockets.factory,
+        i18n,
+      });
+
+      const initialSubscribers = (i18n as unknown as { listeners?: Set<unknown> }).listeners?.size ?? 0;
+      const mounted = mountLobby({
+        doc,
+        client: app.api,
+        i18n,
+        isAuthenticated: () => true,
+      });
+
+      const activeSubscribers = (i18n as unknown as { listeners?: Set<unknown> }).listeners?.size ?? 0;
+      assert.ok(activeSubscribers > initialSubscribers, 'Mounting lobby must add locale listeners');
+
+      mounted.lobby.dispose();
+
+      const remainingSubscribers = (i18n as unknown as { listeners?: Set<unknown> }).listeners?.size ?? 0;
+      assert.equal(remainingSubscribers, initialSubscribers, 'Disposing lobby must clean up playBotDialog locale subscription');
+    });
+
+    it('finding C: password recovery preserves resetSuccess and validation errors across locale change', async () => {
+      const elements = new Map<string, FakeElement>();
+      const ids = [
+        'password-reset-request-view', 'password-reset-confirm-view',
+        'password-reset-request-form', 'password-reset-confirm-form',
+        'password-reset-request-input', 'password-reset-confirm-password',
+        'password-reset-confirm-password-confirm',
+        'password-reset-request-submit', 'password-reset-confirm-submit',
+        'password-reset-status', 'password-reset-error',
+      ];
+      for (const id of ids) {
+        const tag = id.includes('form') ? 'form' : id.includes('input') || id.includes('password') ? 'input' : id.includes('submit') ? 'button' : 'div';
+        elements.set(id, new FakeElement(tag, id));
+      }
+      const doc = createFakeDoc(elements);
+      const i18n = createTestI18n();
+
+      let confirmCalled = false;
+      const fakeClient = {
+        auth: {
+          confirmPasswordReset: async () => {
+            confirmCalled = true;
+            return { ok: true };
+          },
+          requestPasswordReset: async () => ({ ok: true }),
+        },
+      } as unknown as GambitClient;
+
+      const mounted = mountPasswordRecovery({
+        doc,
+        client: fakeClient,
+        resetToken: 'test-token',
+        onSessionInvalidated: () => {},
+        i18n,
+      });
+
+      const pwdInput = elements.get('password-reset-confirm-password')!;
+      const pwdConfirmInput = elements.get('password-reset-confirm-password-confirm')!;
+      const form = elements.get('password-reset-confirm-form')!;
+      pwdInput.value = 'validpassword123';
+      pwdConfirmInput.value = 'validpassword123';
+
+      form.onsubmit!({ preventDefault: () => {} } as unknown as Event);
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.ok(confirmCalled, 'confirmPasswordReset should be called');
+      const statusEl = elements.get('password-reset-status')!;
+      assert.equal(statusEl.textContent, 'Your password has been reset successfully.');
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        statusEl.textContent,
+        'تمت إعادة تعيين كلمة المرور بنجاح.',
+        'Must relocalize to Arabic resetSuccess, not sentInstructions',
+      );
+
+      mounted.dispose();
+    });
+
+    // Real request/failure coverage lives in i18n-correction.test.ts; DOM text is not state.
+
+    it('finding E: study chapter move selection is preserved across locale change', () => {
+      const prevDoc = (globalThis as unknown as { document?: unknown }).document;
+      const elementsMap = new Map<string, FakeElement>();
+      const doc = createFakeDoc(elementsMap);
+      (globalThis as unknown as { document: unknown }).document = doc;
+      try {
+        const elements = {
+          studyLinkEl: doc.createElement('a') as unknown as HTMLAnchorElement,
+          chapterNameEl: doc.createElement('div') as unknown as HTMLElement,
+          exportEl: doc.createElement('a') as unknown as HTMLAnchorElement,
+          treeEl: doc.createElement('div') as unknown as HTMLElement,
+          navEl: doc.createElement('div') as unknown as HTMLElement,
+        };
+        const i18n = createTestI18n();
+        const flatTree: TreeNodeView[] = [
+          { id: 'node-1', chapterId: 'c1', fenAfter: 'fen1', san: 'e4', parentId: null, nags: [], orderIndex: 0 },
+          { id: 'node-2', chapterId: 'c1', fenAfter: 'fen2', san: 'e5', parentId: 'node-1', nags: [], orderIndex: 0 },
+        ];
+        const study = { id: 's1', name: 'Study 1', variant: 'standard', visibility: 'public' } as unknown as StudyView;
+        const chapter = { id: 'c1', name: 'Chapter 1', startingFen: STARTING_FEN } as unknown as ChapterView;
+
+        let selectedId: string | null = null;
+
+        renderChapterDetail(
+          elements,
+          study,
+          chapter,
+          flatTree,
+          [chapter],
+          '/export',
+          (_fen, id) => {
+            selectedId = id;
+          },
+          i18n,
+        );
+
+        const treeEl = elements.treeEl as unknown as FakeElement;
+        const node1Btn = treeEl.querySelector('[data-node-id="node-1"]')!;
+        assert.ok(node1Btn, 'Button for node-1 must exist');
+
+        node1Btn.dispatchEvent({ type: 'click' });
+        assert.equal(selectedId, 'node-1');
+        assert.equal(node1Btn.classList.contains('active'), true);
+        assert.equal(node1Btn.getAttribute('aria-current'), 'true');
+
+        i18n.setLocale('ar');
+        renderChapterDetail(
+          elements,
+          study,
+          chapter,
+          flatTree,
+          [chapter],
+          '/export',
+          (_fen, id) => {
+            selectedId = id;
+          },
+          i18n,
+        );
+
+        const reRenderedNode1Btn = treeEl.querySelector('[data-node-id="node-1"]')!;
+        assert.ok(reRenderedNode1Btn);
+        assert.equal(
+          reRenderedNode1Btn.classList.contains('active'),
+          true,
+          'Active move node must retain active class after relocalization',
+        );
+        assert.equal(
+          reRenderedNode1Btn.getAttribute('aria-current'),
+          'true',
+          'Active move node must retain aria-current="true" after relocalization',
+        );
+      } finally {
+        (globalThis as unknown as { document: unknown }).document = prevDoc;
+      }
+    });
+
+    it('finding F: tournament commentary retry loading phase is not overridden by old failure on locale change', async () => {
+      const elements = new Map<string, FakeElement>();
+      const panel = new FakeElement('div', 'tournament-commentary-panel');
+      const controls = new FakeElement('div', 'tournament-commentary-controls');
+      const status = new FakeElement('div', 'tournament-commentary-status');
+      const result = new FakeElement('div', 'tournament-commentary-result');
+      elements.set('tournament-commentary-panel', panel);
+      elements.set('tournament-commentary-controls', controls);
+      elements.set('tournament-commentary-status', status);
+      elements.set('tournament-commentary-result', result);
+      const doc = createFakeDoc(elements);
+      const i18n = createTestI18n();
+
+      const fakeClient = {
+        tournaments: {
+          rounds: async () => [
+            {
+              roundIndex: 0,
+              pairings: [{ kind: 'game', gameId: 'g1', white: 'w', black: 'b', result: '1-0' }],
+            },
+          ],
+          gameCommentary: async () => {
+            throw new ServiceUnavailableError({ status: 503, message: 'Unavailable', code: 'service_unavailable', retryable: true });
+          },
+        },
+      } as unknown as GambitClient;
+
+      const mounted = mountTournamentCommentary(
+        doc,
+        fakeClient,
+        't1',
+        i18n,
+        async () => ({ capabilities: { tournamentCommentary: true } }),
+      );
+      await new Promise((r) => setTimeout(r, 10));
+
+      const btn = controls.querySelector('#tournament-commentary-game-0-0')!;
+      assert.ok(btn, 'Control button should exist');
+
+      btn.dispatchEvent({ type: 'click' });
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.equal(status.textContent, 'Commentary is unavailable right now.');
+
+      btn.dispatchEvent({ type: 'click' });
+      assert.equal(status.textContent, 'Writing commentary…');
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        status.textContent,
+        'جارٍ كتابة التعليق…',
+        'Retry loading state must not be overridden by previous failure upon locale change',
+      );
+
+      mounted.dispose();
+    });
+
+    it('finding G: forum not-found state relocalizes on locale change', async () => {
+      const elements = new Map<string, FakeElement>();
+      const title = new FakeElement('div', 'forum-title');
+      const list = new FakeElement('div', 'thread-list');
+      const note = new FakeElement('div', 'forum-note');
+      const error = new FakeElement('div', 'forum-error');
+      elements.set('forum-title', title);
+      elements.set('thread-list', list);
+      elements.set('forum-note', note);
+      elements.set('forum-error', error);
+      const doc = createFakeDoc(elements);
+      const i18n = createTestI18n();
+
+      const fakeClient = {
+        teams: {
+          byId: async () => {
+            throw new NotFoundError({ status: 404, message: 'Not found', code: 'not_found', retryable: false });
+          },
+        },
+        session: { current: null },
+      } as unknown as GambitClient;
+
+      const controller = mountForum({
+        doc,
+        client: fakeClient,
+        slug: 'missing-team',
+        sessionPresent: true,
+        restorePromise: Promise.resolve(null),
+        i18n,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.equal(title.textContent, 'Team not found');
+      assert.equal(note.textContent, 'No such team, or it is private.');
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        title.textContent,
+        'الفريق غير موجود',
+        'Forum not-found title must relocalize on locale change',
+      );
+      assert.equal(
+        note.textContent,
+        'لا يوجد مثل هذا الفريق، أو أنه خاص.',
+        'Forum not-found body must relocalize on locale change',
+      );
+
+      controller.dispose();
+    });
+
+    it('finding H & J: team not-found relocalizes and action button disabled state is preserved across locale change', async () => {
+      // Part H: not found
+      const elementsH = new Map<string, FakeElement>();
+      const nameH = new FakeElement('div', 'team-name');
+      const descH = new FakeElement('div', 'team-description');
+      elementsH.set('team-name', nameH);
+      elementsH.set('team-description', descH);
+      const docH = createFakeDoc(elementsH);
+      const i18n = createTestI18n();
+
+      const fakeClientH = {
+        teams: {
+          byId: async () => {
+            throw new NotFoundError({ status: 404, message: 'Not found', code: 'not_found', retryable: false });
+          },
+        },
+        session: { current: null },
+      } as unknown as GambitClient;
+
+      const ctrlH = mountTeamDetail({
+        doc: docH,
+        client: fakeClientH,
+        slug: 'missing-team',
+        sessionPresent: true,
+        restorePromise: Promise.resolve(null),
+        i18n,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.equal(nameH.textContent, 'Team not found');
+      i18n.setLocale('ar');
+      assert.equal(
+        nameH.textContent,
+        'الفريق غير موجود',
+        'Team not-found title must relocalize on locale change',
+      );
+      ctrlH.dispose();
+
+      // Part J: action button disabled state preservation
+      i18n.setLocale('en');
+      const elementsJ = new Map<string, FakeElement>();
+      const actionsJ = new FakeElement('div', 'team-actions');
+      const actionNoteJ = new FakeElement('div', 'team-action-note');
+      elementsJ.set('team-actions', actionsJ);
+      elementsJ.set('team-action-note', actionNoteJ);
+      const docJ = createFakeDoc(elementsJ);
+
+      let joinPromiseResolve!: (val: boolean) => void;
+      let joinCount = 0;
+      const fakeClientJ = {
+        teams: {
+          byId: async () => ({
+            id: 'team-1',
+            name: 'The Knights',
+            slug: 'knights',
+            visibility: 'public',
+            viewerRole: null,
+            memberCount: 5,
+          }),
+          members: async () => ({ items: [], total: 0 }),
+          join: async () => {
+            joinCount++;
+            return new Promise<boolean>((res) => {
+              joinPromiseResolve = res;
+            });
+          },
+        },
+        graphql: {
+          resolvePlayers: async () => new Map(),
+        },
+        session: { current: { user: { id: 'u-viewer', handle: 'player' } } },
+      } as unknown as GambitClient;
+
+      const ctrlJ = mountTeamDetail({
+        doc: docJ,
+        client: fakeClientJ,
+        slug: 'knights',
+        sessionPresent: true,
+        restorePromise: Promise.resolve(null),
+        i18n,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      const joinBtn = actionsJ.querySelector('button')!;
+      assert.ok(joinBtn);
+      assert.equal(joinBtn.disabled, false);
+
+      joinBtn.dispatchEvent({ type: 'click' });
+      assert.equal(joinBtn.disabled, true);
+      assert.equal(joinCount, 1);
+
+      i18n.setLocale('ar');
+
+      const newJoinBtn = actionsJ.querySelector('button')!;
+      assert.ok(newJoinBtn);
+      assert.equal(
+        newJoinBtn.disabled,
+        true,
+        'Action button must remain disabled during pending network action after relocalization',
+      );
+
+      newJoinBtn.dispatchEvent({ type: 'click' });
+      assert.equal(joinCount, 1, 'Duplicate click on relocalized button must be blocked');
+
+      joinPromiseResolve(true);
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(newJoinBtn.disabled, false);
+
+      ctrlJ.dispose();
+    });
+
+    it('finding I: email verification preserves needsLink across locale change without falling into couldNotVerify', () => {
+      const elements = new Map<string, FakeElement>();
+      const section = new FakeElement('div', 'email-verify');
+      const status = new FakeElement('div', 'email-verify-status');
+      const error = new FakeElement('div', 'email-verify-error');
+      const retry = new FakeElement('button', 'email-verify-retry');
+      elements.set('email-verify', section);
+      elements.set('email-verify-status', status);
+      elements.set('email-verify-error', error);
+      elements.set('email-verify-retry', retry);
+      const doc = createFakeDoc(elements);
+      const i18n = createTestI18n();
+
+      const fakeClient = {
+        auth: {
+          verifyEmail: async () => ({ ok: true }),
+        },
+      } as unknown as GambitClient;
+
+      const mounted = mountEmailVerification({
+        doc,
+        client: fakeClient,
+        verificationToken: null,
+        i18n,
+      });
+
+      assert.equal(
+        error.textContent,
+        'This page needs a verification link. Open the link in the verification email we sent you.',
+      );
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        error.textContent,
+        'تحتاج هذه الصفحة إلى رابط تحقق. افتح الرابط في رسالة التحقق الإلكترونية.',
+        'Must relocalize needsLink to Arabic, not fall back to couldNotVerify',
+      );
+
+      mounted.dispose();
+    });
+
+    it('finding K: lesson move step input value and disabled state survive locale change', () => {
+      const prevDoc = (globalThis as unknown as { document?: unknown }).document;
+      const elementsMap = new Map<string, FakeElement>();
+      const doc = createFakeDoc(elementsMap);
+      (globalThis as unknown as { document: unknown }).document = doc;
+      try {
+        const surface = doc.createElement('div');
+        const stepList = doc.createElement('div');
+        stepList.id = 'step-list';
+        surface.appendChild(stepList);
+        const i18n = createTestI18n();
+
+        const lesson = { id: 'l1', courseId: 'c1', title: 'Tactics' } as unknown as LessonView;
+        const steps = [
+          {
+            id: 's1',
+            lessonId: 'l1',
+            orderIndex: 0,
+            kind: 'move',
+            fen: STARTING_FEN,
+            hint: null,
+          } as unknown as StepView,
+        ];
+
+        renderLessonDetail(
+          surface as unknown as HTMLElement,
+          lesson,
+          steps,
+          null,
+          new Map(),
+          async () => {},
+          i18n,
+        );
+
+        const input = surface.querySelector('#san-input-s1') as unknown as FakeElement;
+        assert.ok(input, 'Input element for move step must exist');
+        input.value = 'Nf3';
+
+        i18n.setLocale('ar');
+        renderLessonDetail(
+          surface as unknown as HTMLElement,
+          lesson,
+          steps,
+          null,
+          new Map(),
+          async () => {},
+          i18n,
+        );
+
+        const reRenderedInput = surface.querySelector('#san-input-s1') as unknown as FakeElement;
+        assert.ok(reRenderedInput);
+        assert.equal(
+          reRenderedInput.value,
+          'Nf3',
+          'User typed SAN input must be preserved across relocalization',
+        );
+      } finally {
+        (globalThis as unknown as { document: unknown }).document = prevDoc;
+      }
+    });
+
+    it('finding L: bootstrap auth error relocalizes on locale change', async () => {
+      const elements = new Map<string, FakeElement>();
+      const doc = createFakeDoc(elements);
+      const ids = [
+        'auth', 'auth-status', 'auth-error', 'auth-form', 'auth-handle',
+        'auth-password', 'auth-email', 'auth-code-row', 'auth-code',
+        'auth-submit', 'auth-register', 'auth-passkey', 'auth-logout',
+        'auth-resend-verification', 'play-bot', 'theme-toggle',
+      ];
+      for (const id of ids) {
+        const tag = id.includes('form') ? 'form' : id.includes('input') || id.includes('handle') || id.includes('password') || id.includes('email') || id.includes('code') ? 'input' : id.includes('submit') || id.includes('register') || id.includes('passkey') || id.includes('logout') || id.includes('bot') || id.includes('theme') || id.includes('resend') ? 'button' : 'div';
+        const el = doc.createElement(tag) as unknown as FakeElement;
+        el.id = id;
+        elements.set(id, el);
+      }
+      const i18n = createTestI18n();
+
+      const shell = bootstrap(doc, {
+        config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
+        i18n,
+        storage: new MemoryTokenStore() as unknown as KeyValueStorage,
+        httpTransport: new FakeTransport().onEach((req) => {
+          const path = new URL(req.url).pathname;
+          if (path === '/v1/auth/login') {
+            return json(401, {
+              error: {
+                message: 'Additional verification is required.',
+                code: 'unauthorized',
+                details: { reason: 'step_up_required' },
+              },
+            });
+          }
+          return json(200, {});
+        }),
+      });
+
+      const handleInput = elements.get('auth-handle')!;
+      const pwdInput = elements.get('auth-password')!;
+      const form = elements.get('auth-form')!;
+      handleInput.value = 'alice';
+      pwdInput.value = 'password123';
+
+      form.onsubmit!({ preventDefault: () => {} } as unknown as Event);
+      await new Promise((r) => setTimeout(r, 10));
+
+      const errorEl = elements.get('auth-error')!;
+      assert.equal(
+        errorEl.textContent,
+        'Additional verification is required. If this account has a verified email address, a sign-in code has been sent to it. Enter the code, or sign in with a passkey.',
+      );
+
+      i18n.setLocale('ar');
+
+      assert.equal(
+        errorEl.textContent,
+        'يلزم التحقق الإضافي. أدخل الرمز أو سجل الدخول باستخدام مفتاح مرور.',
+        'Auth error must relocalize on locale change',
+      );
+
+      shell.auth.dispose();
+      shell.shellLocalization?.dispose();
+    });
+  });
+});
+

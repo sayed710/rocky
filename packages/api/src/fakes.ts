@@ -21,6 +21,7 @@ import type {
   RatingsRepository,
   Role,
   SeekAcceptor,
+  Speed,
   GameStarter,
   SeekRow,
   SeeksRepository,
@@ -38,13 +39,13 @@ import type {
   LoginStepUpCheck,
   IdentityTokensRepository,
 } from '@chess-platform/persistence';
-import { DuplicateUserError, VersionConflictError, SEEK_TTL_MS } from '@chess-platform/persistence';
+import { DuplicateUserError, VersionConflictError, SEEK_TTL_MS, SPEEDS } from '@chess-platform/persistence';
 
 import { InMemoryLearningRepository } from '@chess-platform/learning';
 import type { AuditEntry, AuditRepository } from './ports/audit';
 import type { Clock } from './ports/clock';
 import { InMemoryEventStore } from '@chess-platform/persistence';
-import { InMemoryStudyPartnerRepository } from '@chess-platform/persistence';
+import { InMemoryStudyPartnerRepository, InMemoryPlayerReportsRepository, playerReportAuditMeta } from '@chess-platform/persistence';
 import { InMemoryAntiCheatReportRepository, InMemoryBotBehaviorReportRepository } from '@chess-platform/anti-cheat';
 import type { GameEvent } from '@chess-platform/game';
 import { systemClock } from './ports/clock';
@@ -314,8 +315,8 @@ export class InMemorySessionsRepository implements SessionsRepository {
   }
 }
 
-function ratingKey(userId: string, variant: Variant): string {
-  return `${userId}:${variant}`;
+function ratingKey(userId: string, variant: Variant, speed: Speed): string {
+  return `${userId}:${variant}:${speed}`;
 }
 
 export class InMemoryRatingsRepository implements RatingsRepository {
@@ -323,28 +324,26 @@ export class InMemoryRatingsRepository implements RatingsRepository {
 
   constructor(private readonly clock: Clock = systemClock) {}
 
-  async get(userId: string, variant: Variant): Promise<RatingRow | null> {
-    return this.byKey.get(ratingKey(userId, variant)) ?? null;
+  async get(userId: string, variant: Variant, speed: Speed): Promise<RatingRow | null> {
+    return this.byKey.get(ratingKey(userId, variant, speed)) ?? null;
   }
 
-  async upsert(row: {
-    userId: string;
-    variant: Variant;
-    rating: number;
-    rd: number;
-    vol: number;
-  }): Promise<void> {
-    this.byKey.set(ratingKey(row.userId, row.variant), {
-      ...row,
-      updatedAt: new Date(this.clock.now()),
-    });
-  }
-
-  async leaderboard(variant: Variant, limit: number): Promise<RatingRow[]> {
+  async listForUser(userId: string): Promise<RatingRow[]> {
     return [...this.byKey.values()]
-      .filter((r) => r.variant === variant)
+      .filter((r) => r.userId === userId)
+      .sort((a, b) => a.variant.localeCompare(b.variant) || SPEEDS.indexOf(a.speed) - SPEEDS.indexOf(b.speed));
+  }
+
+  async leaderboard(variant: Variant, speed: Speed, limit: number): Promise<RatingRow[]> {
+    return [...this.byKey.values()]
+      .filter((r) => r.variant === variant && r.speed === speed)
       .sort((a, b) => b.rating - a.rating)
       .slice(0, limit);
+  }
+
+  /** Test seeding only: production ratings change solely through the event-log rating applier. */
+  async upsert(row: Omit<RatingRow, 'updatedAt'>): Promise<void> {
+    this.byKey.set(ratingKey(row.userId, row.variant, row.speed), { ...row, updatedAt: new Date(this.clock.now()) });
   }
 }
 
@@ -999,6 +998,7 @@ export interface InMemoryRepositories extends Repositories {
   readonly studies: InMemoryStudiesRepository;
   readonly learning: InMemoryLearningRepository;
   readonly studyPartner: InMemoryStudyPartnerRepository;
+  readonly playerReports: InMemoryPlayerReportsRepository;
 }
 
 /** Construct a fresh set of in-memory repositories sharing a clock. */
@@ -1007,7 +1007,15 @@ export function createInMemoryRepositories(clock: Clock = systemClock): InMemory
   const users = new InMemoryUsersRepository(clock);
   const seeks = new InMemorySeeksRepository(clock, games, users);
   const events = new InMemoryEventStore(() => clock.now());
-  
+  const audit = new InMemoryAuditRepository();
+  // A transition and its audit row land together, as they do in one Postgres transaction.
+  const playerReports = new InMemoryPlayerReportsRepository(({ transition: t, before, report }) => {
+    void audit.record({
+      actorId: t.actorId, action: `player_reports.${t.action}`, target: t.id, meta: playerReportAuditMeta(before, report),
+      requestId: t.audit.requestId, traceId: t.audit.traceId, ip: t.audit.ip, userAgent: t.audit.userAgent, at: t.at.getTime(),
+    });
+  });
+
   return {
     events,
     users,
@@ -1015,7 +1023,7 @@ export function createInMemoryRepositories(clock: Clock = systemClock): InMemory
     ratings: new InMemoryRatingsRepository(clock),
     games,
     seeks,
-    audit: new InMemoryAuditRepository(),
+    audit,
     tournaments: new InMemoryTournamentsRepository(),
     identityTokens: new InMemoryIdentityTokensRepository(users),
     webauthnLoginChallenges: new InMemoryWebAuthnLoginChallengesRepository(),
@@ -1027,5 +1035,6 @@ export function createInMemoryRepositories(clock: Clock = systemClock): InMemory
     studies: new InMemoryStudiesRepository(),
     learning: new InMemoryLearningRepository(),
     studyPartner: new InMemoryStudyPartnerRepository(),
+    playerReports,
   };
 }

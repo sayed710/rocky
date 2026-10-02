@@ -29,6 +29,7 @@ function setup(role: 'white' | 'spectator' = 'white', finished = false) {
     token: 'token',
     initialSessionId: 'u1',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   sockets.last.open();
   sockets.last.emit({

@@ -137,13 +137,13 @@ test('the untimed control is exactly the zero-duration wire shape the server acc
 
 test('estimateSpeed buckets the ladder the way players expect', () => {
   const speedOf = (m: number, i: number) => estimateSpeed(presetToTimeControl(m, i));
-  assert.equal(speedOf(1, 0), 'Bullet');
-  assert.equal(speedOf(2, 1), 'Bullet');
-  assert.equal(speedOf(3, 0), 'Blitz');
-  assert.equal(speedOf(5, 3), 'Blitz');
-  assert.equal(speedOf(10, 0), 'Rapid');
-  assert.equal(speedOf(15, 10), 'Rapid');
-  assert.equal(speedOf(30, 20), 'Classical');
+  assert.equal(speedOf(1, 0), 'bullet');
+  assert.equal(speedOf(2, 1), 'bullet');
+  assert.equal(speedOf(3, 0), 'blitz');
+  assert.equal(speedOf(5, 3), 'blitz');
+  assert.equal(speedOf(10, 0), 'rapid');
+  assert.equal(speedOf(15, 10), 'rapid');
+  assert.equal(speedOf(30, 20), 'classical');
 });
 
 /**
@@ -151,7 +151,7 @@ test('estimateSpeed buckets the ladder the way players expect', () => {
  * *shortest* bucket — the opposite of what it means. The kind has to win, as it
  * does in the server's `classifySpeed`.
  */
-test('estimateSpeed reads the untimed control as correspondence, not bullet', () => {
-  assert.equal(estimateSpeed(UNLIMITED_TIME_CONTROL), 'Correspondence');
-  assert.equal(estimateSpeed({ ...UNLIMITED_TIME_CONTROL, kind: 'sudden_death' }), 'Bullet');
+test('estimateSpeed reads the untimed control as correspondence, not shortest bucket', () => {
+  assert.equal(estimateSpeed(UNLIMITED_TIME_CONTROL), 'correspondence');
+  assert.equal(estimateSpeed({ ...UNLIMITED_TIME_CONTROL, kind: 'sudden_death' }), 'ultrabullet');
 });

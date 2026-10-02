@@ -1,6 +1,11 @@
 import type { GambitClient } from '../api/client.js';
+import type { I18nManager } from '../i18n/manager.js';
 import { PasswordResetController } from './password-reset-controller.js';
-import type { PasswordResetCallbacks } from './password-reset-controller.js';
+import type {
+  PasswordResetCallbacks,
+  PasswordResetErrorKey,
+  PasswordResetStatusKey,
+} from './password-reset-controller.js';
 
 interface PasswordRecoveryElements {
   readonly requestView: HTMLElement | null;
@@ -20,11 +25,12 @@ interface PasswordRecoveryState {
   resetToken: string | null;
 }
 
-interface PasswordRecoveryMountOptions {
+export interface PasswordRecoveryMountOptions {
   readonly doc: Document;
   readonly client: GambitClient;
   readonly resetToken: string | null;
   readonly onSessionInvalidated: () => void;
+  readonly i18n: I18nManager;
 }
 
 function passwordRecoveryElements(doc: Document): PasswordRecoveryElements {
@@ -43,14 +49,22 @@ function passwordRecoveryElements(doc: Document): PasswordRecoveryElements {
   };
 }
 
-function setPasswordRecoveryPending(elements: PasswordRecoveryElements, pending: boolean): void {
+function setPasswordRecoveryPending(
+  elements: PasswordRecoveryElements,
+  pending: boolean,
+  i18n: I18nManager,
+): void {
   if (elements.requestSubmit) {
     elements.requestSubmit.disabled = pending;
-    elements.requestSubmit.textContent = pending ? 'Sending…' : 'Send reset link';
+    elements.requestSubmit.textContent = pending
+      ? i18n.t('passwordRecovery.sending')
+      : i18n.t('passwordRecovery.submit');
   }
   if (elements.confirmSubmit) {
     elements.confirmSubmit.disabled = pending;
-    elements.confirmSubmit.textContent = pending ? 'Resetting…' : 'Reset password';
+    elements.confirmSubmit.textContent = pending
+      ? i18n.t('passwordRecovery.resetting')
+      : i18n.t('passwordRecovery.resetSubmit');
   }
   if (elements.requestInput) elements.requestInput.disabled = pending;
   if (elements.passwordInput) elements.passwordInput.disabled = pending;
@@ -62,25 +76,39 @@ function setPasswordRecoveryPending(elements: PasswordRecoveryElements, pending:
 function resetPasswordRecoverySurface(
   elements: PasswordRecoveryElements,
   resetToken: string | null,
+  i18n: I18nManager,
 ): void {
   if (elements.requestView) elements.requestView.hidden = resetToken !== null;
   if (elements.confirmView) elements.confirmView.hidden = resetToken === null;
   if (elements.status) elements.status.textContent = '';
   if (elements.error) elements.error.textContent = '';
-  setPasswordRecoveryPending(elements, false);
+  setPasswordRecoveryPending(elements, false, i18n);
 }
 
 function createPasswordResetCallbacks(
   elements: PasswordRecoveryElements,
   state: PasswordRecoveryState,
   onSessionInvalidated: () => void,
+  i18n: I18nManager,
+  recordPending?: (pending: boolean) => void,
+  recordFeedback?: (
+    status: string | null,
+    error: string | null,
+    statusKey?: PasswordResetStatusKey | null,
+    errorKey?: PasswordResetErrorKey | null,
+  ) => void,
 ): PasswordResetCallbacks {
   return {
-    onPending: (pending) => setPasswordRecoveryPending(elements, pending),
-    onError: (message) => {
+    onPending: (pending) => {
+      recordPending?.(pending);
+      setPasswordRecoveryPending(elements, pending, i18n);
+    },
+    onError: (message, key) => {
+      recordFeedback?.(null, message, null, key ?? null);
       if (elements.error) elements.error.textContent = message ?? '';
     },
-    onSuccess: (message) => {
+    onSuccess: (message, key) => {
+      recordFeedback?.(message, null, key ?? null, null);
       if (elements.status) elements.status.textContent = message ?? '';
       if (!message || state.resetToken === null) return;
       state.resetToken = null;
@@ -119,27 +147,59 @@ function bindPasswordRecoveryForms(
 function disposePasswordRecoveryMount(
   elements: PasswordRecoveryElements,
   controller: PasswordResetController,
+  i18n: I18nManager,
 ): void {
   if (elements.requestForm) elements.requestForm.onsubmit = null;
   if (elements.confirmForm) elements.confirmForm.onsubmit = null;
   controller.dispose();
-  setPasswordRecoveryPending(elements, false);
+  setPasswordRecoveryPending(elements, false, i18n);
 }
 
 export function mountPasswordRecovery(
   options: PasswordRecoveryMountOptions,
 ): { dispose: () => void } {
+  let disposed = false;
+  let isPending = false;
+  let lastStatusKey: PasswordResetStatusKey | null = null;
+  let lastErrorKey: PasswordResetErrorKey | null = null;
+
   const elements = passwordRecoveryElements(options.doc);
   const state: PasswordRecoveryState = { resetToken: options.resetToken };
-  resetPasswordRecoverySurface(elements, state.resetToken);
+  resetPasswordRecoverySurface(elements, state.resetToken, options.i18n);
 
   const controller = new PasswordResetController({
     client: options.client,
-    callbacks: createPasswordResetCallbacks(elements, state, options.onSessionInvalidated),
+    callbacks: createPasswordResetCallbacks(
+      elements,
+      state,
+      options.onSessionInvalidated,
+      options.i18n,
+      (pending) => { isPending = pending; },
+      (_status, _error, statusKey, errorKey) => {
+        lastStatusKey = statusKey ?? null;
+        lastErrorKey = errorKey ?? null;
+      },
+    ),
+    i18n: options.i18n,
   });
   bindPasswordRecoveryForms(elements, state, controller);
 
+  const unsubscribeLocale = options.i18n.onLocaleChange(() => {
+    setPasswordRecoveryPending(elements, isPending, options.i18n);
+    if (lastStatusKey && elements.status) {
+      elements.status.textContent = options.i18n.t(lastStatusKey);
+    }
+    if (lastErrorKey && elements.error) {
+      elements.error.textContent = options.i18n.t(lastErrorKey);
+    }
+  });
+
   return {
-    dispose: () => disposePasswordRecoveryMount(elements, controller),
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      unsubscribeLocale();
+      disposePasswordRecoveryMount(elements, controller, options.i18n);
+    },
   };
 }
