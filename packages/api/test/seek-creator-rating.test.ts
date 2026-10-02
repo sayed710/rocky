@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { startHarness } from './helpers';
 import { seekView } from '../src/presenters';
+import { InMemoryRatingsRepository } from '../src/fakes';
 
 test('seek views publish only persisted creator ratings in the server-classified variant × speed pool', async () => {
   const h = await startHarness();
@@ -10,12 +11,12 @@ test('seek views publish only persisted creator ratings in the server-classified
     const creator = await h.makeUser('rated-seek-creator');
     const acceptor = await h.makeUser('rated-seek-acceptor');
     for (const [variant, speed, rating] of [
-      ['standard', 'blitz', 1842.4], ['standard', 'rapid', 2137.6], ['atomic', 'blitz', 1293.2],
+      ['standard', 'blitz', 1842.34567], ['standard', 'rapid', 2137.6], ['atomic', 'blitz', 1293.2],
     ] as const) {
       await h.repos.ratings.upsert({ userId: creator.userId, variant, speed, rating, rd: 80, vol: 0.06 });
     }
     const cases = [
-      { variant: 'standard', minutes: 3, speed: 'blitz', rating: 1842.4, rated: true },
+      { variant: 'standard', minutes: 3, speed: 'blitz', rating: 1842.35, rated: true },
       { variant: 'standard', minutes: 10, speed: 'rapid', rating: 2137.6, rated: false },
       { variant: 'atomic', minutes: 3, speed: 'blitz', rating: 1293.2, rated: false },
       { variant: 'atomic', minutes: 10, speed: 'rapid', rating: null, rated: true },
@@ -41,8 +42,18 @@ test('seek views publish only persisted creator ratings in the server-classified
     }
     const matched = await h.json('POST', `/v1/seeks/${ids[0]}/accept`, { token: acceptor.token });
     assert.equal(matched.status, 200);
-    assert.equal(matched.body.creatorRating, 1842.4);
+    assert.equal(matched.body.creatorRating, 1842.35);
   } finally { await h.close(); }
+});
+
+test('rating batch fake omits malformed creator identifiers like PostgreSQL', async () => {
+  const ratings = new InMemoryRatingsRepository();
+  const valid = { userId: randomUUID(), variant: 'standard' as const, speed: 'blitz' as const };
+  const invalid = { ...valid, userId: 'not-a-uuid' };
+  await ratings.upsert({ ...valid, rating: 1842, rd: 80, vol: 0.06 });
+  await ratings.upsert({ ...invalid, rating: 2999, rd: 80, vol: 0.06 });
+  assert.deepEqual(await ratings.getMany([invalid]), []);
+  assert.deepEqual((await ratings.getMany([valid, invalid, valid])).map((r) => r.rating), [1842]);
 });
 
 test('missing creator and missing pool remain null rather than publishing a default or a constraint', async () => {

@@ -22,6 +22,7 @@ for (const width of [1440, 390, 320]) {
     await expect(blitz.locator('.seek-rating')).toHaveText('1842');
     await expect(blitz.locator('.seek-rating')).toHaveAttribute('dir', 'ltr');
     await expect(blitz.locator('.seek-rating')).toHaveAccessibleName('Rating in Standard · Blitz: 1842');
+    await expect(blitz.getByRole('img', { name: 'Rating in Standard · Blitz: 1842' })).toHaveCount(1);
     await expect(blitz.locator('.row-link')).toHaveAttribute('dir', 'auto');
     await expect(blitz.locator('.row-link')).toHaveAttribute('href', '/profile/حسين');
     await expect(rapid.locator('.seek-rating')).toHaveText('2138');

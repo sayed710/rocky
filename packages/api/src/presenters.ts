@@ -162,7 +162,7 @@ export function seekView(row: SeekRow, creatorRating: RatingRow | null): SeekVie
       && creatorRating?.userId === row.creatorId
       && creatorRating.variant === row.variant
       && creatorRating.speed === speed
-      ? creatorRating.rating : null,
+      ? round2(creatorRating.rating) : null,
     variant: row.variant,
     speed,
     timeControl: row.timeControl,

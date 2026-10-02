@@ -131,7 +131,8 @@ export function renderSeeks(
       }
       const rating = doc.createElement('span');
       rating.className = 'seek-rating';
-      rating.setAttribute('role', 'group');
+      // Present the pool label and value atomically, rather than announcing the value twice.
+      rating.setAttribute('role', 'img');
       const ratingText = seek.creatorRating == null
         ? i18n.t('lobby.creatorUnrated') : String(Math.round(seek.creatorRating));
       rating.textContent = ratingText;

@@ -569,6 +569,7 @@ test('seek ratings stay beside their opponent and pool, isolated from RTL and ra
   assert.equal(rows[0]!.querySelector('.row-link')?.getAttribute('dir'), 'auto');
   assert.equal(rows[0]!.querySelector('.seek-rating')?.getAttribute('dir'), 'ltr');
   assert.equal(rows[0]!.querySelector('.seek-rating')?.getAttribute('aria-label'), 'Rating in Standard · Blitz: 1842');
+  assert.equal(rows[0]!.querySelector('.seek-rating')?.getAttribute('role'), 'img');
   rows[1]!.querySelector('.seek-accept')!.focus();
   const ar = { ...en, 'lobby.creatorUnrated': 'غير مصنف', 'lobby.creatorRatingAria': 'التصنيف في {variant} · {speed}: {rating}' };
   const rtl = createI18nManager({ catalogs: { en, ar }, initialLocale: 'ar' });
