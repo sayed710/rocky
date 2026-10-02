@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-02 — M15 Increment 85: Trust terminal-analysis durable retry isolation._
+_Last updated: 2026-10-03 — M15 Increment 85: Trust terminal-analysis decoder self-review correction._
+
+Prior: _Last updated: 2026-10-02 — M15 Increment 85: Trust terminal-analysis durable retry isolation._
 
 Prior: _Last updated: 2026-10-02 — M15 Increment 84: Durable finished-game PGN export._
 
@@ -4918,3 +4920,5 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Validation environment corrections**: the first post-merge hermetic run used stale built serializer dependencies and failed three newly merged tests; rebuilding the combined tree corrected that. Gateway startup deadlines failed on the Windows bind mount, and one Redis forwarding test timed out through the host port. An unchanged native Linux validation copy with direct task-owned service connections passed all 86 tests. Helm used verified-HTTPS official schemas locally because the temporary image's Go certificate store failed; its snapshot script/rendered text was normalized to Linux line endings and the current official YAML validator was installed. These were validation setup changes, not production fixes or relaxed assertions.
 - **Concurrency / review**: began at `f9144a2e73a8e8b74f9d4dbeaf7eb6fa40c5b838`; fetched and normally fast-forward merged current main `2dd6d4dfbcadf3f54bd1b9b25a7e1baf4179f877` when Increment 84 landed. Its history remains verbatim; this increment is 85 and its ADR is 0155. Final commit review uses the explicitly permitted strict Codex self-review fallback; Claude and Gemini independent review are genuinely quota-unavailable per the task. External exact-head CI/Qodo/Greptile and review-thread evidence belongs to the PR handoff and is not claimed by this entry. The owner performs the merge.
 - **Deliberate limits**: no sanctions, thresholds, player-visible verdicts, D-13/D-14 policy decision, permanent dead letter, retry-state API/UI, PGN change or telemetry subsystem. Existing source/report database operations are not physically cancelled or assigned a new general timeout: a request that never settles can delay graceful shutdown, while process termination still leaves the durable lease recoverable after expiry.
+
+- **2026-10-03 self-review correction**: candidate `170b7e3` was not approved. Supporting Codex review found that termination membership coerced array-valued JSON keys, and contradictory `*` endings could receive an abort receipt. A compiled real-PostgreSQL regression reproduced the defect before the fix. Decoding now explicitly requires a string termination; `*` additionally requires a null winner and `aborted` or `no_show`, matching the game authority. Independent regression cases cover each guard and retain both valid abort forms. Persistence build/lint and all 196 PostgreSQL tests passed with zero skips; all 12 mutations were repeated, compiled and killed, with byte-identical source restoration. The earlier history and validation record remain preserved; replacement exact-head review and external gates are required before handoff.

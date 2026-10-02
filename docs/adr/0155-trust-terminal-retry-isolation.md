@@ -117,6 +117,11 @@ rejected after the receipt commits, rather than merely testing active leases.
 It advances time through active/expired leases, multiple due deadlines and the
 cap; checks stale fencing, crash recovery, renewal, atomic rollback, retry-row
 cleanup, corruption and the 0047 upgrade preserving reports/receipts/checksums.
+Current-version decoding requires a string termination before membership checks.
+An unfinished `*` result is valid only for `aborted` or `no_show` with no winner,
+matching the game authority; malformed endings enter retry rather than acquiring
+a success receipt through the abort shortcut. The regression also preserves both
+valid abort forms.
 The deterministic in-memory inbox enforces the same contract. Reconciler tests
 cover 1,000 failures, 2,500 healthy endings behind poison, continuously busy
 forward scans, due reverse rediscovery, duplicate wakeups, restart, renewal

@@ -154,8 +154,9 @@ function decodeTerminalRow(row: TerminalRow): TerminalEventWork {
   try {
     const event = upcast('GameEnded', Number(row.event_version), row.payload);
     if (!event || event.type !== 'GameEnded' || !['1-0', '0-1', '1/2-1/2', '*'].includes(event.result)
-      || !Object.hasOwn(TERMINATIONS, event.termination)
+      || typeof event.termination !== 'string' || !Object.hasOwn(TERMINATIONS, event.termination)
       || !['w', 'b', null].includes(event.winner)
+      || (event.result === '*' && (event.winner !== null || !['aborted', 'no_show'].includes(event.termination)))
       || !Number.isSafeInteger(event.at) || event.at < 0) {
       throw new Error('invalid terminal event shape');
     }

@@ -246,15 +246,31 @@ test('decode corruption takes the same lease and backoff while healthy work rema
 test('malformed current-version endings cannot become successful abort receipts', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, migrationsDir());
-    const id = randomUUID();
-    await pool.query('INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, $2, 1, $3)',
-      [id, 'GameEnded', { type: 'GameEnded', result: '*' }]);
     const inbox = new PgTerminalEventInbox(pool);
-    const claim = await inbox.claimAfter('bot-analysis', null);
-    assert.ok(claim && 'decodeError' in claim.work, 'missing ending fields must reach the failure path before abort handling');
-    assert.equal((await inbox.fail(claim.lease))?.failures, 1);
-    assert.equal(await inbox.claimAfter('bot-analysis', null), undefined);
-    assert.equal((await pool.query('SELECT 1 FROM terminal_event_receipts WHERE game_id = $1', [id])).rowCount, 0);
+    for (const payload of [
+      { type: 'GameEnded', result: '*' },
+      { type: 'GameEnded', result: '*', termination: ['aborted'], winner: null, at: 0 },
+      { type: 'GameEnded', result: '1-0', termination: ['resignation'], winner: 'w', at: 0 },
+      { type: 'GameEnded', result: '*', termination: 'resignation', winner: null, at: 0 },
+      { type: 'GameEnded', result: '*', termination: 'aborted', winner: 'w', at: 0 },
+    ]) {
+      const id = randomUUID();
+      await pool.query('INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, $2, 1, $3)',
+        [id, 'GameEnded', payload]);
+      const claim = await inbox.claimAfter('bot-analysis', null);
+      assert.ok(claim && 'decodeError' in claim.work, 'malformed ending must reach the failure path before abort handling');
+      assert.equal((await inbox.fail(claim.lease))?.failures, 1);
+      assert.equal(await inbox.claimAfter('bot-analysis', null), undefined);
+      assert.equal((await pool.query('SELECT 1 FROM terminal_event_receipts WHERE game_id = $1', [id])).rowCount, 0);
+    }
+    for (const termination of ['aborted', 'no_show']) {
+      const id = randomUUID();
+      await pool.query('INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, $2, 1, $3)',
+        [id, 'GameEnded', { type: 'GameEnded', result: '*', termination, winner: null, at: 0 }]);
+      const claim = await inbox.claimAfter('bot-analysis', null);
+      assert.ok(claim && 'stored' in claim.work, 'valid abort and no-show endings remain consumable');
+      assert.equal(await inbox.acknowledge(claim.lease), true);
+    }
   });
 });
 
