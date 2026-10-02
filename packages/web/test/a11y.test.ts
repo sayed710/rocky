@@ -37,7 +37,7 @@ test('one persistent main landmark contains every application route', () => {
     'game-main', 'lobby', 'auth', 'password-reset', 'email-verify', 'not-found',
     'profile', 'leaderboard', 'tournaments', 'tournament', 'search', 'teams',
     'team', 'forum', 'thread', 'messages', 'conversation', 'endgames', 'courses',
-    'course', 'lesson', 'studies', 'study', 'study-chapter',
+    'course', 'lesson', 'studies', 'study', 'study-chapter', 'public-document',
   ]);
   const found = new Set<string>();
   const stack: Array<'main' | 'section'> = [];

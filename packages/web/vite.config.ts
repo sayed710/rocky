@@ -1,11 +1,20 @@
 import { defineConfig } from 'vite';
 import { fileURLToPath, URL } from 'node:url';
+import { resolveBuildRevision } from './src/app/source-metadata.js';
 
 // Static SPA build. When running e2e tests with GAMBIT_E2E_BACKEND=1, the
 // vite preview server proxies /v1 (REST), /e2e (harness bridge), and /ws
 // (WebSocket) to the e2e harness backend. This lets the frontend talk to
 // real backends without CORS configuration.
 export default defineConfig({
+  // Source disclosure build contract (ADR-0153). `VITE_GIT_SHA` is read here, once, from the build
+  // environment — never from `.env` files and never at run time. Unset or empty embeds `null`, which
+  // the /about page reports as an unavailable revision; anything other than a full commit SHA fails
+  // the build. Only this one validated value reaches the bundle: no `import.meta.env` lookup exists,
+  // so other `VITE_*` variables in the environment are not embedded through it.
+  define: {
+    __ROOKZEN_SOURCE_REVISION__: JSON.stringify(resolveBuildRevision(process.env)),
+  },
   resolve: {
     alias: {
       // The browser needs only the shared bot identity and clock speed classification helpers.

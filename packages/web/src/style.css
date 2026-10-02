@@ -769,10 +769,88 @@ a.button.primary:active {
 .lesson,
 .endgames,
 .not-found,
+.public-document,
 /* Same shape as `.game`: a grid that is also a flex item. Found by the guard below rather than by
    anyone looking — which is the point of asserting the property instead of listing the sections. */
 .study-chapter-layout {
   width: 100%;
+}
+
+/* --- Public documents (/privacy, /terms, /fair-play, /about) ---
+   Read mode: one column of prose at a readable measure. Sections are separated by a hairline, not
+   boxed — no card, no fill (DESIGN.md §1). Logical properties throughout so the page mirrors under
+   `dir="rtl"`; the repository URL and commit SHA isolate themselves as LTR tokens (`.bidi-ltr`). */
+.public-document {
+  max-width: 68ch;
+  margin: 0 auto;
+  padding: clamp(24px, 6vh, 48px) 16px 48px;
+  line-height: 1.6;
+}
+.public-document-header {
+  margin-block-end: 24px;
+}
+.public-document-title {
+  margin: 0;
+  font-size: 1.5rem;
+  line-height: 1.2;
+}
+/* Focus lands here programmatically after in-app navigation. Keyboard users still get the ring
+   (:focus-visible); a pointer-initiated navigation does not paint one around a heading. */
+.public-document-title:focus { outline: none; }
+.public-document-title:focus-visible { outline: 3px solid var(--sel); outline-offset: 4px; }
+.public-document-lede {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+.public-document-section {
+  margin-block-start: 24px;
+  padding-block-start: 16px;
+  border-block-start: 1px solid var(--panel-strong);
+}
+.public-document-section h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+.public-document-section p {
+  margin: 0 0 12px;
+}
+.public-document-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 16px;
+  margin: 16px 0 0;
+}
+.public-document-facts dt {
+  color: var(--muted);
+}
+.public-document-facts dd {
+  margin: 0;
+  min-width: 0;
+}
+/* Prose links are underlined so they never depend on colour alone (WCAG 1.4.1). */
+.public-document-link {
+  color: var(--sel);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  overflow-wrap: anywhere;
+}
+.public-document-link:focus-visible {
+  outline: 3px solid var(--sel);
+  outline-offset: 2px;
+}
+.public-document-sha {
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 0.875em;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 480px) {
+  .public-document-facts {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 4px;
+  }
+  .public-document-facts dd + dt {
+    margin-block-start: 8px;
+  }
 }
 
 /* --- Lobby --- */

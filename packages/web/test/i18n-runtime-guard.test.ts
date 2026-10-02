@@ -57,6 +57,7 @@ export const NON_UI_TECHNICAL_FILES: Readonly<Record<string, string>> = {
   'config.ts': 'Pure technical configuration constants (API URLs, WebSocket endpoints, storage keys).',
   'create-game-prefs.ts': 'Pure localStorage read/write persistence for player game preferences (variant, speed, rating range).',
   'dom.ts': 'Low-level DOM construction primitives and element creation helpers (el, clearChildren).',
+  'source-metadata.ts': 'Pure build-metadata validation (repository constant, commit SHA parsing, commit URL construction); no presentation copy — labels are rendered by public-document.ts.',
   'email-verification-controller.ts': 'Headless state controller for email verification token lifecycle; presentation handled by email-verification-mount.ts.',
   'endgame-controller.ts': 'Headless controller managing endgame training position requests and validation; UI rendered via endgame-view.ts.',
   'explain-controller.ts': 'Headless state controller managing move explanation API requests; UI rendered via explain-view.ts.',

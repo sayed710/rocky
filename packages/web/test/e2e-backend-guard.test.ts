@@ -37,6 +37,7 @@ const STATIC_SPECS = new Set([
   'rtl-layout-reliability.spec.ts',
   'localization-state.spec.ts',
   'seek-creator-rating.spec.ts',
+  'public-documents.spec.ts',
 ]);
 
 /**

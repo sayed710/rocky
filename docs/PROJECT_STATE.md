@@ -6,11 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-02 — M15 Increment 82: Truthful opponent pool ratings in lobby seeks._
+_Last updated: 2026-10-02 — M15 Increment 83: Truthful opponent pool ratings in lobby seeks._
+
+Prior: _Last updated: 2026-10-02 — M15 Increment 82: Policy and source-disclosure engineering infrastructure._
 
 Prior: _Last updated: 2026-10-02 — M15 Increment 81: Moderation and trust operations: player reports, first admin, trust worker._
-
-Prior: _Last updated: 2026-10-02 — M15 Increment 80: Localization semantic state, pending ownership and accessibility corrections._
 
 Prior: _Last updated: 2026-10-01 — M15 Increment 80: Web localization exact-head Greptile and Qodo corrections._
 
@@ -4731,7 +4731,74 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - poison-game retry backoff in the reconciler
   - Compose building the gateway image twice
 
-## M15 Increment 82: Truthful opponent pool ratings in lobby seeks.
+## M15 Increment 82 — Policy and source-disclosure engineering infrastructure (2026-10-02)
+
+- Addresses the `FABLE_ASTRA_FULL_AUDIT.md` gaps for Privacy, Terms, Fair Play and AGPL source discoverability, reverified on `origin/main` `5d0a20e`. The router had no such routes, and neither `Dockerfile.web` nor `packages/web/vite.config.ts` carried a repository URL or commit SHA (the Codex adjudication had already corrected the historical Gemini claim that they did). Decisions are recorded in ADR-0153.
+- **Implemented**:
+  - **Public routes**: `/privacy`, `/terms`, `/fair-play` and `/about` are one typed `Route` variant, `{ name: 'public-document', document }`. Each id is also its exact path segment, so `parseRoute`/`routeToPath` are symmetric by construction. Extra segments, case variants and near-miss spellings stay on the unchanged 404 surface. Queries are ignored as on every route, and malformed percent-encoding still reaches not-found. No session is required, and the sign-in form is hidden on these routes as on the 404 page. Direct loads, SPA navigation and back/forward all work.
+  - **Public-document architecture**: one renderer (`packages/web/src/app/public-document.ts`) and a typed spec per page, rendered into one `<section id="public-document">`; there is no controller per page.
+    - Each page is an `<article>` labelled by an `<h2>` title. The topbar brand stays the page's single `<h1>`, and sections are labelled `<section>`s with `<h3>`s.
+    - All copy is typed `MessageKey`s written with `textContent`: no `innerHTML`, no runtime Markdown, no fetched body.
+    - A locale change re-translates nodes in place, so focus survives. The document title reads `{page} · {brand}` while mounted and is restored on dispose.
+    - Focus moves to the title only after in-app navigation (`inAppNavigation` from `main.ts`), never on a direct load.
+    - The CSS uses logical properties and is styled as prose, not cards.
+  - **Neutral publication-state content**: Privacy, Terms and Fair Play show only their title and a "Publication status" section saying the authoritative text has not been published and the page is not the final published policy. A catalog guard fails on consent, obligation, retention, sanction, cheating, age, jurisdiction, cookie, GDPR/compliance or legal-sufficiency wording in any `publicDocument.*` string. English catalog only: no production Arabic is added, and the RTL tests use a test-only Arabic catalog.
+  - **Source metadata and build plumbing** (`packages/web/src/app/source-metadata.ts`):
+    - The repository `https://github.com/sayed710/rocky` is a source-controlled constant, not a build or runtime input.
+    - The only injected value is `VITE_GIT_SHA`, read once by `vite.config.ts` and embedded through `define` as `__ROOKZEN_SOURCE_REVISION__`. Nothing reads `import.meta.env`, so other `VITE_*` values stay out of the bundle.
+    - Unset or empty → the revision is unavailable and the page says so. A full 40- or 64-hex SHA → normalized and linked to `/commit/<sha>`. Anything else, including abbreviations, refs and the all-zero name → `vite build` fails.
+    - There is no runtime request and no secret.
+    - `Dockerfile.web` declares `ARG VITE_GIT_SHA=` (empty default) after `npm ci`.
+    - CI passes `github.sha` and asserts the exact SHA is in the image's JavaScript. Release passes the released commit, already used in the image tag.
+    - Compose and Helm are unchanged, and the runtime image remains non-root nginx.
+  - **`/about` source surface**: identity, the AGPL-3.0-or-later license as declared by `package.json`/`LICENSE` (no legal interpretation), the repository link, and the build revision (linked) or an explicit "does not record its source revision". Links are same-tab, with no `target`, `rel="external noreferrer"`, underlined, isolated as LTR tokens, and named by the URL/SHA under `<dt>` labels. The renderer also refuses any non-HTTPS `href` at the sink.
+  - **Delivery**: the existing nginx SPA fallback and service worker already serve all four routes, so neither changed. `scripts/nginx-web-delivery-acceptance.mjs` now proves 200 + shell + `no-cache` + security headers for each path against real nginx.
+- **Tests**:
+  - Router: the four paths, serialization, queries, extra segments, case/near-miss/encoded/malformed paths and round trips.
+  - Route surface: all four share one surface.
+  - `public-document.test.ts`: article/header/one title, section labelling, pending state, the forbidden-claims guard, catalog coverage, title restore, dispose, focus only on navigation, in-place relocalization under Arabic/RTL, safe links, the revision present/unavailable cases, no source links on policy pages, no controls, and markup rendered as text.
+  - `source-metadata.test.ts`: URL shape, SHA parsing, fail-closed build resolution, commit URL, no fake revision and frozen metadata.
+  - `source-metadata-build.test.ts`: real `vite build` runs with a SHA, without one, and with a malformed one, plus a `VITE_*` probe kept out of the bundle.
+  - `public-documents.spec.ts` (static Playwright): deep links, 404 near-misses, `/about` links, SPA navigation focus and tab order, back/forward and title restore, the offline service-worker shell, and Arabic RTL at 1024/390/320 px with LTR tokens, no overflow and focus order.
+  - `rtl-layout-reliability.spec.ts` gains `/about` and `/privacy` at four viewports.
+  - Pinned spec counts move to 29 discovered / 10 offline in the topology test.
+- **Falsification**: 16 disposable mutations (sources backed up to disk and restored byte-identical), each caught:
+  - accept extra segments
+  - accept abbreviated SHAs
+  - accept the null SHA
+  - silently ignore a malformed `VITE_GIT_SHA`
+  - render via `innerHTML`
+  - focus on direct load
+  - add `target="_blank"`
+  - skip the title restore
+  - leak the locale listener
+  - rebuild nodes on locale change (caught in Chromium)
+  - invent a revision when missing
+  - a retention claim in the catalog
+  - consent wording in the catalog
+  - drop the `define`
+  - embed raw env
+  - drop the Docker build-arg (the CI image check fails on an unstamped image)
+- **Still open** (the policy-publication launch gate is **not** complete):
+  - authoritative Privacy text
+  - authoritative Terms text
+  - authoritative Fair Play text
+  - legal review
+  - D-06 permanent discoverability placement (no footer, topbar group, menu or legal hub was added)
+  - D-07 registration consent UX (no checkbox, notice or wording was added)
+  - production Arabic copy for these surfaces
+- **Validation**:
+  - build and lint
+  - every `check:*` guard (observability, build order, deploy gates, ADR claims, CI parity, variant parity, engine pin parity, test topology)
+  - `test:scripts` (312)
+  - the 19 hermetic workspaces (3,797, zero skips; web 1,376)
+  - static Playwright (184) and `GAMBIT_E2E_BACKEND=1` Playwright with 4 workers and 0 retries (225), both 0 failures and 0 skips
+  - real-nginx `test:web-delivery` (12, including the new deep-link check)
+  - Docker `Dockerfile.web` built stamped, unstamped and malformed: the SHA is present only in the stamped bundle, the malformed build fails, and the runtime user is uid 101. The CI embed check passed on the stamped image and failed on the unstamped one.
+  - Helm and Compose are untouched.
+- Engineering review was first-party only (Gemini quota exhausted, no delegation); independent exact-head Codex and external reviewer evidence belongs to the PR handoff. Owner performs the merge.
+
+## M15 Increment 83: Truthful opponent pool ratings in lobby seeks.
 
 - Reverified the remaining opponent-rating finding against main `5d0a20e1a2a6d3f36645ae14cc0d631824b86b93`: seek handles and durable variant × speed pools already exist, but seek views and lobby rows have no creator pool rating.
 - `SeekView.creatorRating` is a required nullable number in the API presenter, OpenAPI 3.1 schema/generated artifact, and web REST model. The API returns the persisted creator rating for the seek variant and `classifySpeed(timeControl)`, rounded to two decimals consistently with the profile/leaderboard presenters, for both rated and casual seeks. It publishes no other pool, rating-range constraint, or Glicko starting default. Missing pools and unresolvable creators return null; the lobby displays typed, localized **Unrated**. The starting 1500 used for acceptance eligibility remains a calculation default, not an earned display rating (ADR-0150).

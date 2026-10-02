@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseRoute, routeToPath, navigate } from '../src/app/router.js';
+import { parseRoute, routeToPath, navigate, PUBLIC_DOCUMENT_IDS } from '../src/app/router.js';
 import type { Route, HistoryLike } from '../src/app/router.js';
 
 test('parseRoute: root path → lobby', () => {
@@ -150,4 +150,50 @@ test('parses /email-verify route and rejects extra segments', () => {
 
 test('serializes /email-verify route back to path', () => {
   assert.equal(routeToPath({ name: 'email-verify' }), '/email-verify');
+});
+
+test('parses the four public document routes', () => {
+  assert.deepEqual(parseRoute('/privacy'), { name: 'public-document', document: 'privacy' });
+  assert.deepEqual(parseRoute('/terms'), { name: 'public-document', document: 'terms' });
+  assert.deepEqual(parseRoute('/fair-play'), { name: 'public-document', document: 'fair-play' });
+  assert.deepEqual(parseRoute('/about'), { name: 'public-document', document: 'about' });
+});
+
+test('public document routes ignore the query string, as every other route does', () => {
+  assert.deepEqual(parseRoute('/privacy?ref=signup'), { name: 'public-document', document: 'privacy' });
+  assert.deepEqual(parseRoute('/about?'), { name: 'public-document', document: 'about' });
+});
+
+test('public document routes reject extra segments, case variants and encoded spellings', () => {
+  for (const pathname of [
+    '/privacy/extra',
+    '/terms/v2',
+    '/fair-play/rules/1',
+    '/about/source',
+    '/Privacy',
+    '/ABOUT',
+    '/fair_play',
+    '/fairplay',
+    '/legal',
+    '/priv%61cy',
+    '/%E0%A4%A',
+    '/about/%E0%A4%A',
+  ]) {
+    assert.deepEqual(parseRoute(pathname), { name: 'not-found' }, pathname);
+  }
+});
+
+test('serializes public document routes back to their paths', () => {
+  assert.equal(routeToPath({ name: 'public-document', document: 'privacy' }), '/privacy');
+  assert.equal(routeToPath({ name: 'public-document', document: 'terms' }), '/terms');
+  assert.equal(routeToPath({ name: 'public-document', document: 'fair-play' }), '/fair-play');
+  assert.equal(routeToPath({ name: 'public-document', document: 'about' }), '/about');
+});
+
+test('public document routes round-trip exactly', () => {
+  for (const document of PUBLIC_DOCUMENT_IDS) {
+    const route: Route = { name: 'public-document', document };
+    assert.deepEqual(parseRoute(routeToPath(route)), route, document);
+  }
+  assert.deepEqual([...PUBLIC_DOCUMENT_IDS], ['privacy', 'terms', 'fair-play', 'about']);
 });

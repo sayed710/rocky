@@ -341,6 +341,22 @@ describe('Real Nginx Path Acceptance: Web Delivery Caching and Compression Contr
     assert.match(cacheControl, /no-cache/, 'SPA fallback must use safe revalidation policy');
   });
 
+  test('12. Public document deep links (/privacy, /terms, /fair-play, /about) load the SPA shell, not an nginx 404', async () => {
+    // Direct loads and refreshes of these client routes reach nginx with no matching file; the SPA
+    // fallback must answer with the shell that carries the route's surface. ADR-0153.
+    for (const path of ['/privacy', '/terms', '/fair-play', '/about', '/about?ref=refresh']) {
+      const res = await fetch(`http://127.0.0.1:${nginxPort}${path}`);
+      assert.equal(res.status, 200, `${path} must resolve to 200 OK via SPA fallback`);
+      assert.match(res.headers.get('content-type') ?? '', /text\/html/, `${path} must be served as HTML`);
+      const body = await res.text();
+      assert.match(body, /<section id="public-document"/, `${path} must return the shell that holds the public-document surface`);
+      const cacheControl = res.headers.get('cache-control') ?? '';
+      assert.match(cacheControl, /no-cache/, `${path} must revalidate so a deploy is picked up`);
+      assert.doesNotMatch(cacheControl, /immutable/, `${path} must not inherit immutable caching`);
+      assert.ok(res.headers.get('content-security-policy'), `${path} must keep the security headers`);
+    }
+  });
+
   test('5. gzip: compressible production resource with Accept-Encoding: gzip demonstrates Content-Encoding: gzip', async () => {
     for (const assetFile of [hashedJsFile, hashedCssFile]) {
       // 4a. Verify fetch sees Content-Encoding: gzip

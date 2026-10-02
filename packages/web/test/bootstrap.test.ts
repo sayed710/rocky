@@ -373,6 +373,7 @@ test('bootstrap returns a fresh result with every public named field', () => {
     auth: true,
     theme: true,
     shellLocalization: true,
+    publicDocument: true,
   };
   const first = bootstrap(makeDoc([]), makeDeps());
   const second = bootstrap(makeDoc([]), makeDeps());

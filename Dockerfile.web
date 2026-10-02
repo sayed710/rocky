@@ -8,6 +8,14 @@ COPY packages/ ./packages/
 
 RUN npm ci
 
+# Source revision for the /about page (ADR-0153). Declared after `npm ci` so a new SHA does not
+# invalidate the dependency layer. Empty by default: a local `docker build` / `docker compose build`
+# embeds no revision and the page says so, rather than claiming one. CI and release pass the exact
+# commit with `--build-arg VITE_GIT_SHA=<full sha>`; a malformed value fails `vite build`. Not a
+# secret — the commit of a public repository — and it never reaches the runtime stage as anything
+# but the bundled string.
+ARG VITE_GIT_SHA=
+
 # Build the web package and its dependencies in order
 RUN npm run build:web
 
