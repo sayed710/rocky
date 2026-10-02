@@ -187,6 +187,7 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
       'id',
       'creatorId',
       'creatorHandle',
+      'creatorRating',
       'variant',
       'speed',
       'timeControl',
@@ -200,6 +201,10 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
       id: { type: 'string', format: 'uuid' },
       creatorId: { type: 'string', format: 'uuid' },
       creatorHandle: nullableString,
+      creatorRating: nullable({
+        type: 'number',
+        description: 'Persisted creator rating in the seek variant and server-classified speed pool, for rated and casual seeks. Null when the pool or creator is absent.',
+      }),
       variant: { type: 'string', enum: [...VARIANTS] },
       speed: { type: 'string' },
       timeControl: { $ref: '#/components/schemas/TimeControl' },

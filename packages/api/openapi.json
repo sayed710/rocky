@@ -14102,6 +14102,7 @@
           "id",
           "creatorId",
           "creatorHandle",
+          "creatorRating",
           "variant",
           "speed",
           "timeControl",
@@ -14125,6 +14126,13 @@
               "string",
               "null"
             ]
+          },
+          "creatorRating": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Persisted creator rating in the seek variant and server-classified speed pool, for rated and casual seeks. Null when the pool or creator is absent."
           },
           "variant": {
             "type": "string",

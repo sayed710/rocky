@@ -22,6 +22,7 @@ function makeSeek(overrides: Partial<SeekView> = {}): SeekView {
     id: 's1',
     creatorId: 'u1',
     creatorHandle: null,
+    creatorRating: null,
     variant: 'standard' as Variant,
     speed: 'blitz',
     timeControl: { initialMs: 180_000, incrementMs: 2_000, delayMs: 0, kind: 'increment' },

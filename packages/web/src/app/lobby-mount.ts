@@ -8,7 +8,7 @@ import { LobbyController } from './lobby-controller.js';
 import { PlayBotDialog } from './play-bot-dialog.js';
 import { formatTimeControl, renderEmpty } from './render-helpers.js';
 
-import { applyAutoDirection } from '../i18n/bidi.js';
+import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
 import { getSpeedLabel, getVariantLabel } from './variant-labels.js';
 import type { I18nManager } from '../i18n/manager.js';
 
@@ -129,6 +129,19 @@ export function renderSeeks(
       } else {
         opponentEl.textContent = shortId(seek.creatorId);
       }
+      const rating = doc.createElement('span');
+      rating.className = 'seek-rating';
+      // Present the pool label and value atomically, rather than announcing the value twice.
+      rating.setAttribute('role', 'img');
+      const ratingText = seek.creatorRating == null
+        ? i18n.t('lobby.creatorUnrated') : String(Math.round(seek.creatorRating));
+      rating.textContent = ratingText;
+      if (seek.creatorRating != null) applyLtrIsolation(rating);
+      rating.setAttribute('aria-label', i18n.t('lobby.creatorRatingAria', {
+        variant: getVariantLabel(seek.variant, i18n),
+        speed: getSpeedLabel(seek.speed, i18n), rating: ratingText,
+      }));
+      opponentEl.append(' · ', rating);
       main.appendChild(opponentEl);
 
       const detailParts: string[] = [];

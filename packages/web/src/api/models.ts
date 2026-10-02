@@ -313,6 +313,8 @@ export interface SeekView {
    * directly without requiring an optional GraphQL read layer. Null for unresolvable/deleted users.
    */
   readonly creatorHandle: string | null;
+  /** Persisted rating in the seek's exact variant × speed pool, or null if absent. */
+  readonly creatorRating: number | null;
   readonly variant: Variant;
   readonly speed: string;
   readonly timeControl: TimeControl;

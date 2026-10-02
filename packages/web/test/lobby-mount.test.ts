@@ -6,6 +6,7 @@ import { formatMoreOptionsSummary } from '../src/app/create-game-panel.js';
 import { LobbyController } from '../src/app/lobby-controller.js';
 import { OFFERED_VARIANTS } from '../src/api/models.js';
 import { VARIANT_LABELS } from '../src/app/variant-labels.js';
+import { enMessages as en } from '../src/i18n/catalog/en.js';
 import type {
   CreateBotGameRequest,
   CreateSeekRequest,
@@ -356,6 +357,7 @@ function makeSeek(overrides: Partial<SeekView> = {}): SeekView {
     id: 'seek-1',
     creatorId: 'user-1',
     creatorHandle: null,
+    creatorRating: null,
     variant: 'standard' as Variant,
     speed: 'blitz',
     timeControl: { initialMs: 180_000, incrementMs: 2_000, delayMs: 0, kind: 'increment' },
@@ -546,6 +548,38 @@ test('renderSeeks: renders empty state when no seeks are open', () => {
   assert.equal(empty.querySelector('.empty-mark')?.textContent, '♟');
   assert.equal(empty.querySelector('.empty-title')?.textContent, 'No open seeks right now');
   assert.equal(empty.querySelector('.empty-body')?.textContent, 'Create a game above — the first player to accept joins you.');
+});
+
+test('seek ratings stay beside their opponent and pool, isolated from RTL and rating constraints', () => {
+  const { doc, elements } = createTestDoc();
+  const container = elements.get('seek-list')!;
+  const seeks = [
+    Object.assign(makeSeek({ id: 'blitz', creatorHandle: 'حسين', minRating: 900 }), { creatorRating: 1842.4 }),
+    Object.assign(makeSeek({ id: 'rapid', speed: 'rapid', creatorHandle: 'حسين', rated: false }), { creatorRating: 2137.6 }),
+    Object.assign(makeSeek({ id: 'atomic', variant: 'atomic', creatorHandle: 'Alice' }), { creatorRating: null }),
+    Object.assign(makeSeek({ id: 'mine', creatorId: 'me', creatorHandle: 'Me' }), { creatorRating: 999 }),
+  ];
+  const i18n = createI18nManager();
+  renderSeeksBase(container as unknown as HTMLElement, seeks, 'me', undefined, i18n);
+  const rows = container.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows[0]!.querySelector('.seek-rating')?.textContent, '1842');
+  assert.equal(rows[1]!.querySelector('.seek-rating')?.textContent, '2138');
+  assert.equal(rows[2]!.querySelector('.seek-rating')?.textContent, 'Unrated');
+  assert.equal(rows[3]!.querySelector('.seek-rating'), null);
+  assert.equal(rows[0]!.querySelector('.row-link')?.getAttribute('dir'), 'auto');
+  assert.equal(rows[0]!.querySelector('.seek-rating')?.getAttribute('dir'), 'ltr');
+  assert.equal(rows[0]!.querySelector('.seek-rating')?.getAttribute('aria-label'), 'Rating in Standard · Blitz: 1842');
+  assert.equal(rows[0]!.querySelector('.seek-rating')?.getAttribute('role'), 'img');
+  rows[1]!.querySelector('.seek-accept')!.focus();
+  const ar = { ...en, 'lobby.creatorUnrated': 'غير مصنف', 'lobby.creatorRatingAria': 'التصنيف في {variant} · {speed}: {rating}' };
+  const rtl = createI18nManager({ catalogs: { en, ar }, initialLocale: 'ar' });
+  renderSeeksBase(container as unknown as HTMLElement, seeks, 'me', undefined, rtl);
+  const updated = container.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(updated[2]!.querySelector('.seek-rating')?.textContent, 'غير مصنف');
+  assert.equal(updated[0]!.querySelector('.seek-rating')?.textContent, '1842');
+  assert.match(updated[0]!.querySelector('.seek-rating')?.getAttribute('aria-label') ?? '', /التصنيف/);
+  assert.equal(doc.activeElement, updated[1]!.querySelector('.seek-accept'));
+  assert.equal(updated[3]!.querySelector('.seek-cancel')?.getAttribute('aria-label'), 'Cancel your seek');
 });
 
 test('renderSeeks: renders owned seek with cancel affordance and waiting indicator', () => {

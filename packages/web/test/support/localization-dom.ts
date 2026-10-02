@@ -436,6 +436,8 @@ const testArabicCatalog: Partial<MessagesCatalog> = {
   'game.actions.offerDraw': 'عرض التعادل',
   // Lobby
   'lobby.rated': 'مصنف',
+  'lobby.creatorUnrated': 'غير مصنف',
+  'lobby.creatorRatingAria': 'التصنيف في {variant} · {speed}: {rating}',
   'lobby.cancel': 'إلغاء',
   'lobby.play': 'العب',
   'lobby.emptySeeksTitle': 'لا توجد طلبات لعب مفتوحة',

@@ -186,6 +186,7 @@ describe('mount subscription, state preservation, dynamic relocalization, and di
       id: 'seek-1',
       creatorId: 'u-alice',
       creatorHandle: 'AliceMaster',
+      creatorRating: 1842,
       variant: 'standard',
       speed: 'blitz',
       timeControl: { initialMs: 180000, incrementMs: 2000, delayMs: 0, kind: 'increment' },
@@ -227,7 +228,8 @@ describe('mount subscription, state preservation, dynamic relocalization, and di
       const infoEl = rowEl.querySelector('.seek-info')!;
       const handleEl = rowEl.querySelector('.seek-opponent')!;
       assert.ok(infoEl.textContent.includes('standard · blitz · 3+2 · rated'));
-      assert.equal(handleEl.textContent, 'AliceMaster');
+      assert.equal(handleEl.querySelector('.row-link')?.textContent, 'AliceMaster');
+      assert.equal(handleEl.querySelector('.seek-rating')?.textContent, '1842');
 
       // 4. call i18n.setLocale('ar')
       // 5. DO NOT manually invoke renderer
@@ -240,7 +242,9 @@ describe('mount subscription, state preservation, dynamic relocalization, and di
       assert.ok(updatedInfoEl.textContent.includes('قياسي · خاطف · 3+2 · مصنف'));
 
       // 7. assert live user/server data is unchanged
-      assert.equal(updatedHandleEl.textContent, 'AliceMaster');
+      assert.equal(updatedHandleEl.querySelector('.row-link')?.textContent, 'AliceMaster');
+      assert.equal(updatedHandleEl.querySelector('.seek-rating')?.textContent, '1842');
+      assert.equal(updatedHandleEl.querySelector('.seek-rating')?.getAttribute('aria-label'), 'التصنيف في قياسي · خاطف: 1842');
 
       // 8. dispose mount
       mounted.lobby.dispose();
