@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-02 — M15 Increment 81: Moderation and trust operations: player reports, first admin, trust worker._
+_Last updated: 2026-10-02 — M15 Increment 82: Truthful opponent pool ratings in lobby seeks._
+
+Prior: _Last updated: 2026-10-02 — M15 Increment 81: Moderation and trust operations: player reports, first admin, trust worker._
 
 Prior: _Last updated: 2026-10-02 — M15 Increment 80: Localization semantic state, pending ownership and accessibility corrections._
 
@@ -4728,3 +4730,13 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - arena deadline decided by each replica's clock
   - poison-game retry backoff in the reconciler
   - Compose building the gateway image twice
+
+## M15 Increment 82: Truthful opponent pool ratings in lobby seeks.
+
+- Reverified the remaining opponent-rating finding against main `5d0a20e1a2a6d3f36645ae14cc0d631824b86b93`: seek handles and durable variant × speed pools already exist, but seek views and lobby rows have no creator pool rating.
+- `SeekView.creatorRating` is a required nullable number in the API presenter, OpenAPI 3.1 schema/generated artifact, and web REST model. The API returns the persisted creator rating for the seek variant and `classifySpeed(timeControl)`, for both rated and casual seeks. It publishes no other pool, rating-range constraint, or Glicko starting default. Missing pools and unresolvable creators return null; the lobby displays typed, localized **Unrated**. The starting 1500 used for acceptance eligibility remains a calculation default, not an earned display rating (ADR-0150).
+- Seek listing composes ratings through `RatingsRepository.getMany`: one parameterized PostgreSQL query over complete `(userId, variant, speed)` keys for the bounded seek page, with duplicate keys removed in SQL and malformed UUIDs omitted. The in-memory fake follows the same exact-key semantics. No migration, per-row HTTP request, or per-row database read is added. Create/accept responses use one exact-pool read before the write, so a failed rating read cannot leave a newly committed action behind a failure response.
+- Opponent rows retain their handle/profile link and `dir=auto`, append the rounded rating using the existing profile rounding convention, isolate numeric text LTR, and give the rating a localized accessible name identifying its pool. Own rows keep their waiting/cancel presentation. Existing focus restoration, refresh, locale subscription, Play/Cancel names, and color/range details remain in place; no lobby redesign or production Arabic catalog is introduced.
+- Focused API and web regressions failed before implementation. Coverage distinguishes speeds within one variant and variants within one speed; covers null/missing creators, rated/casual, increment-aware classification and rejected client speed overrides, fresh ratings on refresh, a 100-row page with one batch read, pre-write read failures, OpenAPI nullability, Arabic runtime relocalization, numeric bidi isolation, ownership and focus. PostgreSQL verifies exact keys, duplicate suppression and deleted-user cascades; browser checks cover desktop and 390px/320px RTL without overflow or profile fan-out.
+- Falsification: deliberately swapping blitz and rapid in the compiled read composition failed the rating assertions; the compiled file was restored byte-identical. Historical Fable/Astra and Gemini planning documents remain unchanged. Independent final-head review and GitHub gates are separate evidence requirements, not implied by this implementation record.
+- Validation: full build and lint/TypeScript; all eight `check:*` guards; OpenAPI regeneration with zero byte drift; 19 hermetic workspaces, 3,770 tests (API 1,165; web 1,343), zero skips; scripts 312 and load harness 86; pgvector PostgreSQL 16 persistence 188/API 77 plus backup/restore drill 1; clean-installed gateway build/lint and 86 tests with PostgreSQL/Redis in Linux; real Nginx trusted-edge 8 and web-delivery 11; POSIX API 2 and load 1. The native Windows gateway SIGTERM assertion failed because process termination reports a signal rather than exit 0; its complete Linux rerun passed. An earlier backend Playwright run passed all 207 tests; refreshed final-source runs encountered startup timeouts and unexpected Chromium context closures. The last full run had 206 passed, one failed (existing auth-layout browser context startup), zero skips/retries; all new seek-rating browser cases passed. The required zero-failure browser gate and independent exact-head review remain incomplete; no push readiness is claimed.

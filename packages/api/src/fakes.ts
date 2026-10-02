@@ -324,6 +324,14 @@ export class InMemoryRatingsRepository implements RatingsRepository {
 
   constructor(private readonly clock: Clock = systemClock) {}
 
+  async getMany(pools: readonly Pick<RatingRow, 'userId' | 'variant' | 'speed'>[]): Promise<RatingRow[]> {
+    const keys = new Set(pools.map((p) => ratingKey(p.userId, p.variant, p.speed)));
+    return [...keys].flatMap((key) => {
+      const row = this.byKey.get(key);
+      return row ? [row] : [];
+    });
+  }
+
   async get(userId: string, variant: Variant, speed: Speed): Promise<RatingRow | null> {
     return this.byKey.get(ratingKey(userId, variant, speed)) ?? null;
   }

@@ -282,6 +282,8 @@ export interface RatingRow {
  */
 export interface RatingsRepository {
   get(userId: string, variant: Variant, speed: Speed): Promise<RatingRow | null>;
+  /** Exact requested player pools in one read; missing pools are omitted, never defaulted. */
+  getMany(pools: readonly Pick<RatingRow, 'userId' | 'variant' | 'speed'>[]): Promise<RatingRow[]>;
   /** Every pool the player has a rating in, by variant and then fastest speed first. */
   listForUser(userId: string): Promise<RatingRow[]>;
   leaderboard(variant: Variant, speed: Speed, limit: number): Promise<RatingRow[]>;

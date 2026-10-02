@@ -131,6 +131,8 @@ export interface SeekView {
    * without relying on an optional GraphQL read layer. Null for unresolvable/deleted users.
    */
   readonly creatorHandle: string | null;
+  /** Persisted rating in this seek's variant × speed pool; null when absent. */
+  readonly creatorRating: number | null;
   readonly variant: string;
   readonly speed: string;
   readonly timeControl: SeekRow['timeControl'];
@@ -147,15 +149,22 @@ export interface SeekView {
  * Presenter projecting a database SeekRow into a JSON-serializable SeekView.
  *
  * @param row - The seek persistence row to project
+ * @param creatorRating - Persisted creator pool row, or null when absent
  * @returns Serialized seek view for HTTP responses
  */
-export function seekView(row: SeekRow): SeekView {
+export function seekView(row: SeekRow, creatorRating: RatingRow | null): SeekView {
+  const speed = classifySpeed(row.timeControl);
   return {
     id: row.id,
     creatorId: row.creatorId,
     creatorHandle: row.creatorHandle ?? null,
+    creatorRating: row.creatorHandle != null
+      && creatorRating?.userId === row.creatorId
+      && creatorRating.variant === row.variant
+      && creatorRating.speed === speed
+      ? creatorRating.rating : null,
     variant: row.variant,
-    speed: classifySpeed(row.timeControl),
+    speed,
     timeControl: row.timeControl,
     rated: row.rated,
     color: row.color,
