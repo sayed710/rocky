@@ -140,3 +140,7 @@ jobs:
           tags: |
             ghcr.io/senasehs19-oss/gambit-web:${{ steps.version.outputs.version }}
             ghcr.io/senasehs19-oss/gambit-web:${{ steps.version.outputs.version }}-${{ steps.version.outputs.sha }}
+          # The released commit, for the /about page's build revision (ADR-0153). The same full SHA
+          # already suffixes the second tag above.
+          build-args: |
+            VITE_GIT_SHA=${{ steps.version.outputs.sha }}

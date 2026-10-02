@@ -262,6 +262,9 @@ jobs:
           load: true
           tags: gambit-gateway:ci
 
+      # `github.sha` is the commit actions/checkout just checked out (on a pull request, the merge
+      # ref), so the revision stamped for the /about page is the source this image was built from.
+      # ADR-0153.
       - name: Build web image
         uses: docker/build-push-action@v5
         with:
@@ -270,6 +273,8 @@ jobs:
           push: false
           load: true
           tags: gambit-web:ci
+          build-args: |
+            VITE_GIT_SHA=${{ github.sha }}
 
       # Both Dockerfiles already assert identity and library resolution in their runtime stage, so a
       # broken image cannot be built at all — including by `release.yml`, which never runs this job.
@@ -354,6 +359,22 @@ jobs:
               test -s /usr/share/nginx/html/index.html
             '
           echo "::endgroup::"
+
+      # The build argument above is only useful if it survives into the shipped bundle. A Dockerfile
+      # that dropped the ARG, or a Vite config that stopped substituting it, would still build and
+      # serve an /about page that honestly says "unavailable" — so the absence would never surface as
+      # a failure. Asserting the exact SHA is inside the image's JavaScript closes that. ADR-0153.
+      - name: Verify the web image embeds its source revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker run --rm -e EXPECTED_SHA gambit-web:ci sh -euc '
+            echo "expecting ${EXPECTED_SHA}"
+            grep -rlF "${EXPECTED_SHA}" /usr/share/nginx/html/assets/ > /tmp/stamped.txt
+            cat /tmp/stamped.txt
+            grep -q "\.js$" /tmp/stamped.txt
+          '
 
       # Reported rather than asserted: an image-size threshold in CI turns every legitimate
       # dependency change into a failure here, which is not what this job is for. The numbers are
