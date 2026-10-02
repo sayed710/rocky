@@ -85,6 +85,12 @@ test('two workers overlapping during a rollout finish the backlog once between t
     const events = new PostgresEventStore(pool);
     const backlog: string[] = [];
     for (let i = 0; i < 6; i++) backlog.push(await finishedGame(events));
+    const loads = new Map<string, number>();
+    const originalLoad = events.load.bind(events);
+    events.load = async (gameId) => {
+      loads.set(gameId, (loads.get(gameId) ?? 0) + 1);
+      return originalLoad(gameId);
+    };
     const errors: unknown[] = [];
     const [one, two] = await Promise.all([0, 1].map(() => startTrustAnalyzers({
       config, pool, eventStore: events, pubsub: new InMemoryPubSub(), logger: capturingLogger(errors), scanIntervalMs: 0,
@@ -94,6 +100,7 @@ test('two workers overlapping during a rollout finish the backlog once between t
     assert.deepEqual(await analyzed(pool), [...backlog].sort());
     assert.equal(await receipts(pool), backlog.length, 'one receipt per game, however many workers saw it');
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM bot_reports')).rows[0].n, backlog.length * 2, 'one report per player per game');
+    assert.deepEqual([...loads.values()], backlog.map(() => 1), 'leases prevent duplicate analysis, rather than merely duplicate report rows');
     assert.deepEqual(errors, []);
   });
 });

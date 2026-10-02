@@ -264,7 +264,6 @@ test('terminal inbox replays a missed ending, receipts survive restart and repli
       const { events } = Game.create({ gameId, variant: 'standard', players: { white: uuidv7(), black: uuidv7() }, timeControl: TC, rated: false, at: 1_000 });
       await store.append(gameId, -1, events);
       await commitEnding(store, gameId);
-      assert.equal((await first.pendingAfter('test-consumer', null, 100)).length, 1);
 
       const analysis = new BotAnalysisService(new EventStoreBotTimingSource(store), new PgBotBehaviorReportRepository(pool));
       let calls = 0;
@@ -273,13 +272,13 @@ test('terminal inbox replays a missed ending, receipts survive restart and repli
         assert.ok(await analysis.analyzeAndStore(endedGameId));
       };
       const makeWorker = (inbox: PgTerminalEventInbox) => new TerminalEventReconciler(
-        new InMemoryPubSub(), inbox, 'test-consumer', handler, { scanIntervalMs: 0 },
+        new InMemoryPubSub(), inbox, 'bot-analysis', handler, { scanIntervalMs: 0 },
       );
       const workers = [makeWorker(first), makeWorker(second)];
       await Promise.all(workers.map((worker) => worker.start()));
-      assert.ok(calls >= 1, 'a committed ending must be processed without pub/sub');
+      assert.equal(calls, 1, 'only one worker owns expensive work, without pub/sub');
       assert.equal((await pool.query('SELECT 1 FROM bot_reports WHERE game_id = $1', [gameId])).rowCount, 2);
-      assert.deepEqual(await first.pendingAfter('test-consumer', null, 100), []);
+      assert.equal(await first.claimAfter('bot-analysis', null), undefined);
       await handler(gameId);
       assert.equal((await pool.query('SELECT 1 FROM bot_reports WHERE game_id = $1', [gameId])).rowCount, 2, 'replay upserts, not duplicates');
       const beforeRestart = calls;
@@ -296,27 +295,31 @@ test('a failed terminal consumer remains pending and a restarted worker retries 
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);
     const store = new PostgresEventStore(pool);
-    const inbox = new PgTerminalEventInbox(pool);
+    let now = Date.now();
+    const inbox = new PgTerminalEventInbox(pool, () => now);
     try {
       const gameId = uuidv7();
       const { events } = Game.create({ gameId, variant: 'standard', players: { white: uuidv7(), black: uuidv7() }, timeControl: TC, rated: false, at: 1_000 });
       await store.append(gameId, -1, events);
       await commitEnding(store, gameId);
 
-      const failed = new TerminalEventReconciler(new InMemoryPubSub(), inbox, 'retry-test', async () => {
+      const failed = new TerminalEventReconciler(new InMemoryPubSub(), inbox, 'bot-analysis', async () => {
         throw new Error('injected downstream failure');
       }, { scanIntervalMs: 0, onError: () => undefined });
       await failed.start();
-      assert.equal((await inbox.pendingAfter('retry-test', null, 100)).length, 1);
+      assert.equal(await inbox.claimAfter('bot-analysis', null), undefined, 'failure is durably deferred');
       failed.stop();
 
       let recovered = 0;
-      const restarted = new TerminalEventReconciler(new InMemoryPubSub(), inbox, 'retry-test', async () => {
+      const restarted = new TerminalEventReconciler(new InMemoryPubSub(), inbox, 'bot-analysis', async () => {
         recovered += 1;
       }, { scanIntervalMs: 0 });
       await restarted.start();
+      assert.equal(recovered, 0, 'restart cannot bypass backoff');
+      now += 120_000;
+      await restarted.scan();
       assert.equal(recovered, 1);
-      assert.equal((await inbox.pendingAfter('retry-test', null, 100)).length, 0);
+      assert.equal(await inbox.claimAfter('bot-analysis', null), undefined);
       restarted.stop();
     } finally {
       await store.closePlayerLocks();
@@ -328,7 +331,8 @@ test('an unreadable committed ending stays pending without blocking a later endi
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, MIGRATIONS);
     const store = new PostgresEventStore(pool);
-    const inbox = new PgTerminalEventInbox(pool);
+    let now = Date.now();
+    const inbox = new PgTerminalEventInbox(pool, () => now);
     try {
       const firstId = '00000000-0000-7000-8000-000000000001';
       const secondId = '00000000-0000-7000-8000-000000000002';
@@ -343,18 +347,17 @@ test('an unreadable committed ending stays pending without blocking a later endi
       const seen: string[] = [];
       const errors: string[] = [];
       const worker = new TerminalEventReconciler(
-        new InMemoryPubSub(), inbox, 'decode-test', async (gameId) => { seen.push(gameId); },
+        new InMemoryPubSub(), inbox, 'bot-analysis', async (gameId) => { seen.push(gameId); },
         { scanIntervalMs: 0, onError: (gameId) => { errors.push(gameId); } },
       );
       await worker.start();
       assert.deepEqual(seen, [secondId]);
       assert.deepEqual(errors, [firstId]);
-      const pending = await inbox.pendingAfter('decode-test', null, 100);
-      assert.equal(pending.length, 1);
-      assert.ok('decodeError' in pending[0]!);
-      const reverse = await inbox.pendingBefore('decode-test', { gameId: secondId, seq: 1 }, 100);
-      assert.equal(reverse.length, 1);
-      assert.ok('decodeError' in reverse[0]!, 'reverse catch-up preserves an unreadable older row');
+      assert.equal(await inbox.claimAfter('bot-analysis', null), undefined);
+      now += 120_000;
+      const reverse = await inbox.claimBefore('bot-analysis', { gameId: secondId, seq: 1 });
+      assert.ok(reverse && 'decodeError' in reverse.work, 'due reverse catch-up preserves an unreadable older row');
+      assert.equal((await pool.query('SELECT 1 FROM terminal_event_receipts WHERE game_id = $1', [firstId])).rowCount, 0);
       worker.stop();
     } finally {
       await store.closePlayerLocks();

@@ -103,3 +103,10 @@ The review found one real gap, which predates this change and which the default 
 
 - There is no web UI for reporting or the queue yet. That is a later `packages/web` PR.
 - Follow-ups: account deletion must decide report retention; arena pairing near the deadline still uses each replica's clock (a rare orphaned arena game); a poison game is retried every scan with no backoff; Compose builds the gateway image twice.
+
+## Reliability follow-up — 2026-10-02
+
+[ADR-0155](0155-trust-terminal-retry-isolation.md) closes poison-game retry backoff
+with durable due scheduling and renewable, fenced per-consumer leases. It
+supersedes the original overlap/retry behavior described above for upgraded
+workers. The rollout must drain legacy workers, which do not enforce leases.

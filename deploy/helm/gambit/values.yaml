@@ -176,7 +176,8 @@ gateway:
 # the gateway image (which ships Stockfish), running the thin trust-worker
 # entrypoint — no WebSocket server, no game authority, no Service, no Ingress.
 # It works from the durable terminal-event inbox, so a restart or a rollout
-# overlap repeats at most the game in progress. The gateway refuses the
+# overlap uses fenced per-consumer leases (ADR-0155). Drain pre-0048 workers on
+# the first upgrade, since they do not participate in claims. The gateway refuses the
 # analyzer flags, so nothing else can run a copy. All three must be booleans;
 # turning both analyzers off is refused — set enabled: false instead.
 #

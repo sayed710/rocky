@@ -22,7 +22,7 @@ export function createEngineBackedAnalysisService(
 ): AntiCheatAnalysisService {
   return new AntiCheatAnalysisService(
     source,
-    (variant) => new EngineBackedEvaluator(provider, variant),
+    (variant, signal) => new EngineBackedEvaluator(provider, variant, signal),
     repository,
   );
 }

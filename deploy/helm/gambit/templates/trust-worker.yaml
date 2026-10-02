@@ -15,8 +15,9 @@ Notes:
 - Work comes from the durable terminal-event inbox (committed GameEnded rows
   plus per-consumer receipts), rescanned on start and periodically; Redis only
   wakes it early. So RollingUpdate with maxSurge 1 / maxUnavailable 0 is safe:
-  the brief overlap repeats at most an idempotent analysis, and no gap loses a
-  game either way.
+  upgraded workers use fenced per-consumer leases to prevent duplicate analysis;
+  expired leases recover work after a crash. Drain legacy workers when first
+  upgrading to migration 0048 (ADR-0155), since they do not participate in claims.
 - Not part of rollout.strategy: blue/green and canary apply to api and web.
 */}}
 {{- range $key := list "enabled" "botAnalysis" "antiCheatAnalysis" }}
@@ -58,7 +59,7 @@ spec:
       # wasted work, never correctness.
       terminationGracePeriodSeconds: 300
       initContainers:
-        {{- /* The API runs migrations in its init container; Ready means the schema exists. */}}
+        {{- /* Apply migration 0048 before upgrading workers; an older API's readiness alone cannot prove it exists. */}}
         - name: wait-for-api
           image: "{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
           imagePullPolicy: {{ .Values.images.api.pullPolicy | quote }}

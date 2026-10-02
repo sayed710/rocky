@@ -13,8 +13,10 @@ export class BotAnalysisService {
     this.service = new BotDetectionService(repository);
   }
 
-  async analyzeAndStore(gameId: string): Promise<GameBotReport | null> {
-    const g = await this.source.load(gameId);
+  async analyzeAndStore(gameId: string, signal?: AbortSignal): Promise<GameBotReport | null> {
+    signal?.throwIfAborted();
+    const g = await this.source.load(gameId, signal);
+    signal?.throwIfAborted();
     if (!g) return null;
     return this.service.analyzeAndStore({
       gameId,

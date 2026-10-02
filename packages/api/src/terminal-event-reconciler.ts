@@ -1,10 +1,17 @@
 import type { GameEndedEvent } from '@chess-platform/game';
-import type { TerminalEventInbox, TerminalEventWork } from '@chess-platform/persistence';
+import { TERMINAL_RENEW_MS, TERMINAL_RENEW_TIMEOUT_MS, type ClaimedTerminalEvent, type TerminalConsumer, type TerminalEventFailure, type TerminalEventInbox } from '@chess-platform/persistence';
 import { gamesEndedChannel, type PubSub } from '@chess-platform/realtime-gateway';
+
+export interface TerminalReconcilerErrorMetadata {
+  readonly consumer: TerminalConsumer;
+  readonly seq: number;
+  readonly errorClass: 'decode-error' | 'consumer-error' | 'acknowledgement-error' | 'retry-store-error' | 'lease-lost';
+  readonly retry?: TerminalEventFailure;
+}
 
 interface ReconcilerOptions {
   readonly scanIntervalMs?: number;
-  readonly onError?: (gameId: string, error: unknown) => void;
+  readonly onError?: (gameId: string, error: unknown, metadata?: TerminalReconcilerErrorMetadata) => void;
 }
 
 /** Replays committed endings until an idempotent consumer confirms each one. */
@@ -22,8 +29,8 @@ export class TerminalEventReconciler {
   constructor(
     private readonly pubsub: PubSub,
     private readonly inbox: TerminalEventInbox,
-    private readonly consumer: string,
-    private readonly consume: (gameId: string, ending: GameEndedEvent) => Promise<void>,
+    private readonly consumer: TerminalConsumer,
+    private readonly consume: (gameId: string, ending: GameEndedEvent, signal: AbortSignal) => Promise<void>,
     private readonly options: ReconcilerOptions = {},
   ) {}
 
@@ -56,58 +63,86 @@ export class TerminalEventReconciler {
 
   private async scanNow(): Promise<void> {
     await this.scanOlderWork();
-    for (let pages = 0; pages < 10; pages += 1) {
+    for (let items = 0; items < 1_000; items += 1) {
       if (this.stopping) return;
-      const page = await this.inbox.pendingAfter(this.consumer, this.cursor, 100);
-      if (page.length === 0) {
+      const claim = await this.inbox.claimAfter(this.consumer, this.cursor);
+      if (!claim) {
         this.cursor = null;
         this.reverseCursor = undefined;
         return;
       }
-      for (const work of page) {
-        if (this.stopping) return;
-        const gameId = 'stored' in work ? work.stored.gameId : work.gameId;
-        const seq = 'stored' in work ? work.stored.seq : work.seq;
-        this.cursor = { gameId, seq };
-        await this.processWork(work);
-      }
+      if (this.stopping) return; // A claim in flight when stopped expires without counting a failure.
+      this.cursor = { gameId: claim.lease.gameId, seq: claim.lease.seq };
+      await this.processWork(claim);
     }
   }
 
   private async scanOlderWork(): Promise<void> {
     if (!this.cursor) return;
     this.reverseCursor ??= this.cursor;
-    const page = await this.inbox.pendingBefore(this.consumer, this.reverseCursor, 100);
-    if (page.length === 0) {
-      this.reverseCursor = undefined;
-      return;
-    }
-    for (const work of page) {
+    for (let items = 0; items < 100; items += 1) {
       if (this.stopping) return;
-      this.reverseCursor = {
-        gameId: 'stored' in work ? work.stored.gameId : work.gameId,
-        seq: 'stored' in work ? work.stored.seq : work.seq,
-      };
-      await this.processWork(work);
+      const claim = await this.inbox.claimBefore(this.consumer, this.reverseCursor);
+      if (!claim) {
+        this.reverseCursor = undefined;
+        return;
+      }
+      if (this.stopping) return;
+      this.reverseCursor = { gameId: claim.lease.gameId, seq: claim.lease.seq };
+      await this.processWork(claim);
     }
   }
 
-  private async processWork(work: TerminalEventWork): Promise<void> {
-    const gameId = 'stored' in work ? work.stored.gameId : work.gameId;
+  private async processWork({ work, lease }: ClaimedTerminalEvent): Promise<void> {
+    const { gameId, seq } = lease;
+    const controller = new AbortController();
+    let closed = false;
+    let refresh: ReturnType<typeof setTimeout> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const loseLease = (): void => controller.abort(new Error('terminal lease ownership lost'));
+    const schedule = (): void => {
+      refresh = setTimeout(() => {
+        timeout = setTimeout(loseLease, TERMINAL_RENEW_TIMEOUT_MS);
+        void this.inbox.renew(lease).then((owned) => {
+          if (!owned) loseLease();
+        }, loseLease).finally(() => {
+          if (timeout) clearTimeout(timeout);
+          if (!closed && !controller.signal.aborted) schedule();
+        });
+      }, TERMINAL_RENEW_MS);
+      refresh.unref?.();
+    };
+    schedule();
+    let errorClass: TerminalReconcilerErrorMetadata['errorClass'] = 'decode-error';
     try {
-      if ('decodeError' in work) throw new Error(`cannot decode committed ending: ${work.decodeError}`);
+      if ('decodeError' in work) throw new Error('cannot decode committed ending');
       const stored = work.stored;
       if (stored.event.type !== 'GameEnded') throw new Error('terminal inbox returned a non-terminal event');
-      await this.consume(stored.gameId, stored.event);
-      await this.inbox.acknowledge(this.consumer, stored.gameId, stored.seq);
+      errorClass = 'consumer-error';
+      await this.consume(stored.gameId, stored.event, controller.signal);
+      controller.signal.throwIfAborted();
+      errorClass = 'acknowledgement-error';
+      if (!await this.inbox.acknowledge(lease)) throw new Error('terminal lease ownership lost before acknowledgement');
     } catch (error) {
-      this.report(gameId, error);
+      let retry: TerminalEventFailure | undefined;
+      // Lease loss is not evidence of a consumer failure. Expiry recovers work without an increment.
+      if (!controller.signal.aborted) {
+        try { retry = await this.inbox.fail(lease); }
+        catch (schedulingError) { this.report(gameId, schedulingError, { consumer: this.consumer, seq, errorClass: 'retry-store-error' }); }
+      }
+      this.report(gameId, error, { consumer: this.consumer, seq, errorClass: controller.signal.aborted ? 'lease-lost' : errorClass, ...(retry ? { retry } : {}) });
+    } finally {
+      closed = true;
+      if (refresh) clearTimeout(refresh);
+      if (timeout) clearTimeout(timeout);
+      // Do not wait on an unavailable DB: the consumer has settled and the fencing token protects
+      // any late renewal. The promise already has both rejection handlers attached.
     }
   }
 
   /**
    * Stop waking and scanning, and resolve once the game being processed, if any, has finished.
-   * An interrupted game was never acknowledged, so the next start processes it again.
+   * A killed process leaves an unacknowledged lease, recoverable after its expiry.
    */
   async stop(): Promise<void> {
     this.stopping = true;
@@ -118,12 +153,12 @@ export class TerminalEventReconciler {
     await this.scanInFlight?.catch(() => undefined);
   }
 
-  private report(gameId: string, error: unknown): void {
+  private report(gameId: string, error: unknown, metadata?: TerminalReconcilerErrorMetadata): void {
     try {
-      if (this.options.onError) this.options.onError(gameId, error);
-      else console.error(`TerminalEventReconciler(${this.consumer}): ${gameId}`, error);
+      if (this.options.onError) this.options.onError(gameId, error, metadata);
+      else console.error('Terminal reconciliation failed', { consumer: this.consumer, gameId, ...metadata });
     } catch {
-      console.error(`TerminalEventReconciler(${this.consumer}): error hook failed for ${gameId}`, error);
+      console.error('Terminal reconciliation error hook failed', { consumer: this.consumer, gameId });
     }
   }
 }

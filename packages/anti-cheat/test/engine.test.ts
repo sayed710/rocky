@@ -8,6 +8,22 @@ import { MATE_ENCODING } from '../src/analyzer';
 /** The standard opening position, spelled once so the replay tests below say what they start from. */
 const STANDARD_START = Position.initial('standard').fen();
 
+test('a lease cancellation reaches both engine searches and prevents subsequent analysis', async () => {
+  const provider = new FakeAnalysisProvider();
+  const controller = new AbortController();
+  const signals: Array<AbortSignal | undefined> = [];
+  provider.analyze = async (request) => {
+    signals.push(request.signal);
+    return [{ multipv: 1, evaluation: { type: 'cp', value: 20 }, principalVariation: ['d2d4'], depth: 18, nodes: 1, nps: 1, timeMs: 1 }];
+  };
+  const evaluator = new EngineBackedEvaluator(provider, 'standard', controller.signal);
+  await evaluator.evaluate(STANDARD_START, 'e2e4', 18);
+  assert.deepEqual(signals, [controller.signal, controller.signal], 'MultiPV and played-move searches share ownership cancellation');
+  controller.abort();
+  await assert.rejects(evaluator.evaluate(STANDARD_START, 'e2e4', 18), { name: 'AbortError' });
+  assert.equal(signals.length, 2);
+});
+
 class FakeAnalysisProvider implements AnalysisProvider {
   public stubs: Record<string, EngineResult[]> = {};
 

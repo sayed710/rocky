@@ -19,7 +19,7 @@ export interface FinishedGame {
 }
 
 export interface FinishedGameSource {
-  load(gameId: string): Promise<FinishedGame | null>;
+  load(gameId: string, signal?: AbortSignal): Promise<FinishedGame | null>;
 }
 
 export class EventStoreGameSource implements FinishedGameSource {
@@ -33,8 +33,10 @@ export class EventStoreGameSource implements FinishedGameSource {
     private readonly logger: Logger = new NullLogger(),
   ) {}
 
-  async load(gameId: string): Promise<FinishedGame | null> {
+  async load(gameId: string, signal?: AbortSignal): Promise<FinishedGame | null> {
+    signal?.throwIfAborted();
     const stored = await this.events.load(gameId);
+    signal?.throwIfAborted();
     if (stored.length === 0) return null;
     const events = stored.map((e) => e.event);
     // Read from the creation event rather than the folded state: the aggregate keeps the *current*
@@ -59,14 +61,11 @@ export class EventStoreGameSource implements FinishedGameSource {
     let state;
     try {
       state = Game.fromEvents(events).snapshot();
-    } catch (err) {
+    } catch {
       this.logger.error('anti-cheat: stored game could not be replayed', {
         gameId,
-        variant: created.variant,
-        // The message only — `GameError` reports which invariant failed and the ids involved, and a
-        // stack here would be this file's own. No board state and no player ids: this is an operator
-        // signal, not a dump of the row.
-        reason: (err as Error).message,
+        // Replay exceptions can embed stored FENs and other arbitrary payload values.
+        errorClass: 'game-replay-error',
       });
       return null;
     }
