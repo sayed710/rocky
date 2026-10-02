@@ -67,6 +67,7 @@ test('an engine-capable deployment with the opening feature off keeps the sectio
     client: app.api,
     token: 'token',
     restorePromise: Promise.resolve(null),
+    i18n: app.i18n,
   });
   try {
     await new Promise((resolve) => { setTimeout(resolve, 0); });

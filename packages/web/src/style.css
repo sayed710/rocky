@@ -2105,3 +2105,9 @@ a.button.primary:active {
   overflow-wrap: anywhere;
   text-align: end;
 }
+
+/* Directional isolation for intrinsically LTR chess content (SAN, UCI, FEN, clocks, ratings) */
+.bidi-ltr {
+  direction: ltr;
+  unicode-bidi: isolate;
+}

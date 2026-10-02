@@ -22,30 +22,41 @@
  */
 
 import type { MistakeMoveOutcome, MistakePredictionResponse } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
+import type { MessageKey } from '../i18n/catalog/index.js';
 
-export const ASSESS_MESSAGES = {
-  idle: 'Assess the last move played.',
-  noMove: 'No move to assess yet.',
-  signedOut: 'Sign in to assess moves.',
-  running: 'Assessing…',
-  rateLimited: 'Too many assessments. Try again shortly.',
-  unavailable: 'Move assessment is unavailable right now.',
-  activeGame: 'Move assessment is unavailable while you are playing a live human game.',
-  rejected: 'This position cannot be assessed.',
-  failed: 'Could not assess the move.',
-} as const;
+export const ASSESS_MESSAGE_KEYS = {
+  idle: 'ai.assess.idle',
+  noMove: 'ai.assess.noMove',
+  signedOut: 'ai.assess.signedOut',
+  running: 'ai.assess.running',
+  rateLimited: 'ai.assess.rateLimited',
+  unavailable: 'ai.assess.unavailable',
+  activeGame: 'ai.assess.activeGame',
+  rejected: 'ai.assess.rejected',
+  failed: 'ai.assess.failed',
+} as const satisfies Record<string, MessageKey>;
+
+export type AssessMessageKey = keyof typeof ASSESS_MESSAGE_KEYS;
+
+export function assessMessage(key: AssessMessageKey, i18n: I18nManager): string {
+  return i18n.t(ASSESS_MESSAGE_KEYS[key]);
+}
 
 /** The word the player reads. Capitalised because it is a label, not a sentence. */
-export function classificationLabel(classification: MistakePredictionResponse['classification']): string {
+export function classificationLabel(
+  classification: MistakePredictionResponse['classification'],
+  i18n: I18nManager,
+): string {
   switch (classification) {
     case 'ok':
-      return 'Good move';
+      return i18n.t('ai.assess.goodMove');
     case 'inaccuracy':
-      return 'Inaccuracy';
+      return i18n.t('ai.assess.inaccuracy');
     case 'mistake':
-      return 'Mistake';
+      return i18n.t('ai.assess.mistake');
     case 'blunder':
-      return 'Blunder';
+      return i18n.t('ai.assess.blunder');
     default:
       // An unknown classification from a newer server is shown as itself rather than swallowed: the
       // server said something, and inventing a friendlier word for it would be a guess.
@@ -88,18 +99,24 @@ export function lossLabel(centipawnLoss: number | null): string {
  * move — a row saying "the engine prefers the move you just played" is noise, and its absence is
  * itself the answer.
  */
-export function renderVerdict(container: HTMLElement, result: MistakePredictionResponse): void {
+export function renderVerdict(
+  container: HTMLElement,
+  result: MistakePredictionResponse,
+  i18n: I18nManager,
+): void {
   container.innerHTML = '';
   const doc = container.ownerDocument ?? document;
 
   container.appendChild(
-    row(doc, classificationLabel(result.classification), lossLabel(result.centipawnLoss), 'assess-verdict'),
+    row(doc, classificationLabel(result.classification, i18n), lossLabel(result.centipawnLoss), 'assess-verdict'),
   );
   container.appendChild(row(doc, result.move, describeMoveOutcome(result.after)));
 
   const playedTheBest = result.bestMove !== null && result.bestMove === result.move;
   if (!playedTheBest && result.bestMove !== null) {
-    container.appendChild(row(doc, `Engine prefers ${result.bestMove}`, result.before.evalLabel));
+    container.appendChild(
+      row(doc, i18n.t('ai.assess.enginePrefers', { move: result.bestMove }), result.before.evalLabel),
+    );
   }
 }
 

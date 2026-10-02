@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -12,134 +12,134 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <a id="skip-board" class="skip-link" href="#board" hidden>Skip to board</a>
+    <a id="skip-board" class="skip-link" href="#board" hidden data-i18n="shell.skipBoard">Skip to board</a>
     <header class="topbar">
       <h1 class="brand">
         <a href="/" data-route="lobby" class="brand-link">
           <svg class="brand-rook" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
             <path fill="currentColor" d="M4 2h4v3h2V2h4v3h2V2h4v5l-2 2v7h1v4H5v-4h1V9L4 7V2zm3 16h10v-8.5l1.5-1.5V5h-1V4h-2v2h-4V4h-2v2H7V5H6v2l1.5 1.5V18z"/>
           </svg>
-          <span class="brand-name">Rookzen</span>
+          <span class="brand-name" data-i18n="shell.brand">Rookzen</span>
         </a>
       </h1>
       <nav class="nav">
-        <a href="/" data-route="lobby">Play</a>
-        <a href="/courses" data-route="courses">Learn</a>
-        <a href="/profile" data-route="profile">Profile</a>
-        <a href="/tournaments" data-route="tournaments">Tournaments</a>
-        <a href="/leaderboard" data-route="leaderboard">Leaderboard</a>
-        <a href="/teams" data-route="teams">Teams</a>
-        <a href="/messages" data-route="messages">Messages</a>
+        <a data-i18n="nav.play" href="/" data-route="lobby">Play</a>
+        <a data-i18n="nav.learn" href="/courses" data-route="courses">Learn</a>
+        <a data-i18n="nav.profile" href="/profile" data-route="profile">Profile</a>
+        <a data-i18n="nav.tournaments" href="/tournaments" data-route="tournaments">Tournaments</a>
+        <a data-i18n="nav.leaderboard" href="/leaderboard" data-route="leaderboard">Leaderboard</a>
+        <a data-i18n="nav.teams" href="/teams" data-route="teams">Teams</a>
+        <a data-i18n="nav.messages" href="/messages" data-route="messages">Messages</a>
         <!-- Ships hidden and is revealed only when GET /v1/capabilities reports search: true.
              SEARCH_ENABLED=0 makes every mode of /v1/search answer 503, and a search box that
              cannot search is an entry point into a disabled feature (ADR-0132 §5). -->
         <form id="search-form" class="nav-search" role="search" action="/search" method="get" hidden>
-          <label class="sr-only" for="search-input">Search</label>
-          <input id="search-input" name="q" type="search" placeholder="Search" autocomplete="off" />
+          <label class="sr-only" for="search-input" data-i18n="nav.search">Search</label>
+          <input id="search-input" name="q" type="search" placeholder="Search" autocomplete="off" data-i18n-placeholder="nav.searchPlaceholder" />
         </form>
       </nav>
       <span id="auth-status" role="status" aria-live="polite">Not signed in</span>
-      <button id="auth-logout" type="button" aria-label="Sign out" hidden>Sign out</button>
-      <button id="theme-toggle" type="button" aria-label="Toggle light/dark theme">🌙</button>
-      <button id="flip" type="button" aria-label="Flip board" hidden>Flip</button>
+      <button id="auth-logout" type="button" aria-label="Sign out" data-i18n-aria-label="shell.authStatus.signOut" data-i18n="shell.authStatus.signOut" hidden>Sign out</button>
+      <button id="theme-toggle" type="button" aria-label="Toggle light/dark theme" data-i18n-aria-label="shell.themeToggle">🌙</button>
+      <button id="flip" type="button" aria-label="Flip board" data-i18n-aria-label="shell.flipBoardAria" data-i18n="shell.flipBoard" hidden>Flip</button>
     </header>
     <main id="app-main">
     <section class="game" id="game-main">
-      <section id="board" aria-label="Chess board"></section>
-      <aside class="sidebar" aria-label="Game info">
+      <section id="board" aria-label="Chess board" data-i18n-aria-label="game.board.aria"></section>
+      <aside class="sidebar" aria-label="Game info" data-i18n-aria-label="game.sidebar.aria">
         <p id="status" role="status" aria-live="polite" tabindex="-1">Your move.</p>
 
-        <section id="game-metadata" class="metadata-panel" aria-label="Game information">
+        <section id="game-metadata" class="metadata-panel" aria-label="Game information" data-i18n-aria-label="game.metadata.info">
           <div id="meta-live-status" aria-live="polite" class="sr-only"></div>
           <div class="metadata-row">
-            <span class="metadata-label">Connection</span>
+            <span class="metadata-label" data-i18n="game.metadata.connection">Connection</span>
             <span id="meta-connection" class="metadata-value">Offline</span>
           </div>
           <div class="metadata-row">
-            <span class="metadata-label">Role</span>
+            <span class="metadata-label" data-i18n="game.metadata.role">Role</span>
             <span id="meta-role" class="metadata-value">Waiting…</span>
           </div>
           <div class="metadata-row">
-            <span id="meta-white-name" class="metadata-label">White</span>
+            <span id="meta-white-name" class="metadata-label" data-i18n="game.metadata.white">White</span>
             <span id="meta-white" class="metadata-value">
               <span class="presence-dot offline" aria-hidden="true"></span>
               <span class="presence-text">Offline</span>
             </span>
           </div>
           <div class="metadata-row">
-            <span id="meta-black-name" class="metadata-label">Black</span>
+            <span id="meta-black-name" class="metadata-label" data-i18n="game.metadata.black">Black</span>
             <span id="meta-black" class="metadata-value">
               <span class="presence-dot offline" aria-hidden="true"></span>
               <span class="presence-text">Offline</span>
             </span>
           </div>
           <div class="metadata-row">
-            <span class="metadata-label">Spectators</span>
+            <span class="metadata-label" data-i18n="game.metadata.spectators">Spectators</span>
             <span id="meta-spectators" class="metadata-value">0</span>
           </div>
           <div class="metadata-row">
-            <span class="metadata-label">Variant</span>
+            <span class="metadata-label" data-i18n="game.metadata.variant">Variant</span>
             <span id="meta-variant" class="metadata-value">-</span>
           </div>
           <div class="metadata-row">
-            <span class="metadata-label">Time Control</span>
+            <span class="metadata-label" data-i18n="game.metadata.timeControl">Time Control</span>
             <span id="meta-time" class="metadata-value">-</span>
           </div>
         </section>
 
-        <div id="clock" class="clock" aria-label="Clocks">
+        <div id="clock" class="clock" aria-label="Clocks" data-i18n-aria-label="game.clocks.aria">
           <div id="clock-white" class="clock-side" data-active="true">
-            <span class="clock-label">White</span>
+            <span class="clock-label" data-i18n="game.metadata.white">White</span>
             <span class="clock-time">10:00</span>
           </div>
           <div id="clock-black" class="clock-side">
-            <span class="clock-label">Black</span>
+            <span class="clock-label" data-i18n="game.metadata.black">Black</span>
             <span class="clock-time">10:00</span>
           </div>
         </div>
-        <div id="game-actions" class="game-actions" role="group" aria-label="Game actions" hidden>
+        <div id="game-actions" class="game-actions" role="group" aria-label="Game actions" data-i18n-aria-label="game.actions.aria" hidden>
           <div id="action-error" class="error" role="alert" aria-live="polite" hidden></div>
-          <button id="action-offer-draw" type="button" class="button">Offer draw</button>
-          <button id="action-claim-flag" type="button" class="button">Claim timeout</button>
+          <button id="action-offer-draw" type="button" class="button" data-i18n="game.actions.offerDraw">Offer draw</button>
+          <button id="action-claim-flag" type="button" class="button" data-i18n="game.actions.claimTimeout">Claim timeout</button>
           <div class="action-row">
-            <button id="action-resign" type="button" class="button destructive">Resign</button>
+            <button id="action-resign" type="button" class="button destructive" data-i18n="game.actions.resign">Resign</button>
             <div id="confirm-resign" class="confirm-inline" hidden>
-              <span>Sure?</span>
-              <button id="confirm-resign-yes" type="button" class="button destructive" aria-label="Confirm resignation">Yes</button>
-              <button id="confirm-resign-no" type="button" class="button" aria-label="Cancel resignation">No</button>
+              <span data-i18n="game.actions.sure">Sure?</span>
+              <button id="confirm-resign-yes" type="button" class="button destructive" aria-label="Confirm resignation" data-i18n-aria-label="game.actions.confirmResign" data-i18n="game.actions.yes">Yes</button>
+              <button id="confirm-resign-no" type="button" class="button" aria-label="Cancel resignation" data-i18n-aria-label="game.actions.cancelResign" data-i18n="game.actions.no">No</button>
             </div>
           </div>
           <div class="action-row">
-            <button id="action-abort" type="button" class="button destructive">Abort</button>
+            <button id="action-abort" type="button" class="button destructive" data-i18n="game.actions.abort">Abort</button>
             <div id="confirm-abort" class="confirm-inline" hidden>
-              <span>Sure?</span>
-              <button id="confirm-abort-yes" type="button" class="button destructive" aria-label="Confirm abort">Yes</button>
-              <button id="confirm-abort-no" type="button" class="button" aria-label="Cancel abort">No</button>
+              <span data-i18n="game.actions.sure">Sure?</span>
+              <button id="confirm-abort-yes" type="button" class="button destructive" aria-label="Confirm abort" data-i18n-aria-label="game.actions.confirmAbort" data-i18n="game.actions.yes">Yes</button>
+              <button id="confirm-abort-no" type="button" class="button" aria-label="Cancel abort" data-i18n-aria-label="game.actions.cancelAbort" data-i18n="game.actions.no">No</button>
             </div>
           </div>
           <div id="draw-offer-received" class="draw-offer-banner" role="alert" hidden>
-            <span>Opponent offered a draw</span>
-            <button id="action-accept-draw" type="button" class="button primary">Accept</button>
-            <button id="action-decline-draw" type="button" class="button">Decline</button>
+            <span data-i18n="game.actions.drawOffered">Opponent offered a draw</span>
+            <button id="action-accept-draw" type="button" class="button primary" data-i18n="game.actions.acceptDraw">Accept</button>
+            <button id="action-decline-draw" type="button" class="button" data-i18n="game.actions.declineDraw">Decline</button>
           </div>
         </div>
         <section id="game-review" class="analysis-panel game-review" aria-labelledby="game-review-heading" hidden>
-          <h2 id="game-review-heading" class="analysis-title">Game review</h2>
+          <h2 id="game-review-heading" class="analysis-title" data-i18n="game.review.title">Game review</h2>
           <p id="game-review-note" class="count" role="status" aria-live="polite">Available when the game ends.</p>
-          <button id="game-review-run" type="button" class="button primary">Review my game</button>
+          <button id="game-review-run" type="button" class="button primary" data-i18n="game.review.run">Review my game</button>
           <div id="game-review-error" class="error" role="alert" hidden></div>
           <div id="game-review-summary" class="panel-list game-review-summary" hidden></div>
           <div id="game-review-moves" class="panel-list" aria-busy="false"></div>
         </section>
         <section id="analysis" class="analysis-panel" aria-labelledby="analysis-heading" hidden>
-          <h2 id="analysis-heading" class="analysis-title">Engine</h2>
+          <h2 id="analysis-heading" class="analysis-title" data-i18n="game.analysis.title">Engine</h2>
           <div class="analysis-controls">
-            <button id="analysis-run" type="button" class="button">Analyse</button>
-            <label class="sr-only" for="analysis-lines">Number of lines</label>
+            <button id="analysis-run" type="button" class="button" data-i18n="game.analysis.run">Analyse</button>
+            <label class="sr-only" for="analysis-lines" data-i18n="game.analysis.linesAria">Number of lines</label>
             <select id="analysis-lines" class="cg-select analysis-lines-select">
-              <option value="1">1 line</option>
-              <option value="3" selected>3 lines</option>
-              <option value="5">5 lines</option>
+              <option value="1" data-i18n="game.analysis.oneLine">1 line</option>
+              <option value="3" selected data-i18n="game.analysis.threeLines">3 lines</option>
+              <option value="5" data-i18n="game.analysis.fiveLines">5 lines</option>
             </select>
           </div>
           <p id="analysis-note" class="count" role="status" aria-live="polite"></p>
@@ -148,7 +148,7 @@
           <p id="analysis-reached" class="count" hidden></p>
           <p id="analysis-limits" class="count" hidden></p>
           <div id="puzzle" class="puzzle-block" hidden>
-            <button id="puzzle-run" type="button" class="button">Find tactic</button>
+            <button id="puzzle-run" type="button" class="button" data-i18n="game.puzzle.run">Find tactic</button>
             <p id="puzzle-note" class="count" role="status" aria-live="polite"></p>
             <div id="puzzle-error" class="error" role="alert" hidden></div>
             <div id="puzzle-result" class="puzzle-result" aria-busy="false" hidden>
@@ -156,7 +156,7 @@
             </div>
           </div>
           <div id="explain" class="explain-block" hidden>
-            <button id="explain-run" type="button" class="button">Explain last move</button>
+            <button id="explain-run" type="button" class="button" data-i18n="game.explain.run">Explain last move</button>
             <p id="explain-note" class="count" role="status" aria-live="polite"></p>
             <div id="explain-error" class="error" role="alert" hidden></div>
             <div id="explain-result" class="explain-result" aria-busy="false" hidden>
@@ -168,7 +168,7 @@
             </div>
           </div>
           <div id="assess" class="assess-block" hidden>
-            <button id="assess-run" type="button" class="button">Assess last move</button>
+            <button id="assess-run" type="button" class="button" data-i18n="game.assess.run">Assess last move</button>
             <p id="assess-note" class="count" role="status" aria-live="polite"></p>
             <div id="assess-error" class="error" role="alert" hidden></div>
             <!-- No prose element, and none is missing: this feature makes no provider call, so every
@@ -185,8 +185,8 @@
              (ADR-0127), so nesting it there would both mislabel it and hide it on exactly the
              deployments it was built to serve. -->
         <section id="opening" class="analysis-panel" aria-labelledby="opening-heading" hidden>
-          <h2 id="opening-heading" class="analysis-title">Opening</h2>
-          <button id="opening-run" type="button" class="button">Identify opening</button>
+          <h2 id="opening-heading" class="analysis-title" data-i18n="game.opening.title">Opening</h2>
+          <button id="opening-run" type="button" class="button" data-i18n="game.opening.run">Identify opening</button>
           <p id="opening-note" class="count" role="status" aria-live="polite"></p>
           <div id="opening-error" class="error" role="alert" hidden></div>
           <div id="opening-result" class="opening-result" aria-busy="false" hidden>
@@ -194,8 +194,8 @@
           </div>
         </section>
         <section id="coach" class="analysis-panel" aria-labelledby="coach-heading" hidden>
-          <h2 id="coach-heading" class="analysis-title">Coach</h2>
-          <button id="coach-run" type="button" class="button">Ask coach</button>
+          <h2 id="coach-heading" class="analysis-title" data-i18n="game.coach.title">Coach</h2>
+          <button id="coach-run" type="button" class="button" data-i18n="game.coach.run">Ask coach</button>
           <p id="coach-note" class="count" role="status" aria-live="polite"></p>
           <div id="coach-error" class="error" role="alert" hidden></div>
           <div id="coach-result" class="coach-result" aria-busy="false" hidden>
@@ -204,56 +204,56 @@
         </section>
       </aside>
     </section>
-    <section id="lobby" class="lobby" aria-label="Lobby" hidden>
+    <section id="lobby" class="lobby" aria-label="Lobby" data-i18n-aria-label="lobby.aria" hidden>
       <div class="lobby-hero">
-        <h2 class="lobby-title">Play Chess</h2>
-        <p class="lobby-subtitle">Create a game, challenge the computer, or accept an open seek.</p>
+        <h2 class="lobby-title" data-i18n="lobby.title">Play Chess</h2>
+        <p class="lobby-subtitle" data-i18n="lobby.subtitle">Create a game, challenge the computer, or accept an open seek.</p>
       </div>
       <div id="create-game" class="create-game"></div>
       <div id="play-bot-mount" class="play-bot"></div>
-      <h2>Open seeks</h2>
+      <h2 data-i18n="lobby.openSeeks">Open seeks</h2>
       <div id="seek-list" class="seek-list" role="list"></div>
       <p id="lobby-error" class="error" role="alert"></p>
     </section>
     <section id="auth" class="auth" aria-labelledby="auth-heading">
       <h2 id="auth-heading">Sign in to play</h2>
-      <p class="auth-context">Sign in or register to create seeks, challenge bots, and track your rating.</p>
+      <p class="auth-context" data-i18n="auth.context">Sign in or register to create seeks, challenge bots, and track your rating.</p>
       <!-- `auth-submit` is type="submit" so Enter in either field signs in, the way every other
            form in this app already behaves. `auth-register` stays type="button": it is the second
            action on a form that has one default. -->
       <form id="auth-form" class="auth-form" novalidate>
         <div class="auth-field">
-          <label for="auth-handle">Handle</label>
+          <label for="auth-handle" data-i18n="auth.handle">Handle</label>
           <input id="auth-handle" type="text" autocomplete="username" required />
         </div>
         <div class="auth-field">
-          <label for="auth-password">Password</label>
+          <label for="auth-password" data-i18n="auth.password">Password</label>
           <input id="auth-password" type="password" autocomplete="current-password" required />
         </div>
         <!-- `auth-field-full` spans the sign-in form's two columns: an address is the longest
              value on the form. It is required to register and ignored when signing in, so it
              carries no `required` attribute; the register action checks it. -->
         <div class="auth-field auth-field-full">
-          <label for="auth-email">Email (required to register)</label>
+          <label for="auth-email" data-i18n="auth.emailLabel">Email (required to register)</label>
           <input id="auth-email" type="email" autocomplete="email" maxlength="320" />
         </div>
         <!-- Shown only after the server answers `step_up_required`: many recent failed sign-ins
              for this handle mean the password also needs the code emailed to the account. -->
         <div id="auth-code-row" class="auth-field auth-field-full" hidden>
-          <label for="auth-code">Sign-in code</label>
+          <label for="auth-code" data-i18n="auth.codeLabel">Sign-in code</label>
           <input id="auth-code" type="text" inputmode="numeric" autocomplete="one-time-code"
                  pattern="[0-9]{8}" maxlength="8" />
         </div>
         <div class="auth-actions">
-          <button id="auth-submit" type="submit">Sign in</button>
-          <button id="auth-register" type="button">Register</button>
-          <button id="auth-passkey" type="button">Sign in with passkey</button>
+          <button id="auth-submit" type="submit" data-i18n="auth.signIn">Sign in</button>
+          <button id="auth-register" type="button" data-i18n="auth.register">Register</button>
+          <button id="auth-passkey" type="button" data-i18n="auth.passkey">Sign in with passkey</button>
         </div>
       </form>
-      <p class="auth-meta"><a id="auth-forgot-password" href="/password-reset" data-route="password-reset" class="auth-forgot-link">Forgot password?</a></p>
+      <p class="auth-meta"><a id="auth-forgot-password" href="/password-reset" data-route="password-reset" class="auth-forgot-link" data-i18n="auth.forgotPassword">Forgot password?</a></p>
       <!-- Session-less re-send of the verification link, for an owner who lost it. It uses the
            handle (or an email typed in the handle field) and answers the same whatever happens. -->
-      <p class="auth-meta"><button id="auth-resend-verification" type="button">Resend verification email</button></p>
+      <p class="auth-meta"><button id="auth-resend-verification" type="button" data-i18n="auth.resendVerification">Resend verification email</button></p>
       <p id="auth-error" class="error" role="alert"></p>
     </section>
     <section id="password-reset" class="password-reset auth" aria-labelledby="password-reset-heading" hidden>
@@ -261,98 +261,98 @@
       <div id="password-reset-request-view">
         <form id="password-reset-request-form" class="auth-form" novalidate>
           <div class="auth-field">
-            <label for="password-reset-request-input">Handle or email</label>
+            <label for="password-reset-request-input" data-i18n="passwordRecovery.inputLabel">Handle or email</label>
             <input id="password-reset-request-input" type="text" autocomplete="username email" required />
           </div>
           <div class="auth-actions">
-            <button id="password-reset-request-submit" type="submit">Send reset link</button>
+            <button id="password-reset-request-submit" type="submit" data-i18n="passwordRecovery.submit">Send reset link</button>
           </div>
         </form>
       </div>
       <div id="password-reset-confirm-view" hidden>
         <form id="password-reset-confirm-form" class="auth-form" novalidate>
           <div class="auth-field">
-            <label for="password-reset-confirm-password">New password</label>
+            <label for="password-reset-confirm-password" data-i18n="passwordRecovery.newPassword">New password</label>
             <input id="password-reset-confirm-password" type="password" autocomplete="new-password" required minlength="8" maxlength="1024" />
           </div>
           <div class="auth-field">
-            <label for="password-reset-confirm-password-confirm">Confirm new password</label>
+            <label for="password-reset-confirm-password-confirm" data-i18n="passwordRecovery.confirmPassword">Confirm new password</label>
             <input id="password-reset-confirm-password-confirm" type="password" autocomplete="new-password" required minlength="8" maxlength="1024" />
           </div>
           <div class="auth-actions">
-            <button id="password-reset-confirm-submit" type="submit">Reset password</button>
+            <button id="password-reset-confirm-submit" type="submit" data-i18n="passwordRecovery.resetSubmit">Reset password</button>
           </div>
         </form>
       </div>
       <p id="password-reset-status" class="social-note" role="status" aria-live="polite"></p>
       <p id="password-reset-error" class="error" role="alert" aria-live="polite"></p>
-      <p class="auth-meta"><a id="password-reset-back-link" href="/" data-route="lobby">Back to sign in</a></p>
+      <p class="auth-meta"><a id="password-reset-back-link" href="/" data-route="lobby" data-i18n="passwordRecovery.backToSignIn">Back to sign in</a></p>
     </section>
     <section id="email-verify" class="auth" aria-labelledby="email-verify-heading" hidden>
       <h2 id="email-verify-heading">Email verification</h2>
       <p id="email-verify-status" class="social-note" role="status" aria-live="polite"></p>
       <p id="email-verify-error" class="error" role="alert" aria-live="polite"></p>
       <div class="auth-actions">
-        <button id="email-verify-retry" type="button" hidden>Try again</button>
+        <button id="email-verify-retry" type="button" hidden data-i18n="emailVerification.retry">Try again</button>
       </div>
-      <p class="auth-meta"><a id="email-verify-back-link" href="/" data-route="lobby">Continue to the lobby</a></p>
+      <p class="auth-meta"><a id="email-verify-back-link" href="/" data-route="lobby" data-i18n="emailVerification.continueLobby">Continue to the lobby</a></p>
     </section>
     <section id="not-found" class="not-found" aria-labelledby="not-found-heading" hidden>
       <div class="not-found-card">
-        <h2 id="not-found-heading">Page not found</h2>
-        <p class="not-found-desc">The requested page or position does not exist or has been moved.</p>
-        <a href="/" data-route="lobby" class="button primary not-found-action">Return to Play</a>
+        <h2 id="not-found-heading" data-i18n="shell.notFound.title">Page not found</h2>
+        <p class="not-found-desc" data-i18n="shell.notFound.description">The requested page or position does not exist or has been moved.</p>
+        <a href="/" data-route="lobby" class="button primary not-found-action" data-i18n="shell.notFound.returnPlay">Return to Play</a>
       </div>
     </section>
-    <section id="profile" class="profile" aria-label="Profile" hidden>
+    <section id="profile" class="profile" aria-label="Profile" data-i18n-aria-label="profile.aria" hidden>
       <h2 id="profile-handle">Profile</h2>
-      <div id="profile-ratings" class="ratings" aria-label="Ratings"></div>
+      <div id="profile-ratings" class="ratings" aria-label="Ratings" data-i18n-aria-label="profile.ratingsAria"></div>
       <div id="social-actions" class="social-actions"></div>
 
       <!-- Hidden until a load succeeds: a deployment without ACHIEVEMENTS_ENABLED answers 503 on
            every profile, and an empty heading on all of them is worse than no section. -->
       <div id="achievements" hidden>
-        <h3>Achievements <span id="achievements-count" class="count"></span></h3>
-        <div id="achievements-list" class="panel-list" aria-label="Achievements"></div>
+        <h3><span data-i18n="profile.achievements">Achievements</span> <span id="achievements-count" class="count"></span></h3>
+        <div id="achievements-list" class="panel-list" aria-label="Achievements" data-i18n-aria-label="profile.achievementsAria"></div>
         <p id="achievements-error" class="error" role="alert"></p>
       </div>
 
-      <h3>Followers <span id="social-follower-count" class="count"></span></h3>
-      <div id="social-followers" class="panel-list" aria-label="Followers"></div>
+      <h3><span data-i18n="profile.followers">Followers</span> <span id="social-follower-count" class="count"></span></h3>
+      <div id="social-followers" class="panel-list" aria-label="Followers" data-i18n-aria-label="profile.followersAria"></div>
 
-      <h3>Following <span id="social-following-count" class="count"></span></h3>
-      <div id="social-following" class="panel-list" aria-label="Following"></div>
+      <h3><span data-i18n="profile.following">Following</span> <span id="social-following-count" class="count"></span></h3>
+      <div id="social-following" class="panel-list" aria-label="Following" data-i18n-aria-label="profile.followingAria"></div>
 
       <div id="social-self" hidden>
-        <h3>Friend requests received</h3>
-        <div id="social-incoming" class="panel-list" aria-label="Friend requests received"></div>
+        <h3 data-i18n="profile.friendRequestsReceived">Friend requests received</h3>
+        <div id="social-incoming" class="panel-list" aria-label="Friend requests received" data-i18n-aria-label="profile.incomingRequestsAria"></div>
 
-        <h3>Friend requests sent</h3>
-        <div id="social-outgoing" class="panel-list" aria-label="Friend requests sent"></div>
+        <h3 data-i18n="profile.friendRequestsSent">Friend requests sent</h3>
+        <div id="social-outgoing" class="panel-list" aria-label="Friend requests sent" data-i18n-aria-label="profile.outgoingRequestsAria"></div>
 
-        <h3>Friends <span id="social-friend-count" class="count"></span></h3>
-        <div id="social-friends" class="panel-list" aria-label="Friends"></div>
+        <h3><span data-i18n="profile.friends">Friends</span> <span id="social-friend-count" class="count"></span></h3>
+        <div id="social-friends" class="panel-list" aria-label="Friends" data-i18n-aria-label="profile.friendsAria"></div>
 
-        <h3>Blocked</h3>
-        <div id="social-blocked" class="panel-list" aria-label="Blocked players"></div>
+        <h3 data-i18n="profile.blocked">Blocked</h3>
+        <div id="social-blocked" class="panel-list" aria-label="Blocked players" data-i18n-aria-label="profile.blockedPlayersAria"></div>
 
       </div>
 
       <div id="passkeys-self" hidden>
-        <h3>Passkeys <span id="passkeys-count" class="count"></span></h3>
+        <h3><span data-i18n="profile.passkeys">Passkeys</span> <span id="passkeys-count" class="count"></span></h3>
         <div class="passkeys-actions">
-          <button id="passkey-register" type="button" class="button">Add passkey</button>
+          <button id="passkey-register" type="button" class="button" data-i18n="profile.addPasskey">Add passkey</button>
         </div>
-        <div id="passkeys-list" class="panel-list" aria-label="Passkeys"></div>
+        <div id="passkeys-list" class="panel-list" aria-label="Passkeys" data-i18n-aria-label="profile.passkeysAria"></div>
         <p id="passkeys-note" class="social-note" role="status" aria-live="polite"></p>
         <p id="passkeys-error" class="error" role="alert"></p>
 
-        <h3>Active sessions <span id="sessions-count" class="count"></span></h3>
+        <h3><span data-i18n="profile.activeSessions">Active sessions</span> <span id="sessions-count" class="count"></span></h3>
         <!-- States the one thing a user cannot otherwise know: revocation ends the session's
              ability to renew, but an access token already issued stays valid until it expires.
              Promising an instant cutoff here would be a promise the token design does not keep. -->
-        <p class="social-note">Revoking a session signs that browser out when its current access token expires.</p>
-        <div id="sessions-list" class="panel-list" aria-label="Active sessions"></div>
+        <p class="social-note" data-i18n="profile.sessionNote">Revoking a session signs that browser out when its current access token expires.</p>
+        <div id="sessions-list" class="panel-list" aria-label="Active sessions" data-i18n-aria-label="profile.sessionsAria"></div>
         <p id="sessions-note" class="social-note" role="status" aria-live="polite"></p>
         <p id="sessions-error" class="error" role="alert"></p>
       </div>
@@ -360,113 +360,113 @@
       <p id="social-note" class="social-note"></p>
       <p id="social-error" class="error" role="alert"></p>
 
-      <h3>Recent games</h3>
-      <div id="profile-games" class="game-list" aria-label="Recent games"></div>
+      <h3 data-i18n="profile.recentGames">Recent games</h3>
+      <div id="profile-games" class="game-list" aria-label="Recent games" data-i18n-aria-label="profile.recentGamesAria"></div>
       <p id="profile-error" class="error" role="alert"></p>
     </section>
     <section id="leaderboard" class="leaderboard" aria-labelledby="leaderboard-heading" hidden>
       <header class="section-header">
-        <h2 id="leaderboard-heading">Leaderboard</h2>
+        <h2 id="leaderboard-heading" data-i18n="leaderboard.title">Leaderboard</h2>
         <div class="leaderboard-controls">
           <div class="leaderboard-control">
-            <label for="leaderboard-variant-select">Variant</label>
+            <label for="leaderboard-variant-select" data-i18n="leaderboard.variant">Variant</label>
             <select id="leaderboard-variant-select" class="cg-select"></select>
           </div>
           <div class="leaderboard-control">
-            <label for="leaderboard-speed-select">Time control</label>
+            <label for="leaderboard-speed-select" data-i18n="leaderboard.speed">Time control</label>
             <select id="leaderboard-speed-select" class="cg-select"></select>
           </div>
         </div>
       </header>
-      <div id="leaderboard-loading" role="status" aria-live="polite" class="count" hidden>Loading…</div>
-      <div id="leaderboard-results" class="panel-list" role="list" aria-label="Leaderboard standings"></div>
+      <div id="leaderboard-loading" role="status" aria-live="polite" class="count" data-i18n="leaderboard.loading" hidden>Loading…</div>
+      <div id="leaderboard-results" class="panel-list" role="list" aria-label="Leaderboard standings" data-i18n-aria-label="leaderboard.resultsAria"></div>
       <p id="leaderboard-error" class="error" role="alert"></p>
     </section>
-    <section id="tournaments" class="tournaments" aria-label="Tournaments" hidden>
-      <h2>Tournaments</h2>
-      <div id="tournament-list" class="panel-list" aria-label="Tournaments list"></div>
+    <section id="tournaments" class="tournaments" aria-label="Tournaments" data-i18n-aria-label="tournaments.aria" hidden>
+      <h2 data-i18n="tournaments.title">Tournaments</h2>
+      <div id="tournament-list" class="panel-list" aria-label="Tournaments list" data-i18n-aria-label="tournaments.listAria"></div>
       <p id="tournaments-error" class="error" role="alert"></p>
     </section>
-    <section id="tournament" class="tournament" aria-label="Tournament" hidden>
+    <section id="tournament" class="tournament" aria-label="Tournament" data-i18n-aria-label="tournaments.detailAria" hidden>
       <h2 id="tournament-name">Tournament</h2>
-      <div id="tournament-meta" class="tournament-meta" aria-label="Tournament details"></div>
-      <h3>Standings</h3>
-      <div id="tournament-standings" class="panel-list" aria-label="Standings"></div>
-      <h3>Live games</h3>
-      <div id="tournament-live" class="panel-list" aria-label="Live games"></div>
+      <div id="tournament-meta" class="tournament-meta" aria-label="Tournament details" data-i18n-aria-label="tournaments.detailsAria"></div>
+      <h3 data-i18n="tournaments.standings">Standings</h3>
+      <div id="tournament-standings" class="panel-list" aria-label="Standings" data-i18n-aria-label="tournaments.standingsAria"></div>
+      <h3 data-i18n="tournaments.liveGames">Live games</h3>
+      <div id="tournament-live" class="panel-list" aria-label="Live games" data-i18n-aria-label="tournaments.liveGamesAria"></div>
       <div id="tournament-commentary-panel" class="tournament-commentary" hidden>
-        <h3>Commentary</h3>
+        <h3 data-i18n="tournaments.commentary">Commentary</h3>
         <div id="tournament-commentary-controls" class="panel-row"></div>
         <p id="tournament-commentary-status" class="commentary-status" role="status"></p>
-        <div id="tournament-commentary-result" class="panel-list" aria-label="Commentary" hidden></div>
+        <div id="tournament-commentary-result" class="panel-list" aria-label="Commentary" data-i18n-aria-label="tournaments.commentaryAria" hidden></div>
       </div>
       <p id="tournament-error" class="error" role="alert"></p>
     </section>
-    <section id="search" class="search" aria-label="Search" hidden>
-      <h2>Search</h2>
-      <div id="search-mode" class="cg-segmented" role="radiogroup" aria-label="Search mode"></div>
-      <div id="search-results" class="panel-list" aria-label="Search results"></div>
+    <section id="search" class="search" aria-label="Search" data-i18n-aria-label="search.aria" hidden>
+      <h2 data-i18n="search.title">Search</h2>
+      <div id="search-mode" class="cg-segmented" role="radiogroup" aria-label="Search mode" data-i18n-aria-label="search.modeAria"></div>
+      <div id="search-results" class="panel-list" aria-label="Search results" data-i18n-aria-label="search.resultsAria"></div>
       <p id="search-error" class="error" role="alert"></p>
     </section>
-    <section id="teams" class="teams" aria-label="Teams" hidden>
-      <h2>Teams</h2>
+    <section id="teams" class="teams" aria-label="Teams" data-i18n-aria-label="community.teams.aria" hidden>
+      <h2 data-i18n="community.teams.title">Teams</h2>
       <form id="team-search-form" class="team-search" role="search">
-        <label class="sr-only" for="team-search-input">Search teams</label>
-        <input id="team-search-input" name="search" type="search" placeholder="Search teams" autocomplete="off" />
-        <button id="team-search-submit" type="submit">Search</button>
+        <label class="sr-only" for="team-search-input" data-i18n="community.teams.search">Search teams</label>
+        <input id="team-search-input" name="search" type="search" placeholder="Search teams" autocomplete="off" data-i18n-placeholder="community.teams.searchPlaceholder" />
+        <button id="team-search-submit" type="submit" data-i18n="common.search">Search</button>
       </form>
-      <div id="team-list" class="panel-list" aria-label="Teams"></div>
+      <div id="team-list" class="panel-list" aria-label="Teams" data-i18n-aria-label="community.teams.listAria"></div>
       <p id="teams-error" class="error" role="alert"></p>
     </section>
-    <section id="team" class="team" aria-label="Team" hidden>
+    <section id="team" class="team" aria-label="Team" data-i18n-aria-label="community.teams.detailAria" hidden>
       <h2 id="team-name">Team</h2>
       <p id="team-description"></p>
       <p id="team-action-note"></p>
       <div id="team-actions" class="team-actions"></div>
       <!-- href is set from the loaded team's slug; it is inert until then. -->
-      <p><a id="team-forum-link" data-route="forum">Team forum</a></p>
-      <h3 id="join-requests-heading" hidden>Join requests</h3>
-      <div id="join-requests" class="panel-list" aria-label="Pending join requests" hidden></div>
-      <h3>Members</h3>
-      <div id="team-members" class="panel-list" aria-label="Team members"></div>
+      <p><a id="team-forum-link" data-route="forum" data-i18n="community.teams.teamForum">Team forum</a></p>
+      <h3 id="join-requests-heading" data-i18n="community.teams.joinRequests" hidden>Join requests</h3>
+      <div id="join-requests" class="panel-list" aria-label="Pending join requests" data-i18n-aria-label="community.teams.joinRequestsAria" hidden></div>
+      <h3 data-i18n="community.teams.members">Members</h3>
+      <div id="team-members" class="panel-list" aria-label="Team members" data-i18n-aria-label="community.teams.membersAria"></div>
       <p id="team-error" class="error" role="alert"></p>
     </section>
-    <section id="forum" class="forum" aria-label="Team forum" hidden>
+    <section id="forum" class="forum" aria-label="Team forum" data-i18n-aria-label="community.forum.aria" hidden>
       <h2 id="forum-title">Forum</h2>
       <form id="thread-form" class="thread-form" hidden>
-        <label class="sr-only" for="thread-title-input">Thread title</label>
-        <input id="thread-title-input" name="title" type="text" placeholder="Thread title" autocomplete="off" required />
-        <label class="sr-only" for="thread-body-input">First post</label>
-        <input id="thread-body-input" name="body" type="text" placeholder="Say something" autocomplete="off" required />
-        <button id="thread-submit" type="submit">Start thread</button>
+        <label class="sr-only" for="thread-title-input" data-i18n="community.forum.threadTitle">Thread title</label>
+        <input id="thread-title-input" name="title" type="text" placeholder="Thread title" autocomplete="off" required data-i18n-placeholder="community.forum.threadTitle" />
+        <label class="sr-only" for="thread-body-input" data-i18n="community.forum.firstPost">First post</label>
+        <input id="thread-body-input" name="body" type="text" placeholder="Say something" autocomplete="off" required data-i18n-placeholder="community.forum.saySomething" />
+        <button id="thread-submit" type="submit" data-i18n="community.forum.startThread">Start thread</button>
       </form>
       <p id="forum-note"></p>
-      <div id="thread-list" class="panel-list" aria-label="Forum threads"></div>
+      <div id="thread-list" class="panel-list" aria-label="Forum threads" data-i18n-aria-label="community.forum.threadListAria"></div>
       <p id="forum-error" class="error" role="alert"></p>
     </section>
-    <section id="thread" class="thread" aria-label="Forum thread" hidden>
+    <section id="thread" class="thread" aria-label="Forum thread" data-i18n-aria-label="community.forum.threadDetailAria" hidden>
       <h2 id="thread-title">Thread</h2>
-      <div id="thread-posts" class="message-thread" aria-label="Thread posts"></div>
+      <div id="thread-posts" class="message-thread" aria-label="Thread posts" data-i18n-aria-label="community.forum.postsAria"></div>
       <form id="reply-form" class="composer-form" hidden>
-        <label class="sr-only" for="reply-input">Reply</label>
-        <input id="reply-input" name="body" type="text" placeholder="Write a reply…" autocomplete="off" required />
-        <button id="reply-submit" type="submit">Reply</button>
+        <label class="sr-only" for="reply-input" data-i18n="community.forum.reply">Reply</label>
+        <input id="reply-input" name="body" type="text" placeholder="Write a reply…" autocomplete="off" required data-i18n-placeholder="community.forum.writeReply" />
+        <button id="reply-submit" type="submit" data-i18n="community.forum.reply">Reply</button>
       </form>
       <p id="thread-note"></p>
       <p id="thread-error" class="error" role="alert"></p>
     </section>
-    <section id="messages" class="messages" aria-label="Messages" hidden>
-      <h2>Messages</h2>
-      <div id="messages-inbox" class="panel-list" aria-label="Inbox"></div>
+    <section id="messages" class="messages" aria-label="Messages" data-i18n-aria-label="community.messages.aria" hidden>
+      <h2 data-i18n="community.messages.title">Messages</h2>
+      <div id="messages-inbox" class="panel-list" aria-label="Inbox" data-i18n-aria-label="community.messages.inboxAria"></div>
       <p id="messages-error" class="error" role="alert"></p>
     </section>
-    <section id="conversation" class="conversation" aria-label="Conversation" hidden>
+    <section id="conversation" class="conversation" aria-label="Conversation" data-i18n-aria-label="community.messages.conversationAria" hidden>
       <h2 id="conversation-participant">Conversation</h2>
-      <div id="conversation-thread" class="message-thread" aria-label="Message thread"></div>
+      <div id="conversation-thread" class="message-thread" aria-label="Message thread" data-i18n-aria-label="community.messages.threadAria"></div>
       <form id="conversation-composer" class="composer-form">
-        <label for="composer-input" class="sr-only">Message</label>
-        <input id="composer-input" type="text" name="body" placeholder="Write a message…" autocomplete="off" required />
-        <button id="composer-submit" type="submit">Send</button>
+        <label for="composer-input" class="sr-only" data-i18n="community.messages.composerLabel">Message</label>
+        <input id="composer-input" type="text" name="body" placeholder="Write a message…" autocomplete="off" required data-i18n-placeholder="community.messages.writeMessage" />
+        <button id="composer-submit" type="submit" data-i18n="community.messages.send">Send</button>
       </form>
       <p id="conversation-error" class="error" role="alert"></p>
     </section>
@@ -474,100 +474,100 @@
          every sidebar section is about the position already on the board, and that board belongs to
          the live game. The board here is read-only and the move is typed, mirroring a lesson's move
          step — building a second interactive board is a larger piece of work than this needs. -->
-    <section id="endgames" class="endgames" aria-label="Endgame trainer" hidden>
-      <nav class="subnav" aria-label="Learn navigation">
-        <a href="/courses" data-route="courses" class="subnav-link">Courses</a>
-        <a href="/endgames" data-route="endgames" class="subnav-link" aria-current="page">Endgame Trainer</a>
-        <a href="/studies" data-route="studies" class="subnav-link">Studies</a>
+    <section id="endgames" class="endgames" aria-label="Endgame trainer" data-i18n-aria-label="learning.endgames.aria" hidden>
+      <nav class="subnav" aria-label="Learn navigation" data-i18n-aria-label="learning.navAria">
+        <a href="/courses" data-route="courses" class="subnav-link" data-i18n="learning.navCourses">Courses</a>
+        <a href="/endgames" data-route="endgames" class="subnav-link" aria-current="page" data-i18n="learning.navEndgames">Endgame Trainer</a>
+        <a href="/studies" data-route="studies" class="subnav-link" data-i18n="learning.navStudies">Studies</a>
       </nav>
-      <h2>Endgame trainer</h2>
+      <h2 data-i18n="learning.endgames.title">Endgame trainer</h2>
       <div class="endgame-actions">
-        <button id="endgame-next" type="button" class="button">New position</button>
+        <button id="endgame-next" type="button" class="button" data-i18n="learning.endgames.newPosition">New position</button>
       </div>
       <p id="endgame-note" class="count" role="status" aria-live="polite"></p>
       <div id="endgame-error" class="error" role="alert" hidden></div>
       <div class="endgame-layout">
-        <div class="endgame-board-wrapper" role="region" aria-label="Training position (read-only)">
+        <div class="endgame-board-wrapper" role="region" aria-label="Training position (read-only)" data-i18n-aria-label="learning.endgames.positionReadOnlyAria">
           <div id="endgame-board" class="endgame-board"></div>
         </div>
         <div class="endgame-side">
-          <div id="endgame-position-rows" class="panel-list" aria-label="Training position"></div>
+          <div id="endgame-position-rows" class="panel-list" aria-label="Training position" data-i18n-aria-label="learning.endgames.positionAria"></div>
           <form id="endgame-form" class="step-form">
-            <label class="sr-only" for="endgame-move">Your move, in UCI (for example e2e4)</label>
+            <label class="sr-only" for="endgame-move" data-i18n="learning.endgames.placeholder">Your move, in UCI (for example e2e4)</label>
             <input id="endgame-move" class="step-san-input" type="text" autocomplete="off"
                    maxlength="5" placeholder="e2e4" />
-            <button id="endgame-submit" type="submit" class="button">Play move</button>
+            <button id="endgame-submit" type="submit" class="button" data-i18n="learning.endgames.playMove">Play move</button>
           </form>
           <div id="endgame-result" class="endgame-result" aria-busy="false" hidden>
-            <div id="endgame-rows" class="panel-list" aria-label="Verdict"></div>
+            <div id="endgame-rows" class="panel-list" aria-label="Verdict" data-i18n-aria-label="learning.endgames.verdictAria"></div>
           </div>
         </div>
       </div>
     </section>
-    <section id="courses" class="courses" aria-label="Courses" hidden>
-      <nav class="subnav" aria-label="Learn navigation">
-        <a href="/courses" data-route="courses" class="subnav-link" aria-current="page">Courses</a>
-        <a href="/endgames" data-route="endgames" class="subnav-link">Endgame Trainer</a>
-        <a href="/studies" data-route="studies" class="subnav-link">Studies</a>
+    <section id="courses" class="courses" aria-label="Courses" data-i18n-aria-label="learning.courses.aria" hidden>
+      <nav class="subnav" aria-label="Learn navigation" data-i18n-aria-label="learning.navAria">
+        <a href="/courses" data-route="courses" class="subnav-link" aria-current="page" data-i18n="learning.navCourses">Courses</a>
+        <a href="/endgames" data-route="endgames" class="subnav-link" data-i18n="learning.navEndgames">Endgame Trainer</a>
+        <a href="/studies" data-route="studies" class="subnav-link" data-i18n="learning.navStudies">Studies</a>
       </nav>
-      <h2>Courses</h2>
-      <div id="course-list" class="panel-list" aria-label="Courses list"></div>
+      <h2 data-i18n="learning.courses.title">Courses</h2>
+      <div id="course-list" class="panel-list" aria-label="Courses list" data-i18n-aria-label="learning.courses.listAria"></div>
       <p id="courses-error" class="error" role="alert"></p>
     </section>
-    <section id="course" class="course" aria-label="Course" hidden>
+    <section id="course" class="course" aria-label="Course" data-i18n-aria-label="learning.courses.detailAria" hidden>
       <h2 id="course-title">Course</h2>
       <p id="course-description"></p>
       <p id="course-progress" class="count"></p>
-      <h3>Lessons</h3>
-      <div id="lesson-list" class="panel-list" aria-label="Lessons list"></div>
+      <h3 data-i18n="learning.courses.lessons">Lessons</h3>
+      <div id="lesson-list" class="panel-list" aria-label="Lessons list" data-i18n-aria-label="learning.courses.lessonListAria"></div>
       <p id="course-error" class="error" role="alert"></p>
     </section>
-    <section id="lesson" class="lesson" aria-label="Lesson" hidden>
+    <section id="lesson" class="lesson" aria-label="Lesson" data-i18n-aria-label="learning.courses.lessonAria" hidden>
       <h2 id="lesson-title">Lesson</h2>
       <p id="lesson-progress" class="count"></p>
-      <div id="step-list" class="step-list" aria-label="Steps"></div>
+      <div id="step-list" class="step-list" aria-label="Steps" data-i18n-aria-label="learning.lessons.stepsAria"></div>
       <p id="lesson-error" class="error" role="alert"></p>
     </section>
-    <section id="studies" class="studies" aria-label="Studies" hidden>
-      <nav class="subnav" aria-label="Learn navigation">
-        <a href="/courses" data-route="courses" class="subnav-link">Courses</a>
-        <a href="/endgames" data-route="endgames" class="subnav-link">Endgame Trainer</a>
-        <a href="/studies" data-route="studies" class="subnav-link" aria-current="page">Studies</a>
+    <section id="studies" class="studies" aria-label="Studies" data-i18n-aria-label="learning.studies.aria" hidden>
+      <nav class="subnav" aria-label="Learn navigation" data-i18n-aria-label="learning.navAria">
+        <a href="/courses" data-route="courses" class="subnav-link" data-i18n="learning.navCourses">Courses</a>
+        <a href="/endgames" data-route="endgames" class="subnav-link" data-i18n="learning.navEndgames">Endgame Trainer</a>
+        <a href="/studies" data-route="studies" class="subnav-link" aria-current="page" data-i18n="learning.navStudies">Studies</a>
       </nav>
-      <h2>Studies</h2>
+      <h2 data-i18n="learning.studies.title">Studies</h2>
       <form id="study-search-form" class="study-search" role="search">
-        <label class="sr-only" for="study-search-input">Search studies</label>
-        <input id="study-search-input" name="search" type="search" placeholder="Search studies" autocomplete="off" />
-        <button id="study-search-submit" type="submit">Search</button>
+        <label class="sr-only" for="study-search-input" data-i18n="learning.studies.search">Search studies</label>
+        <input id="study-search-input" name="search" type="search" placeholder="Search studies" autocomplete="off" data-i18n-placeholder="learning.studies.searchPlaceholder" />
+        <button id="study-search-submit" type="submit" data-i18n="common.search">Search</button>
       </form>
-      <div id="study-list" class="panel-list" aria-label="Studies list"></div>
+      <div id="study-list" class="panel-list" aria-label="Studies list" data-i18n-aria-label="learning.studies.listAria"></div>
       <p id="studies-error" class="error" role="alert"></p>
     </section>
-    <section id="study" class="study" aria-label="Study" hidden>
+    <section id="study" class="study" aria-label="Study" data-i18n-aria-label="learning.studies.detailAria" hidden>
       <h2 id="study-name">Study</h2>
       <p id="study-description"></p>
       <p id="study-visibility" class="count"></p>
-      <p><a id="study-export-link" class="button" download>Download PGN</a></p>
-      <h3>Chapters</h3>
-      <div id="study-chapters" class="panel-list" aria-label="Chapters"></div>
-      <h3>Collaborators</h3>
-      <div id="study-collaborators" class="panel-list" aria-label="Collaborators"></div>
+      <p><a id="study-export-link" class="button" download data-i18n="learning.studies.downloadPgn">Download PGN</a></p>
+      <h3 data-i18n="learning.studies.chapters">Chapters</h3>
+      <div id="study-chapters" class="panel-list" aria-label="Chapters" data-i18n-aria-label="learning.studies.chaptersAria"></div>
+      <h3 data-i18n="learning.studies.collaborators">Collaborators</h3>
+      <div id="study-collaborators" class="panel-list" aria-label="Collaborators" data-i18n-aria-label="learning.studies.collaboratorsAria"></div>
       <p id="study-error" class="error" role="alert"></p>
     </section>
-    <section id="study-chapter" class="study-chapter" aria-label="Study chapter" hidden>
+    <section id="study-chapter" class="study-chapter" aria-label="Study chapter" data-i18n-aria-label="learning.studies.chapterDetailAria" hidden>
       <div class="study-chapter-header">
-        <h2><a id="chapter-study-link" data-route="study">Study</a> &rsaquo; <span id="chapter-name">Chapter</span></h2>
-        <p><a id="chapter-export-link" class="button" download>Download PGN</a></p>
+        <h2><a id="chapter-study-link" data-route="study" data-i18n="learning.studies.study">Study</a> &rsaquo; <span id="chapter-name">Chapter</span></h2>
+        <p><a id="chapter-export-link" class="button" download data-i18n="learning.studies.downloadPgn">Download PGN</a></p>
       </div>
       <div class="study-chapter-layout">
         <section id="chapter-board-container" class="chapter-board-container">
-          <div id="chapter-board" aria-label="Chess board position (read-only)"></div>
+          <div id="chapter-board" aria-label="Chess board position (read-only)" data-i18n-aria-label="learning.studies.boardReadOnlyAria"></div>
         </section>
-        <aside class="chapter-sidebar" aria-label="Chapter move notation and navigation">
-          <h3>Notation</h3>
+        <aside class="chapter-sidebar" aria-label="Chapter move notation and navigation" data-i18n-aria-label="learning.studies.chapterSidebarAria">
+          <h3 data-i18n="learning.studies.notation">Notation</h3>
           <div id="chapter-tree" class="notation-tree"></div>
-          <h3>Chapters</h3>
-          <div id="chapter-list-nav" class="panel-list" aria-label="Chapter list"></div>
+          <h3 data-i18n="learning.studies.chapters">Chapters</h3>
+          <div id="chapter-list-nav" class="panel-list" aria-label="Chapter list" data-i18n-aria-label="learning.studies.chapterListAria"></div>
         </aside>
       </div>
       <p id="study-chapter-error" class="error" role="alert"></p>

@@ -33,6 +33,7 @@ export interface TournamentCallbacks {
 export interface TournamentControllerOptions {
   readonly client: GambitClient;
   readonly callbacks: TournamentCallbacks;
+  readonly onDispose?: (() => void) | undefined;
   /** Live polling interval in milliseconds (default 5000ms). */
   readonly pollIntervalMs?: number;
   /** Injected timer (for tests). */
@@ -43,6 +44,7 @@ export interface TournamentControllerOptions {
 export class TournamentController {
   private readonly client: GambitClient;
   private readonly callbacks: TournamentCallbacks;
+  private readonly onDispose: (() => void) | undefined;
   private readonly pollIntervalMs: number;
   private readonly _setInterval: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
   private readonly _clearInterval: (id: ReturnType<typeof setInterval>) => void;
@@ -55,6 +57,7 @@ export class TournamentController {
   constructor(opts: TournamentControllerOptions) {
     this.client = opts.client;
     this.callbacks = opts.callbacks;
+    this.onDispose = opts.onDispose;
     this.pollIntervalMs = opts.pollIntervalMs ?? 5000;
     this._setInterval = opts.setInterval ?? ((fn, ms) => setInterval(fn, ms));
     this._clearInterval = opts.clearInterval ?? ((id) => clearInterval(id));
@@ -175,8 +178,10 @@ export class TournamentController {
 
   /** Permanently dispose the controller. */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
     this.stopLive();
+    this.onDispose?.();
   }
 
   private isCurrent(generation: number): boolean {

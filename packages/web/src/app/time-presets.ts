@@ -5,7 +5,8 @@
  * canonical ladder and call {@link presetToTimeControl}, keeping the wire
  * mapping and speed labels unit-tested in one place.
  */
-import type { TimeControl } from '../api/models.js';
+import { classifySpeed } from '@chess-platform/game';
+import type { Speed, TimeControl } from '../api/models.js';
 
 export interface TimePreset {
   /** Stable id and display label, e.g. `5+3`. */
@@ -63,8 +64,6 @@ export const CUSTOM_LIMITS = {
 /** Preselected preset — a rapid game most players reach for. */
 export const DEFAULT_PRESET_ID = '10+0';
 
-export type SpeedLabel = 'Bullet' | 'Blitz' | 'Rapid' | 'Classical' | 'Correspondence';
-
 /**
  * Build a `TimeControl` from a minutes/increment pair. `sudden_death` when there
  * is no increment, otherwise `increment`. Values are clamped to whole
@@ -81,12 +80,14 @@ export function presetToTimeControl(minutes: number, increment: number): TimeCon
   };
 }
 
+export type CustomTimeErrorCode = 'minutes_range' | 'increment_range';
+
 export type CustomTimeValidation =
   | { readonly ok: true; readonly timeControl: TimeControl }
   | {
       readonly ok: false;
       readonly field: 'minutes' | 'increment';
-      readonly message: string;
+      readonly code: CustomTimeErrorCode;
     };
 
 /** Validate and map the custom inputs before any seek request can be created. */
@@ -100,7 +101,7 @@ export function validateCustomTime(minutes: number, increment: number): CustomTi
     return {
       ok: false,
       field: 'minutes',
-      message: 'Minutes must be between 0.5 and 180 in 0.5-minute steps.',
+      code: 'minutes_range',
     };
   }
 
@@ -113,7 +114,7 @@ export function validateCustomTime(minutes: number, increment: number): CustomTi
     return {
       ok: false,
       field: 'increment',
-      message: 'Increment must be a whole number between 0 and 60 seconds.',
+      code: 'increment_range',
     };
   }
 
@@ -121,18 +122,10 @@ export function validateCustomTime(minutes: number, increment: number): CustomTi
 }
 
 /**
- * Speed bucket for display only — mirrors the server's estimator
- * (`initial + 40 × increment`, in seconds, with `unlimited` short-circuiting
- * to the correspondence bucket exactly as the server's `classifySpeed` does).
- * The authoritative `speed` on a created seek still comes from the server.
+ * Speed bucket technical token — delegates to the authoritative domain classifier
+ * `classifySpeed` in `@chess-platform/game`.
+ * Presentation surfaces localize this token via `getSpeedLabel(speed, i18n)`.
  */
-export function estimateSpeed(tc: TimeControl): SpeedLabel {
-  // Before the arithmetic: an untimed control carries zero durations, which
-  // would otherwise estimate into the shortest bucket rather than the longest.
-  if (tc.kind === 'unlimited') return 'Correspondence';
-  const estimateSeconds = (tc.initialMs + 40 * tc.incrementMs) / 1000;
-  if (estimateSeconds < 180) return 'Bullet';
-  if (estimateSeconds < 480) return 'Blitz';
-  if (estimateSeconds < 1500) return 'Rapid';
-  return 'Classical';
+export function estimateSpeed(tc: TimeControl): Speed {
+  return classifySpeed(tc);
 }

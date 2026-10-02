@@ -15,16 +15,18 @@ import { el } from './dom.js';
 import { renderEmpty } from './render-helpers.js';
 import { progressLabel } from './achievements-helpers.js';
 import type { PlayerAchievement } from '../api/models.js';
+import type { I18nManager } from '../i18n/manager.js';
 
 export function renderAchievements(
   container: HTMLElement,
   achievements: readonly PlayerAchievement[],
+  i18n: I18nManager,
 ): void {
   container.replaceChildren();
   if (achievements.length === 0) {
     renderEmpty(container, {
-      title: 'No achievements available',
-      body: 'Achievements will appear here once the catalogue is published.',
+      title: i18n.t('profile.achievements.emptyTitle'),
+      body: i18n.t('profile.achievements.emptyBody'),
       inline: true,
     });
     return;
@@ -38,14 +40,14 @@ export function renderAchievements(
       doc,
       'span',
       { class: 'row-main' },
-      el(doc, 'span', {}, achievement.name),
-      el(doc, 'span', { class: 'count' }, achievement.description),
+      el(doc, 'span', { dir: 'auto' }, achievement.name),
+      el(doc, 'span', { class: 'count', dir: 'auto' }, achievement.description),
     );
     const standing = el(
       doc,
       'span',
       { class: 'count achievement-standing' },
-      `${achievement.tier} · ${progressLabel(achievement)}`,
+      `${achievement.tier} · ${progressLabel(achievement, i18n)}`,
     );
     container.appendChild(el(doc, 'div', { class: 'panel-row' }, leading, standing));
   }

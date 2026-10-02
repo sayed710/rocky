@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { GambitClient } from '../src/api/client.js';
+import { createI18nManager } from '../src/i18n/index.js';
 import { mountForum, mountForumThread } from '../src/app/forum-mounts.js';
+
+const defaultI18n = createI18nManager();
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
   let resolve!: () => void;
@@ -58,6 +61,7 @@ test('forum waits for session restoration and disposal prevents its delayed requ
     slug: 'private-team',
     sessionPresent: false,
     restorePromise: restored.promise,
+    i18n: defaultI18n,
   });
   assert.equal(requests, 0);
 
@@ -102,6 +106,7 @@ test('re-mounting a forum replaces its composer handler and retains text on fail
     slug: 'team-one',
     sessionPresent: true,
     restorePromise: Promise.resolve(),
+    i18n: defaultI18n,
   });
   const second = mountForum({
     doc,
@@ -112,6 +117,7 @@ test('re-mounting a forum replaces its composer handler and retains text on fail
     slug: 'team-one',
     sessionPresent: true,
     restorePromise: Promise.resolve(),
+    i18n: defaultI18n,
   });
   await settleRequests();
 
@@ -162,6 +168,7 @@ test('re-mounting a thread replaces its reply handler and retains text on failur
     threadId: 'thread-1',
     sessionPresent: true,
     restorePromise: Promise.resolve(),
+    i18n: defaultI18n,
   });
   const second = mountForumThread({
     doc,
@@ -173,6 +180,7 @@ test('re-mounting a thread replaces its reply handler and retains text on failur
     threadId: 'thread-1',
     sessionPresent: true,
     restorePromise: Promise.resolve(),
+    i18n: defaultI18n,
   });
   await settleRequests();
 

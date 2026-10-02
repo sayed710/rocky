@@ -10,6 +10,7 @@
  *
  * Theme toggle and auth controller are always wired across all routes.
  */
+import { resolveBrowserStorage } from '../i18n/storage.js';
 import { createApp } from './composition.js';
 import type { App, AppDependencies } from './composition.js';
 import { applyNavCapabilities } from './capabilities-nav.js';
@@ -52,12 +53,13 @@ import type { TeamsController } from './teams-controller.js';
 import type { MessagesController } from './messages-controller.js';
 import { ThemeToggle } from './theme-toggle.js';
 import { AuthController } from './auth-controller.js';
-import type { AuthSession } from './auth-controller.js';
+import type { AuthErrorInfo, AuthSession } from './auth-controller.js';
 import { mountPasswordRecovery } from './password-recovery-mount.js';
 import { mountEmailVerification } from './email-verification-mount.js';
 import type { WebAuthnAdapter } from '../ports/webauthn.js';
 import { parseRoute } from './router.js';
 import { applyRouteSurface } from './route-surface.js';
+import { localizeShell } from '../i18n/index.js';
 
 export { renderEmpty, formatClock, formatTimeControl };
 export type { EmptyStateOptions };
@@ -85,6 +87,7 @@ export interface BootstrappedDisposables {
   readonly emailVerification: { dispose: () => void } | null;
   readonly connectivity: { dispose: () => void } | null;
   readonly analysis: { dispose: () => void } | null;
+  readonly shellLocalization: { dispose: () => void } | null;
 }
 
 /** Everything the bootstrap wired, returned for later increments and tests. */
@@ -101,6 +104,7 @@ function createBootstrapped(
   app: App,
   auth: AuthController,
   theme: ThemeToggle,
+  shellLocalization: { dispose: () => void },
   activeDisposables: ActiveBootstrappedDisposables,
 ): Bootstrapped {
   return {
@@ -125,6 +129,7 @@ function createBootstrapped(
     emailVerification: null,
     connectivity: null,
     analysis: null,
+    shellLocalization: activeDisposables.shellLocalization ?? shellLocalization,
     theme,
     ...activeDisposables,
   };
@@ -185,6 +190,7 @@ export function bootstrap(
   doc: Document,
   deps?: BootstrapDependencies,
 ): Bootstrapped {
+  const preferenceStorage = deps?.storage ?? resolveBrowserStorage();
   // Capture recovery tokens out of the fragment and clear the location bar BEFORE any network call
   // or app composition. The fragment never reached the server; this clears the browser's copy.
   const rawUrl = typeof location !== 'undefined' ? location.pathname + (location.search ?? '') : '/';
@@ -202,8 +208,11 @@ export function bootstrap(
     ...(deps?.wsFactory !== undefined ? { wsFactory: deps.wsFactory } : {}),
     ...(deps?.tokenStore !== undefined ? { tokenStore: deps.tokenStore } : {}),
     ...(deps?.storage !== undefined ? { storage: deps.storage } : {}),
+    ...(deps?.i18n !== undefined ? { i18n: deps.i18n } : {}),
+    doc,
   };
   const app = createApp(appDeps);
+  const shellLocalizationHandle = localizeShell(doc, app.i18n);
 
   // --- Capabilities-driven navigation ---
   void applyNavCapabilities(doc, app.api);
@@ -216,10 +225,10 @@ export function bootstrap(
         doc.documentElement.classList.toggle('dark', t === 'dark');
         doc.documentElement.classList.toggle('light', t === 'light');
         if (themeButtonEl) {
-          const next = t === 'dark' ? 'light' : 'dark';
+          const labelKey = t === 'dark' ? 'shell.themeToggle.toLight' : 'shell.themeToggle.toDark';
           themeButtonEl.textContent = t === 'dark' ? '☀️' : '🌙';
-          themeButtonEl.setAttribute('aria-label', `Switch to ${next} theme`);
-          themeButtonEl.setAttribute('title', `Switch to ${next} theme`);
+          themeButtonEl.setAttribute('aria-label', app.i18n.t(labelKey));
+          themeButtonEl.setAttribute('title', app.i18n.t(labelKey));
         }
         if ('querySelector' in doc && typeof doc.querySelector === 'function') {
           const themeColor = doc.querySelector('meta[name="theme-color"]');
@@ -227,9 +236,12 @@ export function bootstrap(
         }
       },
     },
-    ...(deps?.storage !== undefined ? { storage: deps.storage } : typeof localStorage !== 'undefined' ? { storage: localStorage } : {}),
+    ...(preferenceStorage ? { storage: preferenceStorage } : {}),
   });
   theme.emit();
+  const unsubThemeLocale = app.i18n.onLocaleChange(() => {
+    theme.emit();
+  });
 
   // --- Auth controller (always wired) ---
   const authErrorEl = doc.getElementById('auth-error');
@@ -252,6 +264,42 @@ export function bootstrap(
   const authStatusEl = doc.getElementById('auth-status');
   const authSectionEl = doc.getElementById('auth');
 
+  let currentAuthSession: AuthSession | null = null;
+  let currentAuthError: AuthErrorInfo | null = null;
+  const updateAuthStatus = (): void => {
+    if (authStatusEl) {
+      authStatusEl.textContent = currentAuthSession
+        ? app.i18n.t('shell.authStatus.signedIn', { handle: currentAuthSession.handle })
+        : app.i18n.t('shell.authStatus.notSignedIn');
+    }
+  };
+  const updatePlayBotButton = (): void => {
+    const playBotBtn = doc.getElementById('play-bot');
+    if (playBotBtn instanceof HTMLButtonElement) {
+      playBotBtn.disabled = currentAuthSession === null;
+      playBotBtn.title = currentAuthSession === null ? app.i18n.t('bot.signInToPlay') : '';
+    }
+  };
+  const updateAuthError = (): void => {
+    if (authErrorEl && currentAuthError) {
+      authErrorEl.textContent = app.i18n.t(currentAuthError.key, currentAuthError.params);
+    }
+  };
+  const unsubAuthLocale = app.i18n.onLocaleChange(() => {
+    updateAuthStatus();
+    updatePlayBotButton();
+    updateAuthError();
+  });
+  updateAuthStatus();
+  updatePlayBotButton();
+  const shellLocalization = {
+    dispose: () => {
+      unsubAuthLocale();
+      unsubThemeLocale();
+      shellLocalizationHandle.dispose();
+    },
+  };
+
   let selfProfileSessionHandler: ((session: AuthSession | null) => void) | null = null;
   let setCreateGameAuthenticated: ((authenticated: boolean) => void) | null = null;
   let setPlayBotAuthenticated: ((authenticated: boolean) => void) | null = null;
@@ -261,21 +309,21 @@ export function bootstrap(
   let commentarySessionHandler: ((signedIn: boolean) => void) | null = null;
   const auth = new AuthController({
     client: app.api,
+    i18n: app.i18n,
     ...(deps?.webauthnAdapter !== undefined ? { webauthnAdapter: deps.webauthnAdapter } : {}),
     callbacks: {
       onSessionChange: (session) => {
-        if (authStatusEl) {
-          authStatusEl.textContent = session ? `Signed in as ${session.handle}` : 'Not signed in';
+        currentAuthSession = session;
+        if (session !== null) {
+          currentAuthError = null;
+          if (authErrorEl) authErrorEl.textContent = '';
         }
+        updateAuthStatus();
+        updatePlayBotButton();
         // Show/hide the sign-in surface vs the logout button. The section is what hides, not just
         // the form inside it: hiding only the form left a signed-in visitor looking at an empty box.
         if (authSectionEl) authSectionEl.hidden = session !== null || hideAuthSection;
         if (authLogoutEl) authLogoutEl.hidden = session === null;
-        const playBotBtn = doc.getElementById('play-bot');
-        if (playBotBtn instanceof HTMLButtonElement) {
-          playBotBtn.disabled = session === null;
-          playBotBtn.title = session === null ? 'Sign in to play the computer' : '';
-        }
         setCreateGameAuthenticated?.(session !== null);
         setPlayBotAuthenticated?.(session !== null);
         lobbySessionHandler?.();
@@ -285,6 +333,10 @@ export function bootstrap(
         commentarySessionHandler?.(session !== null);
       },
       onPending: (pending) => {
+        if (pending) {
+          currentAuthError = null;
+          if (authErrorEl) authErrorEl.textContent = '';
+        }
         if (authSubmitEl instanceof HTMLButtonElement) {
           authSubmitEl.disabled = pending;
         }
@@ -295,12 +347,13 @@ export function bootstrap(
           authPasskeyEl.disabled = pending;
         }
       },
-      onError: (msg) => {
+      onError: (msg, errorInfo) => {
+        currentAuthError = errorInfo ?? null;
         if (authErrorEl) authErrorEl.textContent = msg;
       },
       onStepUp: showStepUp,
     },
-    ...(deps?.storage !== undefined ? { storage: deps.storage } : typeof localStorage !== 'undefined' ? { storage: localStorage } : {}),
+    ...(preferenceStorage ? { storage: preferenceStorage } : {}),
   });
 
   // Wire auth form submit (sign in). Bound on the form so pressing Enter in the password field signs in.
@@ -376,7 +429,7 @@ export function bootstrap(
   // The not-found page is a complete route surface. Keep the global shell controllers alive, but
   // do not fall through to the legacy standalone-board fallback hidden inside #game-main.
   if (route.name === 'not-found') {
-    return createBootstrapped(app, auth, theme, {});
+    return createBootstrapped(app, auth, theme, shellLocalization, {});
   }
 
   // --- Game view ---
@@ -393,9 +446,10 @@ export function bootstrap(
       ...(token !== undefined ? { token } : {}),
       ...(auth.currentSession !== null ? { initialSessionId: auth.currentSession.userId } : {}),
       restorePromise,
+      i18n: app.i18n,
     });
     gameSessionHandler = mountedGame.onSessionChange;
-    return createBootstrapped(app, auth, theme, mountedGame);
+    return createBootstrapped(app, auth, theme, shellLocalization, mountedGame);
   }
 
   // --- Lobby view ---
@@ -406,12 +460,13 @@ export function bootstrap(
       client: app.api,
       isAuthenticated: () => auth.isAuthenticated(),
       ...(deps?.storage !== undefined ? { storage: deps.storage } : {}),
+      i18n: app.i18n,
     });
     setCreateGameAuthenticated = mountedLobby.setCreateGameAuthenticated;
     setPlayBotAuthenticated = mountedLobby.setPlayBotAuthenticated;
     lobbySessionHandler = mountedLobby.onSessionChange;
 
-    return createBootstrapped(app, auth, theme, { lobby: mountedLobby.lobby });
+    return createBootstrapped(app, auth, theme, shellLocalization, { lobby: mountedLobby.lobby });
   }
 
   // --- Profile view ---
@@ -424,10 +479,11 @@ export function bootstrap(
       getCurrentSession: () => auth.currentSession,
       restorePromise,
       ...(deps?.webauthnAdapter !== undefined ? { webauthnAdapter: deps.webauthnAdapter } : {}),
+      i18n: app.i18n,
     });
     selfProfileSessionHandler = mountedProfile.onSessionChange;
 
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       profile: mountedProfile.profile,
       passkeys: mountedProfile.passkeys,
     });
@@ -436,26 +492,26 @@ export function bootstrap(
   // --- Leaderboard view ---
   const leaderboardEl = doc.getElementById('leaderboard');
   if (leaderboardEl && route.name === 'leaderboard') {
-    return createBootstrapped(app, auth, theme, {
-      leaderboard: mountLeaderboard(doc, app.api),
+    return createBootstrapped(app, auth, theme, shellLocalization, {
+      leaderboard: mountLeaderboard(doc, app.api, app.i18n),
     });
   }
 
   // --- Tournaments list view ---
   const tournamentsEl = doc.getElementById('tournaments');
   if (tournamentsEl && route.name === 'tournaments') {
-    return createBootstrapped(app, auth, theme, {
-      tournament: mountTournamentList(doc, app.api),
+    return createBootstrapped(app, auth, theme, shellLocalization, {
+      tournament: mountTournamentList(doc, app.api, app.i18n),
     });
   }
 
   // --- Single tournament detail view ---
   const tournamentEl = doc.getElementById('tournament');
   if (tournamentEl && route.name === 'tournament') {
-    return createBootstrapped(app, auth, theme, {
-      tournament: mountTournamentDetail(doc, app.api, route.id),
+    return createBootstrapped(app, auth, theme, shellLocalization, {
+      tournament: mountTournamentDetail(doc, app.api, route.id, app.i18n),
       tournamentCommentary: (() => {
-        const commentary = mountTournamentCommentary(doc, app.api, route.id);
+        const commentary = mountTournamentCommentary(doc, app.api, route.id, app.i18n);
         // Registered here rather than inside the mount, because the session callback is owned by
         // the AuthController above and this is the only place that holds both.
         commentarySessionHandler = (signedIn) => commentary.sessionChanged(signedIn);
@@ -467,18 +523,19 @@ export function bootstrap(
   // --- Search view ---
   const searchEl = doc.getElementById('search');
   if (searchEl && route.name === 'search') {
-    return createBootstrapped(app, auth, theme, { search: mountSearch(doc, app.api) });
+    return createBootstrapped(app, auth, theme, shellLocalization, { search: mountSearch(doc, app.api, app.i18n) });
   }
 
   // --- Messages Inbox view (/messages) ---
   const messagesEl = doc.getElementById('messages');
   if (messagesEl && route.name === 'messages') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       messages: mountMessagesInbox({
         doc,
         client: app.api,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -486,13 +543,14 @@ export function bootstrap(
   // --- Conversation Thread view (/messages/:id) ---
   const conversationEl = doc.getElementById('conversation');
   if (conversationEl && route.name === 'conversation') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       messages: mountConversation({
         doc,
         client: app.api,
         conversationId: route.id,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -500,19 +558,22 @@ export function bootstrap(
   // --- Teams list view (/teams) ---
   const teamsEl = doc.getElementById('teams');
   if (teamsEl && route.name === 'teams') {
-    return createBootstrapped(app, auth, theme, { teams: mountTeamList(doc, app.api) });
+    return createBootstrapped(app, auth, theme, shellLocalization, {
+      teams: mountTeamList(doc, app.api, app.i18n),
+    });
   }
 
   // --- Team detail view (/teams/:slug) ---
   const teamEl = doc.getElementById('team');
   if (teamEl && route.name === 'team') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       teams: mountTeamDetail({
         doc,
         client: app.api,
         slug: route.slug,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -520,13 +581,14 @@ export function bootstrap(
   // --- Forum thread list (/teams/:slug/forum) ---
   const forumEl = doc.getElementById('forum');
   if (forumEl && route.name === 'forum') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       forum: mountForum({
         doc,
         client: app.api,
         slug: route.slug,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -534,7 +596,7 @@ export function bootstrap(
   // --- Forum thread (/teams/:slug/forum/:threadId) ---
   const threadEl = doc.getElementById('thread');
   if (threadEl && route.name === 'thread') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       forum: mountForumThread({
         doc,
         client: app.api,
@@ -542,6 +604,7 @@ export function bootstrap(
         threadId: route.threadId,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -552,6 +615,7 @@ export function bootstrap(
       doc,
       client: app.api,
       isAuthenticated: () => auth.currentSession !== null,
+      i18n: app.i18n,
     });
     endgameSessionHandler = mounted.onSessionChange;
     return mounted;
@@ -560,7 +624,7 @@ export function bootstrap(
   // --- Endgame trainer (/endgames) ---
   const endgamesEl = doc.getElementById('endgames');
   if (endgamesEl && route.name === 'endgames') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       endgames: mountEndgamesRoute(),
     });
   }
@@ -568,15 +632,15 @@ export function bootstrap(
   // --- Courses list view (/courses) ---
   const coursesEl = doc.getElementById('courses');
   if (coursesEl && route.name === 'courses') {
-    return createBootstrapped(app, auth, theme, {
-      learning: mountCourseList({ doc, client: app.api, surface: coursesEl }),
+    return createBootstrapped(app, auth, theme, shellLocalization, {
+      learning: mountCourseList({ doc, client: app.api, surface: coursesEl, i18n: app.i18n }),
     });
   }
 
   // --- Course detail view (/courses/:slug) ---
   const courseEl = doc.getElementById('course');
   if (courseEl && route.name === 'course') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       learning: mountCourseDetail({
         doc,
         client: app.api,
@@ -584,6 +648,7 @@ export function bootstrap(
         slug: route.slug,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -591,7 +656,7 @@ export function bootstrap(
   // --- Lesson detail view (/lessons/:id) ---
   const lessonEl = doc.getElementById('lesson');
   if (lessonEl && route.name === 'lesson') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       learning: mountLesson({
         doc,
         client: app.api,
@@ -599,6 +664,7 @@ export function bootstrap(
         lessonId: route.id,
         sessionPresent: auth.currentSession !== null,
         restorePromise,
+        i18n: app.i18n,
       }),
     });
   }
@@ -606,20 +672,21 @@ export function bootstrap(
   // --- Studies list view (/studies) ---
   const studiesEl = doc.getElementById('studies');
   if (studiesEl && route.name === 'studies') {
-    return createBootstrapped(app, auth, theme, {
-      studies: mountStudiesList({ doc, client: app.api, surface: studiesEl }),
+    return createBootstrapped(app, auth, theme, shellLocalization, {
+      studies: mountStudiesList({ doc, client: app.api, surface: studiesEl, i18n: app.i18n }),
     });
   }
 
   // --- Study detail view (/studies/:id) ---
   const studyEl = doc.getElementById('study');
   if (studyEl && route.name === 'study') {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       studies: mountStudyDetail({
         doc,
         client: app.api,
         surface: studyEl,
         studyId: route.id,
+        i18n: app.i18n,
       }),
     });
   }
@@ -633,29 +700,32 @@ export function bootstrap(
       surface: studyChapterEl,
       studyId: route.id,
       chapterId: route.chapterId,
+      i18n: app.i18n,
     });
-    return createBootstrapped(app, auth, theme, mountedChapter);
+    return createBootstrapped(app, auth, theme, shellLocalization, mountedChapter);
   }
 
   // --- Password reset view ---
   if (showPasswordReset) {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       passwordReset: mountPasswordRecovery({
         doc,
         client: app.api,
         resetToken: activeResetToken,
         onSessionInvalidated: () => auth.clearLocalSession(),
+        i18n: app.i18n,
       }),
     });
   }
 
   // --- Email verification view ---
   if (showEmailVerify) {
-    return createBootstrapped(app, auth, theme, {
+    return createBootstrapped(app, auth, theme, shellLocalization, {
       emailVerification: mountEmailVerification({
         doc,
         client: app.api,
         verificationToken: activeVerificationToken,
+        i18n: app.i18n,
       }),
     });
   }
@@ -664,8 +734,8 @@ export function bootstrap(
   const statusEl = doc.getElementById('status');
   const flipEl = doc.getElementById('flip');
   const board = boardEl
-    ? mountBoard({ boardEl, statusEl, flipEl })
+    ? mountBoard({ boardEl, statusEl, flipEl }, { i18n: app.i18n })
     : null;
 
-  return createBootstrapped(app, auth, theme, { board });
+  return createBootstrapped(app, auth, theme, shellLocalization, { board });
 }
