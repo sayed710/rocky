@@ -217,6 +217,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let isGamePlayer = false;
   let isHumanGame = false;
   let gameReviewPending = false;
+  let currentReviewNoteKey: 'game.review.reviewingMoves' | null = null;
+  let currentReviewErrorKey: 'game.review.unavailableError' | null = null;
   let gameReviewSessionId = deps.initialSessionId ?? null;
   let authoritativeGameFen: string | null = null;
   let authoritativeGameTurn = false;
@@ -234,16 +236,24 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         || gameReviewSessionId === null
         || gameReviewPending;
     }
-    if (gameReviewNoteEl && !gameReviewPending && gameReviewMovesEl?.childElementCount === 0) {
+    if (gameReviewNoteEl && currentReviewNoteKey) {
+      gameReviewNoteEl.textContent = i18n.t(currentReviewNoteKey);
+    } else if (gameReviewNoteEl && !gameReviewPending && gameReviewMovesEl?.childElementCount === 0) {
       gameReviewNoteEl.textContent = gameReviewSessionId !== null
         ? i18n.t('game.review.noteSignedIn')
         : i18n.t('game.review.noteSignedOut');
+    }
+    if (gameReviewErrorEl) {
+      gameReviewErrorEl.hidden = currentReviewErrorKey === null;
+      gameReviewErrorEl.textContent = currentReviewErrorKey ? i18n.t(currentReviewErrorKey) : '';
     }
   };
 
   /** Remove all private review nodes from persistent route DOM. */
   const clearGameReview = (): void => {
     lastReviewResult = null;
+    currentReviewNoteKey = null;
+    currentReviewErrorKey = null;
     if (gameReviewErrorEl) {
       gameReviewErrorEl.hidden = true;
       gameReviewErrorEl.textContent = '';
@@ -1500,6 +1510,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   /** Render a controller-approved review and its navigable pre-move positions. */
   const renderGameReview = (review: Awaited<ReturnType<GambitClient['games']['review']>>): void => {
     lastReviewResult = review;
+    currentReviewNoteKey = null;
+    currentReviewErrorKey = null;
     if (gameReviewSummaryEl) {
       const summary = [
         [classificationLabel('Brilliant'), '!!', review.summary.brilliant, 'brilliant'],
@@ -1577,16 +1589,15 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       onPhase: (phase) => {
         gameReviewPending = phase === 'loading';
         if (gameReviewMovesEl) gameReviewMovesEl.setAttribute('aria-busy', String(gameReviewPending));
-        if (phase === 'loading' && gameReviewNoteEl) {
-          gameReviewNoteEl.textContent = i18n.t('game.review.reviewingMoves');
-        }
+        currentReviewNoteKey = phase === 'loading' ? 'game.review.reviewingMoves' : null;
         refreshGameReview();
       },
       onResult: renderGameReview,
       onFailure: () => {
+        currentReviewErrorKey = 'game.review.unavailableError';
         if (gameReviewErrorEl) {
           gameReviewErrorEl.hidden = false;
-          gameReviewErrorEl.textContent = i18n.t('game.review.unavailableError');
+          gameReviewErrorEl.textContent = i18n.t(currentReviewErrorKey);
         }
       },
       onInvalidated: invalidateGameReviewPresentation,
@@ -1594,7 +1605,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   });
 
   bindClick(gameReviewRunBtn, () => {
-    if (!gameOver || !gameReviewSupportsVariant(gameReviewCapabilities, currentVariant)) return;
+    if (!gameOver || gameReviewPending || !gameReviewSupportsVariant(gameReviewCapabilities, currentVariant)) return;
     invalidateGameReviewPresentation();
     void gameReviewController.review();
   });

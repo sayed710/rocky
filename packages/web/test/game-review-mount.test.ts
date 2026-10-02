@@ -181,6 +181,44 @@ function dispose(setupResult: ReturnType<typeof setup>): void {
   setupResult.app.dispose();
 }
 
+test('review pending and failure relocalize without requests and clear on retry/sign-out', async () => {
+  const g = setup();
+  g.app.i18n.registerCatalog('ar', { ...enMessages,
+    'game.review.reviewingMoves': 'AR reviewing moves',
+    'game.review.unavailableError': 'AR review unavailable',
+    'game.review.noteSignedOut': 'AR sign in for review',
+  });
+  try {
+    await waitUntil(() => g.elements.get('game-review-run')!.disabled === false);
+    runReview(g.elements);
+    await waitUntil(() => g.pendingReviews.length === 1);
+    runReview(g.elements);
+    g.app.i18n.setLocale('ar');
+    assert.equal(g.elements.get('game-review-note')!.textContent, g.app.i18n.t('game.review.reviewingMoves'));
+    assert.equal(g.pendingReviews.length, 1);
+    assert.equal(g.elements.get('game-review-run')!.disabled, true);
+    g.pendingReviews[0]!.resolve(json(503, {}));
+    await waitUntil(() => g.elements.get('game-review-error')!.hidden === false);
+    g.app.i18n.setLocale('en');
+    assert.equal(g.elements.get('game-review-error')!.textContent, g.app.i18n.t('game.review.unavailableError'));
+    g.app.i18n.setLocale('ar');
+    assert.equal(g.elements.get('game-review-error')!.textContent, g.app.i18n.t('game.review.unavailableError'));
+    assert.equal(g.pendingReviews.length, 1);
+    runReview(g.elements);
+    await waitUntil(() => g.pendingReviews.length === 2);
+    assert.equal(g.elements.get('game-review-error')!.hidden, true);
+    g.app.i18n.setLocale('en');
+    assert.equal(g.elements.get('game-review-note')!.textContent, g.app.i18n.t('game.review.reviewingMoves'));
+    g.mounted.onSessionChange?.(null);
+    g.app.i18n.setLocale('ar');
+    assert.equal(g.elements.get('game-review-note')!.textContent, g.app.i18n.t('game.review.noteSignedOut'));
+    assert.equal(g.elements.get('game-review-error')!.hidden, true);
+    g.pendingReviews[1]!.resolve(json(503, {}));
+    await settle();
+    assert.equal(g.elements.get('game-review-error')!.hidden, true);
+  } finally { dispose(g); }
+});
+
 test('mounted session changes synchronously refresh Game Review controls', async () => {
   const mountedGame = setup();
   try {

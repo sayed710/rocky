@@ -155,6 +155,41 @@ test('correction: create-game variant labels change without resetting selection'
   } finally { panel.dispose(); }
 });
 
+for (const outcome of ['terminal', 'judged', 'failed'] as const) {
+  test(`correction: endgame sign-out overrides ${outcome} presentation and relocalizes`, async () => {
+    const { doc, elements } = documentWith(['endgame-next', 'endgame-submit', 'endgame-move', 'endgame-form', 'endgame-note', 'endgame-error', 'endgame-result', 'endgame-rows', 'endgame-position-rows']);
+    let authenticated = true;
+    const client = { analysis: {
+      nextEndgame: async () => ({ id: 'p1', type: 'KQ_vs_K', name: 'Mate', fen: STARTING_FEN, sideToMove: 'w', objective: 'mate', difficulty: 'beginner', technique: 'Box' }),
+      attemptEndgame: async () => {
+        if (outcome === 'failed') throw new Error('move failed');
+        return outcome === 'terminal'
+          ? { kind: 'terminal', id: 'p1', move: 'e2e4', fenAfter: STARTING_FEN, terminal: { reason: 'checkmate', result: '1-0' } }
+          : { kind: 'judged', id: 'p1', move: 'e2e4', fenAfter: STARTING_FEN, classification: 'acceptable', goalPreserved: true, evalBefore: { type: 'cp', value: 50 }, evalAfter: { type: 'cp', value: 50 }, loss: { kind: 'centipawns', value: 0 }, betterMove: 'e2e4', bestLine: [], depth: 16 };
+      },
+    } } as unknown as GambitClient;
+    const i18n = locale();
+    const mounted = mountEndgames({ doc, client, isAuthenticated: () => authenticated, i18n });
+    try {
+      elements.get('endgame-next')!.click(); await settle();
+      elements.get('endgame-move')!.value = 'e2e4';
+      elements.get('endgame-form')!.dispatchEvent({ type: 'submit' }); await settle();
+      if (outcome === 'judged') assert.equal(elements.get('endgame-note')!.textContent, i18n.t('learning.endgames.msgYourMove'));
+      authenticated = false;
+      mounted.onSessionChange();
+      assert.equal(elements.get('endgame-note')!.textContent, i18n.t('learning.endgames.msgSignedOut'));
+      assert.equal(elements.get('endgame-submit')!.disabled, true);
+      i18n.setLocale('ar');
+      assert.equal(elements.get('endgame-note')!.textContent, i18n.t('learning.endgames.msgSignedOut'));
+      authenticated = true;
+      mounted.onSessionChange();
+      assert.doesNotMatch(elements.get('endgame-note')!.textContent, /Sign in|AR Sign in/);
+      if (outcome === 'terminal') assert.equal(elements.get('endgame-note')!.hidden, true);
+      if (outcome === 'failed') assert.equal(elements.get('endgame-error')!.hidden, false);
+    } finally { mounted.dispose(); }
+  });
+}
+
 test('correction: final endgame verdict never revives judging on locale change', async () => {
   const { doc, elements } = documentWith(['endgame-next', 'endgame-submit', 'endgame-move', 'endgame-form', 'endgame-note', 'endgame-error', 'endgame-result', 'endgame-rows', 'endgame-position-rows', 'endgame-board']);
   const response = deferred<unknown>();

@@ -110,9 +110,23 @@ export function mountEndgames(deps: EndgameMountDependencies): MountedEndgames {
     if (submitBtn) submitBtn.disabled = !authed || !hasPosition || controller.isPending;
     if (moveInput) moveInput.disabled = !authed || !hasPosition;
     if (!noteEl) return;
+    if (!authed) {
+      lastNoteKey = 'signedOut';
+      renderEndgameNote(noteEl, getEndgameMessage('signedOut', deps.i18n));
+      return;
+    }
+    if (lastAttemptResult) {
+      lastNoteKey = lastAttemptResult.kind === 'judged' ? 'yourMove' : null;
+      renderEndgameNote(noteEl, lastNoteKey ? getEndgameMessage(lastNoteKey, deps.i18n) : null);
+      return;
+    }
+    if (lastErrorKey && lastNoteKey === 'signedOut') {
+      lastNoteKey = null;
+      renderEndgameNote(noteEl, null);
+    }
     const isOwned = lastNoteKey === null || lastNoteKey === 'idle' || lastNoteKey === 'signedOut' || lastNoteKey === 'yourMove';
-    if (!isOwned || lastAttemptResult || lastErrorKey) return;
-    const noteKey = !authed ? 'signedOut' : hasPosition ? 'yourMove' : 'idle';
+    if (!isOwned || lastErrorKey) return;
+    const noteKey = hasPosition ? 'yourMove' : 'idle';
     lastNoteKey = noteKey;
     renderEndgameNote(noteEl, getEndgameMessage(noteKey, deps.i18n));
   };
