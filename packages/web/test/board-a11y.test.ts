@@ -1213,6 +1213,45 @@ test("another pointer's release does not drop the piece a drag is carrying", () 
   });
 });
 
+test('a drag the browser cancels drops its floating piece and stops listening', () => {
+  withDragGlobals((win) => {
+    const { root, moves } = mountWithFeedback({ playerColor: 'white' });
+    const body = (globalThis.document as unknown as { body: FakeDOMNode }).body;
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 61, pointerType: 'touch' });
+    win.dispatchEvent('pointermove', { ...centreOf('e3'), pointerId: 61, pointerType: 'touch' });
+    assert.equal(body.children.length, 1, 'the drag shows a floating piece');
+    win.dispatchEvent('pointercancel', { pointerId: 62, pointerType: 'touch' }); // another pointer's cancel
+    assert.equal(body.children.length, 1, "another pointer's cancel leaves the drag alone");
+    win.dispatchEvent('pointercancel', { pointerId: 61, pointerType: 'touch' }); // e.g. a pan takes over
+    assert.equal(body.children.length, 0, 'the floating piece is gone');
+    assert.equal(root.querySelector('.cb-dragging'), null);
+    assert.equal(win.listenerCount('pointermove') + win.listenerCount('pointerup') + win.listenerCount('pointercancel'), 0);
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 61, pointerType: 'touch' });
+    assert.deepEqual(moves, [], 'a cancelled drag moves nothing');
+    assert.equal(root.querySelector('[aria-selected="true"]'), null, 'the cancelled drag leaves nothing selected');
+
+    // A press that never became a drag (a pan starting on the board) keeps an earlier selection.
+    root.dispatchEvent('click', atClick('d2'));
+    root.dispatchEvent('pointerdown', { ...centreOf('a2'), pointerId: 63, pointerType: 'touch' });
+    win.dispatchEvent('pointercancel', { pointerId: 63, pointerType: 'touch' });
+    assert.equal(root.querySelector('[aria-selected="true"]')?.getAttribute('data-square'), 'd2');
+  });
+});
+
+test('a new press during a live drag ends that drag, floating piece included', () => {
+  withDragGlobals((win) => {
+    const { root, moves } = mountWithFeedback({ playerColor: 'white' });
+    const body = (globalThis.document as unknown as { body: FakeDOMNode }).body;
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 71, pointerType: 'touch' });
+    win.dispatchEvent('pointermove', { ...centreOf('e3'), pointerId: 71, pointerType: 'touch' });
+    assert.equal(body.children.length, 1);
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 72, pointerType: 'touch' });
+    assert.equal(body.children.length, 0, "the first drag's floating piece is not left behind");
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 71, pointerType: 'touch' });
+    assert.deepEqual(moves, [], 'the abandoned drag drops nothing');
+  });
+});
+
 test('a change of owner closes an open promotion chooser and clears a queued premove', () => {
   const fen = '4k3/4P3/8/8/8/8/8/4K3 w - - 0 1';
   const root = new FakeBoardRoot();

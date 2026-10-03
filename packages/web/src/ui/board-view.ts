@@ -323,23 +323,35 @@ export class BoardView {
     // The same pointer pressing again: its earlier release made no click here, and any wait for it is over.
     if (event.pointerId === this.suppressClickOf) this.suppressClickOf = null;
     if (event.pointerId === this.cancelledGesturePointer) this.releaseCancelledGesture?.();
+    // A new press ends any drag still in progress, its floating piece included.
+    this.cancelDrag();
     this.dragFrom = sq;
     this.dragging = false;
     this.startX = event.clientX;
     this.startY = event.clientY;
     this.pointerId = event.pointerId;
-    this.releaseDragListeners?.();
     const move = (e: PointerEvent): void => this.handlePointerMove(e);
     const up = (e: PointerEvent): void => {
       if (e.pointerId !== this.pointerId) return; // another pointer's release is not this drag's
       this.releaseDragListeners?.();
       this.handlePointerUp(e);
     };
+    // The browser can take a pointer over (a pan, a system gesture); that pointer then never releases.
+    const cancel = (e: PointerEvent): void => {
+      if (e.pointerId !== this.pointerId) return;
+      const wasDragging = this.dragging;
+      this.cancelDrag();
+      if (!wasDragging) return;
+      this.interaction.cancelPromotion();
+      this.render();
+    };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
     this.releaseDragListeners = (): void => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
       this.releaseDragListeners = null;
     };
   }
