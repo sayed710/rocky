@@ -23,8 +23,8 @@ export function gatewayTestPlan(platform, env, image) {
   return [
     { command: 'docker', args: ['build', '--platform=linux/amd64', '-f', 'Dockerfile.gateway-test', '-t', image, '.'], cwd: ROOT },
     { command: 'docker', args: ['run', '--rm', '--platform=linux/amd64',
-      '-e', `DATABASE_URL=${dockerServiceUrl(env.DATABASE_URL)}`,
-      '-e', `REDIS_URL=${dockerServiceUrl(env.REDIS_URL)}`, image] },
+      '--add-host=host.docker.internal:host-gateway', '-e', 'DATABASE_URL', '-e', 'REDIS_URL', image],
+      env: { ...env, DATABASE_URL: dockerServiceUrl(env.DATABASE_URL), REDIS_URL: dockerServiceUrl(env.REDIS_URL) } },
   ];
 }
 
@@ -35,7 +35,7 @@ export function runGatewayTests(platform = process.platform, env = process.env, 
   if (platform === 'win32') console.log('[gateway] Windows routes the required complete suite to real Linux Docker; no tests are skipped.');
   try {
     for (const step of plan) {
-      const result = run(step.command, step.args, { cwd: step.cwd ?? resolve(ROOT, 'services/gateway'), env, stdio: 'inherit' });
+      const result = run(step.command, step.args, { cwd: step.cwd ?? resolve(ROOT, 'services/gateway'), env: step.env ?? env, stdio: 'inherit' });
       if (result.error) throw result.error;
       if (result.status !== 0 || result.signal) return result.status || 1;
     }

@@ -13,7 +13,20 @@ test('Windows routes exactly one complete suite to real Linux, while Linux runs 
   assert.equal(windows.length, 2);
   assert.ok(windows.every((step) => step.command === 'docker'));
   assert.deepEqual(windows[0].args, ['build', '--platform=linux/amd64', '-f', 'Dockerfile.gateway-test', '-t', 'test:image', '.']);
-  assert.deepEqual(windows[1].args, ['run', '--rm', '--platform=linux/amd64', '-e', 'DATABASE_URL=postgres://chess:chess@host.docker.internal:55433/chess_test', '-e', 'REDIS_URL=redis://host.docker.internal:56380', 'test:image']);
+  assert.deepEqual(windows[1].args, ['run', '--rm', '--platform=linux/amd64', '--add-host=host.docker.internal:host-gateway', '-e', 'DATABASE_URL', '-e', 'REDIS_URL', 'test:image']);
+  assert.equal(windows[1].env.DATABASE_URL, 'postgres://chess:chess@host.docker.internal:55433/chess_test');
+  assert.equal(windows[1].env.REDIS_URL, 'redis://host.docker.internal:56380');
+  assert.equal(env.DATABASE_URL, 'postgres://chess:chess@127.0.0.1:55433/chess_test', 'planning must not mutate the caller environment');
+  let forwarded;
+  assert.equal(runGatewayTests('win32', env, (_command, args, options) => {
+    if (args[0] === 'run') {
+      assert.equal(args.some((arg) => arg.includes('postgres://') || arg.includes('redis://')), false, 'service credentials must never enter process arguments');
+      forwarded = options.env;
+    }
+    return { status: 0 };
+  }), 0);
+  assert.equal(forwarded.DATABASE_URL, windows[1].env.DATABASE_URL);
+  assert.equal(forwarded.REDIS_URL, windows[1].env.REDIS_URL);
   assert.deepEqual(gatewayTestPlan('linux', env, 'unused'), [{ command: 'npm', args: ['run', 'test:runtime'] }]);
   assert.equal(dockerServiceUrl('postgres://u:p@db.example:5432/chess_test'), 'postgres://u:p@db.example:5432/chess_test');
   assert.throws(() => gatewayTestPlan('win32', {}, 'test'), /DATABASE_URL is required/);

@@ -223,9 +223,10 @@ with pgvector and `REDIS_URL` for Redis. Missing URLs fail before running tests.
 On Linux/macOS, `npm test --prefix services/gateway` invokes `test:runtime` directly,
 using the prepared builds above. On Windows it explicitly routes the same complete
 suite through Docker Desktop's Linux engine using `Dockerfile.gateway-test` and Node 22.
-The image installs from both lockfiles, builds the server packages and gateway entrypoint,
+The image caches dependency installs from both lockfiles using only manifests, then builds the server packages and gateway entrypoint,
 then compiles and executes every gateway test through the zero-skip runner. Host loopback
-addresses in the two service URLs become `host.docker.internal`; other hosts are retained.
+addresses in the two service URLs become `host.docker.internal`, explicitly mapped to Docker's host gateway; other hosts are retained.
+Rewritten service URLs are forwarded through the Docker child environment, with only variable names in command arguments.
 Use services reachable from that Linux engine. An unavailable Docker/Linux runtime, build
 failure or failed test fails the command; there is no native Windows signal-test fallback.
 Each run uses a unique image tag and removes the container and tag after completion.
