@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 87: drag cancellation and full Linux validation of the final code._
+_Last updated: 2026-10-03 — M15 Increment 87: abandoned gestures never act, and full Linux validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: drag cancellation and full Linux validation of the final code._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: bounded no-pointer-id click fallback and drag release ownership._
 
@@ -5124,4 +5126,14 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - on Windows: lint passed.
 
   This supersedes the earlier "remain" notes: of the LOW items, only the lack of a real-browser touch test is still open.
+- **Exact-head review of `dd52355` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS.** Its finding is fixed in `59362b9`, with a RED test first.
+  - The finding: a press during another pointer's live drag only detached that drag's listeners. Its selection stayed and its release went unwatched, so its trailing click reached `tap` with the piece still selected and **an abandoned drag could submit a move**. `f98a8b9` had removed only the floating piece; the selection gap was older. The "fixes the pre-existing floating piece" wording in the previous bullet was therefore true only for the clone, until this fix.
+  - The fix: owner changes and new presses now share `abandonGesture()`, which waits for the abandoned pointer's release, swallows that click, and undoes a drag it started (selection cleared, re-rendered). A re-press by the same pointer, whose release was lost, only resets, so its own click still works.
+  - Six compiled mutations were all killed: a new press only cancelling the drag, no wait, selection kept, no re-render, a same-pointer re-press also abandoning, and the owner change not abandoning.
+  - Of the earlier "not fixed" notes, the floating piece and the selection left by a second press are now both fixed.
+- **Validation of `59362b9`, entirely on Linux** (the exact tree from `git archive 59362b9`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,954 of 3,954** across 19 workspaces, with zero skips (web 1,464);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
