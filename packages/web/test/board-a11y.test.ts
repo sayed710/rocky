@@ -1320,6 +1320,30 @@ test('disabling input mid-drag abandons the drag: its late click does not act if
   });
 });
 
+test("on an engine whose clicks carry no pointer id, an abandoned finger's silent release never eats another finger's tap", () => {
+  withDragGlobals((win) => {
+    const { root } = mountWithFeedback({ playerColor: 'white' });
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 101, pointerType: 'touch' }); // A
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 102, pointerType: 'touch' }); // B abandons A
+    win.dispatchEvent('pointerup', { clientX: 900, clientY: 900, pointerId: 101, pointerType: 'touch' }); // A: no click
+    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 102, pointerType: 'touch' });
+    root.dispatchEvent('click', centreOf('g1')); // B's click, with no pointer fields
+    assert.equal(root.querySelector('[aria-selected="true"]')?.getAttribute('data-square'), 'g1', "B's tap selects");
+  });
+});
+
+test('an abandoned pointer that the browser cancels leaves nothing to swallow', () => {
+  withDragGlobals((win) => {
+    const { root, board } = mountWithFeedback({ playerColor: null });
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 111, pointerType: 'touch' });
+    board.setPlayerColor('white'); // abandons the press
+    win.dispatchEvent('pointercancel', { pointerId: 111, pointerType: 'touch' }); // no click will follow
+    assert.equal(win.listenerCount('pointerup') + win.listenerCount('pointercancel'), 0, 'the wait is over');
+    root.dispatchEvent('click', centreOf('e2')); // a later activation with no pointer fields and no press
+    assert.equal(root.querySelector('[aria-selected="true"]')?.getAttribute('data-square'), 'e2', 'it is not swallowed');
+  });
+});
+
 test('a change of owner closes an open promotion chooser and clears a queued premove', () => {
   const fen = '4k3/4P3/8/8/8/8/8/4K3 w - - 0 1';
   const root = new FakeBoardRoot();
