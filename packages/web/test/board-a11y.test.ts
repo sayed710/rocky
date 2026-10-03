@@ -1347,7 +1347,7 @@ test('an abandoned pointer that the browser cancels leaves nothing to swallow', 
 test('drags whose release makes no click leave a bounded number of click records, none for off-board drops', () => {
   withDragGlobals((win) => {
     const { root, board } = mountWithFeedback({ playerColor: 'white' });
-    const pending = (): number => (board.view as unknown as { suppressedClicks: Set<number> }).suppressedClicks.size;
+    const pending = (): number => (board.view as unknown as { suppressedClicks: Map<number, unknown> }).suppressedClicks.size;
     const drag = (id: number, end: { clientX: number; clientY: number }): void => {
       root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: id, pointerType: 'touch' });
       win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: id, pointerType: 'touch' });
@@ -1374,6 +1374,24 @@ test("on an engine whose clicks carry no pointer id, an abandoned finger's delay
     assert.equal(selected(), null, "the abandoned finger's click selects nothing");
     root.dispatchEvent('click', centreOf('g1')); // B's own click
     assert.equal(selected(), 'g1', "B's tap then works");
+  });
+});
+
+test('on an engine whose clicks carry no pointer id, old abandoned releases never turn later taps into dead taps', () => {
+  withDragGlobals((win) => {
+    const { root, board } = mountWithFeedback({ playerColor: null });
+    const selected = (): string | null => root.querySelector('[aria-selected="true"]')?.getAttribute('data-square') ?? null;
+    // Two touches cut short by owner changes, released on the board, whose clicks never come (pans).
+    for (const [id, owner] of [[131, 'white'], [132, null], [133, 'white']] as const) {
+      if (id !== 133) root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: id, pointerType: 'touch', timeStamp: 1000 });
+      board.setPlayerColor(owner);
+      if (id !== 133) win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: id, pointerType: 'touch', timeStamp: 1000 });
+    }
+    // Two seconds later, genuine taps whose clicks arrive as plain MouseEvents.
+    root.dispatchEvent('click', { ...centreOf('e2'), timeStamp: 3000 });
+    assert.equal(selected(), 'e2', 'the first later tap acts');
+    root.dispatchEvent('click', { ...centreOf('d2'), timeStamp: 3100 });
+    assert.equal(selected(), 'd2', 'and so does the next one');
   });
 });
 
