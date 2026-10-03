@@ -109,6 +109,8 @@ export class BoardView {
   private focusedSquare: Square | null = null;
   /** Removes the window listeners of the drag in progress; null when no drag is listening. */
   private releaseDragListeners: (() => void) | null = null;
+  /** Stops waiting for the release of a gesture an owner change cut short; null when none is pending. */
+  private releaseCancelledGesture: (() => void) | null = null;
   // Held as fields so `destroy` can remove the very same references `addEventListener` received.
   private readonly onClick = (e: MouseEvent): void => this.handleClick(e);
   private readonly onPointerDown = (e: PointerEvent): void => this.handlePointerDown(e);
@@ -149,6 +151,7 @@ export class BoardView {
    */
   destroy(): void {
     this.cancelDrag();
+    this.releaseCancelledGesture?.();
     this.closeOverlay();
     this.root.removeEventListener('click', this.onClick);
     this.root.removeEventListener('pointerdown', this.onPointerDown);
@@ -196,8 +199,8 @@ export class BoardView {
     if (color === this.interaction.playerColor) return;
     if (this.overlay) this.cancelPromotion();
     // A pointer gesture still in progress belongs to the previous owner. Cancelling it removes the
-    // pointer-up handler, so swallow its trailing click here or it would tap for the new owner.
-    if (this.releaseDragListeners) this.suppressClick = true;
+    // pointer-up handler, so wait for its release here or its trailing click would tap for the new owner.
+    if (this.releaseDragListeners) this.awaitCancelledRelease();
     this.cancelDrag();
     this.interaction.setPlayerColor(color);
     this.render();
@@ -306,8 +309,8 @@ export class BoardView {
     if (this.overlay) return;
     const sq = this.squareAt(event.clientX, event.clientY);
     if (!sq) return;
-    // A new gesture: a suppression left by one whose click never came must not swallow this one's.
-    this.suppressClick = false;
+    // A new gesture means the one an owner change cut short is over.
+    this.releaseCancelledGesture?.();
     this.dragFrom = sq;
     this.dragging = false;
     this.startX = event.clientX;
@@ -325,6 +328,35 @@ export class BoardView {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       this.releaseDragListeners = null;
+    };
+  }
+
+  /**
+   * Swallow the click this pointer release produces, and nothing later. The browser dispatches that
+   * click straight after pointer-up, before any timer runs, so the flag clears on the next tick: a
+   * release that makes no click (off the board) must not leave a flag that eats a later click, such
+   * as one from assistive technology that sends no pointer events.
+   */
+  private suppressReleaseClick(): void {
+    this.suppressClick = true;
+    setTimeout(() => {
+      this.suppressClick = false;
+    }, 0);
+  }
+
+  /** Wait for the release of a gesture an owner change cut short, and swallow only its click. */
+  private awaitCancelledRelease(): void {
+    this.releaseCancelledGesture?.();
+    const end = (): void => {
+      this.releaseCancelledGesture?.();
+      this.suppressReleaseClick();
+    };
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+    this.releaseCancelledGesture = (): void => {
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+      this.releaseCancelledGesture = null;
     };
   }
 
@@ -365,7 +397,7 @@ export class BoardView {
     this.endFloat();
     this.dragging = false;
     this.dragFrom = null;
-    this.suppressClick = true;
+    this.suppressReleaseClick();
     if (target) {
       this.dispatch(this.interaction.drop(from, target));
     } else {

@@ -690,22 +690,33 @@ function mountWithFeedback(
 }
 
 /** Install the window/document globals a pointer drag touches, for the duration of `run`. */
-function withDragGlobals(run: (win: FakeDOMNode) => void): void {
+function installDragGlobals(): { win: FakeDOMNode; restore: () => void } {
   const win = new FakeDOMNode('window');
   const doc = { createElement: (tag: string) => new FakeDOMNode(tag), body: new FakeDOMNode('body') };
   const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
   Object.defineProperty(globalThis, 'window', { configurable: true, value: win });
   Object.defineProperty(globalThis, 'document', { configurable: true, value: doc });
-  try {
-    run(win);
-  } finally {
+  const restore = (): void => {
     if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
     else Reflect.deleteProperty(globalThis, 'window');
     if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
     else Reflect.deleteProperty(globalThis, 'document');
+  };
+  return { win, restore };
+}
+
+function withDragGlobals(run: (win: FakeDOMNode) => void): void {
+  const { win, restore } = installDragGlobals();
+  try {
+    run(win);
+  } finally {
+    restore();
   }
 }
+
+/** Let pending timers run, as the browser does between one input event and the next. */
+const nextTask = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
 function drag(root: FakeBoardRoot, win: FakeDOMNode, from: string, to: string): void {
   root.dispatchEvent('pointerdown', { ...centreOf(from), pointerId: 1 });
@@ -1031,6 +1042,14 @@ test('becoming a spectator mid-drag drops the floating piece and the drag cannot
     win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 1 });
     assert.deepEqual(moves, []);
     assert.equal(win.listenerCount('pointermove'), 0);
+    assert.equal(win.listenerCount('pointerup'), 0, 'the cut-short gesture stops waiting once released');
+
+    // Disposed while still waiting for a cut-short gesture's release: nothing stays attached.
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 2 });
+    board.setPlayerColor('white');
+    board.dispose();
+    assert.equal(win.listenerCount('pointerup'), 0, 'disposal stops waiting for the release');
+    assert.equal(win.listenerCount('pointercancel'), 0);
   });
 });
 
@@ -1054,6 +1073,34 @@ test('a gesture cut short by an owner change selects nothing with its trailing c
     root.dispatchEvent('click', centreOf('e2'));
     assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-selected'), 'true', 'an ordinary click still selects');
   });
+});
+
+test('a click with no pointer gesture, such as from assistive technology, is never swallowed by an earlier release', async () => {
+  const { win, restore } = installDragGlobals();
+  try {
+    const { root, board } = mountWithFeedback({ playerColor: null });
+    const selected = (): string | null => root.querySelector('[aria-selected="true"]')?.getAttribute('data-square') ?? null;
+    const offBoard = { clientX: 900, clientY: 900 };
+
+    // A gesture cut short by an owner change, released off the board: no click follows it.
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
+    board.setPlayerColor('white');
+    win.dispatchEvent('pointerup', { ...offBoard, pointerId: 1 });
+    await nextTask();
+    root.dispatchEvent('click', centreOf('e2')); // an activation that sends no pointer events
+    assert.equal(selected(), 'e2', 'the next click is not eaten by the cut-short gesture');
+    root.dispatchEvent('click', centreOf('e2')); // deselect again
+
+    // An ordinary drag dropped off the board: no click follows that release either.
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 2 });
+    win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: 2 });
+    win.dispatchEvent('pointerup', { ...offBoard, pointerId: 2 });
+    await nextTask();
+    root.dispatchEvent('click', centreOf('e2'));
+    assert.equal(selected(), 'e2', 'the next click is not eaten by an off-board drop');
+  } finally {
+    restore();
+  }
 });
 
 test('a change of owner closes an open promotion chooser and clears a queued premove', () => {
