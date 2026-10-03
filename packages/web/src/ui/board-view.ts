@@ -208,10 +208,8 @@ export class BoardView {
   setPlayerColor(color: Color | null): void {
     if (color === this.interaction.playerColor) return;
     if (this.overlay) this.cancelPromotion();
-    // A pointer gesture still in progress belongs to the previous owner. Cancelling it removes the
-    // pointer-up handler, so wait for its release here or its trailing click would tap for the new owner.
-    if (this.releaseDragListeners && this.pointerId !== null) this.awaitCancelledRelease(this.pointerId);
-    this.cancelDrag();
+    // A pointer gesture still in progress belongs to the previous owner.
+    this.abandonGesture();
     this.interaction.setPlayerColor(color);
     this.render();
   }
@@ -323,8 +321,10 @@ export class BoardView {
     // The same pointer pressing again: its earlier release made no click here, and any wait for it is over.
     if (event.pointerId === this.suppressClickOf) this.suppressClickOf = null;
     if (event.pointerId === this.cancelledGesturePointer) this.releaseCancelledGesture?.();
-    // A new press ends any drag still in progress, its floating piece included.
-    this.cancelDrag();
+    // A new press ends any gesture still in progress. Another pointer's gesture is abandoned (its
+    // release must not tap); the same pointer pressing again means its release was lost.
+    if (this.releaseDragListeners && this.pointerId !== event.pointerId) this.abandonGesture();
+    else this.cancelDrag();
     this.dragFrom = sq;
     this.dragging = false;
     this.startX = event.clientX;
@@ -398,6 +398,20 @@ export class BoardView {
     if (click.pointerType === '') return false;
     if (click.pointerId === undefined) return this.pressCount === this.suppressedAtPress;
     return click.pointerId === this.suppressClickOf;
+  }
+
+  /**
+   * Abandon the pointer gesture in progress without acting on it. Cancelling removes its pointer-up
+   * handler, so wait for its release and swallow that click, or it would tap; a drag it started is
+   * undone (selection cleared, floating piece removed).
+   */
+  private abandonGesture(): void {
+    if (this.releaseDragListeners && this.pointerId !== null) this.awaitCancelledRelease(this.pointerId);
+    const wasDragging = this.dragging;
+    this.cancelDrag();
+    if (!wasDragging) return;
+    this.interaction.cancelPromotion();
+    this.render();
   }
 
   /** Abandon a drag in progress: stop listening, drop the floating piece, forget the gesture. */

@@ -1247,8 +1247,23 @@ test('a new press during a live drag ends that drag, floating piece included', (
     assert.equal(body.children.length, 1);
     root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 72, pointerType: 'touch' });
     assert.equal(body.children.length, 0, "the first drag's floating piece is not left behind");
-    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 71, pointerType: 'touch' });
-    assert.deepEqual(moves, [], 'the abandoned drag drops nothing');
+    assert.equal(root.querySelector('[aria-selected="true"]'), null, "the abandoned drag's selection is cleared");
+    assert.equal(root.querySelector('.cb-dragging'), null, 'its source piece is no longer shown as dragged');
+    win.dispatchEvent('pointerup', { ...centreOf('d2'), pointerId: 71, pointerType: 'touch' });
+    root.dispatchEvent('click', pointerClick('d2', 71)); // the abandoned drag's own trailing click, on another own piece
+    assert.equal(root.querySelector('[aria-selected="true"]'), null, "the abandoned drag's click selects nothing");
+    assert.deepEqual(moves, [], 'the abandoned drag submits nothing, by drop or by click');
+    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 72, pointerType: 'touch' });
+    root.dispatchEvent('click', pointerClick('g1', 72));
+    assert.equal(root.querySelector('[aria-selected="true"]')?.getAttribute('data-square'), 'g1', 'the new press works normally');
+    root.dispatchEvent('click', atClick('g1', -1)); // deselect again
+
+    // The same mouse pressing again while its previous press is still live (its release was lost).
+    root.dispatchEvent('pointerdown', { ...centreOf('d2'), pointerId: 1, pointerType: 'mouse' });
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1, pointerType: 'mouse' });
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 1, pointerType: 'mouse' });
+    root.dispatchEvent('click', pointerClick('e2', 1, 'mouse'));
+    assert.equal(root.querySelector('[aria-selected="true"]')?.getAttribute('data-square'), 'e2', 'a re-press does not wait on itself');
   });
 });
 
