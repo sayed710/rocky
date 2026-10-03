@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 87: bounded no-pointer-id click fallback and drag release ownership._
+_Last updated: 2026-10-03 — M15 Increment 87: drag cancellation and full Linux validation of the final code._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: bounded no-pointer-id click fallback and drag release ownership._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: pointer-matched click suppression and full Linux validation._
 
@@ -5110,4 +5112,16 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - hermetic suite **3,952 of 3,952** across 19 workspaces, with zero skips (web 1,462);
   - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
   - on Windows: lint, all 8 guards and `test:scripts` (312).
+- **Exact-head review of `066f046` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**, with no merge-blocking defect. Its one actionable finding is fixed in `f98a8b9`, with RED tests first.
+  - The finding: drags never listened for `pointercancel`, so a touch drag the browser took over (a pan, a system gesture) stayed live with its floating piece. The repository sets no `touch-action`, so this is plausible. Since `1bbb5bf` made the drag's `pointerup` ignore other pointers, no later event recovered such a drag.
+  - The fix: a drag now cancels on its own pointer's `pointercancel`, like a drop off the board (selection cleared, floating piece removed). A press that never became a drag keeps an existing selection. A new press now calls `cancelDrag()` before starting, which also fixes the pre-existing "second press during a live drag leaves the floating piece behind", previously recorded as not fixed.
+  - Seven compiled mutations of the new code were all killed by tests: no listener, any pointer's cancel, a new press only detaching listeners, no re-render, the selection kept, a non-drag cancel clearing the selection, and the listener not removed.
+  - Its other note, that a press outside any square keeps a stale entry, is harmless: the only click that entry could eat is one the board ignores anyway.
+- **Validation of `f98a8b9`, entirely on Linux** (the exact tree from `git archive f98a8b9`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,954 of 3,954** across 19 workspaces, with zero skips (web 1,464);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+
+  This supersedes the earlier "remain" notes: of the LOW items, only the lack of a real-browser touch test is still open.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
