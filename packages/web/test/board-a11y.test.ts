@@ -1093,10 +1093,10 @@ test('a click with no pointer gesture, such as from assistive technology, is nev
     const selected = (): string | null => root.querySelector('[aria-selected="true"]')?.getAttribute('data-square') ?? null;
     const offBoard = { clientX: 900, clientY: 900 };
 
-    // A gesture cut short by an owner change, released off the board: no click follows it.
+    // A gesture cut short by an owner change, released on the board, whose click never arrives.
     root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
     board.setPlayerColor('white');
-    win.dispatchEvent('pointerup', { ...offBoard, pointerId: 1 });
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 1 });
     await nextTask();
     root.dispatchEvent('click', atClick('e2')); // an activation with no pointer behind it, and no pointer id
     assert.equal(selected(), 'e2', 'the next click is not eaten by the cut-short gesture');
@@ -1111,10 +1111,10 @@ test('a click with no pointer gesture, such as from assistive technology, is nev
     assert.equal(selected(), 'e2', 'the next click is not eaten by an off-board drop');
     root.dispatchEvent('click', atClick('e2')); // deselect again
 
-    // A mouse drag dropped off the board, then an ordinary click by that same mouse.
+    // A mouse drag dropped on the board whose click is lost, then an ordinary click by that same mouse.
     root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 1, pointerType: 'mouse' });
     win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: 1, pointerType: 'mouse' });
-    win.dispatchEvent('pointerup', { ...offBoard, pointerId: 1, pointerType: 'mouse' });
+    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 1, pointerType: 'mouse' });
     root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1, pointerType: 'mouse' });
     win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 1, pointerType: 'mouse' });
     root.dispatchEvent('click', pointerClick('e2', 1, 'mouse'));
@@ -1189,10 +1189,10 @@ test('a second finger releasing first does not end the wait for the gesture an o
 test('on an engine whose clicks carry no pointer id, a stale suppression never eats a later tap', () => {
   withDragGlobals((win) => {
     const { root } = mountWithFeedback({ playerColor: 'white' });
-    // A touch drag released off the board: real engines make no click for it.
+    // A touch drag released on the board: a touch drag makes no click, so its entry stays.
     root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 41, pointerType: 'touch' });
     win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: 41, pointerType: 'touch' });
-    win.dispatchEvent('pointerup', { clientX: 900, clientY: 900, pointerId: 41, pointerType: 'touch' });
+    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 41, pointerType: 'touch' });
     // A new tap by a new touch pointer, whose click arrives as a plain MouseEvent (no pointer fields).
     root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 42, pointerType: 'touch' });
     win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 42, pointerType: 'touch' });
@@ -1337,10 +1337,43 @@ test('an abandoned pointer that the browser cancels leaves nothing to swallow', 
     const { root, board } = mountWithFeedback({ playerColor: null });
     root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 111, pointerType: 'touch' });
     board.setPlayerColor('white'); // abandons the press
-    win.dispatchEvent('pointercancel', { pointerId: 111, pointerType: 'touch' }); // no click will follow
+    win.dispatchEvent('pointercancel', { ...centreOf('e2'), pointerId: 111, pointerType: 'touch' }); // no click will follow
     assert.equal(win.listenerCount('pointerup') + win.listenerCount('pointercancel'), 0, 'the wait is over');
     root.dispatchEvent('click', centreOf('e2')); // a later activation with no pointer fields and no press
     assert.equal(root.querySelector('[aria-selected="true"]')?.getAttribute('data-square'), 'e2', 'it is not swallowed');
+  });
+});
+
+test('drags whose release makes no click leave a bounded number of click records, none for off-board drops', () => {
+  withDragGlobals((win) => {
+    const { root, board } = mountWithFeedback({ playerColor: 'white' });
+    const pending = (): number => (board.view as unknown as { suppressedClicks: Set<number> }).suppressedClicks.size;
+    const drag = (id: number, end: { clientX: number; clientY: number }): void => {
+      root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: id, pointerType: 'touch' });
+      win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: id, pointerType: 'touch' });
+      win.dispatchEvent('pointerup', { ...end, pointerId: id, pointerType: 'touch' });
+    };
+    for (let id = 200; id < 230; id++) drag(id, { clientX: 900, clientY: 900 }); // off the board: no click can come
+    assert.equal(pending(), 0, 'an off-board drop records nothing');
+    for (let id = 300; id < 400; id++) drag(id, centreOf('g1')); // on the board, but a touch drag makes no click
+    assert.ok(pending() <= 16, `records stay bounded (${pending()})`);
+    root.dispatchEvent('click', pointerClick('g1', 399)); // the most recent release's click is still swallowed
+    assert.equal(root.querySelector('[aria-selected="true"]'), null);
+  });
+});
+
+test("on an engine whose clicks carry no pointer id, an abandoned finger's delayed click never acts", () => {
+  withDragGlobals((win) => {
+    const { root } = mountWithFeedback({ playerColor: 'white' });
+    const selected = (): string | null => root.querySelector('[aria-selected="true"]')?.getAttribute('data-square') ?? null;
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 121, pointerType: 'touch' }); // A
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 122, pointerType: 'touch' }); // B abandons A
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 121, pointerType: 'touch' }); // A releases
+    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 122, pointerType: 'touch' }); // B releases
+    root.dispatchEvent('click', centreOf('e2')); // A's delayed click, after B's release, with no pointer fields
+    assert.equal(selected(), null, "the abandoned finger's click selects nothing");
+    root.dispatchEvent('click', centreOf('g1')); // B's own click
+    assert.equal(selected(), 'g1', "B's tap then works");
   });
 });
 

@@ -60,6 +60,13 @@ function pieceClass(color: string, role: string): string {
 }
 const DRAG_THRESHOLD = 6;
 
+/**
+ * Most click suppressions kept at once. A release's own click arrives within a few events, but a touch
+ * drag usually makes no click at all and touch pointer ids are never reused, so without a cap its entry
+ * would stay for the life of the board. The oldest entries are evicted first.
+ */
+const MAX_PENDING_CLICKS = 16;
+
 /** A resolved user gesture: either a committed move or a queued premove. */
 export type ResolvedMove =
   | { readonly kind: 'move'; readonly move: Premove }
@@ -105,10 +112,11 @@ export class BoardView {
   private pointerId: number | null = null;
   private floatEl: HTMLElement | null = null;
   /**
-   * Pointers whose next click must be swallowed (a drag's release, or an abandoned gesture's). An
-   * entry goes with that click or with the same pointer pressing again.
+   * Pointers whose next click must be swallowed, each marked `true` if it is an abandoned gesture's
+   * (begun under a previous owner, or cut short by another pointer) and `false` for a drag's own
+   * release. An entry goes with that click or with the same pointer pressing again.
    */
-  private readonly suppressedClicks = new Set<number>();
+  private readonly suppressedClicks = new Map<number, boolean>();
   /**
    * The pointer released most recently, so a click with no pointer id can be tied to the release that
    * produced it: a browser dispatches a click straight after its own pointer's release.
@@ -371,8 +379,8 @@ export class BoardView {
     this.stopAwaiting(event.pointerId);
     // A cancelled pointer never clicks, so only a real release leaves a click to swallow.
     if (!released) return;
-    this.lastReleasedPointer = event.pointerId;
-    this.suppressClickFrom(event.pointerId);
+    // A release off the board makes no click here, so there is nothing to swallow.
+    if (this.squareAt(event.clientX, event.clientY)) this.suppressClickFrom(event.pointerId, true);
   }
 
   private stopAwaiting(pointerId: number): void {
@@ -382,23 +390,35 @@ export class BoardView {
   }
 
   /** Swallow the next click produced by `pointerId`, whenever it arrives. */
-  private suppressClickFrom(pointerId: number): void {
-    this.suppressedClicks.add(pointerId);
+  private suppressClickFrom(pointerId: number, abandoned: boolean): void {
+    this.suppressedClicks.set(pointerId, abandoned);
+    for (const oldest of this.suppressedClicks.keys()) {
+      if (this.suppressedClicks.size <= MAX_PENDING_CLICKS) break;
+      this.suppressedClicks.delete(oldest);
+    }
   }
 
   /**
    * If `event` is a click a recorded release produced, forget that entry and return true. Modern
    * browsers deliver `click` as a PointerEvent carrying the id of the pointer behind it, whenever it
    * arrives, so the id decides. A click with no pointer (assistive technology, keyboard,
-   * `element.click()`) has `pointerType` '' and never counts. On an engine whose clicks carry no pointer
-   * fields, the click is taken to be the last released pointer's, which is swallowed only if suppressed.
+   * `element.click()`) has `pointerType` '' and never counts.
+   *
+   * On an engine whose clicks carry no pointer fields, a click cannot be attributed to a pointer, so a
+   * choice is unavoidable. Safety first: while an abandoned gesture's click is pending, the click is
+   * taken to be that one, because an abandoned gesture must never act; at worst one genuine tap is
+   * swallowed and is simply repeated. Otherwise it is taken to be the last released pointer's.
    */
   private consumeSuppressedClick(event: MouseEvent): boolean {
     if (this.suppressedClicks.size === 0) return false;
     const click = event as Partial<PointerEvent>;
     if (click.pointerType === '') return false;
-    const pointerId = click.pointerId ?? this.lastReleasedPointer;
-    return pointerId !== null && this.suppressedClicks.delete(pointerId);
+    if (click.pointerId !== undefined) return this.suppressedClicks.delete(click.pointerId);
+    for (const [pointerId, abandoned] of this.suppressedClicks) {
+      if (abandoned) return this.suppressedClicks.delete(pointerId);
+    }
+    const last = this.lastReleasedPointer;
+    return last !== null && this.suppressedClicks.delete(last);
   }
 
   /**
@@ -452,8 +472,8 @@ export class BoardView {
     this.endFloat();
     this.dragging = false;
     this.dragFrom = null;
-    this.suppressClickFrom(event.pointerId);
     if (target) {
+      this.suppressClickFrom(event.pointerId, false); // a drop off the board makes no click here
       this.dispatch(this.interaction.drop(from, target));
     } else {
       this.interaction.cancelPromotion();
