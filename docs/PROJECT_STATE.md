@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-04 — M15 Increment 87: bounded click records, safety-first pointer-less clicks, full Linux validation._
+_Last updated: 2026-10-04 — M15 Increment 87: time-bounded pointer-less click matching and full Linux validation._
+
+Prior: _Last updated: 2026-10-04 — M15 Increment 87: bounded click records, safety-first pointer-less clicks, full Linux validation._
 
 Prior: _Last updated: 2026-10-04 — M15 Increment 87: pointer-less clicks tied to the last release, and full Linux validation._
 
@@ -5175,6 +5177,18 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Validation of `b6246cd`, entirely on Linux** (the exact tree from `git archive b6246cd`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
   - `npm ci` and build succeeded;
   - hermetic suite **3,960 of 3,960** across 19 workspaces, with zero skips (web 1,470);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Exact-head review of `39c2f9d` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**, with no ownership regression and no case where an abandoned gesture's click acts.
+  - Its finding: the previous bullet's "at worst one genuine tap is swallowed" was an over-claim. Abandoned records had no expiry. On an engine whose clicks carry no `pointerId`, an abandoned touch that never made a click left a record that neither a re-press nor a matching click could remove, because touch ids are never reused. Each later genuine tap was then swallowed against one stale record, up to the cap of 16: dead taps spread over any amount of time.
+  - The reviewer believes Safari and iOS still send `click` without a `pointerId`. That is not verified, but if it holds, this fallback is the main iOS touch path.
+  - The fix (`13a05c9`): records carry their release's time, and on the pointer-less path, records older than `CLICK_WINDOW_MS` (1 s) are dropped before matching. A release's click arrives within milliseconds, or about 300 ms when touch holds it back for double-tap detection. Times come from the events' own `timeStamp`.
+  - The accurate cost of the safety-first rule is therefore: at most one genuine tap per abandoned release, and only within about a second of that release. Engines with pointer ids are unchanged.
+  - A RED test came first: two stale abandoned releases, then genuine taps two seconds later, which must act.
+  - Full mutation sweep: 35 compiled mutations, all killed by tests, including no purge, an unbounded window and a zero window.
+- **Validation of `13a05c9`, entirely on Linux** (the exact tree from `git archive 13a05c9`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,961 of 3,961** across 19 workspaces, with zero skips (web 1,471);
   - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
   - on Windows: lint passed.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
