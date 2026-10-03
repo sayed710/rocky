@@ -188,6 +188,18 @@ export class BoardView {
     this.render();
   }
 
+  /**
+   * Change whose pieces may be moved (`null`: nobody). A drag or promotion chooser opened for the
+   * previous owner is abandoned with it; focus and keyboard navigation are untouched.
+   */
+  setPlayerColor(color: Color | null): void {
+    if (color === this.interaction.playerColor) return;
+    if (this.overlay) this.cancelPromotion();
+    this.cancelDrag();
+    this.interaction.setPlayerColor(color);
+    this.render();
+  }
+
   /** Toggle the board between white-at-bottom and black-at-bottom orientations. */
   flip(): void {
     this.orientation = this.orientation === 'white' ? 'black' : 'white';

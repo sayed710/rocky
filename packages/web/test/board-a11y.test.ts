@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { BoardView } from '../src/ui/board-view.js';
 import { BoardInteraction } from '../src/core/interaction.js';
 import { StaticMoveOracle } from '../src/ports/move-oracle.js';
-import type { Square } from '../src/core/board.js';
+import type { Color, Square } from '../src/core/board.js';
 import { mountBoard } from '../src/app/board.js';
 import { I18n } from '../src/i18n/manager.js';
 import { enMessages } from '../src/i18n/catalog/en.js';
@@ -665,7 +665,9 @@ function centreOf(sq: string): { clientX: number; clientY: number } {
  * The elements go through a variable, so this compiles against a board that does not know the
  * feedback element yet: the RED run fails on behaviour, not on a type error.
  */
-function mountWithFeedback(options: { i18n?: I18n; root?: FakeBoardRoot; feedback?: FakeDOMNode } = {}) {
+function mountWithFeedback(
+  options: { i18n?: I18n; root?: FakeBoardRoot; feedback?: FakeDOMNode; playerColor?: Color | null } = {},
+) {
   const root = options.root ?? new FakeBoardRoot();
   const feedback = options.feedback ?? Object.assign(new FakeDOMNode('p'), { ownerDocument: root.ownerDocument });
   const moves: string[] = [];
@@ -674,6 +676,7 @@ function mountWithFeedback(options: { i18n?: I18n; root?: FakeBoardRoot; feedbac
     oracle: new StaticMoveOracle({ [START_FEN]: { e2: ['e3', 'e4'], g1: ['f3', 'h3'] } }),
     onMove: (uci) => moves.push(uci),
     ...(options.i18n ? { i18n: options.i18n } : {}),
+    ...(options.playerColor !== undefined ? { playerColor: options.playerColor } : {}),
   });
   board.setPosition(START_FEN);
   const press = (sq: string, key = 'Enter'): void => {
@@ -951,4 +954,146 @@ test('remounting onto the same elements announces each rejection exactly once', 
   assert.equal(first.feedback.replacements - before, 1, 'one announcement, not one per mount');
   assert.deepEqual(first.moves, []);
   assert.deepEqual(second.moves, []);
+});
+
+// ---- board ownership ----
+
+/** The square holding the single roving tab stop. */
+function rovingSquare(root: FakeBoardRoot): string | null {
+  const roving = root.querySelectorAll('[tabindex="0"]');
+  assert.equal(roving.length, 1, 'exactly one roving tab stop');
+  return roving[0]?.getAttribute('data-square') ?? null;
+}
+
+test('a spectator board submits nothing from click, keyboard or drag, and says nothing', () => {
+  withDragGlobals((win) => {
+    const { root, feedback, moves, press, click } = mountWithFeedback({ playerColor: null });
+    click('e2');
+    click('e4');
+    press('e2');
+    press('e4');
+    press('e2', ' ');
+    press('e3', ' ');
+    drag(root, win, 'e2', 'e4');
+    drag(root, win, 'e7', 'e5');
+    assert.deepEqual(moves, []);
+    assert.equal(root.querySelector('[aria-selected="true"]'), null, 'nothing is ever selected');
+    assert.equal(root.querySelector('.cb-dragging'), null, 'no piece lifts');
+    assert.equal(feedback.children.length, 0, 'a spectator is not told their gesture was illegal');
+  });
+});
+
+test('a read-only board keeps keyboard navigation, focus and flipping', () => {
+  const { root, board, press } = mountWithFeedback({ playerColor: null });
+  const a8 = root.querySelector<FakeDOMNode>('[data-square="a8"]');
+  assert.ok(a8);
+  press('a8', 'ArrowRight');
+  assert.equal(rovingSquare(root), 'b8', 'arrow keys move the roving focus');
+  assert.equal(root.querySelector<FakeDOMNode>('[data-square="b8"]')?.focused, true);
+  press('b8', 'End');
+  assert.equal(rovingSquare(root), 'h8');
+  assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-label'), 'e2, white pawn');
+
+  board.view.flip();
+  assert.equal(board.view.orientationColor, 'black');
+  assert.equal(root.querySelector('[data-square="h1"]')?.getAttribute('aria-rowindex'), '1', 'flipped grid semantics');
+});
+
+test('a player board accepts only its own colour from click, keyboard and drag', () => {
+  withDragGlobals((win) => {
+    const { root, board, moves, press, click } = mountWithFeedback({ playerColor: 'black' });
+    board.setTurn(false); // White to move: Black is off-turn
+    click('e2');
+    press('e2');
+    drag(root, win, 'e2', 'e4');
+    assert.equal(root.querySelector('[aria-selected="true"]'), null, "White's pieces are not Black's to select");
+    assert.equal(root.querySelector('[aria-description="premove"]'), null, 'no opponent-coloured premove');
+
+    drag(root, win, 'd7', 'd5');
+    assert.equal(root.querySelector('[data-square="d5"]')?.getAttribute('aria-description'), 'premove', 'own premove queues by drag');
+    press('e7');
+    press('e5');
+    assert.equal(root.querySelector('[data-square="e5"]')?.getAttribute('aria-description'), 'premove', 'own premove queues by keyboard');
+    assert.deepEqual(moves, []);
+  });
+});
+
+test('becoming a spectator mid-drag drops the floating piece and the drag cannot complete', () => {
+  withDragGlobals((win) => {
+    const { root, board, moves } = mountWithFeedback({ playerColor: 'white' });
+    const body = (globalThis.document as unknown as { body: FakeDOMNode }).body;
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
+    win.dispatchEvent('pointermove', { ...centreOf('e3'), pointerId: 1 });
+    assert.equal(body.children.length, 1);
+
+    board.setPlayerColor(null);
+    assert.equal(body.children.length, 0);
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 1 });
+    assert.deepEqual(moves, []);
+    assert.equal(win.listenerCount('pointermove'), 0);
+  });
+});
+
+test('a change of owner closes an open promotion chooser and clears a queued premove', () => {
+  const fen = '4k3/4P3/8/8/8/8/8/4K3 w - - 0 1';
+  const root = new FakeBoardRoot();
+  const moves: string[] = [];
+  const board = mountBoard({ boardEl: root as unknown as HTMLElement }, {
+    oracle: new StaticMoveOracle({ [fen]: { e7: ['e8'] } }),
+    onMove: (uci) => moves.push(uci),
+    playerColor: 'white',
+  });
+  board.setPosition(fen);
+  const prevDoc = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: root.ownerDocument });
+  try {
+    const press = (sq: string): void => {
+      root.dispatchEvent('keydown', { key: 'Enter', target: root.querySelector(`[data-square="${sq}"]`), preventDefault: () => undefined });
+    };
+    press('e7');
+    press('e8');
+    assert.ok(root.querySelector('[role="dialog"]'), 'promotion chooser open');
+    board.setPlayerColor(null);
+    assert.equal(root.querySelector('[role="dialog"]'), null, 'chooser closed with the ownership');
+
+    board.setPlayerColor('white');
+    board.setTurn(false);
+    press('e7');
+    press('e8');
+    const choice = root.querySelector<FakeDOMNode>('[role="dialog"]')?.querySelector<FakeDOMNode>('button');
+    assert.ok(choice, 'promotion chooser open for the premove');
+    choice.dispatchEvent('click', { preventDefault: () => undefined, stopPropagation: () => undefined });
+    assert.equal(root.querySelector('[data-square="e8"]')?.getAttribute('aria-description'), 'premove');
+    board.setPlayerColor('black');
+    assert.equal(root.querySelector('[data-square="e8"]')?.getAttribute('aria-description'), null, 'premove cleared');
+    assert.deepEqual(moves, []);
+  } finally {
+    if (prevDoc) Object.defineProperty(globalThis, 'document', prevDoc);
+    else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
+
+test('re-asserting the same owner leaves an unheard rejection and the cells alone', () => {
+  const { root, board, press, announced } = mountWithFeedback({ playerColor: 'white' });
+  press('e2');
+  press('e5');
+  const cell = root.querySelector('[data-square="e2"]');
+  board.setPlayerColor('white');
+  assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+  assert.equal(root.querySelector('[data-square="e2"]'), cell, 'no re-render');
+});
+
+test('remounting keeps no ownership from the previous mount and submits once', () => {
+  const first = mountWithFeedback({ playerColor: 'white' });
+  first.press('e2');
+  const spectator = mountWithFeedback({ root: first.root, feedback: first.feedback, playerColor: null });
+  spectator.press('e2');
+  spectator.press('e4');
+  assert.deepEqual(first.moves, [], 'the old mount and its selection are gone');
+  assert.deepEqual(spectator.moves, []);
+
+  const player = mountWithFeedback({ root: first.root, feedback: first.feedback, playerColor: 'white' });
+  player.press('e2');
+  player.press('e4');
+  assert.deepEqual([first.moves, spectator.moves, player.moves], [[], [], ['e2e4']], 'one submission, from the live mount');
 });

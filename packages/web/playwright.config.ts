@@ -28,6 +28,7 @@ const backendSpecs = [
   'account-security-sessions.spec.ts',
   'achievements.spec.ts',
   'analysis.spec.ts',
+  'board-ownership.spec.ts',
   'forum.spec.ts',
   'game-actions.spec.ts',
   'game-keyboard.spec.ts',

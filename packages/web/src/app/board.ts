@@ -20,6 +20,7 @@ import type { LegalMoveOracle } from '../ports/move-oracle.js';
 import { applyMove } from '../core/mover.js';
 import { STARTING_FEN } from '../core/position.js';
 import type { Premove } from '../core/premove.js';
+import type { Color } from '../core/board.js';
 import { createI18nManager, type I18nManager } from '../i18n/manager.js';
 import { createLtrElement } from '../i18n/bidi.js';
 
@@ -63,6 +64,11 @@ export interface MountBoardOptions {
   readonly onMove?: (uci: string) => void;
   /** Localization manager for board status copy; optional for test resilience. */
   readonly i18n?: I18nManager;
+  /**
+   * The colour this client may move, or `null` for none until {@link MountedBoard.setPlayerColor}
+   * says otherwise. Omit only for a board without players, which moves whichever side is to move.
+   */
+  readonly playerColor?: Color | null;
 }
 
 /** Handle to the mounted board. */
@@ -76,6 +82,8 @@ export interface MountedBoard {
   setTurn: (myTurn: boolean) => void;
   /** Accept or ignore move input (off once the game is over). */
   setInputEnabled: (enabled: boolean) => void;
+  /** Change whose pieces may be moved (`null`: nobody, e.g. a spectator). */
+  setPlayerColor: (color: Color | null) => void;
   /** Set the board orientation ('white' or 'black' perspective). */
   setOrientation: (orientation: 'white' | 'black') => void;
   /**
@@ -133,7 +141,11 @@ export function mountBoard(
   let fen = STARTING_FEN;
   const oracle = options?.oracle ?? new NullMoveOracle();
   const onMove = options?.onMove;
-  const interaction = new BoardInteraction({ oracle, myTurn: true });
+  const interaction = new BoardInteraction({
+    oracle,
+    myTurn: true,
+    ...(options?.playerColor !== undefined ? { playerColor: options.playerColor } : {}),
+  });
 
   const i18n = options?.i18n ?? createI18nManager();
   type StatusKey = 'board.status.played' | 'board.status.premoveSet';
@@ -255,6 +267,12 @@ export function mountBoard(
       if (enabled === interaction.acceptsInput) return;
       clearFeedback();
       view.setInputEnabled(enabled);
+    },
+    // Same churn guard as input: the game route re-asserts the owner on every action-state update.
+    setPlayerColor: (color: Color | null) => {
+      if (color === interaction.playerColor) return;
+      clearFeedback();
+      view.setPlayerColor(color);
     },
     setOrientation: (orientation: 'white' | 'black') => {
       if (view.orientationColor !== orientation) view.flip();

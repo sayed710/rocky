@@ -43,10 +43,20 @@ export type GestureResult =
    */
   | { readonly kind: 'illegal'; readonly from: Square; readonly to: Square };
 
+/**
+ * Whose pieces gestures may pick up: one colour (a player), `null` (nobody: a spectator, or a player
+ * whose colour the server has not confirmed yet), or `'side-to-move'` (a standalone board with no
+ * players, such as analysis or a study).
+ */
+export type BoardOwner = Color | null | 'side-to-move';
+
 export interface BoardInteractionOptions {
   readonly oracle: LegalMoveOracle;
-  /** The side this client may move. Omit to allow whichever side is to move. */
-  readonly playerColor?: Color;
+  /**
+   * The side this client may move, or `null` for none. Omit only on a board without players: it then
+   * moves whichever side is to move.
+   */
+  readonly playerColor?: Color | null;
   /** Whether it is currently this client's turn to move. Default true. */
   readonly myTurn?: boolean;
   /** Max chained premoves (see PremoveQueue). Default 1. */
@@ -61,7 +71,7 @@ interface Pending {
 
 export class BoardInteraction {
   private readonly oracle: LegalMoveOracle;
-  private readonly playerColor: Color | undefined;
+  private owner: BoardOwner;
   private readonly premoves: PremoveQueue;
 
   private pieces = new Map<Square, Piece>();
@@ -75,7 +85,7 @@ export class BoardInteraction {
 
   constructor(options: BoardInteractionOptions) {
     this.oracle = options.oracle;
-    this.playerColor = options.playerColor;
+    this.owner = options.playerColor === undefined ? 'side-to-move' : options.playerColor;
     this.myTurn = options.myTurn ?? true;
     this.premoves = new PremoveQueue(
       options.premoveDepth !== undefined ? { maxDepth: options.premoveDepth } : {},
@@ -119,6 +129,22 @@ export class BoardInteraction {
     this.premoves.clear();
   }
 
+  /**
+   * Change whose pieces this client may move. A gesture, promotion or premove begun for the previous
+   * owner is dropped, so nothing made under one colour completes under another — or under none.
+   */
+  setPlayerColor(color: Color | null): void {
+    if (color === this.owner) return;
+    this.owner = color;
+    this.clearSelection();
+    this.pending = null;
+    this.premoves.clear();
+  }
+
+  get playerColor(): BoardOwner {
+    return this.owner;
+  }
+
   get acceptsInput(): boolean {
     return this.inputEnabled;
   }
@@ -133,14 +159,15 @@ export class BoardInteraction {
 
   // ---- queries --------------------------------------------------------------
 
-  /** The colour this client is allowed to move right now. */
-  private movableColor(): Color {
-    return this.playerColor ?? this.sideToMove;
+  /** The colour this client is allowed to move right now, or `null` for none. */
+  private movableColor(): Color | null {
+    return this.owner === 'side-to-move' ? this.sideToMove : this.owner;
   }
 
   private isOwnPiece(sq: Square): boolean {
     const p = this.pieces.get(sq);
-    return p !== undefined && (p.color === (this.movableColor() === 'white' ? 'w' : 'b'));
+    const color = this.movableColor();
+    return p !== undefined && color !== null && p.color === (color === 'white' ? 'w' : 'b');
   }
 
   private isPromotion(from: Square, to: Square): boolean {
@@ -178,6 +205,11 @@ export class BoardInteraction {
     if (!isSquare(from) || !isSquare(to) || from === to) {
       this.clearSelection();
       return { kind: 'deselect' };
+    }
+    // A drop normally follows a successful dragStart, but the owner can change in between.
+    if (!this.isOwnPiece(from)) {
+      this.clearSelection();
+      return { kind: 'none' };
     }
     this.setSelection(from);
     return this.attempt(to);
