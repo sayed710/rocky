@@ -8,14 +8,17 @@ export class EngineBackedEvaluator implements PositionEvaluator {
   constructor(
     private readonly provider: AnalysisProvider,
     private readonly variant: Variant = 'standard',
+    private readonly signal?: AbortSignal,
   ) {}
 
   async evaluate(fen: string, playedUci: string, depth: number): Promise<PlyEvaluation> {
+    this.signal?.throwIfAborted();
     const lines = await this.provider.analyze({
       fen,
       variant: this.variant,
       limits: { depth },
       multiPv: 3,
+      ...(this.signal ? { signal: this.signal } : {}),
     });
 
     const topMoves: { uci: string; cp: number }[] = [];
@@ -73,6 +76,7 @@ export class EngineBackedEvaluator implements PositionEvaluator {
           variant: this.variant,
           limits: { depth },
           multiPv: 1,
+          ...(this.signal ? { signal: this.signal } : {}),
         });
 
         if (resultingLines.length > 0) {

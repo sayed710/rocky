@@ -29,20 +29,39 @@ export type TerminalEventWork =
   | { readonly stored: StoredEvent }
   | { readonly gameId: string; readonly seq: number; readonly decodeError: string };
 
-/** A restartable page of committed terminal work for one idempotent consumer. */
+export type TerminalConsumer = 'bot-analysis' | 'anti-cheat-analysis';
+
+export interface TerminalEventPosition {
+  readonly gameId: string;
+  readonly seq: number;
+}
+
+/** A fencing token changes on every claim, including recovery of an expired lease. */
+export interface TerminalEventLease extends TerminalEventPosition {
+  readonly consumer: TerminalConsumer;
+  readonly token: string;
+}
+
+export interface ClaimedTerminalEvent {
+  readonly work: TerminalEventWork;
+  readonly lease: TerminalEventLease;
+}
+
+export interface TerminalEventFailure {
+  readonly failures: number;
+  readonly nextRetryAt: number;
+}
+
+/** Atomic one-item claims: no transaction/row lock survives the claim call. */
 export interface TerminalEventInbox {
-  pendingAfter(
-    consumer: string,
-    after: { readonly gameId: string; readonly seq: number } | null,
-    limit: number,
-  ): Promise<TerminalEventWork[]>;
+  claimAfter(consumer: TerminalConsumer, after: TerminalEventPosition | null): Promise<ClaimedTerminalEvent | undefined>;
   /** Reverse keyset sweep catches endings committed below a busy forward cursor. */
-  pendingBefore(
-    consumer: string,
-    before: { readonly gameId: string; readonly seq: number },
-    limit: number,
-  ): Promise<TerminalEventWork[]>;
-  acknowledge(consumer: string, gameId: string, seq: number): Promise<void>;
+  claimBefore(consumer: TerminalConsumer, before: TerminalEventPosition): Promise<ClaimedTerminalEvent | undefined>;
+  /** False means ownership expired or changed; callers must cancel consumption. */
+  renew(lease: TerminalEventLease): Promise<boolean>;
+  /** Only the current unexpired owner can complete or fail; stale/replayed calls are no-ops. */
+  acknowledge(lease: TerminalEventLease): Promise<boolean>;
+  fail(lease: TerminalEventLease): Promise<TerminalEventFailure | undefined>;
 }
 
 /** A game whose durable stream has started and has not emitted `GameEnded`. */

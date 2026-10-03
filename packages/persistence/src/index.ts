@@ -12,6 +12,8 @@ export * from './errors';
 export * from './ids';
 export * from './glicko2';
 export * from './event-store';
+export * from './terminal-event-retry';
+export * from './in-memory-terminal-event-inbox';
 export * from './repositories';
 export * from './study-partner';
 export * from './in-memory-study-partner';

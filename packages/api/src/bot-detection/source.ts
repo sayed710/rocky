@@ -9,14 +9,16 @@ export interface BotFinishedGame {
 }
 
 export interface BotGameTimingSource {
-  load(gameId: string): Promise<BotFinishedGame | null>;
+  load(gameId: string, signal?: AbortSignal): Promise<BotFinishedGame | null>;
 }
 
 export class EventStoreBotTimingSource implements BotGameTimingSource {
   constructor(private readonly events: EventStore) {}
 
-  async load(gameId: string): Promise<BotFinishedGame | null> {
+  async load(gameId: string, signal?: AbortSignal): Promise<BotFinishedGame | null> {
+    signal?.throwIfAborted();
     const stored = await this.events.load(gameId);
+    signal?.throwIfAborted();
     if (stored.length === 0) return null;
     const state = Game.fromEvents(stored.map((e) => e.event)).snapshot();
     if (!state.status.over) return null;
