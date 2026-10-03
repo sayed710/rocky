@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-04 — M15 Increment 87: time-bounded pointer-less click matching and full Linux validation._
+_Last updated: 2026-10-04 — M15 Increment 87: click-window tests pinned and full Linux validation._
+
+Prior: _Last updated: 2026-10-04 — M15 Increment 87: time-bounded pointer-less click matching and full Linux validation._
 
 Prior: _Last updated: 2026-10-04 — M15 Increment 87: bounded click records, safety-first pointer-less clicks, full Linux validation._
 
@@ -5191,4 +5193,12 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - hermetic suite **3,961 of 3,961** across 19 workspaces, with zero skips (web 1,471);
   - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
   - on Windows: lint passed.
+- **Exact-head review of `242ad1c` and its follow-up**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**, with no code defect.
+  - Test gap: only one test used explicit event times, so a regression that shrank `CLICK_WINDOW_MS` (to 50 ms, say) or flipped its comparison would have gone unnoticed and let a late abandoned click act. In `2b52090` that test now requires an abandoned release's click 300 ms later to be swallowed, and a click just past the window to act. This is a test change only; the source is identical to `13a05c9`.
+  - Mutation sweep: 37 compiled mutations, all killed by tests, including the shrunken window and the flipped comparison.
+  - Wording: the previous bullet's timing ("within milliseconds, or about 300 ms when touch holds it back for double-tap detection") is the design assumption behind the 1 s window, not verified browser behaviour. Modern mobile browsers with a viewport meta tag may not delay clicks at all, and the window is generous either way. Whether Safari/iOS click events carry a `pointerId` also remains unverified.
+- **Validation of `2b52090`, entirely on Linux** (the exact tree from `git archive 2b52090`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,961 of 3,961** across 19 workspaces, with zero skips (web 1,471);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
