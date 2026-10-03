@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 87: Player board ownership and read-only spectators._
+_Last updated: 2026-10-03 — M15 Increment 87: Greptile click-suppression correction and Linux backend validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: Player board ownership and read-only spectators._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 86: Accessible local illegal-move feedback._
 
@@ -5050,4 +5052,20 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - Runs on this tree that did not pass, recorded so that none is mistaken for one:
     - Static with the shield on, three times: 185, 186 and 185 of 187. The failures were lobby `#create-seek` left disabled because session restore never completed (at 1440, 1024 and 768 px), an email-verification response never handled, and once headless Chromium gone at launch. In the last of these, commit headroom never fell below 9.5 GB, so memory was ruled out, and early pages took 10, 20, 30 and 40 s, the Avast loopback-stall pattern. The same tests took under a second with the shield off.
     - Backend with the shield on: 230 of 232. A Playwright **test worker** exited with `0xC0000409` (so `game-vs-bot` never ran), and a Black player's page joined as "Spectating" in `game-responsive`. Commit headroom fell to 523 MB during that run and Windows expanded the pagefile, consistent with the commit-exhaustion mechanism but not proven to cause it. The only source change since the passing `3d1ed4a` run was the five-line click suppression in `board-view.ts`. Before the passing run above, the owner reduced unrelated host load: another project's `vite preview` holding port 4173, that project's Vitest run, and this task's idle original interactive session were stopped.
+- **Second exact-head review correction** (Greptile on `a623b11`, confidence 5/5 with one non-blocking finding, valid; Qodo 0 bugs and 0 rule violations on the same head, with its earlier finding resolved): the first fix set `suppressClick` so that only a later click cleared it. A gesture cut short by an owner change and released off the board produces no click, so the flag stayed set and the next click with no pointer events (assistive technology, programmatic activation) was swallowed. An ordinary drag dropped off the board leaked the same way.
+  - Fix (`98fb8b9`): suppression now covers only the click the release itself produces, clearing on the next tick, because the browser dispatches that click straight after pointer-up. An owner change during a gesture waits for that gesture's pointer-up or pointercancel instead of setting a sticky flag, and the wait ends at that release, at the next pointerdown, or on `destroy`. The `pointerdown` reset added in `8245eea` was replaced by ending the wait.
+  - RED test first (`board-a11y.test.ts`): a click with no pointer gesture after a cut-short release, and after an off-board drop, both failed on `a623b11`. The mid-drag owner-change test also asserts that no `pointerup` or `pointercancel` listener survives the release or disposal. Six mutations were compiled and all were killed: release suppression never clearing, the owner change not waiting, pointerdown not ending the wait, destroy leaving the wait, the waiter staying after firing, and the drop path back to a sticky flag.
+  - The exact-head review of `a623b11` was again a strict self-review, because Gemini and Sonnet were both quota-blocked (429). Its claim that "only an off-board click can consume a stale flag" was wrong, because clicks without pointer events exist, so it did not catch this defect.
+- **Validation of `98fb8b9`** (sequentially; nothing in Playwright, Vite, timeouts, retries, workers, Node or host security settings was changed):
+  - build, lint, all 8 `check:*` guards and `test:scripts` (312);
+  - web unit (1,458) and the hermetic suite (3,948 across 19 workspaces), with zero skips;
+  - static Playwright **187 of 187** (4 workers, 0 retries) on Windows, with Avast Web/Network Shield off for that one run at the owner's direction;
+  - backend Playwright **232 of 232** on Linux. The exact tree came from `git archive 98fb8b9`, with no Windows `node_modules` or uncommitted files, and ran on WSL2 Ubuntu 26.04 with Node 22.23.3 (the version CI uses), `npm ci`, `npm run build`, Playwright's own `install-deps chromium` and `GAMBIT_E2E_BACKEND=1 npx playwright test --retries=0`: 4 workers, 0 failed, 0 skipped, 0 flaky, 0 retries.
+  - Windows backend runs on this tree, recorded so that none is mistaken for a pass:
+    - invalid once: `vite preview` exited with `0xC0000409` about 75 s in, with system commit headroom about 13.5 GB and the preview's memory flat;
+    - 230 of 232 with `cdb` attached to the preview only: a Playwright test worker exited with `0xC0000409`, and the analysis panel's run button stayed disabled. The preview survived with no exception.
+    - **232 of 232** with `cdb` attached to the preview and every test worker, with zero exceptions captured in any process;
+    - 231 of 232 uninstrumented: headless Chromium was gone at `browser.newContext` before one test body started.
+
+    These are recorded as host or environmental evidence only. Both processes that died run Node 24.15.0 with Avast's `aswhook.dll` injected, the crashes happened with the shield on and off and at high and low commit headroom, and the instrumented runs captured no failure. No root cause was proven, and the Windows instability is not fixed.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
