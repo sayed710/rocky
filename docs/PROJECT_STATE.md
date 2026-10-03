@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 87: per-pointer gesture tracking and full Linux validation._
+_Last updated: 2026-10-04 — M15 Increment 87: pointer-less clicks tied to the last release, and full Linux validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: per-pointer gesture tracking and full Linux validation._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: abandoned gestures never act, and full Linux validation._
 
@@ -5148,6 +5150,17 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Validation of `d569298`, entirely on Linux** (the exact tree from `git archive d569298`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
   - `npm ci` and build succeeded;
   - hermetic suite **3,956 of 3,956** across 19 workspaces, with zero skips (web 1,466);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Exact-head review of `3bd6965` and the gates on it**:
+  - Independent review: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran it. Verdict **APPROVE**, with one optional LOW: an awaited pointer's `pointercancel` recorded a suppression even though a cancelled pointer never clicks.
+  - Pushed head `3bd6965`: CI was all green, including M6 acceptance. Qodo reported 0 bugs, 0 rule violations and 0 requirement gaps, with all earlier findings resolved.
+  - Greptile, confidence 5/5, raised one non-blocking finding. On an engine whose clicks carry no `pointerId`, the fallback's press count was shared by all fingers. If finger A was abandoned after finger B pressed and A released without a click, A's suppression was recorded at B's count, and B's genuine tap was swallowed.
+  - Both are fixed in `5f7eb72`, with RED tests first. A click without a pointer id is now taken to be the last released pointer's (a browser dispatches a click straight after its own pointer's release) and is swallowed only if that pointer is suppressed. The shared press counter is gone. An awaited pointer's `pointercancel`, on its own handler, ends the wait without recording a suppression. Engines with pointer ids are unchanged.
+  - Full mutation sweep of the click and drag logic, updated to the new code: 27 compiled mutations, all killed by tests.
+- **Validation of `5f7eb72`, entirely on Linux** (the exact tree from `git archive 5f7eb72`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,958 of 3,958** across 19 workspaces, with zero skips (web 1,468);
   - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
   - on Windows: lint passed.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
