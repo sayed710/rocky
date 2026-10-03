@@ -195,6 +195,9 @@ export class BoardView {
   setPlayerColor(color: Color | null): void {
     if (color === this.interaction.playerColor) return;
     if (this.overlay) this.cancelPromotion();
+    // A pointer gesture still in progress belongs to the previous owner. Cancelling it removes the
+    // pointer-up handler, so swallow its trailing click here or it would tap for the new owner.
+    if (this.releaseDragListeners) this.suppressClick = true;
     this.cancelDrag();
     this.interaction.setPlayerColor(color);
     this.render();
@@ -303,6 +306,8 @@ export class BoardView {
     if (this.overlay) return;
     const sq = this.squareAt(event.clientX, event.clientY);
     if (!sq) return;
+    // A new gesture: a suppression left by one whose click never came must not swallow this one's.
+    this.suppressClick = false;
     this.dragFrom = sq;
     this.dragging = false;
     this.startX = event.clientX;

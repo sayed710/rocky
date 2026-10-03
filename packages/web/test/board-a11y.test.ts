@@ -1034,6 +1034,28 @@ test('becoming a spectator mid-drag drops the floating piece and the drag cannot
   });
 });
 
+test('a gesture cut short by an owner change selects nothing with its trailing click; the next click works', () => {
+  withDragGlobals((win) => {
+    const { root, board } = mountWithFeedback({ playerColor: null });
+    // A swipe begun before the role arrives: nobody owns the pieces, so no drag starts.
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
+    win.dispatchEvent('pointermove', { ...centreOf('e4'), pointerId: 1 });
+    board.setPlayerColor('white'); // `joined` lands mid-gesture
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 1 });
+    root.dispatchEvent('click', centreOf('e2')); // the gesture's own trailing click
+    assert.equal(root.querySelector('[aria-selected="true"]'), null, 'the cancelled gesture selects nothing');
+
+    // A gesture abandoned off the board leaves no click behind; it must not swallow the next real one.
+    root.dispatchEvent('pointerdown', { ...centreOf('d2'), pointerId: 2 });
+    board.setPlayerColor(null);
+    board.setPlayerColor('white');
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 3 });
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 3 });
+    root.dispatchEvent('click', centreOf('e2'));
+    assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-selected'), 'true', 'an ordinary click still selects');
+  });
+});
+
 test('a change of owner closes an open promotion chooser and clears a queued premove', () => {
   const fen = '4k3/4P3/8/8/8/8/8/4K3 w - - 0 1';
   const root = new FakeBoardRoot();
