@@ -34,6 +34,7 @@ We establish an explicit, partitioned test architecture across all packages, gua
    - Run via `npm test`, `npm run test:trusted-edge`, and `npm run test:web-delivery` in `services/gateway`.
    - Requires real Redis 7 (`REDIS_URL`) and Docker/Nginx (`REQUIRE_DOCKER=1`).
    - Genuinely executes command routing, lease ownership, edge proxy, and production cache/compression tests with `skipped = 0`.
+   - The complete runtime suite also requires PostgreSQL (`DATABASE_URL`). `npm test` explicitly routes Windows through the Linux Node 22 image in `Dockerfile.gateway-test`; POSIX hosts and Ubuntu CI invoke `test:runtime` directly. Both paths discover the same single copy of every gateway test under the zero-skip runner. Real SIGTERM must reach the trust-worker JavaScript handler and exit 0 without a terminating signal; native Windows runtime invocation fails, rather than accepting forced termination or skipping coverage. The topology guard verifies discovery, required Linux CI execution and change-filter reachability.
 
 5. **M6 Acceptance Suite (`m6-acceptance` CI job)**:
    - Run via `npm run e2e` in `packages/web`.

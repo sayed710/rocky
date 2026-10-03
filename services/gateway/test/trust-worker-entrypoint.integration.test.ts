@@ -15,6 +15,9 @@ import { withTestDatabase } from '@chess-platform/persistence/test-support';
 const WORKER = fileURLToPath(new URL('../src/trust-worker.js', import.meta.url));
 const DATABASE_URL = process.env['DATABASE_URL'];
 
+assert.notEqual(process.platform, 'win32', 'Real POSIX SIGTERM requires Linux; use npm test to route Windows through Docker.');
+assert.ok(DATABASE_URL, 'DATABASE_URL is required for the trust-worker entrypoint contract.');
+
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = createServer();
@@ -36,7 +39,7 @@ async function until<T>(what: string, probe: () => Promise<T | undefined>, ms = 
   }
 }
 
-(DATABASE_URL ? test : test.skip)('the trust worker becomes ready, catches up on a finished game, and exits 0 on SIGTERM', { timeout: 90_000 }, async () => {
+test('the trust worker becomes ready, catches up on a finished game, and exits 0 on SIGTERM', { timeout: 90_000 }, async () => {
   await withTestDatabase(async ({ pool, connectionString }) => {
     await migrate(pool, migrationsDir());
     const gameId = uuidv7();
@@ -67,7 +70,7 @@ async function until<T>(what: string, probe: () => Promise<T | undefined>, ms = 
     let output = '';
     child.stdout.on('data', (chunk) => { output += String(chunk); });
     child.stderr.on('data', (chunk) => { output += String(chunk); });
-    const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => child.on('close', (code, signal) => resolve({ code, signal })));
     try {
       await until('/ready', async () => ((await fetch(`http://127.0.0.1:${port}/ready`)).ok ? true : undefined));
       assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
@@ -80,10 +83,18 @@ async function until<T>(what: string, probe: () => Promise<T | undefined>, ms = 
       assert.equal((await pool.query('SELECT 1 FROM terminal_event_receipts WHERE game_id = $1', [poisonId])).rowCount, 0);
       assert.equal(output.includes('must-not-be-logged'), false);
       assert.match(output, /decode-error/);
-      child.kill('SIGTERM');
-      assert.equal(await exited, 0, output);
+      assert.equal(child.kill('SIGTERM'), true);
+      const { code, signal } = await exited;
+      assert.equal(code, 0, output);
+      assert.equal(signal, null, output);
+      assert.ok(output.split(/\r?\n/).some((line) => {
+        try {
+          const entry = JSON.parse(line) as { service?: string; msg?: string };
+          return entry.service === 'trust-worker' && entry.msg === 'Shutdown signal received; finishing the game in progress';
+        } catch { return false; }
+      }), `the real SIGTERM must reach the JavaScript shutdown handler: ${output}`);
     } finally {
-      if (child.exitCode === null) child.kill('SIGKILL');
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     }
   });
 });
