@@ -1184,6 +1184,35 @@ test('a second finger releasing first does not end the wait for the gesture an o
   });
 });
 
+test('on an engine whose clicks carry no pointer id, a stale suppression never eats a later tap', () => {
+  withDragGlobals((win) => {
+    const { root } = mountWithFeedback({ playerColor: 'white' });
+    // A touch drag released off the board: real engines make no click for it.
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 41, pointerType: 'touch' });
+    win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: 41, pointerType: 'touch' });
+    win.dispatchEvent('pointerup', { clientX: 900, clientY: 900, pointerId: 41, pointerType: 'touch' });
+    // A new tap by a new touch pointer, whose click arrives as a plain MouseEvent (no pointer fields).
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 42, pointerType: 'touch' });
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 42, pointerType: 'touch' });
+    root.dispatchEvent('click', centreOf('e2'));
+    assert.equal(root.querySelector('[aria-selected="true"]')?.getAttribute('data-square'), 'e2', 'the new tap selects');
+  });
+});
+
+test("another pointer's release does not drop the piece a drag is carrying", () => {
+  withDragGlobals((win) => {
+    const { root, moves } = mountWithFeedback({ playerColor: 'white' });
+    const body = (globalThis.document as unknown as { body: FakeDOMNode }).body;
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 51, pointerType: 'touch' });
+    win.dispatchEvent('pointermove', { ...centreOf('e3'), pointerId: 51, pointerType: 'touch' });
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 52, pointerType: 'touch' }); // another finger
+    assert.deepEqual(moves, [], 'nothing dropped by the other finger');
+    assert.equal(body.children.length, 1, 'the drag is still carrying its piece');
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 51, pointerType: 'touch' });
+    assert.deepEqual(moves, ['e2e4'], 'the dragging finger drops it');
+  });
+});
+
 test('a change of owner closes an open promotion chooser and clears a queued premove', () => {
   const fen = '4k3/4P3/8/8/8/8/8/4K3 w - - 0 1';
   const root = new FakeBoardRoot();

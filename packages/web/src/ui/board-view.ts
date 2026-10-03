@@ -60,18 +60,6 @@ function pieceClass(color: string, role: string): string {
 }
 const DRAG_THRESHOLD = 6;
 
-/**
- * Whether `event` is the click produced by pointer `pointerId`. Browsers deliver `click` as a
- * PointerEvent carrying the id of the pointer behind it, whenever that click arrives. A click with no
- * pointer (assistive technology, keyboard, `element.click()`) has `pointerType` '' and never counts. An
- * engine whose clicks carry no pointer fields counts every click, keeping the release's own suppressed.
- */
-function isClickOf(event: MouseEvent, pointerId: number): boolean {
-  const click = event as Partial<PointerEvent>;
-  if (click.pointerType === '') return false;
-  return click.pointerId === undefined || click.pointerId === pointerId;
-}
-
 /** A resolved user gesture: either a committed move or a queued premove. */
 export type ResolvedMove =
   | { readonly kind: 'move'; readonly move: Premove }
@@ -121,6 +109,10 @@ export class BoardView {
    * owner change cut short. Null when none. Cleared by that click or by the same pointer pressing again.
    */
   private suppressClickOf: number | null = null;
+  /** Presses seen on the board, so a click with no pointer id can be tied to the release before it. */
+  private pressCount = 0;
+  /** {@link pressCount} when {@link suppressClickOf} was set. */
+  private suppressedAtPress = 0;
   private overlay: HTMLElement | null = null;
   private focusedSquare: Square | null = null;
   /** Removes the window listeners of the drag in progress; null when no drag is listening. */
@@ -247,7 +239,7 @@ export class BoardView {
   }
 
   private handleClick(event: MouseEvent): void {
-    if (this.suppressClickOf !== null && isClickOf(event, this.suppressClickOf)) {
+    if (this.isSuppressedClick(event)) {
       this.suppressClickOf = null;
       return;
     }
@@ -324,6 +316,7 @@ export class BoardView {
   }
 
   private handlePointerDown(event: PointerEvent): void {
+    this.pressCount += 1;
     if (this.overlay) return;
     const sq = this.squareAt(event.clientX, event.clientY);
     if (!sq) return;
@@ -338,6 +331,7 @@ export class BoardView {
     this.releaseDragListeners?.();
     const move = (e: PointerEvent): void => this.handlePointerMove(e);
     const up = (e: PointerEvent): void => {
+      if (e.pointerId !== this.pointerId) return; // another pointer's release is not this drag's
       this.releaseDragListeners?.();
       this.handlePointerUp(e);
     };
@@ -360,7 +354,7 @@ export class BoardView {
     const end = (e: PointerEvent): void => {
       if (e.pointerId !== pointerId) return;
       this.releaseCancelledGesture?.();
-      this.suppressClickOf = pointerId;
+      this.suppressClickFrom(pointerId);
     };
     window.addEventListener('pointerup', end);
     window.addEventListener('pointercancel', end);
@@ -371,6 +365,27 @@ export class BoardView {
       this.cancelledGesturePointer = null;
       this.releaseCancelledGesture = null;
     };
+  }
+
+  /** Swallow the next click produced by `pointerId`, whenever it arrives. */
+  private suppressClickFrom(pointerId: number): void {
+    this.suppressClickOf = pointerId;
+    this.suppressedAtPress = this.pressCount;
+  }
+
+  /**
+   * Whether `event` is the click the recorded release produced. Modern browsers deliver `click` as a
+   * PointerEvent carrying the id of the pointer behind it, whenever it arrives, so the id decides. A
+   * click with no pointer (assistive technology, keyboard, `element.click()`) has `pointerType` '' and
+   * never counts. On an engine whose clicks carry no pointer fields, a click counts only if no press
+   * came after the release: a later tap is a new gesture, not that release's click.
+   */
+  private isSuppressedClick(event: MouseEvent): boolean {
+    if (this.suppressClickOf === null) return false;
+    const click = event as Partial<PointerEvent>;
+    if (click.pointerType === '') return false;
+    if (click.pointerId === undefined) return this.pressCount === this.suppressedAtPress;
+    return click.pointerId === this.suppressClickOf;
   }
 
   /** Abandon a drag in progress: stop listening, drop the floating piece, forget the gesture. */
@@ -410,7 +425,7 @@ export class BoardView {
     this.endFloat();
     this.dragging = false;
     this.dragFrom = null;
-    this.suppressClickOf = event.pointerId;
+    this.suppressClickFrom(event.pointerId);
     if (target) {
       this.dispatch(this.interaction.drop(from, target));
     } else {
