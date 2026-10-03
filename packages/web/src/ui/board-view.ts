@@ -65,11 +65,21 @@ export type ResolvedMove =
   | { readonly kind: 'move'; readonly move: Premove }
   | { readonly kind: 'premove'; readonly premove: Premove };
 
+/**
+ * What the player should be told about their last gesture: a locally rejected move, or that an
+ * earlier rejection no longer applies because they did something else.
+ */
+export type MoveFeedback =
+  | { readonly kind: 'illegal'; readonly from: Square; readonly to: Square }
+  | { readonly kind: 'clear' };
+
 /** Construction-time options for {@link BoardView}. */
 export interface BoardViewOptions {
   readonly interaction: BoardInteraction;
   readonly orientation?: Color;
   readonly onResult?: (result: ResolvedMove) => void;
+  /** Separate from `onResult`, which carries only moves to submit or queue. */
+  readonly onFeedback?: (feedback: MoveFeedback) => void;
 }
 
 /**
@@ -84,6 +94,7 @@ export class BoardView {
   private readonly root: HTMLElement;
   private readonly interaction: BoardInteraction;
   private readonly onResult: (result: ResolvedMove) => void;
+  private readonly onFeedback: (feedback: MoveFeedback) => void;
   private orientation: Color;
   private pieces = new Map<Square, Piece>();
 
@@ -96,6 +107,8 @@ export class BoardView {
   private suppressClick = false;
   private overlay: HTMLElement | null = null;
   private focusedSquare: Square | null = null;
+  /** Removes the window listeners of the drag in progress; null when no drag is listening. */
+  private releaseDragListeners: (() => void) | null = null;
   // Held as fields so `destroy` can remove the very same references `addEventListener` received.
   private readonly onClick = (e: MouseEvent): void => this.handleClick(e);
   private readonly onPointerDown = (e: PointerEvent): void => this.handlePointerDown(e);
@@ -114,6 +127,7 @@ export class BoardView {
     this.interaction = options.interaction;
     this.orientation = options.orientation ?? 'white';
     this.onResult = options.onResult ?? (() => undefined);
+    this.onFeedback = options.onFeedback ?? (() => undefined);
     this.root.classList.add('cb-board');
     this.root.setAttribute('role', 'grid');
     this.root.setAttribute('aria-label', 'Chess board');
@@ -134,6 +148,7 @@ export class BoardView {
    * anything rendered into markup that `bootstrap` re-runs over — must call this before remounting.
    */
   destroy(): void {
+    this.cancelDrag();
     this.closeOverlay();
     this.root.removeEventListener('click', this.onClick);
     this.root.removeEventListener('pointerdown', this.onPointerDown);
@@ -160,6 +175,17 @@ export class BoardView {
   /** Inform the interaction layer whose turn it is, enabling or disabling move input. */
   setTurn(myTurn: boolean): void {
     this.interaction.setTurn(myTurn);
+    // A surviving selection's destinations change with the turn; show and describe them now.
+    // Without a selection nothing visible changed, so the DOM is left alone.
+    if (this.interaction.highlights().selected !== null) this.render();
+  }
+
+  /** Accept or ignore move input; disabling also dismisses an open promotion chooser. */
+  setInputEnabled(enabled: boolean): void {
+    if (!enabled && this.overlay) this.cancelPromotion();
+    if (!enabled) this.cancelDrag();
+    this.interaction.setInputEnabled(enabled);
+    this.render();
   }
 
   /** Toggle the board between white-at-bottom and black-at-bottom orientations. */
@@ -270,14 +296,28 @@ export class BoardView {
     this.startX = event.clientX;
     this.startY = event.clientY;
     this.pointerId = event.pointerId;
+    this.releaseDragListeners?.();
     const move = (e: PointerEvent): void => this.handlePointerMove(e);
     const up = (e: PointerEvent): void => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
+      this.releaseDragListeners?.();
       this.handlePointerUp(e);
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    this.releaseDragListeners = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      this.releaseDragListeners = null;
+    };
+  }
+
+  /** Abandon a drag in progress: stop listening, drop the floating piece, forget the gesture. */
+  private cancelDrag(): void {
+    this.releaseDragListeners?.();
+    this.endFloat();
+    this.dragging = false;
+    this.dragFrom = null;
+    this.pointerId = null;
   }
 
   private handlePointerMove(event: PointerEvent): void {
@@ -291,6 +331,7 @@ export class BoardView {
         return;
       }
       this.dragging = true;
+      this.onFeedback({ kind: 'clear' });
       this.beginFloat(this.dragFrom);
       this.render();
     }
@@ -320,19 +361,37 @@ export class BoardView {
 
   private dispatch(result: GestureResult): void {
     switch (result.kind) {
+      case 'none':
+        this.onFeedback({ kind: 'clear' });
+        this.render();
+        return;
+      case 'illegal':
+        this.render();
+        this.onFeedback({ kind: 'illegal', from: result.from, to: result.to });
+        return;
+      case 'select':
+      case 'deselect':
+        this.onFeedback({ kind: 'clear' });
+        this.render();
+        return;
       case 'move':
+        this.onFeedback({ kind: 'clear' });
         this.onResult({ kind: 'move', move: result.move });
         this.render();
-        break;
+        return;
       case 'premove':
+        this.onFeedback({ kind: 'clear' });
         this.onResult({ kind: 'premove', premove: result.premove });
         this.render();
-        break;
+        return;
       case 'promotion':
+        this.onFeedback({ kind: 'clear' });
         this.showPromotion(result.to);
-        break;
-      default:
-        this.render();
+        return;
+      default: {
+        const unhandled: never = result;
+        throw new Error(`unhandled gesture result ${JSON.stringify(unhandled)}`);
+      }
     }
   }
 

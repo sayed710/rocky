@@ -19,6 +19,7 @@ import { WsClient } from '../src/net/ws-client.js';
 import { GameSync } from '../src/net/game-sync.js';
 import { AuthoritativeMoveOracle } from '../src/net/authoritative-oracle.js';
 import { BoardInteraction } from '../src/core/interaction.js';
+import type { Square } from '../src/core/board.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
 
 // Test-only import from realtime-gateway — NOT in the production bundle.
@@ -253,5 +254,70 @@ test('R2#4 e2e: resume after disconnect with real GameAuthority', async () => {
   const dests = oracle.destinations('g1');
   assert.ok(dests.includes('f3'), 'g1 should have f3 as a legal destination after resume');
 
+  sync.stop();
+});
+
+/**
+ * Join `variant` as White on a real authority, with the board contract the game route uses: only a
+ * resolved `move` is submitted. Returns the pieces a test needs to play gestures and count frames.
+ */
+async function joinAsWhite(variant: 'standard' | 'racingkings') {
+  const pubsub = new InMemoryPubSub();
+  let clock = 1_000;
+  const authority = new GameAuthority(pubsub, () => (clock += 10));
+  await authority.createGame({
+    gameId: 'g1',
+    variant,
+    timeControl: TC,
+    players: { white: 'alice', black: 'bob' },
+    rated: false,
+  });
+  const { factory, sync } = setupClient('token-alice');
+  pubsub.subscribe('game:g1', (msg: Broadcast) => factory.last.emit(JSON.parse(encode(msg as ServerMessage))));
+  sync.start();
+  factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: authority.getState('g1') });
+
+  const oracle = new AuthoritativeMoveOracle({ getLegalMoves: () => sync.getState().legalMoves });
+  const interaction = new BoardInteraction({ oracle, myTurn: true });
+  interaction.setPosition(sync.getState().snapshot!.fen);
+  const play = (from: Square, to: Square) => {
+    interaction.tap(from);
+    const result = interaction.tap(to);
+    if (result.kind === 'move') sync.submitMove(`${result.move.from}${result.move.to}`);
+    return result;
+  };
+  return { authority, factory, sync, play };
+}
+
+test('e2e: a locally rejected move sends nothing and a legal move after it commits', async () => {
+  const { authority, factory, sync, play } = await joinAsWhite('standard');
+  const framesBefore = factory.last.sent.length;
+
+  assert.deepEqual(play('e2', 'e5'), { kind: 'illegal', from: 'e2', to: 'e5' });
+  assert.equal(factory.last.sent.length, framesBefore, 'no frame for a rejected gesture');
+  assert.equal(sync.getState().pending, null, 'no optimistic move');
+  assert.equal(authority.getState('g1').ply, 0);
+
+  assert.equal(play('e2', 'e4').kind, 'move');
+  assert.equal(factory.last.sent.length, framesBefore + 1, 'exactly one move frame');
+  assert.equal(JSON.parse(factory.last.sent.at(-1)!).uci, 'e2e4');
+  await authority.apply('g1', 'alice', { kind: 'move', uci: 'e2e4' });
+  await flush();
+  assert.equal(authority.getState('g1').ply, 1);
+  sync.stop();
+});
+
+test('e2e racing kings: the variant authority, not the board, decides which knight move is rejected', async () => {
+  // White's knight on e2 reaches c3 and d4 alike by geometry. From c3 it checks the black king on a2,
+  // which Racing Kings forbids; d4 gives no check. The client has no rule for this: it can only have
+  // learned the difference from the server's legal-move map.
+  const { factory, sync, play } = await joinAsWhite('racingkings');
+  const framesBefore = factory.last.sent.length;
+
+  assert.deepEqual(play('e2', 'c3'), { kind: 'illegal', from: 'e2', to: 'c3' });
+  assert.equal(factory.last.sent.length, framesBefore);
+  assert.equal(play('e2', 'd4').kind, 'move');
+  assert.equal(JSON.parse(factory.last.sent.at(-1)!).uci, 'e2d4');
   sync.stop();
 });

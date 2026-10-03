@@ -4,6 +4,9 @@ import { BoardView } from '../src/ui/board-view.js';
 import { BoardInteraction } from '../src/core/interaction.js';
 import { StaticMoveOracle } from '../src/ports/move-oracle.js';
 import type { Square } from '../src/core/board.js';
+import { mountBoard } from '../src/app/board.js';
+import { I18n } from '../src/i18n/manager.js';
+import { enMessages } from '../src/i18n/catalog/en.js';
 
 /**
  * Minimal in-memory DOM node used by board-a11y tests. Supports attribute get/set,
@@ -40,6 +43,10 @@ class FakeDOMNode {
     this.listeners.get(type)?.delete(fn);
   }
 
+  listenerCount(type: string): number {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+
   dispatchEvent(type: string, event: object): void {
     for (const fn of this.listeners.get(type) ?? []) {
       fn(event as never);
@@ -66,6 +73,16 @@ class FakeDOMNode {
 
   removeAttribute(name: string): void {
     this.attributes.delete(name);
+  }
+
+  /** How often content was replaced: each call is one live-region update a screen reader can hear. */
+  replacements = 0;
+
+  replaceChildren(...nodes: FakeDOMNode[]): void {
+    this.replacements += 1;
+    for (const child of this.children) child.parentElement = null;
+    this.children = [];
+    for (const node of nodes) this.appendChild(node);
   }
 
   appendChild(child: FakeDOMNode): FakeDOMNode {
@@ -627,4 +644,311 @@ test('promotion overlay announces accessible dialog and full piece labels', () =
       Reflect.deleteProperty(globalThis, 'document');
     }
   }
+});
+
+// ---- locally rejected moves ----
+
+const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const ILLEGAL_MOVE_KEY = 'board.feedback.illegalMove' as keyof typeof enMessages;
+const ILLEGAL_MOVE_TEXT: string = enMessages[ILLEGAL_MOVE_KEY];
+
+/** Client coordinates of the centre of `sq` on the 512px white-oriented fake board. */
+function centreOf(sq: string): { clientX: number; clientY: number } {
+  const file = sq.charCodeAt(0) - 97;
+  const rank = Number(sq[1]);
+  return { clientX: file * 64 + 32, clientY: (8 - rank) * 64 + 32 };
+}
+
+/**
+ * Mount the real composition (`mountBoard`) on the fake DOM with a move-feedback element.
+ *
+ * The elements go through a variable, so this compiles against a board that does not know the
+ * feedback element yet: the RED run fails on behaviour, not on a type error.
+ */
+function mountWithFeedback(options: { i18n?: I18n; root?: FakeBoardRoot; feedback?: FakeDOMNode } = {}) {
+  const root = options.root ?? new FakeBoardRoot();
+  const feedback = options.feedback ?? Object.assign(new FakeDOMNode('p'), { ownerDocument: root.ownerDocument });
+  const moves: string[] = [];
+  const elements = { boardEl: root as unknown as HTMLElement, feedbackEl: feedback as unknown as HTMLElement };
+  const board = mountBoard(elements, {
+    oracle: new StaticMoveOracle({ [START_FEN]: { e2: ['e3', 'e4'], g1: ['f3', 'h3'] } }),
+    onMove: (uci) => moves.push(uci),
+    ...(options.i18n ? { i18n: options.i18n } : {}),
+  });
+  board.setPosition(START_FEN);
+  const press = (sq: string, key = 'Enter'): void => {
+    const cell = root.querySelector<FakeDOMNode>(`[data-square="${sq}"]`);
+    assert.ok(cell, `cell ${sq} exists`);
+    root.dispatchEvent('keydown', { key, target: cell, preventDefault: () => undefined });
+  };
+  const click = (sq: string): void => root.dispatchEvent('click', centreOf(sq));
+  const announced = (): string => feedback.children.map((c) => c.textContent).join('');
+  return { root, feedback, moves, board, press, click, announced };
+}
+
+/** Install the window/document globals a pointer drag touches, for the duration of `run`. */
+function withDragGlobals(run: (win: FakeDOMNode) => void): void {
+  const win = new FakeDOMNode('window');
+  const doc = { createElement: (tag: string) => new FakeDOMNode(tag), body: new FakeDOMNode('body') };
+  const prevWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const prevDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: win });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: doc });
+  try {
+    run(win);
+  } finally {
+    if (prevWindow) Object.defineProperty(globalThis, 'window', prevWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+    if (prevDocument) Object.defineProperty(globalThis, 'document', prevDocument);
+    else Reflect.deleteProperty(globalThis, 'document');
+  }
+}
+
+function drag(root: FakeBoardRoot, win: FakeDOMNode, from: string, to: string): void {
+  root.dispatchEvent('pointerdown', { ...centreOf(from), pointerId: 1 });
+  win.dispatchEvent('pointermove', { ...centreOf(to), pointerId: 1 });
+  win.dispatchEvent('pointerup', { ...centreOf(to), pointerId: 1 });
+}
+
+test('the rejection copy is a typed catalog entry', () => {
+  assert.equal(typeof ILLEGAL_MOVE_TEXT, 'string');
+});
+
+test('a keyboard attempt the oracle rejects is announced and submits nothing', () => {
+  const { root, feedback, moves, press, announced } = mountWithFeedback();
+  press('e2');
+  press('e5');
+
+  assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+  assert.equal(feedback.replacements, 1, 'one announcement for one gesture');
+  assert.deepEqual(moves, [], 'nothing is submitted');
+  assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-label'), 'e2, white pawn', 'the board is unchanged');
+  const roving = root.querySelectorAll('[tabindex="0"]');
+  assert.equal(roving.length, 1, 'exactly one roving tab stop');
+  assert.equal(roving[0]?.getAttribute('data-square'), 'e5', 'the roving tab stop stays on the attempted square');
+  assert.equal(feedback.focused, false, 'the message never takes focus');
+});
+
+test('a click attempt the oracle rejects is announced and submits nothing', () => {
+  const { moves, click, announced } = mountWithFeedback();
+  click('e2');
+  click('e5');
+  assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+  assert.deepEqual(moves, []);
+});
+
+test('a drag the oracle rejects is announced once and submits nothing', () => {
+  withDragGlobals((win) => {
+    const { root, feedback, moves, announced } = mountWithFeedback();
+    drag(root, win, 'e2', 'e5');
+    assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+    assert.equal(feedback.replacements, 1);
+    assert.deepEqual(moves, []);
+
+    // Picking the piece up again is a new gesture, so it clears the stale message; the identical
+    // rejection that follows is a new node and is heard again.
+    const first = feedback.children[0];
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
+    win.dispatchEvent('pointermove', { ...centreOf('e5'), pointerId: 1 });
+    assert.equal(announced(), '', 'starting a drag clears the earlier rejection');
+    win.dispatchEvent('pointerup', { ...centreOf('e5'), pointerId: 1 });
+    assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+    assert.equal(feedback.replacements, 3, 'one clear and one announcement for the second drag');
+    assert.notEqual(feedback.children[0], first, 'a repeated drag rejection is a fresh addition');
+    assert.deepEqual(moves, []);
+
+    drag(root, win, 'e2', 'e4');
+    assert.deepEqual(moves, ['e2e4'], 'a legal drag still submits exactly once');
+    assert.equal(announced(), '', 'and clears the stale rejection');
+  });
+});
+
+test('any later gesture clears a rejection, including taps that change nothing', () => {
+  const { click, press, announced } = mountWithFeedback();
+  press('e2');
+  press('e5');
+  click('e4'); // empty square with nothing selected: a `none` result
+  assert.equal(announced(), '', 'an empty-square tap clears it');
+
+  press('e2');
+  press('e5');
+  click('e7'); // opponent piece with nothing selected
+  assert.equal(announced(), '', 'an opponent-piece tap clears it');
+});
+
+test('a selection that survives the turn arriving shows its destinations at once', () => {
+  const { root, board, press } = mountWithFeedback();
+  board.setTurn(false);
+  press('e2');
+  assert.equal(root.querySelector('[data-square="e4"]')?.getAttribute('aria-description'), null);
+  board.setTurn(true);
+  assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-selected'), 'true');
+  assert.equal(
+    root.querySelector('[data-square="e4"]')?.getAttribute('aria-description'),
+    'legal move',
+    'the refreshed destinations are rendered and described without waiting for another gesture',
+  );
+});
+
+test('a game ending mid-drag drops the floating piece and the drag cannot resume', () => {
+  withDragGlobals((win) => {
+    const { root, board, moves } = mountWithFeedback();
+    const body = (globalThis.document as unknown as { body: FakeDOMNode }).body;
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
+    win.dispatchEvent('pointermove', { ...centreOf('e3'), pointerId: 1 });
+    assert.equal(body.children.length, 1, 'the drag shows a floating piece');
+
+    board.setInputEnabled(false);
+    assert.equal(body.children.length, 0, 'the floating piece is removed when the game ends');
+    assert.equal(root.querySelector('.cb-dragging'), null);
+
+    assert.equal(win.listenerCount('pointermove'), 0, 'the drag stops listening even if no pointer-up ever comes');
+    assert.equal(win.listenerCount('pointerup'), 0);
+
+    win.dispatchEvent('pointermove', { ...centreOf('e4'), pointerId: 1 });
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 1 });
+    assert.equal(body.children.length, 0, 'later pointer events do not resume the drag');
+    assert.deepEqual(moves, []);
+  });
+});
+
+test('disposing the board mid-drag leaves no window listeners or floating piece', () => {
+  withDragGlobals((win) => {
+    const { root, board } = mountWithFeedback();
+    const body = (globalThis.document as unknown as { body: FakeDOMNode }).body;
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
+    win.dispatchEvent('pointermove', { ...centreOf('e3'), pointerId: 1 });
+    board.dispose();
+    assert.equal(win.listenerCount('pointermove'), 0);
+    assert.equal(win.listenerCount('pointerup'), 0);
+    assert.equal(body.children.length, 0);
+  });
+});
+
+test('an update that leaves input enabled does not erase a rejection', () => {
+  // The game route calls this on every action-state update (a draw offer, a connection blip).
+  const { board, press, announced } = mountWithFeedback();
+  press('e2');
+  press('e5');
+  board.setInputEnabled(true);
+  assert.equal(announced(), ILLEGAL_MOVE_TEXT, 'the message survives an unrelated update');
+  board.setInputEnabled(false);
+  assert.equal(announced(), '', 'but a real change to no input clears it');
+});
+
+test('turn and input updates that change nothing visible leave the cells in place', () => {
+  // The game route calls these on every sync and action-state update. Rebuilding the grid each time
+  // detached cells under anything measuring or focusing them (reproduced as flaky geometry tests).
+  const { root, board } = mountWithFeedback();
+  const cell = root.querySelector('[data-square="a1"]');
+  board.setInputEnabled(true);
+  board.setInputEnabled(true);
+  board.setTurn(false);
+  board.setTurn(true);
+  assert.equal(root.querySelector('[data-square="a1"]'), cell, 'the same cell, not a re-rendered copy');
+});
+
+test('a finished board accepts no gestures: no rejection, no premove, nothing submitted', () => {
+  const { root, feedback, moves, board, press } = mountWithFeedback();
+  board.setTurn(false);
+  press('e2');
+  press('e4'); // premove queued while the game was live
+  assert.equal(root.querySelector('[data-square="e4"]')?.getAttribute('aria-description'), 'premove');
+
+  board.setInputEnabled(false);
+  assert.equal(root.querySelector('[data-square="e4"]')?.getAttribute('aria-description'), null, 'the queued premove is gone');
+  press('e2');
+  press('e5');
+  board.setTurn(true);
+  press('e2');
+  press('e5');
+  assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-selected'), 'false');
+  assert.equal(root.querySelector('[data-square="e5"]')?.getAttribute('aria-description'), null);
+  assert.equal(feedback.children.length, 0);
+  assert.deepEqual(moves, []);
+});
+
+test('a repeated identical rejection is announced again as a fresh live-region addition', () => {
+  const { feedback, press, announced } = mountWithFeedback();
+  press('e2');
+  press('e5');
+  const first = feedback.children[0];
+  press('e2');
+  press('e5');
+  assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+  assert.equal(feedback.children.length, 1, 'the message is not duplicated on screen');
+  assert.notEqual(feedback.children[0], first, 'a new node, so the identical text is announced again');
+});
+
+test('a legal move straight after a rejection submits and clears the message', () => {
+  const { moves, press, announced } = mountWithFeedback();
+  press('e2');
+  press('e5');
+  press('e2');
+  assert.equal(announced(), '', 'a new valid selection clears the stale message');
+  press('e4');
+  assert.deepEqual(moves, ['e2e4']);
+  assert.equal(announced(), '');
+});
+
+test('reselection, deselection and empty taps are not reported as illegal', () => {
+  const { feedback, moves, press, click } = mountWithFeedback();
+  click('e4'); // empty square, nothing selected
+  click('e7'); // opponent piece, nothing selected
+  press('e2');
+  press('g1'); // reselect another own piece
+  press('g1'); // deselect
+  press('a5', 'ArrowUp'); // focus navigation
+  assert.equal(feedback.children.length, 0);
+  assert.deepEqual(moves, []);
+});
+
+test('premoves are not reported as illegal', () => {
+  const { feedback, moves, board, press } = mountWithFeedback();
+  board.setTurn(false);
+  press('e2');
+  press('e5');
+  assert.equal(feedback.children.length, 0, 'an off-turn destination is a premove, not a rejection');
+  assert.deepEqual(moves, []);
+});
+
+test('authoritative updates and turn changes clear a stale rejection', () => {
+  const { board, press, announced } = mountWithFeedback();
+  press('e2');
+  press('e5');
+  assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+  board.setPosition(START_FEN);
+  assert.equal(announced(), '', 'a new authoritative position clears it');
+
+  press('e2');
+  press('e5');
+  assert.equal(announced(), ILLEGAL_MOVE_TEXT);
+  board.setTurn(false);
+  assert.equal(announced(), '', 'the turn ending (a move, a result) clears it');
+});
+
+test('the rejection relocalizes in place and disposal leaves no stale message or handler', () => {
+  const i18n = new I18n({ catalogs: { ar: { ...enMessages, [ILLEGAL_MOVE_KEY]: 'TEST-AR rejected' } } });
+  const { board, press, announced } = mountWithFeedback({ i18n });
+  press('e2');
+  press('e5');
+  i18n.setLocale('ar');
+  assert.equal(announced(), 'TEST-AR rejected');
+
+  board.dispose();
+  assert.equal(announced(), '', 'disposal clears the message');
+  i18n.setLocale('en');
+  assert.equal(announced(), '', 'a disposed board no longer reacts to locale changes');
+});
+
+test('remounting onto the same elements announces each rejection exactly once', () => {
+  const first = mountWithFeedback();
+  const second = mountWithFeedback({ root: first.root, feedback: first.feedback });
+  const before = first.feedback.replacements;
+  second.press('e2');
+  second.press('e5');
+  assert.equal(second.announced(), ILLEGAL_MOVE_TEXT);
+  assert.equal(first.feedback.replacements - before, 1, 'one announcement, not one per mount');
+  assert.deepEqual(first.moves, []);
+  assert.deepEqual(second.moves, []);
 });

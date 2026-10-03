@@ -1182,7 +1182,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const oracle = createGameOracle(gameSync);
 
   const board = mountBoard(
-    { boardEl, statusEl, flipEl },
+    { boardEl, statusEl, flipEl, feedbackEl: doc.getElementById('move-feedback') },
     {
       oracle,
       onMove: (uci: string) => {
@@ -1475,6 +1475,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onActionState: (state) => {
         lastActionState = state;
+        // A finished board takes no moves, premoves or rejections; its only gesture was submitting.
+        board.setInputEnabled(!state.isOver);
         renderActionState(state);
       },
     },

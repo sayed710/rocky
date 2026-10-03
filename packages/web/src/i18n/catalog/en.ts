@@ -932,6 +932,7 @@ export const enMessages = {
   // Board Status Messages
   'board.status.played': 'Played {move}.',
   'board.status.premoveSet': 'Premove set: {move}.',
+  'board.feedback.illegalMove': 'That move isn’t legal.',
   'board.played': 'Played {move}.',
   'board.premoveSet': 'Premove set: {move}.',
 
