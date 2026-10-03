@@ -700,14 +700,14 @@ const RAW_SUITE_DEFINITIONS = [
     pattern: /^services\/gateway\/test\/.*\.integration\.test\.ts$/,
     target: 'npm test in services/gateway (gateway-service)',
     manifest: 'services/gateway/package.json',
-    script: 'test',
+    script: 'test:runtime',
   },
   {
     name: 'gateway-unit',
     pattern: /^services\/gateway\/test\/.*\.test\.ts$/,
     target: 'npm test in services/gateway (gateway-service)',
     manifest: 'services/gateway/package.json',
-    script: 'test',
+    script: 'test:runtime',
   },
   {
     name: 'gateway-trusted-edge',
@@ -926,6 +926,40 @@ export function classifyTestFile(relPath) {
   return null;
 }
 
+/** Pin the single real-signal contract to both the required Linux CI gate and Windows Docker route. */
+export function verifyGatewaySignalRoute(root = REPO_ROOT, overrides = {}) {
+  const read = (path) => overrides[path] ?? readFileSync(join(root, path), 'utf8');
+  const problems = [];
+  const pkg = JSON.parse(read('services/gateway/package.json'));
+  if (pkg.scripts.test !== 'node ../../scripts/run-gateway-tests.mjs') problems.push('gateway test must use the explicit platform router');
+  const expected = 'tsc -p tsconfig.test.json && node ../../scripts/run-zero-skip.mjs -- node --test "dist-test/test/**/*.test.js"';
+  if (pkg.scripts['test:runtime'] !== expected) problems.push('gateway runtime must discover the complete suite once under zero-skip enforcement');
+  const workflow = read('.github/workflows/ci.yml');
+  const ci = workflow.split('  gateway-service:')[1]?.split('\n  # M6')[0] ?? '';
+  if (!/runs-on: ubuntu-latest/.test(ci) || !/run: npm test\s+working-directory: services\/gateway/.test(ci)
+      || !/DATABASE_URL:/.test(ci) || !/REDIS_URL:/.test(ci)
+      || !/if: needs\.changes\.outputs\.gateway == 'true'/.test(ci)) problems.push('gateway CI must run the required Linux runtime with both services');
+  const trigger = workflow.match(/grep -qE '([^']+)' <<<"\$changed" && gateway=true/)?.[1];
+  if (!trigger || ['services/gateway/test/trust-worker-entrypoint.integration.test.ts', 'scripts/run-gateway-tests.mjs', 'Dockerfile.gateway-test',
+    'scripts/check-test-topology.mjs', 'scripts/test/gateway-signal-route.test.mjs']
+    .some((path) => !new RegExp(trigger).test(path))) problems.push('gateway CI must be triggered by signal-test and routing changes');
+  const dockerfile = read('Dockerfile.gateway-test');
+  if (!/^FROM node:22-slim$/m.test(dockerfile) || !/^CMD \["npm", "run", "test:runtime"\]$/m.test(dockerfile)
+      || !dockerfile.includes('npm run build --prefix services/gateway')) problems.push('Windows replacement must build the deployed entrypoint and run the same runtime suite in Linux');
+  const source = stripComments(read('services/gateway/test/trust-worker-entrypoint.integration.test.ts'));
+  for (const fragment of [
+    "assert.notEqual(process.platform, 'win32'",
+    "assert.ok(DATABASE_URL",
+    "test('the trust worker becomes ready",
+    "assert.equal(child.kill('SIGTERM'), true)",
+    'assert.equal(code, 0, output)',
+    'assert.equal(signal, null, output)',
+    "entry.service === 'trust-worker' && entry.msg === 'Shutdown signal received; finishing the game in progress'",
+  ]) if (!source.includes(fragment)) problems.push(`missing real-signal contract: ${fragment}`);
+  if (/test\.skip|process\.emit|code\s*===\s*null/.test(source)) problems.push('signal contract cannot skip, synthesize delivery or accept forced termination');
+  return problems;
+}
+
 /**
  * Scans the repository and validates that:
  * 1. 100% of test files are placed in authorized test directories (no src/ co-location).
@@ -938,7 +972,8 @@ export function classifyTestFile(relPath) {
  *   misplaced: string[],
  *   unclassified: string[],
  *   unreachable: Array<{ file: string, suite: string }>,
- *   categorized: Map<string, string[]>
+ *   categorized: Map<string, string[]>,
+ *   gatewayRouteProblems: string[]
  * }}
  */
 export function verifyTestTopology(root = REPO_ROOT, options = {}) {
@@ -978,6 +1013,7 @@ export function verifyTestTopology(root = REPO_ROOT, options = {}) {
     unclassified,
     unreachable,
     categorized,
+    gatewayRouteProblems: verifyGatewaySignalRoute(root, options.gatewayRouteOverrides),
   };
 }
 
@@ -996,6 +1032,11 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename
   }
 
   let failed = false;
+
+  for (const problem of result.gatewayRouteProblems) {
+    console.error(`[TEST TOPOLOGY] FAILED: ${problem}`);
+    failed = true;
+  }
 
   if (result.misplaced.length > 0) {
     console.error(`[TEST TOPOLOGY] FAILED: ${result.misplaced.length} misplaced test file(s) found (outside authorized test directories):`);
