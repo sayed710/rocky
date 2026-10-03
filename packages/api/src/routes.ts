@@ -2762,7 +2762,7 @@ export function buildRouter(deps: RouteDeps): Router {
       const snap = stored?.snapshot;
       if (!snap) throw HttpError.notFound('tournament not found');
       if (snap.config.format === 'arena') {
-        const t = await arenaService.start(ctx.params['id']!, deps.clock.now());
+        const t = await arenaService.start(ctx.params['id']!);
         return json(200, arenaTournamentView(t));
       }
       const t = await tournamentService.start(ctx.params['id']!);

@@ -699,6 +699,26 @@ export class InMemoryAuditRepository implements AuditRepository {
 }
 
 export class InMemoryTournamentsRepository implements TournamentsRepository {
+  /** Explicit simulation authority shared by all test replicas. */
+  public arenaClock?: () => number;
+  async mutateArena(id: string, apply: (snapshot: import('@chess-platform/tournament').ArenaSnapshot, nowMs: number) => import('@chess-platform/tournament').ArenaSnapshot,
+    simulationClock?: () => number): Promise<import('@chess-platform/tournament').ArenaSnapshot | null> {
+    const stored = this.byId.get(id);
+    if (!stored) return null;
+    if (stored.snap.config.format !== 'arena') throw new Error('Not an arena tournament');
+    // No await between read, synchronous decision and write: one atomic simulation step.
+    const snapshot = apply(structuredClone(stored.snap) as import('@chess-platform/tournament').ArenaSnapshot,
+      (this.arenaClock ?? simulationClock ?? (() => Date.now()))());
+    if (JSON.stringify(snapshot) !== JSON.stringify(stored.snap)) {
+      this.byId.set(id, { snap: structuredClone(snapshot), version: stored.version + 1 });
+    }
+    return structuredClone(snapshot);
+  }
+  async listArenaWorkAfter(afterId: string | null, limit: number): Promise<string[]> {
+    return [...this.byId.entries()].filter(([id, row]) => row.snap.config.format === 'arena'
+      && row.snap.state === 'running' && (afterId === null || id > afterId))
+      .map(([id]) => id).sort().slice(0, limit);
+  }
   private readonly byId = new Map<string, { snap: TournamentAnySnapshot; version: number }>();
   private readonly order: string[] = []; // for newest-first list
 

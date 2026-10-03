@@ -6,6 +6,8 @@
  */
 
 import type { Pool, PoolClient } from 'pg';
+import { isDeepStrictEqual } from 'node:util';
+import type { ArenaSnapshot } from '@chess-platform/tournament';
 import type { Variant } from '@chess-platform/core';
 import type { ResultString, Termination, TimeControl, GameEvent } from '@chess-platform/game';
 import type {
@@ -851,6 +853,63 @@ export class PgGameStarter implements GameStarter {
 
 export class PgTournamentsRepository implements TournamentsRepository {
   constructor(private readonly pool: Pool) {}
+
+  async mutateArena(id: string, apply: (snapshot: ArenaSnapshot, nowMs: number) => ArenaSnapshot): Promise<ArenaSnapshot | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      const locked = await client.query<TournamentDbRow>('SELECT snapshot, version, state, format FROM tournaments WHERE id = $1 FOR UPDATE', [id]);
+      const row = locked.rows[0];
+      if (!row) { await client.query('COMMIT'); return null; }
+      if (row.format !== 'arena') throw new Error('Not an arena tournament');
+      if (!row.snapshot?.config || row.snapshot.config.format !== 'arena' ||
+          row.snapshot.config.id !== id || row.snapshot.state !== row.state) {
+        throw new Error('Invalid persisted Arena structure; operator repair required');
+      }
+      const before = row.snapshot as ArenaSnapshot;
+      // clock_timestamp(), unlike transaction_timestamp(), advances while waiting for a lock.
+      const time = await client.query<{ ms: string | null }>('SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS ms');
+      if (time.rows[0]?.ms == null) throw new Error('Arena database time is unavailable');
+      const nowMs = Number(time.rows[0]!.ms);
+      if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new Error('Arena database time is not an exact millisecond');
+      const snapshot = apply(structuredClone(before), nowMs);
+      if (snapshot.config.id !== id) throw new Error('Arena identity changed during mutation');
+      if (!isDeepStrictEqual(snapshot.config, before.config)) throw new Error('Arena configuration is immutable');
+      if (before.state === 'registration' && snapshot.state === 'running' && snapshot.startedAtMs !== nowMs) {
+        throw new Error('Arena start must use database time');
+      }
+      if (before.startedAtMs !== undefined && snapshot.startedAtMs !== before.startedAtMs) throw new Error('Arena start instant is immutable');
+      if (!isDeepStrictEqual(snapshot, before)) {
+        const newPairing = snapshot.pairingSequence > before.pairingSequence;
+        const deadline = snapshot.startedAtMs === undefined ? null : snapshot.startedAtMs + snapshot.config.durationMs;
+        // Authorization linearizes at this write, never at an earlier process-side read.
+        const written = await client.query(
+          `UPDATE tournaments SET snapshot = $2::jsonb, state = $3, participant_count = $4,
+             version = version + 1, updated_at = clock_timestamp()
+           WHERE id = $1 AND version = $5
+             AND (NOT $6::boolean OR floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint < $7::bigint)`,
+          [id, JSON.stringify(snapshot), snapshot.state, snapshot.participants.length, row.version, newPairing, deadline]);
+        if (written.rowCount !== 1) throw new VersionConflictError(id, row.version);
+      }
+      await client.query('COMMIT');
+      return snapshot;
+    } catch (error) { await rollback(client); throw error; }
+    finally { client.release(); }
+  }
+
+  async listArenaWorkAfter(afterId: string | null, limit: number): Promise<string[]> {
+    const result = await this.pool.query<{ tournament_id: string }>(
+      `SELECT tournament_id FROM (
+         SELECT tournament_id FROM arena_deadlines WHERE invalid OR pending_launch
+         UNION
+         SELECT tournament_id FROM arena_deadlines
+           WHERE NOT invalid AND deadline_ms <= floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint
+       ) AS work
+       WHERE ($1::text IS NULL OR tournament_id > $1)
+       ORDER BY tournament_id LIMIT $2`, [afterId, limit]);
+    return result.rows.map(row => row.tournament_id);
+  }
 
   async save(snapshot: TournamentAnySnapshot, expectedVersion: number): Promise<void> {
     if (expectedVersion === 0) {

@@ -438,6 +438,13 @@ export interface TournamentSummaryRow {
 }
 
 export interface TournamentsRepository {
+  /** Short atomic Arena decision. Database time is sampled AFTER row-lock acquisition.
+   * The callback must be synchronous and perform no external work. simulationClock is
+   * used only by the in-memory test adapter; PostgreSQL never calls it. */
+  mutateArena(id: string, apply: (snapshot: ArenaSnapshot, nowMs: number) => ArenaSnapshot,
+    simulationClock?: () => number): Promise<ArenaSnapshot | null>;
+  /** Rotating keyset scan; database-owned time determines due membership. */
+  listArenaWorkAfter(afterId: string | null, limit: number): Promise<string[]>;
   save(snapshot: TournamentAnySnapshot, expectedVersion: number): Promise<void>;
   findById(id: string): Promise<{ snapshot: TournamentAnySnapshot; version: number } | null>;
   list(limit: number): Promise<TournamentSummaryRow[]>;

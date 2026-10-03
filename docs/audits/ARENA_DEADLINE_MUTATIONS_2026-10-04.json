@@ -1,0 +1,324 @@
+{
+  "mutations": [
+    {
+      "name": "local Date.now authority",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (3.6105ms)",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (0.8553ms)",
+        "✖ worker rotates past corrupt Arena, coalesces passes and drains in-flight work on stop (1.0554ms)",
+        "✖ stale authorization retry reloads state before creating any external game (5.7472ms)",
+        "✖ production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown (5013.0442ms)",
+        "✖ failing tests:",
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (3.6105ms)",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (0.8553ms)",
+        "✖ worker rotates past corrupt Arena, coalesces passes and drains in-flight work on stop (1.0554ms)",
+        "✖ stale authorization retry reloads state before creating any external game (5.7472ms)",
+        "✖ production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown (5013.0442ms)"
+      ]
+    },
+    {
+      "name": "pairing permitted at exact T",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (4.1282ms)",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (1.3353ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (1.1766ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (3.9529ms)",
+        "✖ worker rotates past corrupt Arena, coalesces passes and drains in-flight work on stop (0.9626ms)",
+        "✖ pure domain preserves exact deadline across snapshot restore and active games (0.4227ms)",
+        "✖ production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown (5008.9216ms)",
+        "✖ failing tests:",
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (4.1282ms)",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (1.3353ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (1.1766ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (3.9529ms)",
+        "✖ worker rotates past corrupt Arena, coalesces passes and drains in-flight work on stop (0.9626ms)",
+        "✖ pure domain preserves exact deadline across snapshot restore and active games (0.4227ms)",
+        "✖ production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown (5008.9216ms)"
+      ]
+    },
+    {
+      "name": "settlement at T-1",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (3.3663ms)",
+        "✖ result/abandon white_win at T-1 uses exact cutoff (11.3074ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (1.4258ms)",
+        "✖ pure domain preserves exact deadline across snapshot restore and active games (0.3375ms)",
+        "✖ failing tests:",
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (3.3663ms)",
+        "✖ result/abandon white_win at T-1 uses exact cutoff (11.3074ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (1.4258ms)",
+        "✖ pure domain preserves exact deadline across snapshot restore and active games (0.3375ms)"
+      ]
+    },
+    {
+      "name": "post-deadline abandon repartner",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ result/abandon * at T+0 uses exact cutoff (2.0426ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (1.1643ms)",
+        "✖ failing tests:",
+        "✖ result/abandon * at T+0 uses exact cutoff (2.0426ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (1.1643ms)"
+      ]
+    },
+    {
+      "name": "post-deadline result reparing",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ result/abandon white_win at T+0 uses exact cutoff (2.1353ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (1.3053ms)",
+        "✖ result/abandon white_win at T+1 uses exact cutoff (2.114ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (1.1244ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (3.659ms)",
+        "✖ failing tests:",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (2.1353ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (1.3053ms)",
+        "✖ result/abandon white_win at T+1 uses exact cutoff (2.114ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (1.1244ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (3.659ms)"
+      ]
+    },
+    {
+      "name": "duplicate logical settlement writes",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ opposite-clock replicas and workers cannot finish idle Arena before T (1304.4981ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1578.3021ms)",
+        "✖ legacy unlinked pairing refuses ambiguous ended slot (1422.2694ms)",
+        "✖ failing tests:",
+        "✖ opposite-clock replicas and workers cannot finish idle Arena before T (1304.4981ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1578.3021ms)",
+        "✖ legacy unlinked pairing refuses ambiguous ended slot (1422.2694ms)"
+      ]
+    },
+    {
+      "name": "start retry changes effective deadline",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ lost response after authoritative start commit recovers the same deadline and one game (1522.8302ms)",
+        "✖ real two-replica result/abandon at T-1 converges (1392.1944ms)",
+        "✖ real two-replica result/abandon at T-1 converges (1574.3695ms)",
+        "✖ real two-replica result/abandon at T0 converges (1467.9877ms)",
+        "✖ real two-replica result/abandon at T0 converges (1466.2509ms)",
+        "✖ real two-replica result/abandon at T1 converges (1416.0875ms)",
+        "✖ real two-replica result/abandon at T1 converges (1416.3233ms)",
+        "✖ failing tests:",
+        "✖ lost response after authoritative start commit recovers the same deadline and one game (1522.8302ms)",
+        "✖ real two-replica result/abandon at T-1 converges (1392.1944ms)",
+        "✖ real two-replica result/abandon at T-1 converges (1574.3695ms)",
+        "✖ real two-replica result/abandon at T0 converges (1467.9877ms)",
+        "✖ real two-replica result/abandon at T0 converges (1466.2509ms)",
+        "✖ real two-replica result/abandon at T1 converges (1416.0875ms)",
+        "✖ real two-replica result/abandon at T1 converges (1416.3233ms)"
+      ]
+    },
+    {
+      "name": "authority failure falls back locally",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ database-time failure does not fallback or mutate/launch (1.5118ms)",
+        "✖ failing tests:",
+        "✖ database-time failure does not fallback or mutate/launch (1.5118ms)"
+      ]
+    },
+    {
+      "name": "stale snapshot overwrites current version",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ row lock wait crosses deadline; time is read after acquisition and stale saves fail (2047.9049ms)",
+        "✖ failing tests:",
+        "✖ row lock wait crosses deadline; time is read after acquisition and stale saves fail (2047.9049ms)"
+      ]
+    },
+    {
+      "name": "poison Arena stops page processing",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ malformed row/snapshot and active-game state retain evidence and cannot falsely finish (1932.339ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (2520.4775ms)",
+        "✖ failing tests:",
+        "✖ malformed row/snapshot and active-game state retain evidence and cannot falsely finish (1932.339ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (2520.4775ms)"
+      ]
+    },
+    {
+      "name": "crash permanently consumes due work",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ malformed row/snapshot and active-game state retain evidence and cannot falsely finish (2006.9024ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (2051.2321ms)",
+        "✖ rollback before commit preserves due work for restarted worker (1582.6705ms)",
+        "✖ failing tests:",
+        "✖ malformed row/snapshot and active-game state retain evidence and cannot falsely finish (2006.9024ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (2051.2321ms)",
+        "✖ rollback before commit preserves due work for restarted worker (1582.6705ms)"
+      ]
+    },
+    {
+      "name": "finished Arena keeps due row",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ real two-replica result/abandon at T0 converges (1396.247ms)",
+        "✖ real two-replica result/abandon at T0 converges (1393.3889ms)",
+        "✖ real two-replica result/abandon at T1 converges (1444.256ms)",
+        "✖ real two-replica result/abandon at T1 converges (1413.1057ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1376.8505ms)",
+        "✖ rollback before commit preserves due work for restarted worker (1303.3505ms)",
+        "✖ failing tests:",
+        "✖ real two-replica result/abandon at T0 converges (1396.247ms)",
+        "✖ real two-replica result/abandon at T0 converges (1393.3889ms)",
+        "✖ real two-replica result/abandon at T1 converges (1444.256ms)",
+        "✖ real two-replica result/abandon at T1 converges (1413.1057ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1376.8505ms)",
+        "✖ rollback before commit preserves due work for restarted worker (1303.3505ms)"
+      ]
+    },
+    {
+      "name": "pre-deadline committed pairing discarded in recovery",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ result/abandon white_win at T-1 uses exact cutoff (11.0206ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (0.9666ms)",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (0.9097ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (0.8022ms)",
+        "✖ result/abandon white_win at T+1 uses exact cutoff (0.7687ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (0.9232ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (1.3177ms)",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (3.8569ms)",
+        "✖ database-time failure does not fallback or mutate/launch (1.7769ms)",
+        "✖ failing tests:",
+        "✖ result/abandon white_win at T-1 uses exact cutoff (11.0206ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (0.9666ms)",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (0.9097ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (0.8022ms)",
+        "✖ result/abandon white_win at T+1 uses exact cutoff (0.7687ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (0.9232ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (1.3177ms)",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (3.8569ms)",
+        "✖ database-time failure does not fallback or mutate/launch (1.7769ms)"
+      ]
+    },
+    {
+      "name": "duplicate reporter scores next pairing twice",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ result/abandon white_win at T-1 uses exact cutoff (14.2564ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (2.0708ms)",
+        "✖ failing tests:",
+        "✖ result/abandon white_win at T-1 uses exact cutoff (14.2564ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (2.0708ms)"
+      ]
+    },
+    {
+      "name": "replica skew changes database decision",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ production PostgreSQL clock establishes start independently of process clocks (1248.467ms)",
+        "✖ opposite-clock replicas and workers cannot finish idle Arena before T (1226.6441ms)",
+        "✖ lost response after authoritative start commit recovers the same deadline and one game (1435.555ms)",
+        "✖ malformed row/snapshot and active-game state retain evidence and cannot falsely finish (1396.3888ms)",
+        "✖ real two-replica result/abandon at T-1 converges (1423.9916ms)",
+        "✖ real two-replica result/abandon at T-1 converges (1394.7198ms)",
+        "✖ real two-replica result/abandon at T0 converges (1401.6794ms)",
+        "✖ real two-replica result/abandon at T0 converges (1558.7951ms)",
+        "✖ real two-replica result/abandon at T1 converges (1634.0068ms)",
+        "✖ real two-replica result/abandon at T1 converges (1618.7534ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1584.9961ms)",
+        "✖ write-time deadline guard rolls back late authorization and retries with fresh database time (1723.4728ms)",
+        "✖ two different results race worker settlement and survive service replay (1757.6435ms)",
+        "✖ row lock wait crosses deadline; time is read after acquisition and stale saves fail (1669.4963ms)",
+        "✖ rollback before commit preserves due work for restarted worker (1603.23ms)",
+        "✖ committed results survive reporter restart and race expiry worker on separate connections (1601.6997ms)",
+        "✖ committed pairing survives crash after game creation and terminal * before link recovery (1433.5679ms)",
+        "✖ committed pairing survives crash after game creation and terminal 1-0 before link recovery (1676.6182ms)",
+        "✖ legacy unlinked pairing recovers live slot and counts reporter result (1678.6615ms)",
+        "✖ legacy unlinked pairing refuses ambiguous ended slot (1830.4219ms)",
+        "✖ failing tests:",
+        "✖ production PostgreSQL clock establishes start independently of process clocks (1248.467ms)",
+        "✖ opposite-clock replicas and workers cannot finish idle Arena before T (1226.6441ms)",
+        "✖ lost response after authoritative start commit recovers the same deadline and one game (1435.555ms)",
+        "✖ malformed row/snapshot and active-game state retain evidence and cannot falsely finish (1396.3888ms)",
+        "✖ real two-replica result/abandon at T-1 converges (1423.9916ms)",
+        "✖ real two-replica result/abandon at T-1 converges (1394.7198ms)",
+        "✖ real two-replica result/abandon at T0 converges (1401.6794ms)",
+        "✖ real two-replica result/abandon at T0 converges (1558.7951ms)",
+        "✖ real two-replica result/abandon at T1 converges (1634.0068ms)",
+        "✖ real two-replica result/abandon at T1 converges (1618.7534ms)",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1584.9961ms)",
+        "✖ write-time deadline guard rolls back late authorization and retries with fresh database time (1723.4728ms)",
+        "✖ two different results race worker settlement and survive service replay (1757.6435ms)",
+        "✖ row lock wait crosses deadline; time is read after acquisition and stale saves fail (1669.4963ms)",
+        "✖ rollback before commit preserves due work for restarted worker (1603.23ms)",
+        "✖ committed results survive reporter restart and race expiry worker on separate connections (1601.6997ms)",
+        "✖ committed pairing survives crash after game creation and terminal * before link recovery (1433.5679ms)",
+        "✖ committed pairing survives crash after game creation and terminal 1-0 before link recovery (1676.6182ms)",
+        "✖ legacy unlinked pairing recovers live slot and counts reporter result (1678.6615ms)",
+        "✖ legacy unlinked pairing refuses ambiguous ended slot (1830.4219ms)"
+      ]
+    },
+    {
+      "name": "new authorization collides with legacy orphan namespace",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ new committed authorization cannot consume a legacy ended orphan in the same slot (1548.7184ms)",
+        "✖ failing tests:",
+        "✖ new committed authorization cannot consume a legacy ended orphan in the same slot (1548.7184ms)"
+      ]
+    },
+    {
+      "name": "legacy ended slot is incorrectly consumed as proven outcome",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "failingTests": [
+        "✖ legacy unlinked pairing refuses ambiguous ended slot (1956.3783ms)",
+        "✖ failing tests:",
+        "✖ legacy unlinked pairing refuses ambiguous ended slot (1956.3783ms)"
+      ]
+    }
+  ],
+  "restoredByteIdentically": true,
+  "sourceSha256": {
+    "packages/tournament/src/arena.ts": "32325caa5a77cca2dcf6495f00b8838a23b3f9b92d3bec05ad372f05e808ea7f",
+    "packages/api/src/tournament/arena.service.ts": "903628e4aa2261908ed8652b8b45effd1cfe29fa088bd8bf5799d854dcd368f3",
+    "packages/persistence/src/pg/repositories.ts": "8e37e29d2301e1a58b5412aae2dd4a685fc6e1eee207d4529b73887f3c48a246",
+    "packages/api/src/tournament/arena-deadline-worker.ts": "d7f69d2f8b18784c2f8bcc33823ba1a4dbf7584c8e48a809813d105697d937e8",
+    "packages/persistence/migrations/0049_arena_deadlines.sql": "e839c3699fb5a6112e10803ab434b1f59445974bb27f33c7c53c5de00cbca998",
+    "packages/api/src/tournament/durable-launcher.ts": "3b13f49a560a9150c444267a180b8816803ccf0d22ea40ee7ed7b84bacb43727"
+  }
+}

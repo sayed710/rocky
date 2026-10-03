@@ -5,7 +5,8 @@ import { Game, type TimeControl } from '@chess-platform/game';
 import type { EventStore } from '@chess-platform/persistence';
 import type { Clock } from '../ports/clock';
 import { DEFAULT_NO_SHOW_DEADLINES } from '../config';
-import type { GameLauncher, LaunchInput } from './launcher';
+import type { GameLauncher, LaunchInput, LaunchResult } from './launcher';
+import { tournamentOutcome } from './reporter';
 
 /**
  * Production tournament launcher backed by the shared durable game event log.
@@ -32,9 +33,10 @@ export class DurableGameLauncher implements GameLauncher {
    * it does past a game that has already ended.
    * Every replica walks the same sequence, so they still converge on one game per pairing, and the
    * tournament's version CAS still decides which link is kept. A game left unlinked by a lost race
-   * is never started; the no-show deadline ends it. ADR-0152.
+   * is never started; the no-show deadline ends it. ADR-0152. New Arena authorizations
+   * use a separate durable namespace and commit before launch (ADR-0156).
    */
-  async launch(input: LaunchInput): Promise<{ gameId: string }> {
+  async launch(input: LaunchInput): Promise<LaunchResult> {
     for (let probe = 0; probe < MAX_SLOT_PROBES; probe += 1) {
       const launched = await this.launchAt({ ...input, attempt: input.attempt + probe });
       if (launched) return launched;
@@ -43,7 +45,7 @@ export class DurableGameLauncher implements GameLauncher {
   }
 
   /** Create or find this pairing's game at exactly this attempt; null when another pairing holds it. */
-  private async launchAt(input: LaunchInput): Promise<{ gameId: string } | null> {
+  private async launchAt(input: LaunchInput): Promise<LaunchResult | null> {
     const gameId = launchGameId(input);
     if (await this.events.exists(gameId)) return this.existing(gameId, input);
 
@@ -77,12 +79,14 @@ export class DurableGameLauncher implements GameLauncher {
    * pairing holds it, or the game has already ended. A pairing's game can sit past its nominal
    * attempt, so the relaunch after an abandon can land on that same aborted game; linking it again
    * would leave the pairing waiting on a game that is over. A concurrent duplicate launch of the
-   * same pairing never needs an ended game either: it loses its version CAS to the update that
-   * linked the live one.
+   * same round-based pairing never needs an ended game either: it loses its version CAS to the
+   * update that linked the live one. A marked Arena pairing can instead recover a terminal
+   * outcome after a game commit/link crash. An unmarked legacy ended slot cannot prove ownership.
    */
-  private async existing(gameId: string, input: LaunchInput): Promise<{ gameId: string } | null> {
+  private async existing(gameId: string, input: LaunchInput): Promise<LaunchResult | null> {
     const stored = await this.events.load(gameId);
-    if (stored.some(({ event }) => event.type === 'GameEnded')) return null;
+    const ending = stored.find(({ event }) => event.type === 'GameEnded')?.event;
+    if (!input.committedArenaPairing && ending) return null;
     const created = stored[0]?.event;
     const same = created?.type === 'GameCreated'
       && created.players.white === input.white
@@ -90,7 +94,12 @@ export class DurableGameLauncher implements GameLauncher {
       && created.variant === input.variant
       // Key order is not compared: PostgreSQL stores the payload as JSONB, which reorders keys.
       && isDeepStrictEqual(created.timeControl, input.timeControl);
-    return same ? { gameId } : null;
+    if (!same) return null;
+    if (ending && input.committedArenaPairing && !input.arenaLaunchNamespace) {
+      throw new Error('Ambiguous ended legacy Arena launch; operator repair required');
+    }
+    if (ending?.type === 'GameEnded') return { gameId, terminalOutcome: tournamentOutcome(ending) };
+    return { gameId };
   }
 }
 
@@ -103,7 +112,10 @@ const MAX_SLOT_PROBES = 8;
 
 /** SHA-256 of the launch identity. Both the game id and the Chess960 start position derive from it. */
 function launchDigest(input: LaunchInput): Buffer {
-  const identity = JSON.stringify([input.tournamentId, input.matchId, input.attempt]);
+  // Keep the original three-element identity byte-compatible for legacy/round games.
+  const identity = JSON.stringify(input.arenaLaunchNamespace
+    ? [input.tournamentId, input.matchId, input.attempt, input.arenaLaunchNamespace]
+    : [input.tournamentId, input.matchId, input.attempt]);
   return createHash('sha256').update(identity).digest();
 }
 
