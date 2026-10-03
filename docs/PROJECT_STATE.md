@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 87: pointer-matched click suppression and full Linux validation._
+_Last updated: 2026-10-03 — M15 Increment 87: bounded no-pointer-id click fallback and drag release ownership._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: pointer-matched click suppression and full Linux validation._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: Greptile click-suppression correction and Linux backend validation._
 
@@ -5098,4 +5100,14 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - static Playwright **187 of 187**, 0 flaky, `--retries=0`;
   - backend Playwright **232 of 232**, 0 flaky, `--retries=0`.
   - On Windows, build, lint, all 8 guards and `test:scripts` (312) passed on this commit. The Windows hermetic run failed one file, `packages/api` `resources.test.js`, at file level with no failing assertion. That file passed 14 of 14 in three isolated reruns, and this PR does not touch `packages/api`. It is recorded with the other host faults above, without a proven cause.
+- **Exact-head review of `79686a5` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**: no defect on Chromium or modern Firefox, and the 11 mutations map one-to-one to assertions. Two of its findings were fixed in `1bbb5bf`, with RED tests first:
+  - (MEDIUM, conditional) In the fallback for engines whose `click` carries no `pointerId`, a stale entry matched any later click. For example, a touch drag released off the board makes no click, so the next tap's click was swallowed once. In that fallback a click now counts as the release's own only if no press came after the release. This uses a press counter, not a timer; engines with pointer ids are unchanged.
+  - (LOW) The drag's `pointerup` listener accepted any pointer, so another finger's release could drop the carried piece at its own coordinates. It now ignores other pointers.
+
+  The wording "browsers deliver click as a PointerEvent" above means modern browsers; older engines take the fallback. Not fixed: a second press during a live drag leaves the floating piece behind (this predates the PR). Mutation run on `1bbb5bf`: 14 compiled mutations, 13 killed by tests. The survivor, "a swallowed click keeps its entry", is an equivalent mutant: any later click from that pointer follows a new press by it, which already clears the entry, and the press counter covers the fallback.
+- **Validation of `1bbb5bf`, entirely on Linux** (the exact tree from `git archive 1bbb5bf`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,952 of 3,952** across 19 workspaces, with zero skips (web 1,462);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint, all 8 guards and `test:scripts` (312).
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
