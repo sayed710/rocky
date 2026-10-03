@@ -1,0 +1,23 @@
+# Windows uses the same Linux/Node 22 runtime as the gateway CI job.
+# Reuse the production gateway builder's dependency order, without engines or runtime changes.
+FROM node:22-slim AS manifests
+WORKDIR /app
+COPY packages/ ./packages/
+COPY services/ ./services/
+# Preserve manifest directory structure without a second hard-coded workspace inventory.
+RUN find packages services -type f ! -name package.json ! -name package-lock.json -delete && \
+    find packages services -depth -type d -empty -delete
+
+FROM node:22-slim
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY --from=manifests /app/packages/ ./packages/
+COPY --from=manifests /app/services/ ./services/
+RUN npm ci && npm ci --prefix services/gateway
+COPY packages/ ./packages/
+RUN npm run build:server
+COPY services/ ./services/
+RUN npm run build --prefix services/gateway
+COPY scripts/ ./scripts/
+WORKDIR /app/services/gateway
+CMD ["npm", "run", "test:runtime"]

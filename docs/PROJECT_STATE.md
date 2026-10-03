@@ -6,27 +6,33 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-04 — M15 Increment 87: click-window tests pinned and full Linux validation._
+_Last updated: 2026-10-04 — M15 Increment 88: Player board ownership, merged with Increment 87 (#89) and revalidated._
 
-Prior: _Last updated: 2026-10-04 — M15 Increment 87: time-bounded pointer-less click matching and full Linux validation._
+Prior: _Last updated: 2026-10-04 — M15 Increment 88: click-window tests pinned and full Linux validation._
 
-Prior: _Last updated: 2026-10-04 — M15 Increment 87: bounded click records, safety-first pointer-less clicks, full Linux validation._
+Prior: _Last updated: 2026-10-04 — M15 Increment 88: time-bounded pointer-less click matching and full Linux validation._
 
-Prior: _Last updated: 2026-10-04 — M15 Increment 87: pointer-less clicks tied to the last release, and full Linux validation._
+Prior: _Last updated: 2026-10-04 — M15 Increment 88: bounded click records, safety-first pointer-less clicks, full Linux validation._
 
-Prior: _Last updated: 2026-10-03 — M15 Increment 87: per-pointer gesture tracking and full Linux validation._
+Prior: _Last updated: 2026-10-04 — M15 Increment 88: pointer-less clicks tied to the last release, and full Linux validation._
 
-Prior: _Last updated: 2026-10-03 — M15 Increment 87: abandoned gestures never act, and full Linux validation._
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: per-pointer gesture tracking and full Linux validation._
 
-Prior: _Last updated: 2026-10-03 — M15 Increment 87: drag cancellation and full Linux validation of the final code._
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: abandoned gestures never act, and full Linux validation._
 
-Prior: _Last updated: 2026-10-03 — M15 Increment 87: bounded no-pointer-id click fallback and drag release ownership._
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: drag cancellation and full Linux validation of the final code._
 
-Prior: _Last updated: 2026-10-03 — M15 Increment 87: pointer-matched click suppression and full Linux validation._
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: bounded no-pointer-id click fallback and drag release ownership._
 
-Prior: _Last updated: 2026-10-03 — M15 Increment 87: Greptile click-suppression correction and Linux backend validation._
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: pointer-matched click suppression and full Linux validation._
 
-Prior: _Last updated: 2026-10-03 — M15 Increment 87: Player board ownership and read-only spectators._
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: Greptile click-suppression correction and Linux backend validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: Player board ownership and read-only spectators._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: Windows SIGTERM harness external review corrections._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: Real POSIX SIGTERM gateway harness on Windows._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 86: Accessible local illegal-move feedback._
 
@@ -5019,7 +5025,19 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Concurrency**: implemented on `2dd6d4d`. PR #88 (trust terminal-analysis retry isolation, M15 Increment 85) merged first as `f99a9e1` and was merged normally into this branch (no rebase, no force). Its entry and header chain are preserved unchanged, and this entry is renumbered to Increment 86. The only conflict was this file; #88 touches persistence, trust worker, helm and scripts, and no web or browser code. The validation above was rerun on the integrated tree, recorded below.
 - **Deliberate limits**: no reason text (the oracle exposes none); no feedback for a queued premove invalidated later (no production caller applies premoves today, so this is separate scope); no sound, vibration or animation; the board's own English ARIA labels remain outside the catalog as before. The owner performs the merge.
 
-## M15 Increment 87 — Player board ownership and read-only spectators (2026-10-03)
+## M15 Increment 87 — Real POSIX SIGTERM gateway harness on Windows (2026-10-03)
+
+- Separate prerequisite from the frozen Arena checkout, started from freshly fetched `origin/main` `d5af5be547c80b3163fe691b4a2eadc20acfe541` in a new isolated app worktree on `codex/windows-sigterm-harness`. No Arena implementation, migration 0049, production shutdown behavior, security settings, timeouts, workers or retries changed.
+- **RED / cause**: the unchanged trust-worker entrypoint test failed on Windows Node 24.15.0 (`1` test, `0` passed, `1` failed, `0` skipped): readiness, bot report and durable poison backoff succeeded, but SIGTERM yielded `null !== 0` with no shutdown-handler log. Windows forcibly terminates this child rather than delivering JavaScript SIGTERM. Increment 83 already records the same defect and a passing Linux rerun; it is not an Arena regression.
+- **Single required execution path**: gateway `npm test` now uses `scripts/run-gateway-tests.mjs`. POSIX hosts and Ubuntu CI run `test:runtime` directly. Windows explicitly builds and runs that same complete suite in a Linux Node 22 Docker image using the existing server dependency order and both lockfiles. UUID image tags prevent collisions; containers and tags are removed after execution. Loopback service hosts become Docker Desktop's `host.docker.internal`; other hosts must be reachable from the Linux engine. Missing database/Redis URLs or unavailable Docker fail closed. No separate signal-test copy or exclusion was introduced.
+- **Preserved contract**: one real SIGTERM must reach the deployed JavaScript handler, produce its structured shutdown log and close with code `0` and signal `null`. Direct Windows execution fails with the explicit Linux routing instruction. The test observes `close` so stdout/stderr are drained before checking the handler log. A signal-terminated child is not treated as still running during cleanup. Production source remains unchanged.
+- **Topology / falsification**: `check:test-topology` verifies the one complete runtime glob under zero-skip enforcement, the Windows image command/build, the required Ubuntu CI job/services and CI triggers for the signal test, router, image, guard and guard test. Regression checks reject all eight requested faulty alternatives: null acceptance, silent skip, absent exit assertion, native Windows replacement, undiscovered Linux/CI test, absent handler proof, forced kill and duplicate conflicting execution. Five real Linux emitted-code mutants were killed at runtime: SIGKILL, exit 1, missing SIGTERM registration, missing handler log and a skipped signal test. Positive focused runs passed before and after; mutated emitted files were restored byte-identically. The deliberate skip mutant failed zero-skip enforcement; every unmutated executed suite has zero skips.
+- **Sequential local validation**: full build and lint; standalone gateway build/lint/test compilation; all eight `check:*` guards; topology `476` files across `21` suites; script tests `315`; PostgreSQL backup/restore script tests `2`; `19` hermetic workspaces `3,915`; focused Linux entrypoint `1`; full Windows-routed Linux gateway `86/86`; native Linux gateway `86/86`, all with zero unexpected skips/failures/cancellations. Runtime process inspection after the Linux gate showed no worker descendants. Dedicated prerequisite PostgreSQL/Redis containers isolate the tests from Arena's schema. An initial image omitted the production gateway build and cancelled proxy-admission tests; adding the CI-equivalent build corrected that harness defect without relaxing any test.
+- **Review / publication boundary**: Gemini 3.8 Flash High returned a genuine HTTP 429 individual-quota error. The valid Claude Sonnet 4.6 Thinking fallback completed a read-only candidate review, identifying a CI trigger gap for the guard/test and a service-host documentation gap; both were corrected and affected checks refreshed. A fresh fixed-candidate review and exact-final-head GitHub gates remain required before handoff. CI, Qodo, mandatory Greptile and resolved review threads are not implied by these local results. The owner performs the manual merge; this prerequisite does not resume Arena.
+- **External review corrections**: PR #89's first head `2c1a1275b0999f79c2abe7d0d752bb5b60e556ee` passed every applicable GitHub CI job, but Qodo reported three findings and Greptile one overlapping credential-exposure finding. Rewritten service URLs now travel through the Docker child environment, with only variable names in command arguments; regression coverage checks both argument absence and actual environment forwarding. The Linux image isolates manifests in a separate stage without duplicating the workspace inventory, caches both lockfile installs before source copies, and builds server packages before copying gateway source. An isolated real gateway-test source edit proved the dependency-install and server-build layers remained cached. The Docker route explicitly maps `host.docker.internal` to `host-gateway`, with TCP reachability verified against the prerequisite database. Production and signal-contract source remain unchanged by these corrections.
+- **Correction validation / limits**: refreshed full build/lint, all 19 hermetic workspaces (`3,915`), all eight guards, script tests (`315`) and the corrected Windows-routed Linux gateway (`86/86`) passed sequentially with zero unexpected skips/failures/cancellations. One intermediate gateway run passed `85/86` with an unchanged flag-race test timing out waiting for both seats ready; no assertion, timeout, worker or retry was changed. After the interrupted environment stopped service containers together with exit 255 (`OOMKilled=false`), a subsequent run encountered Redis refusals and was stopped as invalid for a passing gate. Only the prerequisite's database/Redis containers were restarted, readiness was verified, and the final complete healthy-service run passed. Arena's containers and checkout were not changed. The first-head Claude exact-SHA attempt returned a genuine individual-quota HTTP 429; the candidate reviews preceding it completed with zero actionable findings after their corrections. The correction commit requires fresh review and exact-head GitHub gates; the first head's green evidence is superseded by any new push.
+
+## M15 Increment 88 — Player board ownership and read-only spectators (2026-10-03)
 
 - **Problem**, reverified on `origin/main` `d5af5be`: `BoardInteraction.movableColor()` fell back to the side to move when no `playerColor` was given, and the game route mounted its board without one and enabled input whenever `!isOver`. So a spectator could select, drag and premove pieces; the board was interactive before the `joined` role arrived (a pre-join tap queued a premove); an off-turn player could pick up the **opponent's** pieces (the side to move) and queue premoves with them; and joining a finished game briefly enabled input (`true` then `false`). `GameSync.submitMove` already refused spectator and off-turn moves, so no illegal move reached the server, but the board offered gestures it had no right to.
 - **Contract** (`packages/web/src/core/interaction.ts`): ownership is explicit, `BoardOwner = Color | null | 'side-to-move'`. A player (`'white'`/`'black'`) picks up only their own colour, on and off turn. `null` (a spectator, or a player whose colour is not confirmed yet) picks up nothing: every tap, drag start, drop, keyboard activation, promotion and premove resolves to `none`, so spectators never see "illegal move". `'side-to-move'` is kept only for boards with no players (fallback, analysis, studies, endgame, learning), which still omit the option. `setPlayerColor(color | null)` drops the selection, a pending promotion and queued premoves on a real change and is a no-op otherwise. `drop()` re-checks the origin's owner, since the owner can change between drag start and drop. Ownership is the piece's colour on the square; legality is still only the oracle's, so no variant rule enters the client.

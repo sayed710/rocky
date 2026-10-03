@@ -193,6 +193,7 @@ For tests outside Docker, use Node.js 22+ and run these commands **from the repo
 npm ci                           # root workspace dependencies, from package-lock.json
 npm run build                    # public packages/*/dist outputs, in dependency order
 npm ci --prefix services/gateway # standalone dependencies, from its own package-lock.json
+npm run build --prefix services/gateway # deployed entrypoint used by proxy-admission tests
 npm run test:counts              # execute and count workspace + gateway service tests
 ```
 
@@ -204,7 +205,8 @@ Installing those links does not build their targets. Workspace tests compile int
 `dist-test/`, which does not replace the public `dist/` build.
 
 `test:counts` runs the workspace tests and `npm test --prefix services/gateway`.
-It does not install dependencies or run production builds. For separate checks after
+On Linux/macOS it uses the prepared dependency trees and builds. On Windows the gateway
+suite builds an isolated Linux test image as described below. For separate checks after
 the setup above:
 
 ```bash
@@ -214,11 +216,27 @@ npm test --prefix services/gateway       # compiles and tests gateway dist-test/
 npm run build --prefix services/gateway  # compiles gateway dist/ for npm start
 ```
 
-A gateway production build is not a prerequisite for its test command. Redis-backed
-tests skip when `REDIS_URL` is unset, but their static `ioredis` imports still require
-the gateway dependencies at compilation and module-loading time. Skips are reported
-separately and do not prove the Redis integration. With a test Redis instance available
-at `REDIS_URL`, `npm run test:gateway-redis` runs the gateway build and test suite.
+The complete gateway suite requires `DATABASE_URL` for a disposable PostgreSQL database
+with pgvector and `REDIS_URL` for Redis. Missing URLs fail before running tests.
+`npm run test:gateway-redis` runs the gateway build and test suite.
+
+On Linux/macOS, `npm test --prefix services/gateway` invokes `test:runtime` directly,
+using the prepared builds above. On Windows it explicitly routes the same complete
+suite through Docker Desktop's Linux engine using `Dockerfile.gateway-test` and Node 22.
+The image caches dependency installs from both lockfiles using only manifests, then builds the server packages and gateway entrypoint,
+then compiles and executes every gateway test through the zero-skip runner. Host loopback
+addresses in the two service URLs become `host.docker.internal`, explicitly mapped to Docker's host gateway; other hosts are retained.
+Rewritten service URLs are forwarded through the Docker child environment, with only variable names in command arguments.
+Use services reachable from that Linux engine. An unavailable Docker/Linux runtime, build
+failure or failed test fails the command; there is no native Windows signal-test fallback.
+Each run uses a unique image tag and removes the container and tag after completion.
+
+The trust-worker test requires a real POSIX SIGTERM, its JavaScript handler log, exit code
+0 and no terminating signal. Direct Windows execution fails with a routing instruction;
+forced Windows termination (`code=null`, `signal=SIGTERM`) cannot satisfy this contract.
+There is one test copy, discovered by `test:runtime` both in the Ubuntu `gateway-service`
+CI job and the Windows Linux container. `check:test-topology` guards these paths and
+the CI change filter. No signal test is excluded or skipped.
 
 If `gateway-service: ERROR` includes `Cannot find module 'ioredis'`, run the separate
 gateway install above. Missing `@chess-platform/...` modules or type declarations on
