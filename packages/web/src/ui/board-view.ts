@@ -105,23 +105,20 @@ export class BoardView {
   private pointerId: number | null = null;
   private floatEl: HTMLElement | null = null;
   /**
-   * The pointer whose next click must be swallowed: one that just released a drag, or a gesture an
-   * owner change cut short. Null when none. Cleared by that click or by the same pointer pressing again.
+   * Pointers whose next click must be swallowed (a drag's release, or an abandoned gesture's), each
+   * with {@link pressCount} at that release. An entry goes with that click or the same pointer pressing again.
    */
-  private suppressClickOf: number | null = null;
+  private readonly suppressedClicks = new Map<number, number>();
   /** Presses seen on the board, so a click with no pointer id can be tied to the release before it. */
   private pressCount = 0;
-  /** {@link pressCount} when {@link suppressClickOf} was set. */
-  private suppressedAtPress = 0;
+  /** Pointers whose gesture was abandoned and whose release is still awaited. */
+  private readonly awaitingRelease = new Set<number>();
   private overlay: HTMLElement | null = null;
   private focusedSquare: Square | null = null;
   /** Removes the window listeners of the drag in progress; null when no drag is listening. */
   private releaseDragListeners: (() => void) | null = null;
-  /** Stops waiting for the release of a gesture an owner change cut short; null when none is pending. */
-  private releaseCancelledGesture: (() => void) | null = null;
-  /** The pointer whose cut-short gesture is being waited for; null when none. */
-  private cancelledGesturePointer: number | null = null;
   // Held as fields so `destroy` can remove the very same references `addEventListener` received.
+  private readonly onAwaitedRelease = (e: PointerEvent): void => this.handleAwaitedRelease(e);
   private readonly onClick = (e: MouseEvent): void => this.handleClick(e);
   private readonly onPointerDown = (e: PointerEvent): void => this.handlePointerDown(e);
   private readonly onKeyDown = (e: KeyboardEvent): void => this.handleKeyDown(e);
@@ -161,7 +158,7 @@ export class BoardView {
    */
   destroy(): void {
     this.cancelDrag();
-    this.releaseCancelledGesture?.();
+    for (const pointerId of [...this.awaitingRelease]) this.stopAwaiting(pointerId);
     this.closeOverlay();
     this.root.removeEventListener('click', this.onClick);
     this.root.removeEventListener('pointerdown', this.onPointerDown);
@@ -196,7 +193,7 @@ export class BoardView {
   /** Accept or ignore move input; disabling also dismisses an open promotion chooser. */
   setInputEnabled(enabled: boolean): void {
     if (!enabled && this.overlay) this.cancelPromotion();
-    if (!enabled) this.cancelDrag();
+    if (!enabled) this.abandonGesture();
     this.interaction.setInputEnabled(enabled);
     this.render();
   }
@@ -237,10 +234,7 @@ export class BoardView {
   }
 
   private handleClick(event: MouseEvent): void {
-    if (this.isSuppressedClick(event)) {
-      this.suppressClickOf = null;
-      return;
-    }
+    if (this.consumeSuppressedClick(event)) return;
     if (this.overlay) return;
     const sq = this.squareAt(event.clientX, event.clientY);
     if (!sq) return;
@@ -319,8 +313,8 @@ export class BoardView {
     const sq = this.squareAt(event.clientX, event.clientY);
     if (!sq) return;
     // The same pointer pressing again: its earlier release made no click here, and any wait for it is over.
-    if (event.pointerId === this.suppressClickOf) this.suppressClickOf = null;
-    if (event.pointerId === this.cancelledGesturePointer) this.releaseCancelledGesture?.();
+    this.suppressedClicks.delete(event.pointerId);
+    this.stopAwaiting(event.pointerId);
     // A new press ends any gesture still in progress. Another pointer's gesture is abandoned (its
     // release must not tap); the same pointer pressing again means its release was lost.
     if (this.releaseDragListeners && this.pointerId !== event.pointerId) this.abandonGesture();
@@ -357,47 +351,50 @@ export class BoardView {
   }
 
   /**
-   * Wait for the release of the pointer whose gesture an owner change cut short, then swallow that
-   * pointer's click whenever it arrives. Other pointers' releases are ignored: on an engine whose
-   * clicks carry no pointer id, ending the wait early would swallow another pointer's click.
+   * Wait for the release of a pointer whose gesture was abandoned, then swallow that pointer's click
+   * whenever it arrives. Any number of pointers can be awaited at once; each waits only for itself.
    */
   private awaitCancelledRelease(pointerId: number): void {
-    this.releaseCancelledGesture?.();
-    const end = (e: PointerEvent): void => {
-      if (e.pointerId !== pointerId) return;
-      this.releaseCancelledGesture?.();
-      this.suppressClickFrom(pointerId);
-    };
-    window.addEventListener('pointerup', end);
-    window.addEventListener('pointercancel', end);
-    this.cancelledGesturePointer = pointerId;
-    this.releaseCancelledGesture = (): void => {
-      window.removeEventListener('pointerup', end);
-      window.removeEventListener('pointercancel', end);
-      this.cancelledGesturePointer = null;
-      this.releaseCancelledGesture = null;
-    };
+    if (this.awaitingRelease.size === 0) {
+      window.addEventListener('pointerup', this.onAwaitedRelease);
+      window.addEventListener('pointercancel', this.onAwaitedRelease);
+    }
+    this.awaitingRelease.add(pointerId);
+  }
+
+  private handleAwaitedRelease(event: PointerEvent): void {
+    if (!this.awaitingRelease.has(event.pointerId)) return;
+    this.stopAwaiting(event.pointerId);
+    this.suppressClickFrom(event.pointerId);
+  }
+
+  private stopAwaiting(pointerId: number): void {
+    if (!this.awaitingRelease.delete(pointerId) || this.awaitingRelease.size > 0) return;
+    window.removeEventListener('pointerup', this.onAwaitedRelease);
+    window.removeEventListener('pointercancel', this.onAwaitedRelease);
   }
 
   /** Swallow the next click produced by `pointerId`, whenever it arrives. */
   private suppressClickFrom(pointerId: number): void {
-    this.suppressClickOf = pointerId;
-    this.suppressedAtPress = this.pressCount;
+    this.suppressedClicks.set(pointerId, this.pressCount);
   }
 
   /**
-   * Whether `event` is the click the recorded release produced. Modern browsers deliver `click` as a
-   * PointerEvent carrying the id of the pointer behind it, whenever it arrives, so the id decides. A
-   * click with no pointer (assistive technology, keyboard, `element.click()`) has `pointerType` '' and
-   * never counts. On an engine whose clicks carry no pointer fields, a click counts only if no press
-   * came after the release: a later tap is a new gesture, not that release's click.
+   * If `event` is a click a recorded release produced, forget that entry and return true. Modern
+   * browsers deliver `click` as a PointerEvent carrying the id of the pointer behind it, whenever it
+   * arrives, so the id decides. A click with no pointer (assistive technology, keyboard,
+   * `element.click()`) has `pointerType` '' and never counts. On an engine whose clicks carry no pointer
+   * fields, a click counts only if no press came after a recorded release: a later tap is a new gesture.
    */
-  private isSuppressedClick(event: MouseEvent): boolean {
-    if (this.suppressClickOf === null) return false;
+  private consumeSuppressedClick(event: MouseEvent): boolean {
+    if (this.suppressedClicks.size === 0) return false;
     const click = event as Partial<PointerEvent>;
     if (click.pointerType === '') return false;
-    if (click.pointerId === undefined) return this.pressCount === this.suppressedAtPress;
-    return click.pointerId === this.suppressClickOf;
+    if (click.pointerId !== undefined) return this.suppressedClicks.delete(click.pointerId);
+    for (const [pointerId, atPress] of this.suppressedClicks) {
+      if (atPress === this.pressCount) return this.suppressedClicks.delete(pointerId);
+    }
+    return false;
   }
 
   /**
