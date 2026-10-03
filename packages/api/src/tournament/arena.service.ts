@@ -29,66 +29,61 @@ export class ArenaService {
   constructor(
     private readonly repo: TournamentsRepository,
     private readonly launcher: GameLauncher,
-    private readonly clock: () => number
+    /** Only the in-memory repository uses this simulation clock. PostgreSQL ignores it. */
+    private readonly clock?: () => number
   ) {}
 
   async getTournament(id: string): Promise<ArenaTournament> {
-    const stored = await this.repo.findById(id);
-    if (!stored) throw HttpError.notFound('arena not found');
-    if (!isArenaSnapshot(stored.snapshot)) throw HttpError.conflict('not an arena tournament');
-    const arena = ArenaTournament.restore(stored.snapshot);
-    const wasRunning = arena.getState() === 'running';
-    arena.settle(this.clock());
-    if (wasRunning && arena.getState() === 'finished') {
-      try {
-        await this.repo.save(arena.toSnapshot(), stored.version);
-      } catch (e) {
-        // A version conflict means someone else already settled or mutated the
-        // arena — safe to serve the settled read. Anything else is a real
-        // persistence failure and must propagate.
-        if (!(e instanceof VersionConflictError)) throw e;
-      }
-    }
-    return arena;
+    return this.decide(id, (arena, nowMs) => arena.settle(nowMs));
   }
 
-  private async reconcileLaunch(arena: ArenaTournament): Promise<void> {
-    const pairings = arena.pairAvailable(this.clock());
-    for (const p of pairings) {
-      if (!arena.gameIdFor(p.pairingId)) {
-        const { gameId } = await this.launcher.launch({
+  /** Recover only pairings already committed by a database-time decision. */
+  async reconcile(id: string): Promise<ArenaTournament> {
+    const arena = await this.getTournament(id);
+    for (const [pairingId, p] of Object.entries(arena.toSnapshot().activeGames)) {
+      if (!arena.gameIdFor(pairingId)) {
+        const { gameId, terminalOutcome } = await this.launcher.launch({
           tournamentId: arena.config.id,
-          matchId: p.pairingId,
+          matchId: pairingId,
           white: p.white,
           black: p.black,
           variant: arena.config.variant,
           timeControl: arena.config.timeControl,
           attempt: 0,
+          committedArenaPairing: true,
+          arenaLaunchNamespace: p.launchNamespace,
         });
-        arena.linkGame(p.pairingId, gameId);
+        await this.decide(id, (current, nowMs) => {
+          // A concurrent reporter may have resolved it while launch was in flight.
+          if (!current.toSnapshot().activeGames[pairingId]) return;
+          const existing = current.gameIdFor(pairingId);
+          if (existing && existing !== gameId) throw new Error('Conflicting Arena game link');
+          if (terminalOutcome !== undefined) {
+            if (terminalOutcome === '*') current.abandonPairing(pairingId);
+            else current.recordResult(pairingId, terminalOutcome, nowMs);
+            current.pairAvailable(nowMs);
+            return;
+          }
+          current.linkGame(pairingId, gameId);
+        });
       }
     }
+    return this.load(id);
   }
 
-  private async withRetry(
-    id: string,
-    action: (arena: ArenaTournament) => Promise<void | false> | void | false
-  ): Promise<ArenaTournament> {
+  private async decide(id: string, action: (arena: ArenaTournament, nowMs: number) => void): Promise<ArenaTournament> {
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const stored = await this.repo.findById(id);
-      if (!stored) {
-        throw HttpError.notFound('Tournament not found');
-      }
-      if (!isArenaSnapshot(stored.snapshot)) {
-        throw HttpError.conflict('Not an arena tournament');
-      }
-      const arena = ArenaTournament.restore(stored.snapshot);
-      
       try {
-        const changed = await action(arena);
-        if (changed === false) return arena;
-        await this.repo.save(arena.toSnapshot(), stored.version);
-        return arena;
+        const snapshot = await this.repo.mutateArena(id, (stored, nowMs) => {
+          const arena = ArenaTournament.restore(stored);
+          action(arena, nowMs);
+          const snapshot = arena.toSnapshot();
+          // Refuse invalid launcher links or mutations before they reach durable storage.
+          ArenaTournament.restore(snapshot);
+          return snapshot;
+        }, this.clock);
+        if (!snapshot) throw HttpError.notFound('Tournament not found');
+        return ArenaTournament.restore(snapshot);
       } catch (e: any) {
         if (e instanceof VersionConflictError) {
           if (attempt === 3) throw HttpError.conflict('Concurrent update failed after retries');
@@ -138,23 +133,25 @@ export class ArenaService {
   }
 
   async register(id: string, playerId: string): Promise<ArenaTournament> {
-    return this.withRetry(id, async (arena) => {
+    await this.decide(id, (arena, nowMs) => {
       arena.register(playerId);
-      await this.reconcileLaunch(arena);
+      arena.pairAvailable(nowMs);
     });
+    return this.reconcile(id);
   }
 
   async withdraw(id: string, playerId: string): Promise<ArenaTournament> {
-    return this.withRetry(id, (arena) => {
+    return this.decide(id, (arena) => {
       arena.withdraw(playerId);
     });
   }
 
-  async start(id: string, atMs: number): Promise<ArenaTournament> {
-    return this.withRetry(id, async (arena) => {
-      arena.start(atMs);
-      await this.reconcileLaunch(arena);
+  async start(id: string, _atMs?: number): Promise<ArenaTournament> {
+    await this.decide(id, (arena, nowMs) => {
+      arena.start(nowMs);
+      arena.pairAvailable(nowMs);
     });
+    return this.reconcile(id);
   }
 
   async getStandings(id: string) {
@@ -163,26 +160,29 @@ export class ArenaService {
   }
 
   async recordResultByGame(id: string, gameId: string, result: GameResult): Promise<ArenaTournament> {
-    return this.withRetry(id, async (arena) => {
-      arena.recordResultByGame(gameId, result, this.clock());
-      await this.reconcileLaunch(arena);
+    await this.decide(id, (arena, nowMs) => {
+      arena.recordResultByGame(gameId, result, nowMs);
+      arena.pairAvailable(nowMs);
     });
+    return this.reconcile(id);
   }
 
   /** A resolved arena link is absent on replay; CAS retries observe that absence as success. */
   async recordCommittedOutcome(id: string, gameId: string, result: GameResult | '*'): Promise<ArenaTournament> {
-    return this.withRetry(id, async (arena) => {
-      if (!arena.pairingForGame(gameId)) return false;
+    await this.decide(id, (arena, nowMs) => {
+      if (!arena.pairingForGame(gameId)) return;
       if (result === '*') arena.abandonGame(gameId);
-      else arena.recordResultByGame(gameId, result, this.clock());
-      await this.reconcileLaunch(arena);
+      else arena.recordResultByGame(gameId, result, nowMs);
+      arena.pairAvailable(nowMs);
     });
+    return this.reconcile(id);
   }
 
   async abandonGame(id: string, gameId: string): Promise<ArenaTournament> {
-    return this.withRetry(id, async (arena) => {
+    await this.decide(id, (arena, nowMs) => {
       arena.abandonGame(gameId);
-      await this.reconcileLaunch(arena);
+      arena.pairAvailable(nowMs);
     });
+    return this.reconcile(id);
   }
 }

@@ -276,6 +276,7 @@ async function main(): Promise<void> {
 
   // --- Tournament Result Reporter (M9 inc 13, ADR-0025) ---
   let reporter: TournamentResultReporter | undefined;
+  let arenaDeadlines: import('@chess-platform/api').ArenaDeadlineWorker | undefined;
   if (process.env['TOURNAMENT_REPORTER'] === '1') {
     if (!pgPool || !eventStore) {
       logger.warn('TOURNAMENT_REPORTER requires DATABASE_URL to be set');
@@ -289,15 +290,17 @@ async function main(): Promise<void> {
       // Games launched by THIS process are watched immediately; games launched
       // by API replicas are picked up by the reporter's periodic scan.
       const reportingLauncher = {
-        launch: async (input: LaunchInput): Promise<{ gameId: string }> => {
+        launch: async (input: LaunchInput): Promise<import('@chess-platform/api').LaunchResult> => {
           const res = await durableLauncher.launch(input);
-          reporter?.watch(input.tournamentId, res.gameId);
+          if (res.terminalOutcome === undefined) reporter?.watch(input.tournamentId, res.gameId);
           return res;
         },
       };
 
       const tournamentService = new api.TournamentService(tournamentsRepo, reportingLauncher);
-      const arenaService = new api.ArenaService(tournamentsRepo, reportingLauncher, () => Date.now());
+      const arenaService = new api.ArenaService(tournamentsRepo, reportingLauncher);
+      arenaDeadlines = new api.ArenaDeadlineWorker(tournamentsRepo, arenaService, { logger, metrics });
+      arenaDeadlines.start();
 
       reporter = new api.TournamentResultReporter(pubsub, tournamentsRepo, tournamentService, arenaService, eventStore, {
         scanIntervalMs: positiveIntEnv('TOURNAMENT_REPORTER_SCAN_MS', 30_000),
@@ -803,6 +806,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     clearInterval(heartbeat);
     reporter?.stop();
+    const arenaDeadlinesStopped = arenaDeadlines?.stop();
     engineBotMover?.stop();
     // No new no-show or flag pass starts from here; an in-flight one may still be routing a command
     // through Redis and the database, so it is awaited below before either closes.
@@ -827,6 +831,7 @@ async function main(): Promise<void> {
         await engineShutdown; // ensure engine subprocesses are cleaned up before exit
         await noShowStopped;
         await flagStopped;
+        await arenaDeadlinesStopped;
         if (commandConsumer) commandConsumer.stop();
         if (ownershipRegistry) {
           ownershipRegistry.stopRenewal();

@@ -44,7 +44,7 @@ export interface ArenaSnapshot {
     onFire: boolean;
     gamesPlayed: number;
   }>;
-  readonly activeGames: Record<string, { white: string; black: string }>;
+  readonly activeGames: Record<string, { white: string; black: string; launchNamespace?: 'committed-v1' }>;
   readonly pairingSequence: number;
   readonly lastOpponents: Record<string, string>;
   readonly playedAsWhite: Record<string, number>;
@@ -68,7 +68,7 @@ export class ArenaTournament {
     gamesPlayed: number;
   }>();
 
-  private readonly activeGames = new Map<string, { white: string; black: string }>();
+  private readonly activeGames = new Map<string, { white: string; black: string; launchNamespace?: 'committed-v1' }>();
   private pairingSequence = 0;
   
   // Rematch avoidance
@@ -115,6 +115,10 @@ export class ArenaTournament {
 
   start(nowMs: number): void {
     if (this.state !== 'registration') return;
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !Number.isSafeInteger(this.config.durationMs)
+      || this.config.durationMs <= 0 || !Number.isSafeInteger(nowMs + this.config.durationMs)) {
+      throw new Error('Invalid Arena start/deadline milliseconds');
+    }
     this.state = 'running';
     this.startedAtMs = nowMs;
   }
@@ -205,7 +209,7 @@ export class ArenaTournament {
 
       const pairingId = `a:${++this.pairingSequence}`;
       
-      this.activeGames.set(pairingId, { white: whitePlayer, black: blackPlayer });
+      this.activeGames.set(pairingId, { white: whitePlayer, black: blackPlayer, launchNamespace: 'committed-v1' });
       
       newPairings.push({
         pairingId,
@@ -247,6 +251,11 @@ export class ArenaTournament {
     if (!this.activeGames.has(pairingId)) {
       throw new Error(`Cannot link game for unknown or resolved pairingId: ${pairingId}`);
     }
+    const previous = this.gameLinks.get(pairingId);
+    if (previous !== undefined && previous !== gameId) throw new Error('Arena pairing already linked to a live game');
+    for (const [other, linked] of this.gameLinks) {
+      if (other !== pairingId && linked === gameId) throw new Error('Arena game belongs to another pairing');
+    }
     this.gameLinks.set(pairingId, gameId);
   }
 
@@ -274,6 +283,12 @@ export class ArenaTournament {
     if (!pairingId) {
       throw new Error(`Unknown gameId: ${gameId}`);
     }
+    this.abandonPairing(pairingId);
+  }
+
+  /** Resolve a durably authorized pairing whose game ended before link recovery. */
+  abandonPairing(pairingId: string): void {
+    if (!this.activeGames.has(pairingId)) throw new Error('Unknown or resolved Arena pairing');
     // Remove the pairing completely, putting players back into the pool.
     this.activeGames.delete(pairingId);
     this.gameLinks.delete(pairingId);
@@ -351,6 +366,63 @@ export class ArenaTournament {
   }
 
   static restore(snap: ArenaSnapshot): ArenaTournament {
+    if (!Number.isSafeInteger(snap.config.durationMs) || snap.config.durationMs <= 0
+      || (snap.state === 'registration' && snap.startedAtMs !== undefined)) {
+      throw new Error('Invalid persisted Arena deadline; operator repair required');
+    }
+    if (!['registration', 'running', 'finished'].includes(snap.state)
+      || !Array.isArray(snap.participants) || !Array.isArray(snap.withdrawn)
+      || !snap.activeGames || typeof snap.activeGames !== 'object' || Array.isArray(snap.activeGames)
+      || !snap.playerStates || typeof snap.playerStates !== 'object'
+      || !Number.isSafeInteger(snap.pairingSequence) || snap.pairingSequence < 0
+      || (snap.gameLinks !== undefined && !Array.isArray(snap.gameLinks))) {
+      throw new Error('Invalid persisted Arena structure; operator repair required');
+    }
+    const participants = new Set(snap.participants);
+    if (participants.size !== snap.participants.length || snap.participants.some(p => typeof p !== 'string' || !Object.hasOwn(snap.playerStates, p) || !snap.playerStates[p])) {
+      throw new Error('Invalid persisted Arena participants; operator repair required');
+    }
+    if (!snap.playedAsWhite || !snap.playedAsBlack || !snap.lastOpponents
+      || typeof snap.playedAsWhite !== 'object' || typeof snap.playedAsBlack !== 'object' || typeof snap.lastOpponents !== 'object'
+      || Array.isArray(snap.playerStates) || Array.isArray(snap.playedAsWhite)
+      || Array.isArray(snap.playedAsBlack) || Array.isArray(snap.lastOpponents)
+      || snap.withdrawn.some(p => !participants.has(p))) {
+      throw new Error('Invalid persisted Arena player maps; operator repair required');
+    }
+    for (const player of snap.participants) {
+      const state = snap.playerStates[player]!;
+      const values = [state.points, state.wins, state.draws, state.losses, state.consecutiveWins, state.gamesPlayed,
+        snap.playedAsWhite[player], snap.playedAsBlack[player]];
+      if (values.some(value => !Number.isSafeInteger(value) || value < 0) || typeof state.onFire !== 'boolean'
+        || state.gamesPlayed !== state.wins + state.draws + state.losses) {
+        throw new Error('Invalid persisted Arena player state; operator repair required');
+      }
+    }
+    const activePlayers = new Set<string>();
+    for (const [id, game] of Object.entries(snap.activeGames)) {
+      const sequence = Number(id.slice(2));
+      if (!id.startsWith('a:') || !Number.isSafeInteger(sequence) || sequence <= 0 || sequence > snap.pairingSequence
+        || !game || (game.launchNamespace !== undefined && game.launchNamespace !== 'committed-v1')
+        || game.white === game.black || !participants.has(game.white) || !participants.has(game.black)
+        || activePlayers.has(game.white) || activePlayers.has(game.black)) {
+        throw new Error('Invalid persisted Arena pairing; operator repair required');
+      }
+      activePlayers.add(game.white); activePlayers.add(game.black);
+    }
+    const linkedPairings = new Set<string>(), linkedGames = new Set<string>();
+    for (const link of snap.gameLinks ?? []) {
+      if (!Array.isArray(link) || link.length !== 2 || typeof link[0] !== 'string' || typeof link[1] !== 'string'
+        || !Object.hasOwn(snap.activeGames, link[0]) || linkedPairings.has(link[0]) || linkedGames.has(link[1])) {
+        throw new Error('Invalid persisted Arena game link; operator repair required');
+      }
+      linkedPairings.add(link[0]); linkedGames.add(link[1]);
+    }
+    if (snap.state !== 'running' && activePlayers.size > 0) throw new Error('Invalid inactive Arena games; operator repair required');
+    if (snap.state !== 'registration' && (!Number.isSafeInteger(snap.startedAtMs)
+      || snap.startedAtMs! < 0 || !Number.isSafeInteger(snap.config.durationMs)
+      || snap.config.durationMs <= 0 || !Number.isSafeInteger(snap.startedAtMs! + snap.config.durationMs))) {
+      throw new Error('Invalid persisted Arena deadline; operator repair required');
+    }
     const t = new ArenaTournament(snap.config);
     t.state = snap.state;
     t.startedAtMs = snap.startedAtMs;

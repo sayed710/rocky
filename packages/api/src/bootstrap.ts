@@ -8,6 +8,8 @@
  */
 
 import type { Pool } from 'pg';
+import { ArenaService } from './tournament/arena.service';
+import { ArenaDeadlineWorker } from './tournament/arena-deadline-worker';
 import { uuidv7 } from '@chess-platform/persistence';
 import type { EventStore, TournamentsRepository } from '@chess-platform/persistence';
 import {
@@ -566,7 +568,13 @@ export function createPgApiServer(options: PgBootstrapOptions = {}): {
 } {
   const { deps, pool, shutdownAnalysis } = createPgDependencies(options);
   const server = createApiServer(deps, options.server);
-  return { server, pool, shutdownAnalysis };
+  const arenas = new ArenaService(deps.tournamentRepo, deps.gameLauncher);
+  const deadlines = new ArenaDeadlineWorker(deps.tournamentRepo, arenas, { logger: deps.logger, metrics: deps.metrics });
+  deadlines.start();
+  return { server, pool, shutdownAnalysis: async () => {
+    try { await deadlines.stop(); }
+    finally { await shutdownAnalysis(); }
+  } };
 }
 
 export { uuidv7 };
