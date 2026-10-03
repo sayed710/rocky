@@ -7,7 +7,7 @@
  * `GameEnded` events are the work list, a per-consumer receipt marks a game done, a startup scan and
  * a periodic scan recover anything a lost broadcast or a restart missed, and PubSub only wakes the
  * scan early. Each consumer works one game at a time, which is what bounds engine use. Analysis is
- * an idempotent upsert, so a second worker overlapping during a rollout repeats work at worst.
+ * an idempotent upsert, with fenced per-consumer leases isolating overlapping workers.
  */
 import type { Pool } from 'pg';
 import type { EventStore } from '@chess-platform/persistence';
@@ -18,7 +18,8 @@ import { EventStoreGameSource } from './anti-cheat/source';
 import { BotAnalysisService } from './bot-detection/analysis-service';
 import { EventStoreBotTimingSource } from './bot-detection/source';
 import type { Logger } from './ports/logger';
-import { TerminalEventReconciler } from './terminal-event-reconciler';
+import { TerminalEventReconciler, type TerminalReconcilerErrorMetadata } from './terminal-event-reconciler';
+import { safeTrustFailureCode } from './trust-failure-code';
 
 export interface TrustWorkerConfig {
   readonly botAnalysis: boolean;
@@ -69,8 +70,11 @@ export async function startTrustAnalyzers(options: TrustAnalyzerOptions): Promis
   const inbox = new PgTerminalEventInbox(pool);
   const reconcilerOptions = {
     ...(options.scanIntervalMs !== undefined ? { scanIntervalMs: options.scanIntervalMs } : {}),
-    onError: (gameId: string, error: unknown) => logger.error('Trust analysis failed; the game stays pending and is retried', {
-      gameId, error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+    onError: (gameId: string, error: unknown, metadata?: TerminalReconcilerErrorMetadata) => logger.error('Trust analysis failed; durable work remains recoverable', {
+      gameId, consumer: metadata?.consumer ?? null, seq: metadata?.seq ?? null,
+      failures: metadata?.retry?.failures ?? null, nextRetryAt: metadata?.retry?.nextRetryAt ?? null,
+      errorClass: metadata?.errorClass ?? 'scan-store-error',
+      failureCode: safeTrustFailureCode(error),
     }),
   };
   const workers: TerminalEventReconciler[] = [];
@@ -78,23 +82,25 @@ export async function startTrustAnalyzers(options: TrustAnalyzerOptions): Promis
   if (config.antiCheatAnalysis && !engine) throw new Error('ANTICHEAT_AUTO_ANALYZE=1 requires STOCKFISH_PATH');
 
   if (config.botAnalysis) {
-    const analysis = new BotAnalysisService(new EventStoreBotTimingSource(eventStore), new PgBotBehaviorReportRepository(pool));
-    workers.push(new TerminalEventReconciler(pubsub, inbox, 'bot-analysis', async (gameId, ending) => {
+    const source = new EventStoreBotTimingSource(eventStore);
+    workers.push(new TerminalEventReconciler(pubsub, inbox, 'bot-analysis', async (gameId, ending, signal, lease) => {
       if (ending.result === '*') return;
-      if (!(await analysis.analyzeAndStore(gameId))) throw new Error(`no finished game for ${gameId}`);
+      const analysis = new BotAnalysisService(source, new PgBotBehaviorReportRepository(pool, { lease, signal }));
+      if (!(await analysis.analyzeAndStore(gameId, signal))) throw new Error(`no finished game for ${gameId}`);
     }, reconcilerOptions));
   }
   if (engine) {
     // The logger matters: without it a game whose events cannot be replayed is skipped silently.
-    const service = createEngineBackedAnalysisService(new EventStoreGameSource(eventStore, logger), engine, new PgAntiCheatReportRepository(pool));
-    workers.push(new TerminalEventReconciler(pubsub, inbox, 'anti-cheat-analysis', async (gameId, ending) => {
+    const source = new EventStoreGameSource(eventStore, logger);
+    workers.push(new TerminalEventReconciler(pubsub, inbox, 'anti-cheat-analysis', async (gameId, ending, signal, lease) => {
       if (ending.result === '*') return;
-      if (!(await service.analyzeAndStore(gameId))) throw new Error(`no analyzable game for ${gameId}`);
+      const service = createEngineBackedAnalysisService(source, engine, new PgAntiCheatReportRepository(pool, { lease, signal }));
+      if (!(await service.analyzeAndStore(gameId, { signal }))) throw new Error(`no analyzable game for ${gameId}`);
     }, reconcilerOptions));
   }
 
   const initialScan = Promise.all(workers.map((worker) => worker.start().catch((error: unknown) => {
-    logger.error('Trust analysis startup scan failed; the periodic scan retries', { error: String(error) });
+    logger.error('Trust analysis startup scan failed; the periodic scan retries', { errorClass: 'scan-store-error', failureCode: safeTrustFailureCode(error) });
   }))).then(() => undefined);
   return {
     initialScan,

@@ -3,6 +3,10 @@
 **Status:** Proposed for owner review
 **Date:** 2026-09-25
 
+**Trust reliability extension:** [ADR-0155](0155-trust-terminal-retry-isolation.md)
+adds durable backoff and fenced leases to the trust inbox. Its due-filtered,
+one-item claims preserve the forward/reverse scan budgets below.
+
 ## Context
 
 `GameAuthority` commits `GameEnded` before publishing it. A crash, lost Redis message, or a failed tournament callback can therefore leave durable terminal truth without the downstream effect. ADR-0025's reporter watched live channels and scanned only the newest 100 tournaments; its `watched` set also prevented retries after a failed callback.

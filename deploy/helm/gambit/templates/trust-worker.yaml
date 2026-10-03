@@ -14,9 +14,11 @@ Notes:
   only port is the health port the kubelet probes.
 - Work comes from the durable terminal-event inbox (committed GameEnded rows
   plus per-consumer receipts), rescanned on start and periodically; Redis only
-  wakes it early. So RollingUpdate with maxSurge 1 / maxUnavailable 0 is safe:
-  the brief overlap repeats at most an idempotent analysis, and no gap loses a
-  game either way.
+  wakes it early. Recreate terminates the old revision before creating its
+  replacement, preventing legacy/new overlap on the first upgrade (ADR-0155).
+  The brief worker gap loses no durable work. Fenced per-consumer leases protect
+  accidental overlap between upgraded workers; expiry recovers crashed work.
+  Drain any separately deployed legacy workers, which do not acquire leases.
 - Not part of rollout.strategy: blue/green and canary apply to api and web.
 */}}
 {{- range $key := list "enabled" "botAnalysis" "antiCheatAnalysis" }}
@@ -39,10 +41,7 @@ spec:
   # Pinned to 1 on purpose — see the header comment. Do not parameterize.
   replicas: 1
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    type: Recreate
   selector:
     matchLabels:
       {{- include "gambit.selectorLabels" . | nindent 6 }}
@@ -58,7 +57,7 @@ spec:
       # wasted work, never correctness.
       terminationGracePeriodSeconds: 300
       initContainers:
-        {{- /* The API runs migrations in its init container; Ready means the schema exists. */}}
+        {{- /* Apply migration 0048 before upgrading workers; an older API's readiness alone cannot prove it exists. */}}
         - name: wait-for-api
           image: "{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
           imagePullPolicy: {{ .Values.images.api.pullPolicy | quote }}

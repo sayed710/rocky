@@ -205,8 +205,8 @@ test('a corrupt stored game is logged, so containment is not the same as silence
       type: 'GameCreated',
       gameId,
       variant: 'chess960',
-      chess960StartId: 9999,
-      initialFen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      chess960StartId: 700,
+      initialFen: 'PRIVATE-STORED-FEN-SENTINEL',
       timeControl: { initialMs: 180_000, incrementMs: 2_000, delayMs: 0, kind: 'increment' as const },
       players: { white: 'w1', black: 'b1' },
       rated: true,
@@ -233,5 +233,6 @@ test('a corrupt stored game is logged, so containment is not the same as silence
   assert.equal(records.length, 1, 'the unreadable row produced exactly one operator signal');
   assert.match(records[0]!.msg, /could not be replayed/);
   assert.equal(records[0]!.fields?.['gameId'], gameId, 'and names the game an operator has to go find');
-  assert.match(String(records[0]!.fields?.['reason']), /9999/, 'and why it failed');
+  assert.equal(records[0]!.fields?.['errorClass'], 'game-replay-error');
+  assert.ok(!JSON.stringify(records).includes('PRIVATE-STORED-FEN-SENTINEL'), 'stored payload must not enter operator logs');
 });

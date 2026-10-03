@@ -10,6 +10,7 @@ import type {
   StoredPlayerReport,
   PlayerCorrelationReport,
 } from '@chess-platform/anti-cheat';
+import { assertTerminalReportFence, lockTerminalReportFence, validateTerminalReportFence, type TerminalReportFence } from './terminal-report-fence';
 
 interface AntiCheatReportDbRow {
   player_id: string;
@@ -38,14 +39,18 @@ async function rollback(client: PoolClient): Promise<void> {
 }
 
 export class PgAntiCheatReportRepository implements AntiCheatReportRepository {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool, private readonly fence?: TerminalReportFence) {}
 
   async saveBatch(records: readonly StoredPlayerReport[]): Promise<void> {
+    validateTerminalReportFence(this.fence, 'anti-cheat-analysis', records);
     if (records.length === 0) return;
     const client = await this.pool.connect();
     try {
+      this.fence?.signal?.throwIfAborted();
       await client.query('BEGIN');
+      if (this.fence) await lockTerminalReportFence(client, this.fence);
       for (const record of records) {
+        this.fence?.signal?.throwIfAborted();
         await client.query(
           `INSERT INTO anti_cheat_reports (player_id, game_id, color, report, updated_at)
            VALUES ($1, $2, $3, $4::jsonb, now())
@@ -59,6 +64,8 @@ export class PgAntiCheatReportRepository implements AntiCheatReportRepository {
           ],
         );
       }
+      if (this.fence) await assertTerminalReportFence(client, this.fence);
+      this.fence?.signal?.throwIfAborted();
       await client.query('COMMIT');
     } catch (error) {
       await rollback(client);

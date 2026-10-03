@@ -52,6 +52,9 @@ async function until<T>(what: string, probe: () => Promise<T | undefined>, ms = 
       at += 1000;
     }
     await new PostgresEventStore(pool).append(gameId, -1, all);
+    const poisonId = '00000000-0000-7000-8000-000000000001';
+    await pool.query(`INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 0, 'GameEnded', 99, $2)`,
+      [poisonId, { type: 'GameEnded', secretPayload: 'must-not-be-logged' }]);
 
     const port = await freePort();
     const child = spawn(process.execPath, [WORKER], {
@@ -69,6 +72,14 @@ async function until<T>(what: string, probe: () => Promise<T | undefined>, ms = 
       await until('/ready', async () => ((await fetch(`http://127.0.0.1:${port}/ready`)).ok ? true : undefined));
       assert.equal((await fetch(`http://127.0.0.1:${port}/health`)).status, 200);
       await until('the bot report', async () => ((await pool.query('SELECT 1 FROM bot_reports WHERE game_id = $1', [gameId])).rowCount ? true : undefined));
+      await until('durable poison backoff', async () => {
+        const row = (await pool.query('SELECT failures, next_retry_at, lease_token FROM terminal_event_retries WHERE game_id = $1', [poisonId])).rows[0];
+        return row?.failures === 1 ? row : undefined;
+      });
+      assert.equal((await fetch(`http://127.0.0.1:${port}/ready`)).status, 200, 'poison work is not process unavailability');
+      assert.equal((await pool.query('SELECT 1 FROM terminal_event_receipts WHERE game_id = $1', [poisonId])).rowCount, 0);
+      assert.equal(output.includes('must-not-be-logged'), false);
+      assert.match(output, /decode-error/);
       child.kill('SIGTERM');
       assert.equal(await exited, 0, output);
     } finally {
