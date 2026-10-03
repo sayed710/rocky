@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 86: Accessible local illegal-move feedback._
+_Last updated: 2026-10-03 — M15 Increment 87: Player board ownership and read-only spectators._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 86: Accessible local illegal-move feedback._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 85: Trust terminal-analysis external review corrections._
 
@@ -4996,3 +4998,47 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Independent review**: none was available. Codex rejected its configured model on this account, the Gemini CLI tier is ineligible, and agy returned a 429 quota error. The review was first-party only.
 - **Concurrency**: implemented on `2dd6d4d`. PR #88 (trust terminal-analysis retry isolation, M15 Increment 85) merged first as `f99a9e1` and was merged normally into this branch (no rebase, no force). Its entry and header chain are preserved unchanged, and this entry is renumbered to Increment 86. The only conflict was this file; #88 touches persistence, trust worker, helm and scripts, and no web or browser code. The validation above was rerun on the integrated tree, recorded below.
 - **Deliberate limits**: no reason text (the oracle exposes none); no feedback for a queued premove invalidated later (no production caller applies premoves today, so this is separate scope); no sound, vibration or animation; the board's own English ARIA labels remain outside the catalog as before. The owner performs the merge.
+
+## M15 Increment 87 — Player board ownership and read-only spectators (2026-10-03)
+
+- **Problem**, reverified on `origin/main` `d5af5be`: `BoardInteraction.movableColor()` fell back to the side to move when no `playerColor` was given, and the game route mounted its board without one and enabled input whenever `!isOver`. So a spectator could select, drag and premove pieces; the board was interactive before the `joined` role arrived (a pre-join tap queued a premove); an off-turn player could pick up the **opponent's** pieces (the side to move) and queue premoves with them; and joining a finished game briefly enabled input (`true` then `false`). `GameSync.submitMove` already refused spectator and off-turn moves, so no illegal move reached the server, but the board offered gestures it had no right to.
+- **Contract** (`packages/web/src/core/interaction.ts`): ownership is explicit, `BoardOwner = Color | null | 'side-to-move'`. A player (`'white'`/`'black'`) picks up only their own colour, on and off turn. `null` (a spectator, or a player whose colour is not confirmed yet) picks up nothing: every tap, drag start, drop, keyboard activation, promotion and premove resolves to `none`, so spectators never see "illegal move". `'side-to-move'` is kept only for boards with no players (fallback, analysis, studies, endgame, learning), which still omit the option. `setPlayerColor(color | null)` drops the selection, a pending promotion and queued premoves on a real change and is a no-op otherwise. `drop()` re-checks the origin's owner, since the owner can change between drag start and drop. Ownership is the piece's colour on the square; legality is still only the oracle's, so no variant rule enters the client.
+- **View and mount** (`ui/board-view.ts`, `app/board.ts`): `BoardView.setPlayerColor` also closes an open promotion chooser and abandons a drag in progress (float and window listeners), then renders. Focus, roving keyboard navigation and flipping are untouched, so a read-only board stays fully inspectable. `mountBoard` takes a `playerColor` option and exposes `setPlayerColor` with the same churn guard as `setInputEnabled`, so a no-op re-assertion neither clears an unheard rejection nor rebuilds the grid.
+- **Game route** (`app/game-mount.ts`): the board mounts with `playerColor: null`. One `syncBoardOwnership()` reads `myColor` and `status.over` from the same `GameSync` snapshot and is called from both `onColor` and `onActionState`, so neither callback order can open a window. A finished game latches and never goes live again. Input is enabled exactly when there is an owner. No API, WebSocket or server change; the server stays authoritative.
+- **Tests**:
+  - `board-ownership.test.ts` (14, core): spectators on both turns; fail-closed startup until a colour arrives; White-only and Black-only selection on and off turn, including opponent drops; own premove queued and applied; reselection and promotion premove; the illegal-move result for a real player; a finished board inert under owner changes; owner changes clearing selection, pending promotion and premoves; same-owner no-op; Chess960 (start position 700); the standalone side-to-move board.
+  - `board-a11y.test.ts` (+7, real `mountBoard`/`BoardView` on the fake DOM): spectator click, keyboard Enter/Space and drag submit nothing and announce nothing; keyboard navigation, focus and flip on a read-only board; own-colour-only input off-turn by click, keyboard and drag, including an own premove by drag; ownership loss mid-drag; ownership change closing the promotion chooser and clearing a premove; same-owner churn guard; remount carrying no ownership and submitting once.
+  - `board-ownership-route.test.ts` (10, real `mountGame` with fake socket, gestures through the board's click handler, `controller.submitMove` and `setInputEnabled` spied): no input before the socket opens or before `joined`; spectators read-only across syncs; a White legal move; off-turn White and Black limited to their own pieces; a finished join never enabled for any role; finished wins over a later live-looking sync; Chess960.
+  - Backend Playwright `board-ownership.spec.ts`: a real two-player game with a spectator. Black off-turn and the spectator try click, keyboard Enter and Space, and drag on both colours: nothing is selected or premoved, no `move` frame is sent, no message appears, and the spectator can still move focus with the arrow keys. White's keyboard e2–e4 commits; off-turn White cannot touch Black and queues an own d2–d4 premove without sending it; Black cannot touch White and its keyboard e7–e5 commits; the spectator stays read-only after both moves.
+  - `illegal-move-feedback.spec.ts`: the finished-board step tried Black's pawn because "off-turn the board offers the side to move". That premise is now false, so the step would pass vacuously; it now tries White's own premove d2–d4.
+- **RED evidence**: on `d5af5be` the route tests compiled and 8 of 9 failed on behaviour (a pre-join premove, spectator selection, opponent selection off-turn for both colours, a transient `true,false` enable on a finished join, Chess960); the legal-move control passed. The new browser spec, run against main's web sources, failed because off-turn Black queued a premove of White's e2–e4. The core and view tests target the new `setPlayerColor` API and could not compile on main; their behaviour is pinned by the mutations below.
+- **Falsification**: 16 compiled mutations, sources backed up to disk and restored by SHA-256; 15 killed by tests, none by compile errors:
+  - the route effectively using `playerColor ?? sideToMove`
+  - spectators treated as a player
+  - opponent-coloured premoves allowed off-turn
+  - mouse and drag guarded in the view but keyboard not (null owner falling back to the side to move)
+  - an owner change keeping a stale premove, pending promotion or selection (three mutations)
+  - finished not latched, and finished ignored
+  - remount not tearing down the previous mount
+  - `drop` ignoring ownership
+  - the view keeping a drag, or a promotion chooser, across an owner change
+  - no churn guard on `mountBoard.setPlayerColor`
+  - the route enabling input regardless of owner
+
+  One mutation is equivalent: removing the route's `playerColor: null` at mount. `mountGame` is synchronous and `controller.start()` emits the pre-join state immediately, which sets the owner to `null` before the function returns, so no user event can land in between (a test clicking before the socket opens confirms it). The option is kept so fail-closed startup does not depend on that ordering.
+- **Validation** (sequentially, on `3d1ed4a` over `d5af5be`):
+  - build, lint, all 8 `check:*` guards including `check:test-topology`, and `test:scripts` (312);
+  - web unit (1,456) and the hermetic suite (3,946 across 19 workspaces), with zero skips;
+  - static Playwright (187 of 187), 4 workers, 0 retries, with Avast Web/Network Shield off at the owner's direction. An earlier shield-on static run failed 3 non-board tests (lobby create-seek, email verification) waiting on local responses, and those specs then passed 270 of 270 in isolation (diagnostic, `--repeat-each=3`);
+  - backend Playwright (`GAMBIT_E2E_BACKEND=1`, 4 workers, 0 retries): **232 of 232**, 0 failed, 0 skipped, in the normal host state (shield on). Ports 4173 and 4174 were checked free beforehand, and a read-only commit sampler showed `vite preview` alive from start to teardown (minimum commit headroom 3,374 MB).
+  - Earlier backend runs, recorded so that none is mistaken for a pass: shield on, 231 of 232 (headless Chromium gone before `app-loads.spec.ts` started); shield off, invalid twice (`vite preview` exited natively with `0xC0000409`, then connection-refused for nearly every test); shield on after the separate preview diagnostic closed, 230 of 232 (an empty achievements count after 15 s, and the same Chromium launch fault), with the preview alive throughout. Every game and board spec passed in each run where the server was alive. The preview diagnostic found no product defect and did not prove a root cause; nothing in Playwright, Vite, timeouts, retries, workers or host settings was changed for these runs.
+- **Independent review**: Gemini 3.8 Flash High was quota-blocked (`RESOURCE_EXHAUSTED`, 429), so the configured fallback, Claude Sonnet 4.6 Thinking via agy, reviewed the implementation read-only. A first fallback attempt failed on an invocation error (`--effort` is unsupported for that model), not on quota. The review returned six findings:
+  - Valid: own-colour premove by drag was untested. The test was added.
+  - Rejected: input enablement and ownership are two redundant locks. Both are idempotent, render only on a real change and run synchronously; keeping input enablement explicit is deliberate.
+  - Rejected: restoring the authoritative position after a game review could expose highlights. Game review runs only on finished games, where the owner is `null` and no selection can exist.
+  - Rejected: the view's churn guard is dead for standalone boards. The first call from `'side-to-move'` is a real change and later calls hit the guard.
+  - Rejected: `applyPremove` does not check the owner. It has no production caller, and the queue is always empty under a `null` owner.
+  - Rejected: `suppressClick` survives a cancelled drag. The drag's own trailing click consumes it, as on the existing path that disables input.
+
+  The exact-final-head review is recorded in the PR.
+- **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
