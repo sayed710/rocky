@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-04 — M15 Increment 87: pointer-less clicks tied to the last release, and full Linux validation._
+_Last updated: 2026-10-04 — M15 Increment 87: bounded click records, safety-first pointer-less clicks, full Linux validation._
+
+Prior: _Last updated: 2026-10-04 — M15 Increment 87: pointer-less clicks tied to the last release, and full Linux validation._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: per-pointer gesture tracking and full Linux validation._
 
@@ -5161,6 +5163,18 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Validation of `5f7eb72`, entirely on Linux** (the exact tree from `git archive 5f7eb72`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
   - `npm ci` and build succeeded;
   - hermetic suite **3,958 of 3,958** across 19 workspaces, with zero skips (web 1,468);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Gates on `8314d11` and their correction**: the independent review gave **APPROVE**. CI was all green, including M6 acceptance. Two non-blocking findings came in; both are fixed in `b6246cd`, with RED tests first.
+  - **Qodo, 1 bug (performance):** off-board drops recorded click suppressions that no click could consume. Its cancelled-pointer half was already fixed in `5f7eb72`. Touch pointer ids are never reused, so records grew for the life of the board, and an on-board touch drag, which usually makes no click, grows them the same way. Releases off the board now record nothing, and pending records are capped at 16, oldest evicted.
+  - **Greptile, confidence 5/5:** on an engine whose clicks carry no `pointerId`, finger A's abandoned gesture could produce a delayed click after finger B's release. The last-released rule attributed it to B, so it acted.
+  - Without a pointer id a click cannot be attributed to a finger, so every rule fails in one direction. The press counter swallowed a genuine tap (Greptile on `3bd6965`); "last released" let an abandoned click act (Greptile on `8314d11`). The choice made is **safety first**: while an abandoned gesture's click is pending, a pointer-less click is taken to be that one. An abandoned gesture never acts; at worst one genuine tap is swallowed and repeated. Drag-release suppressions keep the last-released rule, and engines with pointer ids are unchanged.
+  - Because off-board releases now record nothing, older tests that made stale entries with off-board releases no longer reached their protections. A mutation sweep showed this as 7 survivors. Those tests now use on-board releases with no click, and the cancel test's `pointercancel` carries coordinates on the board.
+  - Two lines became provably redundant (a re-add and a last-released write on awaited releases) and were removed instead of being kept untested.
+  - The final sweep of the click and drag logic: 32 compiled mutations, all killed by tests.
+- **Validation of `b6246cd`, entirely on Linux** (the exact tree from `git archive b6246cd`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,960 of 3,960** across 19 workspaces, with zero skips (web 1,470);
   - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
   - on Windows: lint passed.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
