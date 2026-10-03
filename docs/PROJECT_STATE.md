@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 87: Greptile click-suppression correction and Linux backend validation._
+_Last updated: 2026-10-03 — M15 Increment 87: pointer-matched click suppression and full Linux validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: Greptile click-suppression correction and Linux backend validation._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: Player board ownership and read-only spectators._
 
@@ -5074,4 +5076,26 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - An ordinary drag does not listen for `pointercancel` (predates this PR).
   - The click-timing fixes are covered by fake-DOM unit tests only, with no browser touch or interrupted-gesture case. The mutation harness is outside the repository.
   - Two over-claims in this entry, the click ordering and "captured no failure", were corrected in the commit that adds this bullet.
+- **Third exact-head review correction** (on `38e1bdd`): CI was green, including M6 acceptance at 232 passed with 0 flaky. Three findings were raised, all valid:
+  - Qodo #1 and Greptile (one root cause): clearing suppression on a next-tick timer assumed a release's click arrives in the same task. Touch does not guarantee that, so a late touch click from a completed drag, or from a gesture an owner change cut short, could still act on the board.
+  - Qodo #2: the cut-short wait ended on any pointer's release, so a second finger lifting first let the original finger's click through.
+
+  These are the first two LOW items recorded by the exact-head review above, now fixed.
+  - Fix (`2ae8589`): suppression is tied to the pointer, not to time. `BoardView` records which pointer's next click must be swallowed (a drag's release, or a gesture an owner change cut short) and matches the click's own `pointerId` whenever it arrives, because browsers deliver `click` as a PointerEvent carrying that id. A click with `pointerType` '' (assistive technology, keyboard, `element.click()`) is never swallowed.
+  - The cut-short wait ends only on that pointer's release or cancel, on a new press by the same pointer, or on `destroy`. A new press by the same pointer also clears a stale entry left by a release that made no click. There is no timer.
+  - An engine whose clicks carry no pointer fields keeps suppressing the release's own click; this is the fallback path.
+  - RED tests came first (`board-a11y.test.ts`): a touch click arriving in a later task after a cut-short release, and two interleaved fingers, both failed on `38e1bdd`. Further cases cover:
+    - a drag that wobbles back onto its own piece with a late click;
+    - another finger's tap between a drag release and its click;
+    - a mouse re-press after an off-board drop;
+    - a re-press after a lost release;
+    - an assistive-technology click with no pointer id.
+  - Eleven compiled mutations, one per part of the fix, were all killed by tests, and the source was restored byte-identical. The mutated parts were: the `pointerType` rule, pointer-id matching, the wait's own-pointer check, the re-press clearing a stale entry, the re-press ending the wait, the drag release and the cut-short release recording suppression, the owner change waiting, `destroy`, the waiter removing itself, and a swallowed click clearing the entry.
+  - Of that review's LOW items, `pointercancel` on an ordinary drag (predates this PR) and the lack of a real-browser touch test remain.
+- **Validation of `2ae8589`, entirely on Linux** (the exact tree from `git archive 2ae8589`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3, npm 10.9.9 and the repository's normal worker calculation, giving 4 workers):
+  - `npm ci` and `npm run build` succeeded.
+  - hermetic suite **3,950 of 3,950** across 19 workspaces, with zero skips (web 1,460);
+  - static Playwright **187 of 187**, 0 flaky, `--retries=0`;
+  - backend Playwright **232 of 232**, 0 flaky, `--retries=0`.
+  - On Windows, build, lint, all 8 guards and `test:scripts` (312) passed on this commit. The Windows hermetic run failed one file, `packages/api` `resources.test.js`, at file level with no failing assertion. That file passed 14 of 14 in three isolated reruns, and this PR does not touch `packages/api`. It is recorded with the other host faults above, without a proven cause.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
