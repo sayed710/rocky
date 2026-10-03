@@ -715,6 +715,15 @@ function withDragGlobals(run: (win: FakeDOMNode) => void): void {
   }
 }
 
+/**
+ * A click from assistive technology, the keyboard or `element.click()`: browsers deliver it as a
+ * PointerEvent with no pointer behind it (`pointerType` '' and a pointerId of -1).
+ */
+const atClick = (sq: string, pointerId?: number): object => ({ ...centreOf(sq), pointerType: '', ...(pointerId !== undefined ? { pointerId } : {}) });
+
+/** A click produced by a real pointer, carrying that pointer's id and type, as browsers deliver it. */
+const pointerClick = (sq: string, pointerId: number, pointerType = 'touch'): object => ({ ...centreOf(sq), pointerId, pointerType });
+
 /** Let pending timers run, as the browser does between one input event and the next. */
 const nextTask = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -1087,20 +1096,92 @@ test('a click with no pointer gesture, such as from assistive technology, is nev
     board.setPlayerColor('white');
     win.dispatchEvent('pointerup', { ...offBoard, pointerId: 1 });
     await nextTask();
-    root.dispatchEvent('click', centreOf('e2')); // an activation that sends no pointer events
+    root.dispatchEvent('click', atClick('e2')); // an activation with no pointer behind it, and no pointer id
     assert.equal(selected(), 'e2', 'the next click is not eaten by the cut-short gesture');
-    root.dispatchEvent('click', centreOf('e2')); // deselect again
+    root.dispatchEvent('click', atClick('e2', -1)); // deselect again
 
     // An ordinary drag dropped off the board: no click follows that release either.
     root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 2 });
     win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: 2 });
     win.dispatchEvent('pointerup', { ...offBoard, pointerId: 2 });
     await nextTask();
-    root.dispatchEvent('click', centreOf('e2'));
+    root.dispatchEvent('click', atClick('e2'));
     assert.equal(selected(), 'e2', 'the next click is not eaten by an off-board drop');
+    root.dispatchEvent('click', atClick('e2')); // deselect again
+
+    // A mouse drag dropped off the board, then an ordinary click by that same mouse.
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 1, pointerType: 'mouse' });
+    win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: 1, pointerType: 'mouse' });
+    win.dispatchEvent('pointerup', { ...offBoard, pointerId: 1, pointerType: 'mouse' });
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1, pointerType: 'mouse' });
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 1, pointerType: 'mouse' });
+    root.dispatchEvent('click', pointerClick('e2', 1, 'mouse'));
+    assert.equal(selected(), 'e2', 'pressing again clears the earlier release that made no click');
+    root.dispatchEvent('click', atClick('e2', -1)); // deselect again
+
+    // A gesture cut short by an owner change whose release never arrived, then that pointer presses again.
+    board.setPlayerColor(null);
+    root.dispatchEvent('pointerdown', { ...centreOf('d2'), pointerId: 1, pointerType: 'mouse' });
+    board.setPlayerColor('white'); // the release of this press is lost
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1, pointerType: 'mouse' });
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 1, pointerType: 'mouse' });
+    root.dispatchEvent('click', pointerClick('e2', 1, 'mouse'));
+    assert.equal(selected(), 'e2', 'a new press by that pointer ends the wait, so its own click works');
   } finally {
     restore();
   }
+});
+
+test('a touch click that arrives after its release, in a later task, is still swallowed', async () => {
+  const { win, restore } = installDragGlobals();
+  try {
+    const { root, board, moves } = mountWithFeedback({ playerColor: null });
+    const selected = (): string | null => root.querySelector('[aria-selected="true"]')?.getAttribute('data-square') ?? null;
+
+    // A touch tap cut short by an owner change: its click is synthesized after the release.
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 11, pointerType: 'touch' });
+    board.setPlayerColor('white');
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 11, pointerType: 'touch' });
+    await nextTask();
+    root.dispatchEvent('click', pointerClick('e2', 11));
+    assert.equal(selected(), null, 'the cut-short tap selects nothing for the new owner');
+
+    // A touch drag that wobbles back onto its own piece; its click comes late, after another finger's tap.
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 12, pointerType: 'touch' });
+    win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: 12, pointerType: 'touch' });
+    win.dispatchEvent('pointermove', { ...centreOf('g1'), pointerId: 12, pointerType: 'touch' });
+    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 12, pointerType: 'touch' });
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 13, pointerType: 'touch' });
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 13, pointerType: 'touch' });
+    root.dispatchEvent('click', pointerClick('e2', 13));
+    assert.equal(selected(), 'e2', "another finger's own tap is not swallowed");
+    root.dispatchEvent('click', pointerClick('e2', 13)); // deselect again
+    await nextTask();
+    root.dispatchEvent('click', pointerClick('g1', 12));
+    assert.equal(selected(), null, "the drag's late click does not select the piece it was dropped on");
+    assert.deepEqual(moves, [], 'nothing was submitted');
+  } finally {
+    restore();
+  }
+});
+
+test('a second finger releasing first does not end the wait for the gesture an owner change cut short', () => {
+  withDragGlobals((win) => {
+    const { root, board } = mountWithFeedback({ playerColor: null });
+    const selected = (): string | null => root.querySelector('[aria-selected="true"]')?.getAttribute('data-square') ?? null;
+
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 21, pointerType: 'touch' }); // finger 1
+    board.setPlayerColor('white'); // `joined` lands while finger 1 is down
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 22, pointerType: 'touch' }); // finger 2
+    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 22, pointerType: 'touch' });
+    root.dispatchEvent('click', pointerClick('g1', 22));
+    assert.equal(selected(), 'g1', "finger 2's own tap, begun under the new owner, selects");
+
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 21, pointerType: 'touch' });
+    root.dispatchEvent('click', pointerClick('e2', 21));
+    assert.equal(selected(), 'g1', "finger 1's cut-short tap is still swallowed");
+    assert.equal(win.listenerCount('pointerup'), 0, 'the wait ends with its own pointer');
+  });
 });
 
 test('a change of owner closes an open promotion chooser and clears a queued premove', () => {
