@@ -411,7 +411,8 @@ export class BoardView {
   }
 
   /**
-   * If `event` is a click a recorded release produced, forget that entry and return true. Modern
+   * If `event` is a click a recorded release produced, return true (and forget that entry, except as
+   * described below for an abandoned release on an engine without pointer ids). Modern
    * browsers deliver `click` as a PointerEvent carrying the id of the pointer behind it, whenever it
    * arrives, so the id decides. A click with no pointer (assistive technology, keyboard,
    * `element.click()`) has `pointerType` '' and never counts.
