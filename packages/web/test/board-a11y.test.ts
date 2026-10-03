@@ -1392,6 +1392,23 @@ test('on an engine whose clicks carry no pointer id, old abandoned releases neve
     assert.equal(selected(), 'e2', 'the first later tap acts');
     root.dispatchEvent('click', { ...centreOf('d2'), timeStamp: 3100 });
     assert.equal(selected(), 'd2', 'and so does the next one');
+    root.dispatchEvent('click', atClick('d2', -1)); // deselect again
+
+    // Inside the window, an abandoned release's late click is still swallowed (a touch click can be held back).
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 134, pointerType: 'touch', timeStamp: 5000 });
+    board.setPlayerColor(null);
+    board.setPlayerColor('white');
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 134, pointerType: 'touch', timeStamp: 5000 });
+    root.dispatchEvent('click', { ...centreOf('e2'), timeStamp: 5300 });
+    assert.equal(selected(), null, 'a click 300 ms after its abandoned release is swallowed');
+
+    // Just past the window, a click is a new activation.
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 135, pointerType: 'touch', timeStamp: 7000 });
+    board.setPlayerColor(null);
+    board.setPlayerColor('white');
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 135, pointerType: 'touch', timeStamp: 7000 });
+    root.dispatchEvent('click', { ...centreOf('e2'), timeStamp: 8001 });
+    assert.equal(selected(), 'e2', 'a click more than the window later acts');
   });
 });
 
