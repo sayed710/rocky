@@ -6,7 +6,31 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 87: Windows SIGTERM harness external review corrections._
+_Last updated: 2026-10-04 — M15 Increment 88: Player board ownership, merged with Increment 87 (#89) and revalidated._
+
+Prior: _Last updated: 2026-10-04 — M15 Increment 88: click-window tests pinned and full Linux validation._
+
+Prior: _Last updated: 2026-10-04 — M15 Increment 88: time-bounded pointer-less click matching and full Linux validation._
+
+Prior: _Last updated: 2026-10-04 — M15 Increment 88: bounded click records, safety-first pointer-less clicks, full Linux validation._
+
+Prior: _Last updated: 2026-10-04 — M15 Increment 88: pointer-less clicks tied to the last release, and full Linux validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: per-pointer gesture tracking and full Linux validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: abandoned gestures never act, and full Linux validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: drag cancellation and full Linux validation of the final code._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: bounded no-pointer-id click fallback and drag release ownership._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: pointer-matched click suppression and full Linux validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: Greptile click-suppression correction and Linux backend validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 88: Player board ownership and read-only spectators._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: Windows SIGTERM harness external review corrections._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: Real POSIX SIGTERM gateway harness on Windows._
 
@@ -5012,3 +5036,192 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Review / publication boundary**: Gemini 3.8 Flash High returned a genuine HTTP 429 individual-quota error. The valid Claude Sonnet 4.6 Thinking fallback completed a read-only candidate review, identifying a CI trigger gap for the guard/test and a service-host documentation gap; both were corrected and affected checks refreshed. A fresh fixed-candidate review and exact-final-head GitHub gates remain required before handoff. CI, Qodo, mandatory Greptile and resolved review threads are not implied by these local results. The owner performs the manual merge; this prerequisite does not resume Arena.
 - **External review corrections**: PR #89's first head `2c1a1275b0999f79c2abe7d0d752bb5b60e556ee` passed every applicable GitHub CI job, but Qodo reported three findings and Greptile one overlapping credential-exposure finding. Rewritten service URLs now travel through the Docker child environment, with only variable names in command arguments; regression coverage checks both argument absence and actual environment forwarding. The Linux image isolates manifests in a separate stage without duplicating the workspace inventory, caches both lockfile installs before source copies, and builds server packages before copying gateway source. An isolated real gateway-test source edit proved the dependency-install and server-build layers remained cached. The Docker route explicitly maps `host.docker.internal` to `host-gateway`, with TCP reachability verified against the prerequisite database. Production and signal-contract source remain unchanged by these corrections.
 - **Correction validation / limits**: refreshed full build/lint, all 19 hermetic workspaces (`3,915`), all eight guards, script tests (`315`) and the corrected Windows-routed Linux gateway (`86/86`) passed sequentially with zero unexpected skips/failures/cancellations. One intermediate gateway run passed `85/86` with an unchanged flag-race test timing out waiting for both seats ready; no assertion, timeout, worker or retry was changed. After the interrupted environment stopped service containers together with exit 255 (`OOMKilled=false`), a subsequent run encountered Redis refusals and was stopped as invalid for a passing gate. Only the prerequisite's database/Redis containers were restarted, readiness was verified, and the final complete healthy-service run passed. Arena's containers and checkout were not changed. The first-head Claude exact-SHA attempt returned a genuine individual-quota HTTP 429; the candidate reviews preceding it completed with zero actionable findings after their corrections. The correction commit requires fresh review and exact-head GitHub gates; the first head's green evidence is superseded by any new push.
+
+## M15 Increment 88 — Player board ownership and read-only spectators (2026-10-03)
+
+- **Problem**, reverified on `origin/main` `d5af5be`: `BoardInteraction.movableColor()` fell back to the side to move when no `playerColor` was given, and the game route mounted its board without one and enabled input whenever `!isOver`. So a spectator could select, drag and premove pieces; the board was interactive before the `joined` role arrived (a pre-join tap queued a premove); an off-turn player could pick up the **opponent's** pieces (the side to move) and queue premoves with them; and joining a finished game briefly enabled input (`true` then `false`). `GameSync.submitMove` already refused spectator and off-turn moves, so no illegal move reached the server, but the board offered gestures it had no right to.
+- **Contract** (`packages/web/src/core/interaction.ts`): ownership is explicit, `BoardOwner = Color | null | 'side-to-move'`. A player (`'white'`/`'black'`) picks up only their own colour, on and off turn. `null` (a spectator, or a player whose colour is not confirmed yet) picks up nothing: every tap, drag start, drop, keyboard activation, promotion and premove resolves to `none`, so spectators never see "illegal move". `'side-to-move'` is kept only for boards with no players (fallback, analysis, studies, endgame, learning), which still omit the option. `setPlayerColor(color | null)` drops the selection, a pending promotion and queued premoves on a real change and is a no-op otherwise. `drop()` re-checks the origin's owner, since the owner can change between drag start and drop. Ownership is the piece's colour on the square; legality is still only the oracle's, so no variant rule enters the client.
+- **View and mount** (`ui/board-view.ts`, `app/board.ts`): `BoardView.setPlayerColor` also closes an open promotion chooser and abandons a drag in progress (float and window listeners), then renders. Focus, roving keyboard navigation and flipping are untouched, so a read-only board stays fully inspectable. `mountBoard` takes a `playerColor` option and exposes `setPlayerColor` with the same churn guard as `setInputEnabled`, so a no-op re-assertion neither clears an unheard rejection nor rebuilds the grid.
+- **Game route** (`app/game-mount.ts`): the board mounts with `playerColor: null`. One `syncBoardOwnership()` reads `myColor` and `status.over` from the same `GameSync` snapshot and is called from both `onColor` and `onActionState`, so neither callback order can open a window. A finished game latches and never goes live again. Input is enabled exactly when there is an owner. No API, WebSocket or server change; the server stays authoritative.
+- **Tests**:
+  - `board-ownership.test.ts` (14, core): spectators on both turns; fail-closed startup until a colour arrives; White-only and Black-only selection on and off turn, including opponent drops; own premove queued and applied; reselection and promotion premove; the illegal-move result for a real player; a finished board inert under owner changes; owner changes clearing selection, pending promotion and premoves; same-owner no-op; Chess960 (start position 700); the standalone side-to-move board.
+  - `board-a11y.test.ts` (+8, real `mountBoard`/`BoardView` on the fake DOM): spectator click, keyboard Enter/Space and drag submit nothing and announce nothing; keyboard navigation, focus and flip on a read-only board; own-colour-only input off-turn by click, keyboard and drag, including an own premove by drag; ownership loss mid-drag; ownership change closing the promotion chooser and clearing a premove; same-owner churn guard; a gesture cut short by an owner change selecting nothing with its trailing click; remount carrying no ownership and submitting once.
+  - `board-ownership-route.test.ts` (10, real `mountGame` with fake socket, gestures through the board's click handler, `controller.submitMove` and `setInputEnabled` spied): no input before the socket opens or before `joined`; spectators read-only across syncs; a White legal move; off-turn White and Black limited to their own pieces; a finished join never enabled for any role; finished wins over a later live-looking sync; Chess960.
+  - Backend Playwright `board-ownership.spec.ts`: a real two-player game with a spectator. Black off-turn and the spectator try click, keyboard Enter and Space, and drag on both colours: nothing is selected or premoved, no `move` frame is sent, no message appears, and the spectator can still move focus with the arrow keys. White's keyboard e2–e4 commits; off-turn White cannot touch Black and queues an own d2–d4 premove without sending it; Black cannot touch White and its keyboard e7–e5 commits; the spectator stays read-only after both moves.
+  - `illegal-move-feedback.spec.ts`: the finished-board step tried Black's pawn because "off-turn the board offers the side to move". That premise is now false, so the step would pass vacuously; it now tries White's own premove d2–d4.
+- **RED evidence**: on `d5af5be` the route tests compiled and 8 of 9 failed on behaviour (a pre-join premove, spectator selection, opponent selection off-turn for both colours, a transient `true,false` enable on a finished join, Chess960); the legal-move control passed. The new browser spec, run against main's web sources, failed because off-turn Black queued a premove of White's e2–e4. The core and view tests target the new `setPlayerColor` API and could not compile on main; their behaviour is pinned by the mutations below.
+- **Falsification**: 16 compiled mutations, sources backed up to disk and restored by SHA-256; 15 killed by tests, none by compile errors:
+  - the route effectively using `playerColor ?? sideToMove`
+  - spectators treated as a player
+  - opponent-coloured premoves allowed off-turn
+  - mouse and drag guarded in the view but keyboard not (null owner falling back to the side to move)
+  - an owner change keeping a stale premove, pending promotion or selection (three mutations)
+  - finished not latched, and finished ignored
+  - remount not tearing down the previous mount
+  - `drop` ignoring ownership
+  - the view keeping a drag, or a promotion chooser, across an owner change
+  - no churn guard on `mountBoard.setPlayerColor`
+  - the route enabling input regardless of owner
+
+  One mutation is equivalent: removing the route's `playerColor: null` at mount. `mountGame` is synchronous and `controller.start()` emits the pre-join state immediately, which sets the owner to `null` before the function returns, so no user event can land in between (a test clicking before the socket opens confirms it). The option is kept so fail-closed startup does not depend on that ordering.
+- **Validation** (sequentially, on `3d1ed4a` over `d5af5be`):
+  - build, lint, all 8 `check:*` guards including `check:test-topology`, and `test:scripts` (312);
+  - web unit (1,456) and the hermetic suite (3,946 across 19 workspaces), with zero skips;
+  - static Playwright (187 of 187), 4 workers, 0 retries, with Avast Web/Network Shield off at the owner's direction. An earlier shield-on static run failed 3 non-board tests (lobby create-seek, email verification) waiting on local responses, and those specs then passed 270 of 270 in isolation (diagnostic, `--repeat-each=3`);
+  - backend Playwright (`GAMBIT_E2E_BACKEND=1`, 4 workers, 0 retries): **232 of 232**, 0 failed, 0 skipped, in the normal host state (shield on). Ports 4173 and 4174 were checked free beforehand, and a read-only commit sampler showed `vite preview` alive from start to teardown (minimum commit headroom 3,374 MB).
+  - Earlier backend runs, recorded so that none is mistaken for a pass: shield on, 231 of 232 (headless Chromium gone before `app-loads.spec.ts` started); shield off, invalid twice (`vite preview` exited natively with `0xC0000409`, then connection-refused for nearly every test); shield on after the separate preview diagnostic closed, 230 of 232 (an empty achievements count after 15 s, and the same Chromium launch fault), with the preview alive throughout. Every game and board spec passed in each run where the server was alive. The preview diagnostic found no product defect and did not prove a root cause; nothing in Playwright, Vite, timeouts, retries, workers or host settings was changed for these runs.
+- **Independent review**: Gemini 3.8 Flash High was quota-blocked (`RESOURCE_EXHAUSTED`, 429), so the configured fallback, Claude Sonnet 4.6 Thinking via agy, reviewed the implementation read-only. A first fallback attempt failed on an invocation error (`--effort` is unsupported for that model), not on quota. The review returned six findings:
+  - Valid: own-colour premove by drag was untested. The test was added.
+  - Rejected: input enablement and ownership are two redundant locks. Both are idempotent, render only on a real change and run synchronously; keeping input enablement explicit is deliberate.
+  - Rejected: restoring the authoritative position after a game review could expose highlights. Game review runs only on finished games, where the owner is `null` and no selection can exist.
+  - Rejected: the view's churn guard is dead for standalone boards. The first call from `'side-to-move'` is a real change and later calls hit the guard.
+  - Rejected: `applyPremove` does not check the owner. It has no production caller, and the queue is always empty under a `null` owner.
+  - Rejected at first: `suppressClick` survives a cancelled drag. The stated reason, that the drag's own trailing click consumes the flag, was wrong. Cancelling a gesture removes its pointer-up handler, so the flag is never set and the trailing click reaches `tap`. Qodo found the real defect; see the correction below.
+
+  The exact-final-head review is recorded in the PR.
+- **Exact-head review correction** (Qodo, 1 bug on `6068e0b`, valid; Greptile 5/5 with no findings on the same head): an owner change during a pointer gesture cancelled it and removed its pointer-up handler, so the gesture's trailing click reached `tap`. A swipe begun before `joined` landed could therefore select the new owner's piece under the release point. `BoardView.setPlayerColor` now suppresses that click when a gesture is in progress, and every `pointerdown` resets the suppression, so a gesture abandoned off the board cannot swallow the next real click. A RED test (`board-a11y.test.ts`) came first, and two mutations, one undoing each half, are both killed. The exact-head review of `6068e0b` had been a strict self-review, because Gemini and Sonnet were both quota-blocked (429). It repeated the mistaken dismissal of the Sonnet finding above, so it did not catch this defect.
+- **Validation of the corrected tree** (`8245eea`, run sequentially; nothing in Playwright, Vite, timeouts, retries, workers or host security settings was changed):
+  - build, lint, all 8 `check:*` guards and `test:scripts` (312);
+  - web unit (1,457) and the hermetic suite (3,947 across 19 workspaces), with zero skips;
+  - static Playwright **187 of 187** (4 workers, 0 retries), with Avast Web/Network Shield off for that one run at the owner's direction;
+  - backend Playwright **232 of 232** (4 workers, 0 retries), shield on. Ports 4173 and 4174 were free. A read-only sampler showed `vite preview` alive from start to teardown, minimum commit headroom 11,868 MB, minimum physical available 5,595 MB, and no pagefile growth.
+  - Runs on this tree that did not pass, recorded so that none is mistaken for one:
+    - Static with the shield on, three times: 185, 186 and 185 of 187. The failures were lobby `#create-seek` left disabled because session restore never completed (at 1440, 1024 and 768 px), an email-verification response never handled, and once headless Chromium gone at launch. In the last of these, commit headroom never fell below 9.5 GB, so memory was ruled out, and early pages took 10, 20, 30 and 40 s, the Avast loopback-stall pattern. The same tests took under a second with the shield off.
+    - Backend with the shield on: 230 of 232. A Playwright **test worker** exited with `0xC0000409` (so `game-vs-bot` never ran), and a Black player's page joined as "Spectating" in `game-responsive`. Commit headroom fell to 523 MB during that run and Windows expanded the pagefile, consistent with the commit-exhaustion mechanism but not proven to cause it. The only source change since the passing `3d1ed4a` run was the five-line click suppression in `board-view.ts`. Before the passing run above, the owner reduced unrelated host load: another project's `vite preview` holding port 4173, that project's Vitest run, and this task's idle original interactive session were stopped.
+- **Second exact-head review correction** (Greptile on `a623b11`, confidence 5/5 with one non-blocking finding, valid; Qodo 0 bugs and 0 rule violations on the same head, with its earlier finding resolved): the first fix set `suppressClick` so that only a later click cleared it. A gesture cut short by an owner change and released off the board produces no click, so the flag stayed set and the next click with no pointer events (assistive technology, programmatic activation) was swallowed. An ordinary drag dropped off the board leaked the same way.
+  - Fix (`98fb8b9`): suppression now covers only the click the release itself produces, clearing on the next tick. For mouse and pen, the browser dispatches that click straight after pointer-up. For touch, where a tap's click is synthesized from a later gesture event, this ordering is not verified (see the exact-head review below). An owner change during a gesture waits for that gesture's pointer-up or pointercancel instead of setting a sticky flag, and the wait ends at that release, at the next pointerdown, or on `destroy`. The `pointerdown` reset added in `8245eea` was replaced by ending the wait.
+  - RED test first (`board-a11y.test.ts`): a click with no pointer gesture after a cut-short release, and after an off-board drop, both failed on `a623b11`. The mid-drag owner-change test also asserts that no `pointerup` or `pointercancel` listener survives the release or disposal. Six mutations were compiled and all were killed: release suppression never clearing, the owner change not waiting, pointerdown not ending the wait, destroy leaving the wait, the waiter staying after firing, and the drop path back to a sticky flag.
+  - The exact-head review of `a623b11` was again a strict self-review, because Gemini and Sonnet were both quota-blocked (429). Its claim that "only an off-board click can consume a stale flag" was wrong, because clicks without pointer events exist, so it did not catch this defect.
+- **Validation of `98fb8b9`** (sequentially; nothing in Playwright, Vite, timeouts, retries, workers, Node or host security settings was changed):
+  - build, lint, all 8 `check:*` guards and `test:scripts` (312);
+  - web unit (1,458) and the hermetic suite (3,948 across 19 workspaces), with zero skips;
+  - static Playwright **187 of 187** (4 workers, 0 retries) on Windows, with Avast Web/Network Shield off for that one run at the owner's direction;
+  - backend Playwright **232 of 232** on Linux. The exact tree came from `git archive 98fb8b9`, with no Windows `node_modules` or uncommitted files, and ran on WSL2 Ubuntu 26.04 with Node 22.23.3 (the version CI uses), `npm ci`, `npm run build`, Playwright's own `install-deps chromium` and `GAMBIT_E2E_BACKEND=1 npx playwright test --retries=0`: 4 workers, 0 failed, 0 skipped, 0 flaky, 0 retries.
+  - Windows backend runs on this tree, recorded so that none is mistaken for a pass:
+    - invalid once: `vite preview` exited with `0xC0000409` about 75 s in, with system commit headroom about 13.5 GB and the preview's memory flat;
+    - 230 of 232 with `cdb` attached to the preview only: a Playwright test worker exited with `0xC0000409`, and the analysis panel's run button stayed disabled. The preview survived with no exception.
+    - **232 of 232** with `cdb` attached to the preview and every test worker, with zero exceptions captured in any process;
+    - 231 of 232 uninstrumented: headless Chromium was gone at `browser.newContext` before one test body started.
+
+    These are recorded as host or environmental evidence only. Both processes that died run Node 24.15.0 with Avast's `aswhook.dll` injected, the crashes happened with the shield on and off and at high and low commit headroom, and the instrumented runs captured no exception, although the run with `cdb` on the preview only still failed when an uninstrumented worker died. No root cause was proven, and the Windows instability is not fixed.
+- **Exact-final-head review** (head `631b373`): Gemini 3.8 Flash High and Claude Sonnet 4.6 were both quota-blocked (429). Under the hierarchy's last step, a strict Claude review was run by a fresh read-only reviewer agent with no shared context. **APPROVE WITH NITS**: no CRITICAL or HIGH defects, no hole in the ownership boundary, and both review fixes traced correct, with the unit tests failing if either fix is reverted. Its LOW items are recorded here, not fixed, because each needs a code change and full gate reruns:
+  - A cut-short **touch** tap could still select a piece for the new owner if its synthesized click arrives after the next tick. It never submits a move, and it needs an owner change during that tap.
+  - The release handlers do not filter on `pointerId`, so a second finger lifting ends the wait or a drag early. The drag half predates this PR.
+  - An ordinary drag does not listen for `pointercancel` (predates this PR).
+  - The click-timing fixes are covered by fake-DOM unit tests only, with no browser touch or interrupted-gesture case. The mutation harness is outside the repository.
+  - Two over-claims in this entry, the click ordering and "captured no failure", were corrected in the commit that adds this bullet.
+- **Third exact-head review correction** (on `38e1bdd`): CI was green, including M6 acceptance at 232 passed with 0 flaky. Three findings were raised, all valid:
+  - Qodo #1 and Greptile (one root cause): clearing suppression on a next-tick timer assumed a release's click arrives in the same task. Touch does not guarantee that, so a late touch click from a completed drag, or from a gesture an owner change cut short, could still act on the board.
+  - Qodo #2: the cut-short wait ended on any pointer's release, so a second finger lifting first let the original finger's click through.
+
+  These are the first two LOW items recorded by the exact-head review above, now fixed.
+  - Fix (`2ae8589`): suppression is tied to the pointer, not to time. `BoardView` records which pointer's next click must be swallowed (a drag's release, or a gesture an owner change cut short) and matches the click's own `pointerId` whenever it arrives, because browsers deliver `click` as a PointerEvent carrying that id. A click with `pointerType` '' (assistive technology, keyboard, `element.click()`) is never swallowed.
+  - The cut-short wait ends only on that pointer's release or cancel, on a new press by the same pointer, or on `destroy`. A new press by the same pointer also clears a stale entry left by a release that made no click. There is no timer.
+  - An engine whose clicks carry no pointer fields keeps suppressing the release's own click; this is the fallback path.
+  - RED tests came first (`board-a11y.test.ts`): a touch click arriving in a later task after a cut-short release, and two interleaved fingers, both failed on `38e1bdd`. Further cases cover:
+    - a drag that wobbles back onto its own piece with a late click;
+    - another finger's tap between a drag release and its click;
+    - a mouse re-press after an off-board drop;
+    - a re-press after a lost release;
+    - an assistive-technology click with no pointer id.
+  - Eleven compiled mutations, one per part of the fix, were all killed by tests, and the source was restored byte-identical. The mutated parts were: the `pointerType` rule, pointer-id matching, the wait's own-pointer check, the re-press clearing a stale entry, the re-press ending the wait, the drag release and the cut-short release recording suppression, the owner change waiting, `destroy`, the waiter removing itself, and a swallowed click clearing the entry.
+  - Of that review's LOW items, `pointercancel` on an ordinary drag (predates this PR) and the lack of a real-browser touch test remain.
+- **Validation of `2ae8589`, entirely on Linux** (the exact tree from `git archive 2ae8589`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3, npm 10.9.9 and the repository's normal worker calculation, giving 4 workers):
+  - `npm ci` and `npm run build` succeeded.
+  - hermetic suite **3,950 of 3,950** across 19 workspaces, with zero skips (web 1,460);
+  - static Playwright **187 of 187**, 0 flaky, `--retries=0`;
+  - backend Playwright **232 of 232**, 0 flaky, `--retries=0`.
+  - On Windows, build, lint, all 8 guards and `test:scripts` (312) passed on this commit. The Windows hermetic run failed one file, `packages/api` `resources.test.js`, at file level with no failing assertion. That file passed 14 of 14 in three isolated reruns, and this PR does not touch `packages/api`. It is recorded with the other host faults above, without a proven cause.
+- **Exact-head review of `79686a5` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**: no defect on Chromium or modern Firefox, and the 11 mutations map one-to-one to assertions. Two of its findings were fixed in `1bbb5bf`, with RED tests first:
+  - (MEDIUM, conditional) In the fallback for engines whose `click` carries no `pointerId`, a stale entry matched any later click. For example, a touch drag released off the board makes no click, so the next tap's click was swallowed once. In that fallback a click now counts as the release's own only if no press came after the release. This uses a press counter, not a timer; engines with pointer ids are unchanged.
+  - (LOW) The drag's `pointerup` listener accepted any pointer, so another finger's release could drop the carried piece at its own coordinates. It now ignores other pointers.
+
+  The wording "browsers deliver click as a PointerEvent" above means modern browsers; older engines take the fallback. Not fixed: a second press during a live drag leaves the floating piece behind (this predates the PR). Mutation run on `1bbb5bf`: 14 compiled mutations, 13 killed by tests. The survivor, "a swallowed click keeps its entry", is an equivalent mutant: any later click from that pointer follows a new press by it, which already clears the entry, and the press counter covers the fallback.
+- **Validation of `1bbb5bf`, entirely on Linux** (the exact tree from `git archive 1bbb5bf`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,952 of 3,952** across 19 workspaces, with zero skips (web 1,462);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint, all 8 guards and `test:scripts` (312).
+- **Exact-head review of `066f046` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**, with no merge-blocking defect. Its one actionable finding is fixed in `f98a8b9`, with RED tests first.
+  - The finding: drags never listened for `pointercancel`, so a touch drag the browser took over (a pan, a system gesture) stayed live with its floating piece. The repository sets no `touch-action`, so this is plausible. Since `1bbb5bf` made the drag's `pointerup` ignore other pointers, no later event recovered such a drag.
+  - The fix: a drag now cancels on its own pointer's `pointercancel`, like a drop off the board (selection cleared, floating piece removed). A press that never became a drag keeps an existing selection. A new press now calls `cancelDrag()` before starting, which also fixes the pre-existing "second press during a live drag leaves the floating piece behind", previously recorded as not fixed.
+  - Seven compiled mutations of the new code were all killed by tests: no listener, any pointer's cancel, a new press only detaching listeners, no re-render, the selection kept, a non-drag cancel clearing the selection, and the listener not removed.
+  - Its other note, that a press outside any square keeps a stale entry, is harmless: the only click that entry could eat is one the board ignores anyway.
+- **Validation of `f98a8b9`, entirely on Linux** (the exact tree from `git archive f98a8b9`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,954 of 3,954** across 19 workspaces, with zero skips (web 1,464);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+
+  This supersedes the earlier "remain" notes: of the LOW items, only the lack of a real-browser touch test is still open.
+- **Exact-head review of `dd52355` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS.** Its finding is fixed in `59362b9`, with a RED test first.
+  - The finding: a press during another pointer's live drag only detached that drag's listeners. Its selection stayed and its release went unwatched, so its trailing click reached `tap` with the piece still selected and **an abandoned drag could submit a move**. `f98a8b9` had removed only the floating piece; the selection gap was older. The "fixes the pre-existing floating piece" wording in the previous bullet was therefore true only for the clone, until this fix.
+  - The fix: owner changes and new presses now share `abandonGesture()`, which waits for the abandoned pointer's release, swallows that click, and undoes a drag it started (selection cleared, re-rendered). A re-press by the same pointer, whose release was lost, only resets, so its own click still works.
+  - Six compiled mutations were all killed: a new press only cancelling the drag, no wait, selection kept, no re-render, a same-pointer re-press also abandoning, and the owner change not abandoning.
+  - Of the earlier "not fixed" notes, the floating piece and the selection left by a second press are now both fixed.
+- **Validation of `59362b9`, entirely on Linux** (the exact tree from `git archive 59362b9`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,954 of 3,954** across 19 workspaces, with zero skips (web 1,464);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Exact-head review of `b1441a4` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**, with no single-gesture path that acts.
+  - Its LOW finding: one wait slot and one suppression slot meant a third simultaneous pointer could defeat them. Abandoning A replaced the pending wait on an earlier abandoned C, so C's click still tapped.
+  - Its nits: no test covered a press interrupting another pointer's non-drag gesture, and `setInputEnabled(false)` still only cancelled a drag.
+  - All three are addressed in `d569298`. Waits are a set of awaited pointer ids, served by one window listener pair that is attached while any pointer is awaited. Suppressions are a map from pointer id to the press count at its release. Each pointer's release, click, re-press and the no-pointer-id fallback behave per pointer. `setInputEnabled(false)` abandons the gesture like an owner change.
+  - The PR #87 test that asserted no `pointerup` listener after a game ends now asserts the new contract: the drag's listeners go at once, and only the wait for the abandoned release remains until that release.
+  - RED tests came first (three simultaneous fingers; input disabled and re-enabled mid-drag).
+  - A full mutation sweep of the click and drag logic: 25 compiled mutations, all killed by tests. Two had survived the first sweep: abandoning a non-drag press clearing an earlier selection, and a swallowed fallback click keeping its entry. They were killed after the missing assertions were added.
+- **Validation of `d569298`, entirely on Linux** (the exact tree from `git archive d569298`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,956 of 3,956** across 19 workspaces, with zero skips (web 1,466);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Exact-head review of `3bd6965` and the gates on it**:
+  - Independent review: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran it. Verdict **APPROVE**, with one optional LOW: an awaited pointer's `pointercancel` recorded a suppression even though a cancelled pointer never clicks.
+  - Pushed head `3bd6965`: CI was all green, including M6 acceptance. Qodo reported 0 bugs, 0 rule violations and 0 requirement gaps, with all earlier findings resolved.
+  - Greptile, confidence 5/5, raised one non-blocking finding. On an engine whose clicks carry no `pointerId`, the fallback's press count was shared by all fingers. If finger A was abandoned after finger B pressed and A released without a click, A's suppression was recorded at B's count, and B's genuine tap was swallowed.
+  - Both are fixed in `5f7eb72`, with RED tests first. A click without a pointer id is now taken to be the last released pointer's (a browser dispatches a click straight after its own pointer's release) and is swallowed only if that pointer is suppressed. The shared press counter is gone. An awaited pointer's `pointercancel`, on its own handler, ends the wait without recording a suppression. Engines with pointer ids are unchanged.
+  - Full mutation sweep of the click and drag logic, updated to the new code: 27 compiled mutations, all killed by tests.
+- **Validation of `5f7eb72`, entirely on Linux** (the exact tree from `git archive 5f7eb72`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,958 of 3,958** across 19 workspaces, with zero skips (web 1,468);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Gates on `8314d11` and their correction**: the independent review gave **APPROVE**. CI was all green, including M6 acceptance. Two non-blocking findings came in; both are fixed in `b6246cd`, with RED tests first.
+  - **Qodo, 1 bug (performance):** off-board drops recorded click suppressions that no click could consume. Its cancelled-pointer half was already fixed in `5f7eb72`. Touch pointer ids are never reused, so records grew for the life of the board, and an on-board touch drag, which usually makes no click, grows them the same way. Releases off the board now record nothing, and pending records are capped at 16, oldest evicted.
+  - **Greptile, confidence 5/5:** on an engine whose clicks carry no `pointerId`, finger A's abandoned gesture could produce a delayed click after finger B's release. The last-released rule attributed it to B, so it acted.
+  - Without a pointer id a click cannot be attributed to a finger, so every rule fails in one direction. The press counter swallowed a genuine tap (Greptile on `3bd6965`); "last released" let an abandoned click act (Greptile on `8314d11`). The choice made is **safety first**: while an abandoned gesture's click is pending, a pointer-less click is taken to be that one. An abandoned gesture never acts; at worst one genuine tap is swallowed and repeated. Drag-release suppressions keep the last-released rule, and engines with pointer ids are unchanged.
+  - Because off-board releases now record nothing, older tests that made stale entries with off-board releases no longer reached their protections. A mutation sweep showed this as 7 survivors. Those tests now use on-board releases with no click, and the cancel test's `pointercancel` carries coordinates on the board.
+  - Two lines became provably redundant (a re-add and a last-released write on awaited releases) and were removed instead of being kept untested.
+  - The final sweep of the click and drag logic: 32 compiled mutations, all killed by tests.
+- **Validation of `b6246cd`, entirely on Linux** (the exact tree from `git archive b6246cd`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,960 of 3,960** across 19 workspaces, with zero skips (web 1,470);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Exact-head review of `39c2f9d` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**, with no ownership regression and no case where an abandoned gesture's click acts.
+  - Its finding: the previous bullet's "at worst one genuine tap is swallowed" was an over-claim. Abandoned records had no expiry. On an engine whose clicks carry no `pointerId`, an abandoned touch that never made a click left a record that neither a re-press nor a matching click could remove, because touch ids are never reused. Each later genuine tap was then swallowed against one stale record, up to the cap of 16: dead taps spread over any amount of time.
+  - The reviewer believes Safari and iOS still send `click` without a `pointerId`. That is not verified, but if it holds, this fallback is the main iOS touch path.
+  - The fix (`13a05c9`): records carry their release's time, and on the pointer-less path, records older than `CLICK_WINDOW_MS` (1 s) are dropped before matching. A release's click arrives within milliseconds, or about 300 ms when touch holds it back for double-tap detection. Times come from the events' own `timeStamp`.
+  - The accurate cost of the safety-first rule is therefore: at most one genuine tap per abandoned release, and only within about a second of that release. Engines with pointer ids are unchanged.
+  - A RED test came first: two stale abandoned releases, then genuine taps two seconds later, which must act.
+  - Full mutation sweep: 35 compiled mutations, all killed by tests, including no purge, an unbounded window and a zero window.
+- **Validation of `13a05c9`, entirely on Linux** (the exact tree from `git archive 13a05c9`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,961 of 3,961** across 19 workspaces, with zero skips (web 1,471);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Exact-head review of `242ad1c` and its follow-up**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**, with no code defect.
+  - Test gap: only one test used explicit event times, so a regression that shrank `CLICK_WINDOW_MS` (to 50 ms, say) or flipped its comparison would have gone unnoticed and let a late abandoned click act. In `2b52090` that test now requires an abandoned release's click 300 ms later to be swallowed, and a click just past the window to act. This is a test change only; the source is identical to `13a05c9`.
+  - Mutation sweep: 37 compiled mutations, all killed by tests, including the shrunken window and the flipped comparison.
+  - Wording: the previous bullet's timing ("within milliseconds, or about 300 ms when touch holds it back for double-tap detection") is the design assumption behind the 1 s window, not verified browser behaviour. Modern mobile browsers with a viewport meta tag may not delay clicks at all, and the window is generous either way. Whether Safari/iOS click events carry a `pointerId` also remains unverified.
+- **Validation of `2b52090`, entirely on Linux** (the exact tree from `git archive 2b52090`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,961 of 3,961** across 19 workspaces, with zero skips (web 1,471);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`.
+- **Merged with `origin/main` `abab2bc` (#89, Increment 87) in `2e878c5`** (normal merge, parents `6f49620` and `abab2bc`; owner-approved). #89 had claimed Increment 87, so this entry and its header lines were renumbered to Increment 88. The only conflict was this file: #89's Increment 87 entry and header lines are kept unchanged, main's previous "Last updated" line became a "Prior:" line, and nothing else from main was altered. No source, test or config file conflicted. #89's topology and harness changes (`scripts/check-test-topology.mjs`, `scripts/run-gateway-tests.mjs`, the new `scripts/test/gateway-signal-route.test.mjs`, CI, `Dockerfile.gateway-test`, gateway test) merged cleanly beside this PR's Playwright spec count of 32.
+- **Validation of the merge `2e878c5`**:
+  - on Windows: `npm ci`, build and lint passed; all eight `check:*` guards passed, including `check:test-topology` (479 test files across 21 suites, all placed, classified and reachable); `test:scripts` **315 of 315**, with zero skips (up from 312 with #89's new script test), including the topology tests "backend-free Playwright discovers only the eleven offline specs" and the 32-spec discovery count;
+  - entirely on Linux (the exact tree from `git archive 2e878c5`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers): `npm ci` and build succeeded; hermetic suite **3,961 of 3,961** across 19 workspaces, with zero skips (web 1,471); static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 failed, 0 skipped and 0 flaky with `--retries=0`; no config, timeout, worker or test changes.
+- **Exact-head review of `2e878c5`**: Gemini (429, resets in 87 h) and Sonnet (429, resets in 153 h) were still quota-blocked, so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE**, with no critical, high or medium finding. It covered Qodo's off-board release / accumulated click-record finding (resolved), Greptile's delayed abandoned-click finding (resolved, with the documented no-pointer-id trade-off), per-pointer `pointerId` handling, assistive-technology and pointer-less clicks, multi-touch and interleaved pointers, #89's merged topology and harness changes (no semantic conflict), and this file's merge resolution. Low notes, left as they are: the no-pointer-id fail-safe can swallow one genuine tap within 1 s of an abandoned release; an ignored press (off the board or with an overlay open) does not clear that pointer's stale record, which is bounded and time-limited; `lastReleasedPointer` also updates on ordinary taps, which is harmless.
+- **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.

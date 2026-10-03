@@ -60,6 +60,25 @@ function pieceClass(color: string, role: string): string {
 }
 const DRAG_THRESHOLD = 6;
 
+/**
+ * Most click suppressions kept at once. A release's own click arrives within a few events, but a touch
+ * drag usually makes no click at all and touch pointer ids are never reused, so without a cap its entry
+ * would stay for the life of the board. The oldest entries are evicted first.
+ */
+const MAX_PENDING_CLICKS = 16;
+
+/**
+ * How long after a release its click can still arrive. A browser sends a release's click within a few
+ * milliseconds for mouse and pen; for touch it can hold the click back for double-tap detection (around
+ * 300 ms). A click later than this is a new activation, never that release's.
+ */
+const CLICK_WINDOW_MS = 1000;
+
+/** An event's own time, or now for an event without one. */
+function eventTime(event: Event): number {
+  return typeof event.timeStamp === 'number' ? event.timeStamp : performance.now();
+}
+
 /** A resolved user gesture: either a committed move or a queued premove. */
 export type ResolvedMove =
   | { readonly kind: 'move'; readonly move: Premove }
@@ -104,12 +123,26 @@ export class BoardView {
   private startY = 0;
   private pointerId: number | null = null;
   private floatEl: HTMLElement | null = null;
-  private suppressClick = false;
+  /**
+   * Pointers whose next click must be swallowed: `abandoned` is true for an abandoned gesture's release
+   * (begun under a previous owner, or cut short by another pointer) and false for a drag's own release;
+   * `at` is the release's time. An entry goes with that click or with the same pointer pressing again.
+   */
+  private readonly suppressedClicks = new Map<number, { readonly abandoned: boolean; readonly at: number }>();
+  /**
+   * The pointer released most recently, so a click with no pointer id can be tied to the release that
+   * produced it: a browser dispatches a click straight after its own pointer's release.
+   */
+  private lastReleasedPointer: number | null = null;
+  /** Pointers whose gesture was abandoned and whose release is still awaited. */
+  private readonly awaitingRelease = new Set<number>();
   private overlay: HTMLElement | null = null;
   private focusedSquare: Square | null = null;
   /** Removes the window listeners of the drag in progress; null when no drag is listening. */
   private releaseDragListeners: (() => void) | null = null;
   // Held as fields so `destroy` can remove the very same references `addEventListener` received.
+  private readonly onAwaitedRelease = (e: PointerEvent): void => this.handleAwaitedRelease(e, true);
+  private readonly onAwaitedCancel = (e: PointerEvent): void => this.handleAwaitedRelease(e, false);
   private readonly onClick = (e: MouseEvent): void => this.handleClick(e);
   private readonly onPointerDown = (e: PointerEvent): void => this.handlePointerDown(e);
   private readonly onKeyDown = (e: KeyboardEvent): void => this.handleKeyDown(e);
@@ -149,6 +182,7 @@ export class BoardView {
    */
   destroy(): void {
     this.cancelDrag();
+    for (const pointerId of [...this.awaitingRelease]) this.stopAwaiting(pointerId);
     this.closeOverlay();
     this.root.removeEventListener('click', this.onClick);
     this.root.removeEventListener('pointerdown', this.onPointerDown);
@@ -183,8 +217,21 @@ export class BoardView {
   /** Accept or ignore move input; disabling also dismisses an open promotion chooser. */
   setInputEnabled(enabled: boolean): void {
     if (!enabled && this.overlay) this.cancelPromotion();
-    if (!enabled) this.cancelDrag();
+    if (!enabled) this.abandonGesture();
     this.interaction.setInputEnabled(enabled);
+    this.render();
+  }
+
+  /**
+   * Change whose pieces may be moved (`null`: nobody). A drag or promotion chooser opened for the
+   * previous owner is abandoned with it; focus and keyboard navigation are untouched.
+   */
+  setPlayerColor(color: Color | null): void {
+    if (color === this.interaction.playerColor) return;
+    if (this.overlay) this.cancelPromotion();
+    // A pointer gesture still in progress belongs to the previous owner.
+    this.abandonGesture();
+    this.interaction.setPlayerColor(color);
     this.render();
   }
 
@@ -211,10 +258,7 @@ export class BoardView {
   }
 
   private handleClick(event: MouseEvent): void {
-    if (this.suppressClick) {
-      this.suppressClick = false;
-      return;
-    }
+    if (this.consumeSuppressedClick(event)) return;
     if (this.overlay) return;
     const sq = this.squareAt(event.clientX, event.clientY);
     if (!sq) return;
@@ -291,24 +335,121 @@ export class BoardView {
     if (this.overlay) return;
     const sq = this.squareAt(event.clientX, event.clientY);
     if (!sq) return;
+    // The same pointer pressing again: its earlier release made no click here, and any wait for it is over.
+    this.suppressedClicks.delete(event.pointerId);
+    this.stopAwaiting(event.pointerId);
+    // A new press ends any gesture still in progress. Another pointer's gesture is abandoned (its
+    // release must not tap); the same pointer pressing again means its release was lost.
+    if (this.releaseDragListeners && this.pointerId !== event.pointerId) this.abandonGesture();
+    else this.cancelDrag();
     this.dragFrom = sq;
     this.dragging = false;
     this.startX = event.clientX;
     this.startY = event.clientY;
     this.pointerId = event.pointerId;
-    this.releaseDragListeners?.();
     const move = (e: PointerEvent): void => this.handlePointerMove(e);
     const up = (e: PointerEvent): void => {
+      if (e.pointerId !== this.pointerId) return; // another pointer's release is not this drag's
+      this.lastReleasedPointer = e.pointerId;
       this.releaseDragListeners?.();
       this.handlePointerUp(e);
     };
+    // The browser can take a pointer over (a pan, a system gesture); that pointer then never releases.
+    const cancel = (e: PointerEvent): void => {
+      if (e.pointerId !== this.pointerId) return;
+      const wasDragging = this.dragging;
+      this.cancelDrag();
+      if (!wasDragging) return;
+      this.interaction.cancelPromotion();
+      this.render();
+    };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
     this.releaseDragListeners = (): void => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
       this.releaseDragListeners = null;
     };
+  }
+
+  /**
+   * Wait for the release of a pointer whose gesture was abandoned, then swallow that pointer's click
+   * whenever it arrives. Any number of pointers can be awaited at once; each waits only for itself.
+   */
+  private awaitCancelledRelease(pointerId: number): void {
+    if (this.awaitingRelease.size === 0) {
+      window.addEventListener('pointerup', this.onAwaitedRelease);
+      window.addEventListener('pointercancel', this.onAwaitedCancel);
+    }
+    this.awaitingRelease.add(pointerId);
+  }
+
+  private handleAwaitedRelease(event: PointerEvent, released: boolean): void {
+    if (!this.awaitingRelease.has(event.pointerId)) return;
+    this.stopAwaiting(event.pointerId);
+    // A cancelled pointer never clicks, so only a real release leaves a click to swallow.
+    if (!released) return;
+    // A release off the board makes no click here, so there is nothing to swallow.
+    if (this.squareAt(event.clientX, event.clientY)) this.suppressClickFrom(event, true);
+  }
+
+  private stopAwaiting(pointerId: number): void {
+    if (!this.awaitingRelease.delete(pointerId) || this.awaitingRelease.size > 0) return;
+    window.removeEventListener('pointerup', this.onAwaitedRelease);
+    window.removeEventListener('pointercancel', this.onAwaitedCancel);
+  }
+
+  /** Swallow the next click produced by `pointerId`, whenever it arrives. */
+  private suppressClickFrom(release: PointerEvent, abandoned: boolean): void {
+    this.suppressedClicks.set(release.pointerId, { abandoned, at: eventTime(release) });
+    for (const oldest of this.suppressedClicks.keys()) {
+      if (this.suppressedClicks.size <= MAX_PENDING_CLICKS) break;
+      this.suppressedClicks.delete(oldest);
+    }
+  }
+
+  /**
+   * If `event` is a click a recorded release produced, forget that entry and return true. Modern
+   * browsers deliver `click` as a PointerEvent carrying the id of the pointer behind it, whenever it
+   * arrives, so the id decides. A click with no pointer (assistive technology, keyboard,
+   * `element.click()`) has `pointerType` '' and never counts.
+   *
+   * On an engine whose clicks carry no pointer fields, a click cannot be attributed to a pointer, so a
+   * choice is unavoidable. Only releases within {@link CLICK_WINDOW_MS} can be its own; older records
+   * are dropped. Safety first: while an abandoned gesture's click is still due, the click is taken to
+   * be that one, because an abandoned gesture must never act; at worst a genuine tap within that window
+   * is swallowed and simply repeated. Otherwise it is taken to be the last released pointer's.
+   */
+  private consumeSuppressedClick(event: MouseEvent): boolean {
+    if (this.suppressedClicks.size === 0) return false;
+    const click = event as Partial<PointerEvent>;
+    if (click.pointerType === '') return false;
+    if (click.pointerId !== undefined) return this.suppressedClicks.delete(click.pointerId);
+    const now = eventTime(event);
+    for (const [pointerId, record] of this.suppressedClicks) {
+      if (now - record.at > CLICK_WINDOW_MS) this.suppressedClicks.delete(pointerId);
+    }
+    for (const [pointerId, record] of this.suppressedClicks) {
+      if (record.abandoned) return this.suppressedClicks.delete(pointerId);
+    }
+    const last = this.lastReleasedPointer;
+    return last !== null && this.suppressedClicks.delete(last);
+  }
+
+  /**
+   * Abandon the pointer gesture in progress without acting on it. Cancelling removes its pointer-up
+   * handler, so wait for its release and swallow that click, or it would tap; a drag it started is
+   * undone (selection cleared, floating piece removed).
+   */
+  private abandonGesture(): void {
+    if (this.releaseDragListeners && this.pointerId !== null) this.awaitCancelledRelease(this.pointerId);
+    const wasDragging = this.dragging;
+    this.cancelDrag();
+    if (!wasDragging) return;
+    this.interaction.cancelPromotion();
+    this.render();
   }
 
   /** Abandon a drag in progress: stop listening, drop the floating piece, forget the gesture. */
@@ -348,8 +489,8 @@ export class BoardView {
     this.endFloat();
     this.dragging = false;
     this.dragFrom = null;
-    this.suppressClick = true;
     if (target) {
+      this.suppressClickFrom(event, false); // a drop off the board makes no click here
       this.dispatch(this.interaction.drop(from, target));
     } else {
       this.interaction.cancelPromotion();
