@@ -1068,20 +1068,20 @@ test('a gesture cut short by an owner change selects nothing with its trailing c
   withDragGlobals((win) => {
     const { root, board } = mountWithFeedback({ playerColor: null });
     // A swipe begun before the role arrives: nobody owns the pieces, so no drag starts.
-    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1 });
-    win.dispatchEvent('pointermove', { ...centreOf('e4'), pointerId: 1 });
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 1, timeStamp: 1000 });
+    win.dispatchEvent('pointermove', { ...centreOf('e4'), pointerId: 1, timeStamp: 1000 });
     board.setPlayerColor('white'); // `joined` lands mid-gesture
-    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 1 });
-    root.dispatchEvent('click', centreOf('e2')); // the gesture's own trailing click
+    win.dispatchEvent('pointerup', { ...centreOf('e4'), pointerId: 1, timeStamp: 1000 });
+    root.dispatchEvent('click', { ...centreOf('e2'), timeStamp: 1010 }); // the gesture's own trailing click
     assert.equal(root.querySelector('[aria-selected="true"]'), null, 'the cancelled gesture selects nothing');
 
-    // A gesture abandoned off the board leaves no click behind; it must not swallow the next real one.
-    root.dispatchEvent('pointerdown', { ...centreOf('d2'), pointerId: 2 });
+    // Later, a gesture abandoned off the board leaves no click behind; it must not swallow the next real one.
+    root.dispatchEvent('pointerdown', { ...centreOf('d2'), pointerId: 2, timeStamp: 3000 });
     board.setPlayerColor(null);
     board.setPlayerColor('white');
-    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 3 });
-    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 3 });
-    root.dispatchEvent('click', centreOf('e2'));
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 3, timeStamp: 3000 });
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 3, timeStamp: 3000 });
+    root.dispatchEvent('click', { ...centreOf('e2'), timeStamp: 3010 });
     assert.equal(root.querySelector('[data-square="e2"]')?.getAttribute('aria-selected'), 'true', 'an ordinary click still selects');
   });
 });
@@ -1366,14 +1366,37 @@ test("on an engine whose clicks carry no pointer id, an abandoned finger's delay
   withDragGlobals((win) => {
     const { root } = mountWithFeedback({ playerColor: 'white' });
     const selected = (): string | null => root.querySelector('[aria-selected="true"]')?.getAttribute('data-square') ?? null;
-    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 121, pointerType: 'touch' }); // A
-    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 122, pointerType: 'touch' }); // B abandons A
-    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 121, pointerType: 'touch' }); // A releases
-    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 122, pointerType: 'touch' }); // B releases
-    root.dispatchEvent('click', centreOf('e2')); // A's delayed click, after B's release, with no pointer fields
-    assert.equal(selected(), null, "the abandoned finger's click selects nothing");
-    root.dispatchEvent('click', centreOf('g1')); // B's own click
-    assert.equal(selected(), 'g1', "B's tap then works");
+    // The clicks of A and B cannot be told apart, in either order, so both are swallowed within the window.
+    for (const [first, second, base] of [['e2', 'g1', 1000], ['g1', 'e2', 5000]] as const) {
+      root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: base + 1, pointerType: 'touch', timeStamp: base }); // A
+      root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: base + 2, pointerType: 'touch', timeStamp: base }); // B abandons A
+      win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: base + 1, pointerType: 'touch', timeStamp: base + 10 });
+      win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: base + 2, pointerType: 'touch', timeStamp: base + 20 });
+      root.dispatchEvent('click', { ...centreOf(first), timeStamp: base + 50 }); // no pointer fields
+      assert.equal(selected(), null, `the first click (${first}) selects nothing`);
+      root.dispatchEvent('click', { ...centreOf(second), timeStamp: base + 300 });
+      assert.equal(selected(), null, `the second click (${second}) selects nothing: the abandoned one never acts`);
+      root.dispatchEvent('click', { ...centreOf('g1'), timeStamp: base + 1011 }); // past the window: a new tap
+      assert.equal(selected(), 'g1', 'a tap after the window acts');
+      root.dispatchEvent('click', atClick('g1', -1)); // deselect again
+    }
+  });
+});
+
+test("on an engine whose clicks carry no pointer id, an abandoned release never uses up a drag's own suppression", () => {
+  withDragGlobals((win) => {
+    const { root, board } = mountWithFeedback({ playerColor: null });
+    root.dispatchEvent('pointerdown', { ...centreOf('e2'), pointerId: 141, pointerType: 'touch', timeStamp: 1000 });
+    board.setPlayerColor('white'); // abandons A
+    win.dispatchEvent('pointerup', { ...centreOf('e2'), pointerId: 141, pointerType: 'touch', timeStamp: 1000 });
+    // B drags a knight and wobbles back onto it near the end of A's window.
+    root.dispatchEvent('pointerdown', { ...centreOf('g1'), pointerId: 142, pointerType: 'touch', timeStamp: 1800 });
+    win.dispatchEvent('pointermove', { ...centreOf('f3'), pointerId: 142, pointerType: 'touch', timeStamp: 1850 });
+    win.dispatchEvent('pointermove', { ...centreOf('g1'), pointerId: 142, pointerType: 'touch', timeStamp: 1880 });
+    win.dispatchEvent('pointerup', { ...centreOf('g1'), pointerId: 142, pointerType: 'touch', timeStamp: 1900 });
+    root.dispatchEvent('click', { ...centreOf('e2'), timeStamp: 1950 }); // A's late click: swallowed
+    root.dispatchEvent('click', { ...centreOf('g1'), timeStamp: 2100 }); // B's own click, after A's window
+    assert.equal(root.querySelector('[aria-selected="true"]'), null, "the drag's own click is still swallowed");
   });
 });
 

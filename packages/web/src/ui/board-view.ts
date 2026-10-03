@@ -418,9 +418,10 @@ export class BoardView {
    *
    * On an engine whose clicks carry no pointer fields, a click cannot be attributed to a pointer, so a
    * choice is unavoidable. Only releases within {@link CLICK_WINDOW_MS} can be its own; older records
-   * are dropped. Safety first: while an abandoned gesture's click is still due, the click is taken to
-   * be that one, because an abandoned gesture must never act; at worst a genuine tap within that window
-   * is swallowed and simply repeated. Otherwise it is taken to be the last released pointer's.
+   * are dropped. Safety first: an abandoned gesture must never act, and its click may come before or
+   * after another finger's, so every click within that window of an abandoned release is swallowed,
+   * and the record stays until the window closes. At worst a genuine tap within that window is
+   * swallowed and simply repeated. Otherwise it is taken to be the last released pointer's.
    */
   private consumeSuppressedClick(event: MouseEvent): boolean {
     if (this.suppressedClicks.size === 0) return false;
@@ -431,8 +432,8 @@ export class BoardView {
     for (const [pointerId, record] of this.suppressedClicks) {
       if (now - record.at > CLICK_WINDOW_MS) this.suppressedClicks.delete(pointerId);
     }
-    for (const [pointerId, record] of this.suppressedClicks) {
-      if (record.abandoned) return this.suppressedClicks.delete(pointerId);
+    for (const record of this.suppressedClicks.values()) {
+      if (record.abandoned) return true;
     }
     const last = this.lastReleasedPointer;
     return last !== null && this.suppressedClicks.delete(last);
