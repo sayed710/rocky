@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-03 — M15 Increment 87: abandoned gestures never act, and full Linux validation._
+_Last updated: 2026-10-03 — M15 Increment 87: per-pointer gesture tracking and full Linux validation._
+
+Prior: _Last updated: 2026-10-03 — M15 Increment 87: abandoned gestures never act, and full Linux validation._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: drag cancellation and full Linux validation of the final code._
 
@@ -5134,6 +5136,18 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Validation of `59362b9`, entirely on Linux** (the exact tree from `git archive 59362b9`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
   - `npm ci` and build succeeded;
   - hermetic suite **3,954 of 3,954** across 19 workspaces, with zero skips (web 1,464);
+  - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
+  - on Windows: lint passed.
+- **Exact-head review of `b1441a4` and its correction**: Gemini and Sonnet were still quota-blocked (429), so a fresh read-only Claude reviewer agent ran the strict review. **APPROVE WITH NITS**, with no single-gesture path that acts.
+  - Its LOW finding: one wait slot and one suppression slot meant a third simultaneous pointer could defeat them. Abandoning A replaced the pending wait on an earlier abandoned C, so C's click still tapped.
+  - Its nits: no test covered a press interrupting another pointer's non-drag gesture, and `setInputEnabled(false)` still only cancelled a drag.
+  - All three are addressed in `d569298`. Waits are a set of awaited pointer ids, served by one window listener pair that is attached while any pointer is awaited. Suppressions are a map from pointer id to the press count at its release. Each pointer's release, click, re-press and the no-pointer-id fallback behave per pointer. `setInputEnabled(false)` abandons the gesture like an owner change.
+  - The PR #87 test that asserted no `pointerup` listener after a game ends now asserts the new contract: the drag's listeners go at once, and only the wait for the abandoned release remains until that release.
+  - RED tests came first (three simultaneous fingers; input disabled and re-enabled mid-drag).
+  - A full mutation sweep of the click and drag logic: 25 compiled mutations, all killed by tests. Two had survived the first sweep: abandoning a non-drag press clearing an earlier selection, and a swallowed fallback click keeping its entry. They were killed after the missing assertions were added.
+- **Validation of `d569298`, entirely on Linux** (the exact tree from `git archive d569298`, with no Windows `node_modules` or uncommitted files, on WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers):
+  - `npm ci` and build succeeded;
+  - hermetic suite **3,956 of 3,956** across 19 workspaces, with zero skips (web 1,466);
   - static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 flaky with `--retries=0`;
   - on Windows: lint passed.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
