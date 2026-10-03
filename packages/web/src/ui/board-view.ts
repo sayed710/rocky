@@ -107,6 +107,8 @@ export class BoardView {
   private suppressClick = false;
   private overlay: HTMLElement | null = null;
   private focusedSquare: Square | null = null;
+  /** Removes the window listeners of the drag in progress; null when no drag is listening. */
+  private releaseDragListeners: (() => void) | null = null;
   // Held as fields so `destroy` can remove the very same references `addEventListener` received.
   private readonly onClick = (e: MouseEvent): void => this.handleClick(e);
   private readonly onPointerDown = (e: PointerEvent): void => this.handlePointerDown(e);
@@ -146,6 +148,7 @@ export class BoardView {
    * anything rendered into markup that `bootstrap` re-runs over — must call this before remounting.
    */
   destroy(): void {
+    this.cancelDrag();
     this.closeOverlay();
     this.root.removeEventListener('click', this.onClick);
     this.root.removeEventListener('pointerdown', this.onPointerDown);
@@ -179,17 +182,8 @@ export class BoardView {
 
   /** Accept or ignore move input; disabling also dismisses an open promotion chooser. */
   setInputEnabled(enabled: boolean): void {
-    // Called on every action-state update; re-rendering each time replaces the cells under anyone
-    // measuring or focusing them, so only a real change touches the DOM.
-    if (enabled === this.interaction.acceptsInput) return;
     if (!enabled && this.overlay) this.cancelPromotion();
-    if (!enabled) {
-      // A drag in progress ends here: drop the floating piece and forget the gesture, so later
-      // pointer events find nothing to move or release.
-      this.endFloat();
-      this.dragging = false;
-      this.dragFrom = null;
-    }
+    if (!enabled) this.cancelDrag();
     this.interaction.setInputEnabled(enabled);
     this.render();
   }
@@ -302,14 +296,28 @@ export class BoardView {
     this.startX = event.clientX;
     this.startY = event.clientY;
     this.pointerId = event.pointerId;
+    this.releaseDragListeners?.();
     const move = (e: PointerEvent): void => this.handlePointerMove(e);
     const up = (e: PointerEvent): void => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
+      this.releaseDragListeners?.();
       this.handlePointerUp(e);
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    this.releaseDragListeners = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      this.releaseDragListeners = null;
+    };
+  }
+
+  /** Abandon a drag in progress: stop listening, drop the floating piece, forget the gesture. */
+  private cancelDrag(): void {
+    this.releaseDragListeners?.();
+    this.endFloat();
+    this.dragging = false;
+    this.dragFrom = null;
+    this.pointerId = null;
   }
 
   private handlePointerMove(event: PointerEvent): void {

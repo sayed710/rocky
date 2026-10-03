@@ -248,7 +248,11 @@ export function mountBoard(
       clearFeedback();
       view.setTurn(myTurn);
     },
+    // Called on every action-state update (a draw offer, a connection blip): only a real change may
+    // clear a rejection the player has not heard yet, or rebuild the grid under anyone measuring or
+    // focusing its cells.
     setInputEnabled: (enabled: boolean) => {
+      if (enabled === interaction.acceptsInput) return;
       clearFeedback();
       view.setInputEnabled(enabled);
     },
