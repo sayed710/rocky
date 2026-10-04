@@ -126,14 +126,14 @@ test('a keyboard player hears a rejected move, nothing is sent, and the next leg
     await page.click('#confirm-resign-yes');
     await expect(status).toHaveText(/resignation/i, { timeout: 15_000 });
     const finalStatus = await status.textContent();
-    // It ended on Black's turn; off-turn the board offers the side to move, so try Black's pawn.
-    await board.locator('[data-square="e7"]').focus();
+    // It ended on Black's turn, so a live board would take White's own off-turn premove; this one must not.
+    await board.locator('[data-square="d2"]').focus();
     await page.keyboard.press('Enter');
-    await expect(board.locator('[data-square="e7"]')).toHaveAttribute('aria-selected', 'false');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
+    await expect(board.locator('[data-square="d2"]')).toHaveAttribute('aria-selected', 'false');
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('ArrowUp');
     await page.keyboard.press('Enter');
-    await expect(board.locator('[data-square="e5"]')).not.toHaveAttribute('aria-description', /premove/);
+    await expect(board.locator('[data-square="d4"]')).not.toHaveAttribute('aria-description', /premove/);
     await expect(status).toHaveText(finalStatus ?? '');
     await expect(feedback).toBeEmpty();
     expect(sentMoves).toEqual(['e2e4']);
