@@ -63,6 +63,29 @@ test('EN/AR live game, lobby/create game and profile remain contained at all rel
         expect(cell.x).toBeCloseTo(before[i]!.x, 1);
         expect(cell.y).toBeCloseTo(before[i]!.y, 1);
       });
+      // The connected black player's orientation has its own canonical geometry, in both locales.
+      await opponentPage.setViewportSize({ width, height: width >= 768 ? 900 : 844 });
+      await opponentPage.locator('#locale-select').selectOption('en');
+      await expect(opponentPage.locator('.cb-board [data-square]').first()).toHaveAttribute('data-square', 'h1');
+      const blackBefore = await geometry(opponentPage);
+      expect(blackBefore[7]!.square).toBe('a1');
+      expect(blackBefore[7]!.x).toBeCloseTo(7, 1);
+      expect(blackBefore[56]!.square).toBe('h8');
+      expect(blackBefore[56]!.y).toBeCloseTo(7, 1);
+      await opponentPage.locator('#locale-select').focus();
+      await opponentPage.locator('#locale-select').selectOption('ar');
+      await expect(opponentPage.locator('#locale-select')).toBeFocused();
+      const blackAfter = await geometry(opponentPage);
+      blackAfter.forEach((cell, i) => {
+        expect(cell.square).toBe(blackBefore[i]!.square);
+        expect(cell.x).toBeCloseTo(blackBefore[i]!.x, 1);
+        expect(cell.y).toBeCloseTo(blackBefore[i]!.y, 1);
+      });
+      const blackBox = await opponentPage.locator('.cb-board').boundingBox();
+      expect(blackBox!.width).toBeGreaterThan(width < 768 ? width - 40 : 280);
+      expect(blackBox!.x).toBeGreaterThanOrEqual(-1);
+      expect(blackBox!.x + blackBox!.width).toBeLessThanOrEqual(width + 1);
+      expect(await opponentPage.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       const boardBox = await page.locator('.cb-board').boundingBox();
       expect(boardBox!.width).toBeGreaterThan(width < 768 ? width - 40 : 280);
       expect(boardBox!.x).toBeGreaterThanOrEqual(-1);

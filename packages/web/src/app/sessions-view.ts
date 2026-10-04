@@ -9,6 +9,7 @@ import type { SessionView } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { appendPanelRow, renderEmpty } from './render-helpers.js';
 import { renderInterpolatedText } from '../i18n/bidi.js';
+import { interpolate } from '../i18n/interpolate.js';
 
 /**
  * A session the user can still act on: not revoked, not past its expiry.
@@ -94,28 +95,23 @@ export function renderSessions(
     // the honest last-seen time regardless: every refresh rotates the session, so an active row was
     // created the last time that browser was actually here.
     const lastSeen = isoDate(session.lastSeenAt) ?? isoDate(session.createdAt);
-    const lastSeenStr = lastSeen ? i18n.t('profile.sessions.lastSeen', { date: lastSeen }) : null;
-    const parts = [
-      describeDevice(session.lastUserAgent ?? session.createdUserAgent, i18n),
-      session.lastIp ?? session.createdIp,
-      lastSeenStr,
-    ].filter((part): part is string => Boolean(part));
+    const ip = session.lastIp ?? session.createdIp;
+    const template = ['{device}', ip ? '{ip}' : null, lastSeen ? i18n.t('profile.sessions.lastSeen') : null]
+      .filter(Boolean).join(' · ');
+    const params = {
+      device: describeDevice(session.lastUserAgent ?? session.createdUserAgent, i18n),
+      ip: ip ?? '',
+      date: lastSeen ?? '',
+    };
 
     const revokeLabel = i18n.t('profile.sessions.revoke');
     const label = appendPanelRow(
       container,
-      parts.join(' · '),
+      interpolate(template, params),
       [{ label: revokeLabel, run: () => onRevoke(session.id) }],
       busy,
     );
-    const ip = session.lastIp ?? session.createdIp;
-    const template = ['{device}', ip ? '{ip}' : null, lastSeen ? i18n.t('profile.sessions.lastSeen') : null]
-      .filter(Boolean).join(' · ');
     label.removeAttribute('dir');
-    renderInterpolatedText(label, template, {
-      device: describeDevice(session.lastUserAgent ?? session.createdUserAgent, i18n),
-      ip: ip ?? '',
-      date: lastSeen ?? '',
-    });
+    renderInterpolatedText(label, template, params);
   }
 }

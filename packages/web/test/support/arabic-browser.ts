@@ -86,6 +86,7 @@ export function render(tokens: string[]) {
     images: node.querySelectorAll('img').length,
     result: { text: status.textContent, directions: [...status.querySelectorAll('bdi')].map((child) => child.dir) },
     sessionTokens: [...sessions.querySelectorAll('bdi')].map((child) => ({ text: child.textContent, dir: child.dir })),
+    sessionName: { visible: sessions.querySelector('.panel-row > span')?.textContent, action: sessions.querySelector('button')?.getAttribute('aria-label') },
     achievement: { text: achievements.textContent, images: achievements.querySelectorAll('img').length, progressDir: achievements.querySelector<HTMLElement>('bdi[dir="ltr"]')?.dir },
     tournament: { liveText: liveGames.textContent, ltrTokens: [...liveGames.querySelectorAll('bdi[dir="ltr"]')].map((child) => child.textContent), standingsText: standings.textContent },
     study: { visibility: visibility.textContent, roles: [...collaborators.querySelectorAll('.count')].map((child) => child.textContent), ids: [...collaborators.querySelectorAll<HTMLElement>('.row-main')].map((child) => ({ text: child.textContent, dir: child.dir })) },

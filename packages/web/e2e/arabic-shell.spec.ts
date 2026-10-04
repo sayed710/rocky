@@ -75,21 +75,25 @@ test('unsupported stored locale safely renders English', async ({ page }) => {
 });
 
 test('Arabic board names and keyboard geometry change in place without changing orientation', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 });
   await page.goto('/game/offline-arabic');
   const square = page.locator('[data-square="e2"]');
   await square.focus();
+  expect((await page.locator('.cb-board').boundingBox())!.width).toBeGreaterThan(280);
   const before = await page.locator('.cb-board [data-square]').evaluateAll((cells) => { const origin = cells[0]!.getBoundingClientRect(); return cells.map((cell) => ({ square: cell.getAttribute('data-square'), x: (cell.getBoundingClientRect().x - origin.x) / origin.width, y: (cell.getBoundingClientRect().y - origin.y) / origin.height })); });
   expect(before[0]!.square).toBe('a8');
   expect(before[7]!.square).toBe('h8');
   expect(before[7]!.x).toBeCloseTo(7, 1);
   expect(before[56]!.square).toBe('a1');
   expect(before[56]!.y).toBeCloseTo(7, 1);
+  if (process.env['ROOKZEN_CAPTURE_EVIDENCE']) await page.screenshot({ path: '../../docs/audits/arabic-rtl-evidence/guest-game-en-1280x600.png', fullPage: true });
   await page.locator('#locale-select').evaluate((select) => {
     (select as HTMLSelectElement).value = 'ar';
     select.dispatchEvent(new Event('change', { bubbles: true }));
   });
   await expect(square).toBeFocused();
   await expect(square).toHaveAttribute('aria-label', 'e2، بيدق أبيض');
+  expect((await page.locator('.cb-board').boundingBox())!.width).toBeGreaterThan(280);
   const after = await page.locator('.cb-board [data-square]').evaluateAll((cells) => { const origin = cells[0]!.getBoundingClientRect(); return cells.map((cell) => ({ square: cell.getAttribute('data-square'), x: (cell.getBoundingClientRect().x - origin.x) / origin.width, y: (cell.getBoundingClientRect().y - origin.y) / origin.height })); });
   // The shell may reposition the board column; every square's relative geometry stays identical.
   for (let i = 0; i < before.length; i++) {
@@ -97,6 +101,7 @@ test('Arabic board names and keyboard geometry change in place without changing 
     expect(after[i]!.x - after[0]!.x).toBeCloseTo(before[i]!.x - before[0]!.x, 1);
     expect(after[i]!.y - after[0]!.y).toBeCloseTo(before[i]!.y - before[0]!.y, 1);
   }
+  if (process.env['ROOKZEN_CAPTURE_EVIDENCE']) await page.screenshot({ path: '../../docs/audits/arabic-rtl-evidence/guest-game-ar-1280x600.png', fullPage: true });
   await page.keyboard.press('ArrowRight');
   await expect(page.locator('[data-square="f2"]')).toBeFocused();
   await page.keyboard.press('ArrowLeft');
@@ -131,6 +136,7 @@ test('mixed Arabic prose isolates SAN, UCI, FEN, handle, rating and hostile text
   expect(evidence.result).toEqual({ text: 'نتيجتان: {result0} {toString} 1-0 و0-1', directions: ['ltr', 'ltr'] });
   expect(evidence.sessionTokens).toContainEqual({ text: '127.0.0.1', dir: 'ltr' });
   expect(evidence.sessionTokens).toContainEqual({ text: '2026-10-04', dir: 'ltr' });
+  expect(evidence.sessionName.action).toBe(`إلغاء الجلسة ${evidence.sessionName.visible}`);
   expect(evidence.achievement.text).toContain('External <img src=x onerror=alert(1)>');
   expect(evidence.achievement.text).toContain('Unmodified content');
   expect(evidence.achievement.images).toBe(0);

@@ -228,6 +228,18 @@ html[lang="ar"] body { line-height: 1.6; }
     overflow-y: auto;
     min-height: 0;
   }
+  /* A guest's sign-in panel also occupies this column. Let the page scroll instead of
+     allowing that panel to consume the size container and collapse the board to zero. */
+  body.route-game:has(#auth:not([hidden])) {
+    height: auto;
+  }
+  body.route-game:has(#auth:not([hidden])) .game {
+    container-type: normal;
+    flex: none;
+  }
+  body.route-game:has(#auth:not([hidden])) .cb-board {
+    width: 100%;
+  }
 }
 .cb-row {
   display: flex;
