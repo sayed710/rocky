@@ -6,29 +6,7 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-04 — M15 Increment 88: Player board ownership, merged with Increment 87 (#89) and revalidated._
-
-Prior: _Last updated: 2026-10-04 — M15 Increment 88: click-window tests pinned and full Linux validation._
-
-Prior: _Last updated: 2026-10-04 — M15 Increment 88: time-bounded pointer-less click matching and full Linux validation._
-
-Prior: _Last updated: 2026-10-04 — M15 Increment 88: bounded click records, safety-first pointer-less clicks, full Linux validation._
-
-Prior: _Last updated: 2026-10-04 — M15 Increment 88: pointer-less clicks tied to the last release, and full Linux validation._
-
-Prior: _Last updated: 2026-10-03 — M15 Increment 88: per-pointer gesture tracking and full Linux validation._
-
-Prior: _Last updated: 2026-10-03 — M15 Increment 88: abandoned gestures never act, and full Linux validation._
-
-Prior: _Last updated: 2026-10-03 — M15 Increment 88: drag cancellation and full Linux validation of the final code._
-
-Prior: _Last updated: 2026-10-03 — M15 Increment 88: bounded no-pointer-id click fallback and drag release ownership._
-
-Prior: _Last updated: 2026-10-03 — M15 Increment 88: pointer-matched click suppression and full Linux validation._
-
-Prior: _Last updated: 2026-10-03 — M15 Increment 88: Greptile click-suppression correction and Linux backend validation._
-
-Prior: _Last updated: 2026-10-03 — M15 Increment 88: Player board ownership and read-only spectators._
+_Last updated: 2026-10-04 — M15 Increment 88: Player board ownership and read-only spectators, merged with Increment 87 (#89) and revalidated._
 
 Prior: _Last updated: 2026-10-03 — M15 Increment 87: Windows SIGTERM harness external review corrections._
 
@@ -5240,4 +5218,5 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - A first Linux run was stopped during its build step because Claude Code reclaimed background work when the Windows host ran low on memory. The owner approved the resume. The host was then re-checked (3.9 GB of 15.7 GB physical free; commit 13.9 of 31.4 GB) and no stale WSL, npm or Playwright processes remained.
   - On Windows: lint passed; all eight `check:*` guards passed; `test:scripts` **315 of 315**, with zero skips; board tests 74 of 74.
   - Entirely on Linux, rerun from scratch (a fresh `git archive 5793636`, a new Linux tree, no Windows `node_modules` or uncommitted files, WSL2 Ubuntu 26.04 with Node 22.23.3 and npm 10.9.9, 4 workers): `npm ci` and build succeeded; hermetic suite **3,962 of 3,962** across 19 workspaces, with zero skips (web 1,472, up one for the new test); static Playwright **187 of 187** and backend Playwright **232 of 232**, both 0 failed, 0 skipped and 0 flaky with `--retries=0`; no config, timeout, worker or test changes.
+- **Pushed `cbb06a2`; gates on it**: an independent exact-final-head review approved it. Greptile 5/5 on that exact head with no findings. Qodo marked the abandoned-tap finding Resolved, but raised one new maintainability finding: the header held twelve "Prior:" lines that were all intermediate states of this increment. Main keeps at most a few per increment, and that history is already in this entry's body. The header now has one current Increment 88 line, followed by main's previous line as the first "Prior:" line. Only lines this PR had added were removed; main's header lines are all unchanged, so against main the file is still purely additive. Docs only; no source, test or config change.
 - **Deliberate limits**: no production caller applies queued premoves (`applyPremove` is exercised only by tests; unchanged here). Studies and lesson boards mount without players and show positions with `setTurn(false)`, which on any board means "premove", not "read-only"; that is a separate surface and is unchanged. The owner performs the merge.
