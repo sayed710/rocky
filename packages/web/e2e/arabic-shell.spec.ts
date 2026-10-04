@@ -149,5 +149,6 @@ test('mixed Arabic prose isolates SAN, UCI, FEN, handle, rating and hostile text
   expect(evidence.ai.ltrTokens).toEqual(expect.arrayContaining(['e2e4', 'd2d4', '-0.20', '+0.35']));
   expect(evidence.ai.text).toContain('صعب');
   expect(evidence.ai.text).toContain('متقدم');
+  expect(evidence.ai.text).toContain('toString · 1/2-1/2');
   expect(evidence.ai.text).not.toMatch(/Hard|advanced|faster mate|Win|stalemate/);
 });

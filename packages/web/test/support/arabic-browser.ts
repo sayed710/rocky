@@ -77,6 +77,9 @@ export function render(tokens: string[]) {
   const endgame = document.createElement('div');
   ai.appendChild(endgame);
   renderEndgameVerdict(document, endgame, document.createElement('div'), { kind: 'terminal', id: 'endgame', move: 'e1d2', fenAfter: '', classification: 'throws_result', goalPreserved: false, terminal: { reason: 'stalemate', result: '1/2-1/2' } }, i18n);
+  const unknownEndgame = document.createElement('div');
+  ai.appendChild(unknownEndgame);
+  renderEndgameVerdict(document, unknownEndgame, document.createElement('div'), { kind: 'terminal', id: 'endgame', move: 'e1d2', fenAfter: '', classification: 'throws_result', goalPreserved: false, terminal: { reason: 'toString', result: '1/2-1/2' } }, i18n);
   return {
     text: node.textContent,
     children: [...node.querySelectorAll('bdi')].map((child) => ({ text: child.textContent, dir: child.dir, isolation: getComputedStyle(child).unicodeBidi })),

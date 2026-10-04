@@ -63,7 +63,7 @@ export function renderStudyList(
       const tag = document.createElement('span');
       tag.className = 'count';
       tag.textContent = study.visibility === 'private'
-        ? i18n.t('community.teams.privateTag')
+        ? i18n.t('learning.studies.visibility.private')
         : i18n.t('learning.studies.visibility.unlisted');
       row.appendChild(tag);
     }

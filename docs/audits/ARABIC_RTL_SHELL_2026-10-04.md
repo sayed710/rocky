@@ -44,6 +44,8 @@ Screenshots support visual containment only. Automated DOM semantics, focus and 
 
 ## Local validation and final PR boundary
 
+Post-commit strict Codex review was authorized after fresh Gemini and Claude attempts both returned genuine 429 individual-quota exhaustion without reviewing files. It reproduced an unknown endgame reason `toString` rendering inherited function text in the real DOM. The own-property lookup correction passed the unchanged focused browser assertion (1/1). Arabic review also corrected the imperative for winning from a position and used the feminine study-private label. Final-head review and complete re-execution must cover the corrective commit too; the earlier attempts/results are historical.
+
 Local gate counts and falsification evidence are recorded after completion below. The exact committed-head independent reviewer, CI, Qodo, Greptile, unresolved threads, Git equality and open/unmerged state are verified separately on the PR. This source document does not claim owner merge approval or whole-product launch readiness.
 
 | Positive local gate | Result |

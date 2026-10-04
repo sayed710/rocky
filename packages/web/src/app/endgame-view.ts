@@ -235,7 +235,7 @@ function terminalLabel(reason: string, result: string, i18n: I18nManager): strin
     insufficient_material: 'ai.explain.outcome.insufficientMaterial', fifty_move: 'ai.explain.outcome.fiftyMove',
     variant_win: 'ai.explain.outcome.variantWin', variant_draw: 'ai.explain.outcome.variantDraw',
   };
-  const key = keys[reason];
+  const key = Object.prototype.hasOwnProperty.call(keys, reason) ? keys[reason] : undefined;
   return `${key ? i18n.t(key) : reason} · ${result}`;
 }
 

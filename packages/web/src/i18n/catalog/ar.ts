@@ -712,7 +712,7 @@ export const arMessages = {
   "community.forum.threadNotFoundTitle": "الموضوع غير موجود",
   "community.forum.threadNotFoundBody": "الموضوع غير موجود أو الفريق خاص.",
   "learning.endgames.deliverCheckmate": "حقّق كش مات",
-  "learning.endgames.winPosition": "افز بالوضعية",
+  "learning.endgames.winPosition": "فُز من هذه الوضعية",
   "learning.endgames.holdDraw": "حافظ على التعادل",
   "learning.endgames.bestMove": "أفضل نقلة",
   "learning.endgames.playableNotBest": "نقلة قابلة للعب، لكنها ليست الأفضل",
