@@ -8,6 +8,7 @@
 import type { SessionView } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { appendPanelRow, renderEmpty } from './render-helpers.js';
+import { renderInterpolatedText } from '../i18n/bidi.js';
 
 /**
  * A session the user can still act on: not revoked, not past its expiry.
@@ -101,11 +102,20 @@ export function renderSessions(
     ].filter((part): part is string => Boolean(part));
 
     const revokeLabel = i18n.t('profile.sessions.revoke');
-    appendPanelRow(
+    const label = appendPanelRow(
       container,
       parts.join(' · '),
       [{ label: revokeLabel, run: () => onRevoke(session.id) }],
       busy,
     );
+    const ip = session.lastIp ?? session.createdIp;
+    const template = ['{device}', ip ? '{ip}' : null, lastSeen ? i18n.t('profile.sessions.lastSeen') : null]
+      .filter(Boolean).join(' · ');
+    label.removeAttribute('dir');
+    renderInterpolatedText(label, template, {
+      device: describeDevice(session.lastUserAgent ?? session.createdUserAgent, i18n),
+      ip: ip ?? '',
+      date: lastSeen ?? '',
+    });
   }
 }

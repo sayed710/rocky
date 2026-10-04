@@ -105,7 +105,7 @@ import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
 import { mountGamePgnExport } from './game-pgn-export.js';
 import { isEngineBotUserId } from '@chess-platform/game';
-import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
+import { applyAutoDirection, applyLtrIsolation, renderInterpolatedText, renderGameStatusText } from '../i18n/bidi.js';
 import { createI18nManager } from '../i18n/manager.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { getVariantLabel } from './variant-labels.js';
@@ -1299,7 +1299,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           : label;
     }
     if (metaTimeEl && state.timeControl) {
-      metaTimeEl.textContent = formatTimeControl(state.timeControl, i18n);
+      renderInterpolatedText(metaTimeEl, '{time}', { time: formatTimeControl(state.timeControl, i18n) });
     }
 
     if (metaLiveStatusEl && liveAnnouncement) {
@@ -1464,7 +1464,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onStatus: (text: string) => {
         authoritativeGameStatus = text;
-        if (statusEl) statusEl.textContent = text;
+        if (statusEl) renderGameStatusText(statusEl, text);
       },
       onLastMove: (from: string | null, to: string | null) => {
         authoritativeLastMove = from !== null && to !== null ? [from, to] : null;
@@ -1512,7 +1512,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     board.setPosition(authoritativeGameFen);
     board.setTurn(authoritativeGameTurn);
     board.setLastMove(authoritativeLastMove?.[0] ?? null, authoritativeLastMove?.[1] ?? null);
-    if (statusEl) statusEl.textContent = authoritativeGameStatus;
+    if (statusEl) renderGameStatusText(statusEl, authoritativeGameStatus);
   };
 
   const classificationLabel = (name: string): string => {
@@ -1585,7 +1585,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           board.setTurn(false);
           if (move.move.length >= 4) board.setLastMove(move.move.slice(0, 2), move.move.slice(2, 4));
           if (statusEl) {
-            statusEl.textContent = i18n.t('game.review.statusReviewing', {
+            renderInterpolatedText(statusEl, i18n.t('game.review.statusReviewing'), {
               san: move.san,
               bestMove: move.assessment.bestMove ?? i18n.t('game.review.bestMoveNotAvailable'),
             });
@@ -1598,7 +1598,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       if (review.isPartial) {
         const analyzed = review.analyzedPlayerMoves ?? review.moves.length;
         const total = review.totalPlayerMoves ?? analyzed;
-        gameReviewNoteEl.textContent = i18n.t('game.review.partialNote', {
+        renderInterpolatedText(gameReviewNoteEl, i18n.t('game.review.partialNote'), {
           analyzed: String(analyzed),
           total: String(total),
         });

@@ -6,7 +6,7 @@ import type {
   TeamMembership,
   TeamView,
 } from '../api/models.js';
-import { applyAutoDirection } from '../i18n/bidi.js';
+import { applyAutoDirection, renderInterpolatedText } from '../i18n/bidi.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { ForumController } from './forum-controller.js';
 import type { ForumCallbacks } from './forum-controller.js';
@@ -111,8 +111,8 @@ function renderForumIdentity(
 ): void {
   if (elements.error) elements.error.textContent = '';
   if (elements.title) {
-    elements.title.textContent = i18n.t('community.forum.teamForumTitle', { name: team.name });
-    applyAutoDirection(elements.title);
+    elements.title.removeAttribute('dir');
+    renderInterpolatedText(elements.title, i18n.t('community.forum.teamForumTitle'), { name: team.name });
   }
   if (elements.list) renderThreadList(elements.list, slug, threads, names, i18n);
 

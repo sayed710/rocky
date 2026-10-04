@@ -28,6 +28,9 @@ import type {
   OpeningExplorationResponse,
 } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
+import { renderInterpolatedText, renderChessText, applyAutoDirection } from '../i18n/bidi.js';
+import type { InterpolationParams } from '../i18n/types.js';
+import { aiDifficultyLabel } from './ai-labels.js';
 import type { MessageKey } from '../i18n/catalog/index.js';
 import {
   classificationLabel,
@@ -162,7 +165,7 @@ function renderMistakeSection(
 
   const playedTheBest = outcome.bestMove !== null && outcome.bestMove === outcome.move;
   if (!playedTheBest && outcome.bestMove !== null) {
-    block.appendChild(row(doc, i18n.t('ai.assess.enginePrefers', { move: outcome.bestMove }), outcome.before.evalLabel));
+    block.appendChild(row(doc, i18n.t('ai.assess.enginePrefers'), outcome.before.evalLabel, undefined, { move: outcome.bestMove }));
   }
 
   container.appendChild(block);
@@ -199,6 +202,7 @@ function renderExplanationSection(
   const prose = doc.createElement('p');
   prose.className = 'coach-prose';
   prose.textContent = explanation.explanation;
+  applyAutoDirection(prose);
   block.appendChild(prose);
 
   const { citation } = explanation;
@@ -211,12 +215,12 @@ function renderExplanationSection(
 
   const playedTheBest = citation.bestMove !== null && citation.bestMove === explanation.move;
   if (!playedTheBest && citation.bestMove !== null) {
-    block.appendChild(row(doc, i18n.t('ai.assess.enginePrefers', { move: citation.bestMove }), citation.evalLabel));
+    block.appendChild(row(doc, i18n.t('ai.assess.enginePrefers'), citation.evalLabel, undefined, { move: citation.bestMove }));
   }
 
   const source = doc.createElement('p');
   source.className = 'count';
-  source.textContent = i18n.t('ai.generatedBy', { provider: explanation.providerId, model: explanation.model });
+  renderInterpolatedText(source, i18n.t('ai.generatedBy'), { provider: explanation.providerId, model: explanation.model });
   block.appendChild(source);
 
   container.appendChild(block);
@@ -295,7 +299,7 @@ function renderPuzzleSection(
   const puzzle = section.value;
   const block = createSectionBlock(doc, i18n.t('ai.coach.section.tactic'));
   block.appendChild(row(doc, i18n.t('ai.coach.label.tactic'), i18n.t('ai.coach.present')));
-  block.appendChild(row(doc, i18n.t('ai.coach.label.difficulty'), capitalize(puzzle.difficulty)));
+  block.appendChild(row(doc, i18n.t('ai.coach.label.difficulty'), aiDifficultyLabel(puzzle.difficulty, i18n)));
 
   container.appendChild(block);
   return true;
@@ -333,11 +337,11 @@ function renderEndgameSection(
   const endgame = section.value;
   const block = createSectionBlock(doc, i18n.t('ai.coach.section.endgame'));
   block.appendChild(row(doc, i18n.t('ai.coach.label.position'), endgame.name));
-  block.appendChild(row(doc, i18n.t('ai.coach.label.objective'), capitalize(endgame.objective)));
+  block.appendChild(row(doc, i18n.t('ai.coach.label.objective'), i18n.t(`ai.objective.${endgame.objective}`)));
   if (endgame.technique !== null) {
     block.appendChild(row(doc, i18n.t('ai.coach.label.technique'), endgame.technique));
   }
-  block.appendChild(row(doc, i18n.t('ai.coach.label.difficulty'), capitalize(endgame.difficulty)));
+  block.appendChild(row(doc, i18n.t('ai.coach.label.difficulty'), aiDifficultyLabel(endgame.difficulty, i18n)));
 
   container.appendChild(block);
   return true;
@@ -407,15 +411,16 @@ function createSectionBlock(doc: Document, titleText: string): HTMLElement {
  * @param extraClass - an optional modifier on the label.
  * @returns the row, unattached.
  */
-function row(doc: Document, labelText: string, valueText: string, extraClass?: string): HTMLElement {
+function row(doc: Document, labelText: string, valueText: string, extraClass?: string, params?: InterpolationParams): HTMLElement {
   const item = doc.createElement('div');
   item.className = 'panel-row';
   const label = doc.createElement('span');
   label.className = extraClass ? `coach-label ${extraClass}` : 'coach-label';
-  label.textContent = labelText;
+  if (params) renderInterpolatedText(label, labelText, params);
+  else renderChessText(label, labelText);
   const value = doc.createElement('span');
   value.className = 'coach-value';
-  value.textContent = valueText;
+  renderChessText(value, valueText);
   item.appendChild(label);
   item.appendChild(value);
   return item;
@@ -451,13 +456,4 @@ function continuationLabel(c: OpeningContinuationView): string {
  */
 function continuationName(c: OpeningContinuationView): string {
   return c.name ?? c.eco ?? '';
-}
-
-/**
- * @param str - a lower-case token from the server, such as `win` or `hard`.
- * @returns it with an initial capital, for reading as a label rather than as a wire value.
- */
-function capitalize(str: string): string {
-  if (!str) return str;
-  return str.charAt(0).toUpperCase() + str.slice(1);
 }

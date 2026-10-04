@@ -14,6 +14,7 @@ This subsystem is built with zero third-party dependencies, adhering to Rookzen'
 | `metadata.ts` | Locale constants, direction mapping (`ltr`/`rtl`), and `resolveLocale()` normalization. |
 | `interpolate.ts` | Deterministic parameter substitution for `{param}` placeholders without `eval()`. |
 | `catalog/en.ts` | Authoritative canonical English catalog containing client-owned UI copy. |
+| `catalog/ar.ts` | Complete Modern Standard Arabic catalogue, checked against every English key. |
 | `catalog/index.ts` | Strongly typed `MessageKey` union derived from `enMessages` and `isMessageKey` type guard. |
 | `manager.ts` | `I18n` class and `createI18n()` factory for runtime message resolution and subscriptions. |
 | `document.ts` | Scoped synchronization of `<html lang dir>` attributes on target Document. |
@@ -88,9 +89,9 @@ Corresponding CSS in `style.css`:
 ## Constraints & Invariants
 
 1. **Default Locale:** The active production runtime locale remains `en` by default.
-2. **Catalog Availability Check:** A locale can only be activated at runtime if a catalog is registered (`this.catalogs.has(locale)`). Because no production Arabic catalog is registered in this increment, attempts to set `ar` safely remain `en`.
+2. **Catalog Availability Check:** English and Arabic are registered by default. Both contain all 929 client-owned message keys; Arabic satisfies `MessagesCatalog` without casts or English spreads. Tests enforce placeholder parity, built-in achievement source parity and explicitly list invariant technical/brand templates. Unknown achievement entries and future server-owned difficulty labels retain their original bytes.
 3. **No Auto-Detection:** Browser `navigator.language` is intentionally not auto-detected; locale selection requires explicit user action.
-4. **No Visible Switcher:** No language switcher UI or locale route prefixes ship in this increment.
+4. **Locale selection:** The native, labelled header selector persists an explicit choice without requiring an account. SPA mounts synchronize it and dispose its listener. `/locale-init.js` applies validated stored `lang`/`dir` before stylesheet/body parsing; blocked or unsupported storage defaults to English. No route prefixes are required.
 5. **Storage Key:** The canonical versioned key is `rookzen_locale_v1`.
 6. **Chessboard Invariance:** Logical chessboard orientation is independent of document direction (`dir="rtl"`). `.cb-board` retains `direction: ltr`.
 7. **Compile-Time Safety:** All message keys must exist in `enMessages`.

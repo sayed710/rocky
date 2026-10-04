@@ -17,6 +17,11 @@ class FakeDOMNode {
   readonly attributes = new Map<string, string>();
   readonly dataset: Record<string, string> = {};
   readonly classList = new Set<string>();
+  get className(): string { return [...this.classList].join(' '); }
+  set className(value: string) {
+    this.classList.clear();
+    for (const name of value.split(/\s+/).filter(Boolean)) this.classList.add(name);
+  }
   children: FakeDOMNode[] = [];
   parentElement: FakeDOMNode | null = null;
   focused = false;
@@ -600,7 +605,8 @@ test('promotion overlay announces accessible dialog and full piece labels', () =
     },
   });
   const interaction = new BoardInteraction({ oracle });
-  const view = new BoardView(root as unknown as HTMLElement, { interaction });
+  const i18n = new I18n();
+  const view = new BoardView(root as unknown as HTMLElement, { interaction, i18n });
   view.setPosition(fen);
 
   const prevDoc = globalThis.document;
@@ -637,7 +643,18 @@ test('promotion overlay announces accessible dialog and full piece labels', () =
     assert.equal(buttons[2]?.getAttribute('aria-label'), 'Promote to bishop');
     assert.equal(buttons[3]?.getAttribute('aria-label'), 'Promote to knight');
     assert.equal(buttons[4]?.getAttribute('aria-label'), 'Cancel promotion');
+    buttons[0]!.focus();
+    i18n.setLocale('ar');
+    assert.equal(root.querySelector('[role="dialog"]'), overlay, 'locale switch preserves the open dialog');
+    assert.equal(overlay.querySelectorAll('button')[0], buttons[0], 'locale switch preserves the focused button node');
+    assert.equal(buttons[0]!.focused, true);
+    assert.equal(overlay.getAttribute('aria-label'), 'اختر قطعة الترقية');
+    assert.equal(buttons[0]!.getAttribute('aria-label'), 'الترقية إلى وزير');
+    assert.equal(buttons[4]!.getAttribute('aria-label'), 'إلغاء الترقية');
+    i18n.setLocale('en');
+    assert.equal(buttons[0]!.getAttribute('aria-label'), 'Promote to queen');
   } finally {
+    view.destroy();
     if (prevDoc !== undefined) {
       Object.defineProperty(globalThis, 'document', { configurable: true, value: prevDoc });
     } else {

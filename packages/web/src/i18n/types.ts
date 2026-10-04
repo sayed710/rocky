@@ -4,8 +4,7 @@
 
 /**
  * Supported locale codes.
- * Currently 'en' is the active runtime production locale.
- * 'ar' is supported architecturally in the metadata and bidi subsystem.
+ * English and Arabic ship complete client-owned message catalogues.
  */
 export type Locale = 'en' | 'ar';
 

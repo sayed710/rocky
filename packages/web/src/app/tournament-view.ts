@@ -1,7 +1,7 @@
 import { el } from './dom.js';
 import { renderEmpty, formatTimeControl, formatClock } from './render-helpers.js';
 import { shortId } from '../api/graphql.js';
-import { applyAutoDirection } from '../i18n/bidi.js';
+import { applyAutoDirection, createLtrElement, renderInterpolatedText } from '../i18n/bidi.js';
 import { getVariantLabel } from './variant-labels.js';
 import type { I18n } from '../i18n/manager.js';
 import type {
@@ -113,12 +113,14 @@ export function renderTournamentDetail(
     el(doc, 'span', {}, getVariantLabel(detail.variant, i18n)),
   );
 
+  const timeValue = el(doc, 'span', {});
+  renderInterpolatedText(timeValue, '{time}', { time: formatTimeControl(detail.timeControl, i18n) });
   const tcRow = el(
     doc,
     'div',
     { class: 'panel-row' },
     el(doc, 'strong', {}, i18n.t('tournaments.details.timeControl')),
-    el(doc, 'span', {}, formatTimeControl(detail.timeControl, i18n)),
+    timeValue,
   );
 
   const playersText = i18n.t('tournaments.playersCount', { count: detail.participants.length });
@@ -151,7 +153,7 @@ export function renderTournamentDetail(
       'div',
       { class: 'panel-row' },
       el(doc, 'strong', {}, i18n.t('tournaments.details.rounds')),
-      el(doc, 'span', {}, roundsText),
+      createLtrElement(doc, 'span', roundsText),
     );
     container.appendChild(roundsRow);
   }
@@ -176,22 +178,25 @@ export function renderStandings(
   const doc = container.ownerDocument;
   for (const s of standings) {
     const handle = names.get(s.playerId)?.handle ?? shortId(s.playerId);
-    const playerSpan = el(doc, 'span', {}, `#${s.rank} ${handle}`);
-    applyAutoDirection(playerSpan);
+    const playerSpan = el(doc, 'span', {});
+    renderInterpolatedText(playerSpan, '{rank} {handle}', { rank: `#${s.rank}`, handle });
 
     const ptsStr = i18n.t('tournaments.standings.points', { points: s.points });
-    let statsStr = '';
+    const statsSpan = el(doc, 'span', { class: 'count' });
     if ('wins' in s) {
       // ArenaStanding
       const onFireStr = s.onFire ? i18n.t('tournaments.standings.onFire') : '';
-      statsStr = `${ptsStr} (${s.wins}W/${s.draws}D/${s.losses}L, ${s.gamesPlayed} games)${onFireStr}`;
+      renderInterpolatedText(statsSpan, i18n.t('tournaments.standings.arenaStats'), {
+        points: ptsStr, wins: s.wins, draws: s.draws, losses: s.losses, games: s.gamesPlayed, onFire: onFireStr,
+      });
     } else {
       // SwissOrRoundRobinStanding
       const withdrawnStr = s.withdrawn ? i18n.t('tournaments.standings.withdrawn') : '';
-      statsStr = `${ptsStr} (Tiebreak: ${s.tiebreak}, Buchholz: ${s.buchholz})${withdrawnStr}`;
+      renderInterpolatedText(statsSpan, i18n.t('tournaments.standings.swissStats'), {
+        points: ptsStr, tiebreak: s.tiebreak, buchholz: s.buchholz, withdrawn: withdrawnStr,
+      });
     }
 
-    const statsSpan = el(doc, 'span', { class: 'count' }, statsStr);
     const row = el(doc, 'div', { class: 'panel-row' }, playerSpan, statsSpan);
     container.appendChild(row);
   }
@@ -222,26 +227,24 @@ export function renderLiveBoards(
       doc,
       'a',
       { href: `/game/${encodeURIComponent(g.gameId)}`, class: 'row-link' },
-      `${whiteHandle} vs ${blackHandle}`,
     );
-    applyAutoDirection(matchupLink);
+    renderInterpolatedText(matchupLink, i18n.t('tournaments.liveGame.matchup'), { white: whiteHandle, black: blackHandle });
 
-    let statusText = '';
+    const infoSpan = el(doc, 'span', { class: 'count' });
     if (g.status.over) {
-      statusText = i18n.t('tournaments.liveGame.over', { result: g.status.result });
+      renderInterpolatedText(infoSpan, i18n.t('tournaments.liveGame.over'), { result: g.status.result });
     } else {
       const turnStr = g.turn === 'w'
         ? i18n.t('game.player.white')
         : i18n.t('game.player.black');
       const clocksStr = `${formatClock(g.clock.w)} - ${formatClock(g.clock.b)}`;
-      statusText = i18n.t('tournaments.liveGame.inProgress', {
+      renderInterpolatedText(infoSpan, i18n.t('tournaments.liveGame.inProgress'), {
         move: Math.floor(g.ply / 2) + 1,
         turn: turnStr,
         clocks: clocksStr,
       });
     }
 
-    const infoSpan = el(doc, 'span', { class: 'count' }, statusText);
     const row = el(doc, 'div', { class: 'panel-row' }, matchupLink, infoSpan);
     container.appendChild(row);
   }

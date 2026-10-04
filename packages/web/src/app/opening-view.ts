@@ -7,6 +7,7 @@
  */
 import type { OpeningContinuationView, OpeningExplorationResponse } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
+import { renderChessText, applyAutoDirection } from '../i18n/bidi.js';
 import type { MessageKey } from '../i18n/catalog/index.js';
 
 export const OPENING_MESSAGE_KEYS = {
@@ -133,10 +134,11 @@ function row(doc: Document, labelText: string, valueText: string): HTMLElement {
   item.className = 'panel-row';
   const label = doc.createElement('span');
   label.className = 'opening-label';
-  label.textContent = labelText;
+  renderChessText(label, labelText);
   const value = doc.createElement('span');
   value.className = 'opening-value';
   value.textContent = valueText;
+  applyAutoDirection(value);
   item.appendChild(label);
   item.appendChild(value);
   return item;

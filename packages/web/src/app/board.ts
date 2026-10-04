@@ -205,6 +205,7 @@ export function mountBoard(
   });
 
   const view = new BoardView(boardEl, {
+    i18n,
     interaction,
     orientation: 'white',
     onFeedback: showFeedback,
@@ -238,11 +239,20 @@ export function mountBoard(
   // the board refusing to flip — an even number of handlers returns it to where it started.
   const onFlip = (): void => view.flip();
   flipEl?.addEventListener('click', onFlip);
+  const skipLink = boardEl.id === 'board' ? boardEl.ownerDocument?.getElementById?.('skip-board') : null;
+  const onSkip = (event: Event): void => {
+    const cell = boardEl.querySelector<HTMLElement>('[tabindex="0"]');
+    if (!cell) return;
+    event.preventDefault();
+    cell.focus();
+  };
+  skipLink?.addEventListener('click', onSkip);
 
   const teardown = (): void => {
     unsubscribeLocale?.();
     clearFeedback();
     flipEl?.removeEventListener('click', onFlip);
+    skipLink?.removeEventListener('click', onSkip);
     view.destroy();
     if (mountedTeardowns.get(boardEl) === teardown) mountedTeardowns.delete(boardEl);
   };

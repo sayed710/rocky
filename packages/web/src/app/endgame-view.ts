@@ -12,8 +12,10 @@ import type {
 } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { enMessages } from '../i18n/catalog/en.js';
-import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
+import { applyAutoDirection, applyLtrIsolation, renderChessText } from '../i18n/bidi.js';
+import type { MessageKey } from '../i18n/catalog/index.js';
 import { mountBoard } from './board.js';
+import { aiDifficultyLabel } from './ai-labels.js';
 
 export const ENDGAME_MESSAGES = {
   idle: enMessages['learning.endgames.msgIdle'],
@@ -64,7 +66,7 @@ export function renderEndgamePositionRows(
     : i18n.t('learning.endgames.rowBlack');
   rows.appendChild(row(doc, i18n.t('learning.endgames.rowToMove'), turnLabel));
 
-  rows.appendChild(row(doc, i18n.t('learning.endgames.rowLevel'), position.difficulty));
+  rows.appendChild(row(doc, i18n.t('learning.endgames.rowLevel'), aiDifficultyLabel(position.difficulty, i18n)));
   if (position.technique) {
     rows.appendChild(row(doc, i18n.t('learning.endgames.rowTechnique'), position.technique, 'auto'));
   }
@@ -90,7 +92,7 @@ export function renderEndgamePosition(
   position: EndgamePosition,
   i18n: I18nManager,
 ): { dispose: () => void } {
-  const board = mountBoard({ boardEl });
+  const board = mountBoard({ boardEl }, { i18n });
   board.setTurn(false);
   board.setPosition(position.fen);
 
@@ -128,7 +130,7 @@ export function renderEndgameVerdict(
   if (result.kind === 'terminal') {
     // A decided game has a result, not a score. Rendering an evaluation here — even a zero — would
     // describe a finished position as an equal one.
-    rows.appendChild(row(doc, i18n.t('learning.endgames.rowGame'), terminalLabel(result.terminal.reason, result.terminal.result), 'ltr'));
+    rows.appendChild(row(doc, i18n.t('learning.endgames.rowGame'), terminalLabel(result.terminal.reason, result.terminal.result, i18n)));
     resultEl.hidden = false;
     return null;
   }
@@ -227,8 +229,14 @@ function evaluationLabel(
  * @param result - the score.
  * @returns the pair as one readable phrase.
  */
-function terminalLabel(reason: string, result: string): string {
-  return `${reason.replaceAll('_', ' ')} · ${result}`;
+function terminalLabel(reason: string, result: string, i18n: I18nManager): string {
+  const keys: Readonly<Record<string, MessageKey>> = {
+    checkmate: 'ai.explain.outcome.checkmate', stalemate: 'ai.explain.outcome.stalemate',
+    insufficient_material: 'ai.explain.outcome.insufficientMaterial', fifty_move: 'ai.explain.outcome.fiftyMove',
+    variant_win: 'ai.explain.outcome.variantWin', variant_draw: 'ai.explain.outcome.variantDraw',
+  };
+  const key = keys[reason];
+  return `${key ? i18n.t(key) : reason} · ${result}`;
 }
 
 /**
@@ -252,7 +260,7 @@ function row(
   label.textContent = labelText;
   const value = doc.createElement('span');
   value.className = 'endgame-value';
-  value.textContent = valueText;
+  renderChessText(value, valueText);
   if (isolate === 'auto') {
     applyAutoDirection(value);
   } else if (isolate === 'ltr') {

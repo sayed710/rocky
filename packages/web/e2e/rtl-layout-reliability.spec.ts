@@ -303,10 +303,7 @@ test.describe('RTL Layout Reliability — Accessible Skip Link', () => {
         }), 'Focused skip link must be exposed to hit testing').toBe(true);
 
         await page.keyboard.press('Enter');
-        await expect(page).toHaveURL(/#board$/);
-        // Native fragment navigation establishes the sequential focus starting point;
-        // the non-focusable board container need not become document.activeElement.
-        await page.keyboard.press('Tab');
+        // Activation transfers focus directly to the board's existing roving tab stop.
         await expect(page.locator('#board .cb-sq[tabindex="0"]')).toBeFocused();
         await expect(page.locator('#board .cb-sq[tabindex="0"]')).toHaveAttribute('data-square', 'a8');
       });

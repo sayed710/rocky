@@ -332,20 +332,18 @@ describe('i18n bootstrap integration regressions', () => {
     assert.strictEqual(b2.app.i18n.locale, 'ar');
   });
 
-  it('rejects activating ar in production when no Arabic catalog is registered, preserving en', () => {
+  it('restores production Arabic and switches back to English without injected catalogues', () => {
     const storage = new MemoryStorage();
-    storage.setItem(DEFAULT_LOCALE_STORAGE_KEY, 'ar'); // Stale or corrupt stored preference
+    storage.setItem(DEFAULT_LOCALE_STORAGE_KEY, 'ar');
 
     const doc = makeTestDoc();
     const b = bootstrap(doc, makeDeps({ storage }));
 
-    // Production has no registered Arabic catalog -> falls back safely to 'en'
-    assert.strictEqual(b.app.i18n.locale, 'en');
-    assert.strictEqual(doc.documentElement.getAttribute('lang'), 'en');
-    assert.strictEqual(doc.documentElement.getAttribute('dir'), 'ltr');
+    assert.strictEqual(b.app.i18n.locale, 'ar');
+    assert.strictEqual(doc.documentElement.getAttribute('lang'), 'ar');
+    assert.strictEqual(doc.documentElement.getAttribute('dir'), 'rtl');
 
-    // Attempting to setLocale to 'ar' also remains 'en'
-    b.app.i18n.setLocale('ar');
+    b.app.i18n.setLocale('en');
     assert.strictEqual(b.app.i18n.locale, 'en');
     assert.strictEqual(doc.documentElement.getAttribute('dir'), 'ltr');
   });

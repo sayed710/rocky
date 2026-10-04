@@ -12,6 +12,7 @@ export type MessageKey = keyof typeof enMessages;
 export type MessagesCatalog = Readonly<Record<MessageKey, string>>;
 
 export { enMessages };
+export { arMessages } from './ar.js';
 
 /**
  * Type guard verifying whether a string is a valid MessageKey.

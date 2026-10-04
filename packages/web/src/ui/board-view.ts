@@ -21,33 +21,27 @@ import {
 import { parsePlacement, type Piece } from '../core/position.js';
 import type { BoardInteraction, GestureResult, PromotionRole } from '../core/interaction.js';
 import type { Premove } from '../core/premove.js';
+import { createI18n, type I18n } from '../i18n/manager.js';
 
 const PROMO_ROLES: readonly PromotionRole[] = ['q', 'r', 'b', 'n'];
-
-const PIECE_NAMES: Record<string, string> = {
-  p: 'pawn',
-  n: 'knight',
-  b: 'bishop',
-  r: 'rook',
-  q: 'queen',
-  k: 'king',
-};
-
-const COLOR_NAMES: Record<string, string> = {
-  w: 'white',
-  b: 'black',
-};
 
 /**
  * Build the accessible label for a grid cell: square name plus piece description,
  * or `"<sq>, empty"` when there is no piece. Screen readers announce this as the
  * cell's name, so it must unambiguously identify both location and occupant.
  */
-function squareAccessibleLabel(sq: Square, piece?: Piece): string {
-  if (!piece) return `${sq}, empty`;
-  const color = COLOR_NAMES[piece.color] ?? piece.color;
-  const role = PIECE_NAMES[piece.role] ?? piece.role;
-  return `${sq}, ${color} ${role}`;
+function squareAccessibleLabel(i18n: I18n, sq: Square, piece?: Piece): string {
+  if (!piece) return i18n.t('board.empty', { square: sq });
+  return i18n.t('board.occupied', {
+    square: sq,
+    color: i18n.t(piece.color === 'w' ? 'board.color.white' : 'board.color.black'),
+    piece: i18n.t(`board.piece.${piece.role}`),
+  });
+}
+
+/** Catalogue values are text, including in the string-built grid's attributes. */
+function escapeAttribute(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 /**
@@ -94,6 +88,7 @@ export type MoveFeedback =
 
 /** Construction-time options for {@link BoardView}. */
 export interface BoardViewOptions {
+  readonly i18n?: I18n;
   readonly interaction: BoardInteraction;
   readonly orientation?: Color;
   readonly onResult?: (result: ResolvedMove) => void;
@@ -110,6 +105,8 @@ export interface BoardViewOptions {
  * presentation-only. Emits resolved moves/premoves via `onResult`.
  */
 export class BoardView {
+  private readonly i18n: I18n;
+  private readonly unsubscribeLocale: () => void;
   private readonly root: HTMLElement;
   private readonly interaction: BoardInteraction;
   private readonly onResult: (result: ResolvedMove) => void;
@@ -157,13 +154,15 @@ export class BoardView {
   /** Mount the board into `root`, attaching all pointer and keyboard listeners. */
   constructor(root: HTMLElement, options: BoardViewOptions) {
     this.root = root;
+    this.i18n = options.i18n ?? createI18n();
+    this.unsubscribeLocale = this.i18n.onLocaleChange(() => this.localizeAccessibility());
     this.interaction = options.interaction;
     this.orientation = options.orientation ?? 'white';
     this.onResult = options.onResult ?? (() => undefined);
     this.onFeedback = options.onFeedback ?? (() => undefined);
     this.root.classList.add('cb-board');
     this.root.setAttribute('role', 'grid');
-    this.root.setAttribute('aria-label', 'Chess board');
+    this.root.setAttribute('aria-label', this.i18n.t('game.board.aria'));
     this.root.setAttribute('aria-rowcount', '8');
     this.root.setAttribute('aria-colcount', '8');
     this.root.addEventListener('click', this.onClick);
@@ -181,6 +180,7 @@ export class BoardView {
    * anything rendered into markup that `bootstrap` re-runs over — must call this before remounting.
    */
   destroy(): void {
+    this.unsubscribeLocale();
     this.cancelDrag();
     for (const pointerId of [...this.awaitingRelease]) this.stopAwaiting(pointerId);
     this.closeOverlay();
@@ -573,13 +573,13 @@ export class BoardView {
     const overlay = document.createElement('div');
     overlay.className = 'cb-promotion';
     overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-label', 'Choose promotion piece');
+    overlay.setAttribute('aria-label', this.i18n.t('board.promotion.choose'));
     for (const role of PROMO_ROLES) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = `cb-promo-choice ${pieceClass(color, role)}`;
-      const roleName = PIECE_NAMES[role] ?? role;
-      btn.setAttribute('aria-label', `Promote to ${roleName}`);
+      btn.setAttribute('data-promotion-role', role);
+      btn.setAttribute('aria-label', this.i18n.t('board.promotion.to', { piece: this.i18n.t(`board.piece.${role}`) }));
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         this.closeOverlay();
@@ -591,7 +591,7 @@ export class BoardView {
     cancel.type = 'button';
     cancel.className = 'cb-promo-cancel';
     cancel.textContent = '\u2715';
-    cancel.setAttribute('aria-label', 'Cancel promotion');
+    cancel.setAttribute('aria-label', this.i18n.t('board.promotion.cancel'));
     cancel.addEventListener('click', (e) => {
       e.stopPropagation();
       this.cancelPromotion();
@@ -602,6 +602,33 @@ export class BoardView {
     this.root.ownerDocument.addEventListener('keydown', this.onPromotionKeyDown, true);
     const first = overlay.querySelector('button');
     if (first instanceof HTMLElement) first.focus();
+  }
+
+  /** Update names in place: a locale switch preserves square/dialog focus and board geometry. */
+  private localizeAccessibility(): void {
+    this.root.setAttribute('aria-label', this.i18n.t('game.board.aria'));
+    const highlights = this.interaction.highlights();
+    for (const cell of this.root.querySelectorAll<HTMLElement>('[data-square]')) {
+      const sq = cell.dataset.square;
+      if (!sq || !isSquare(sq)) continue;
+      cell.setAttribute('aria-label', squareAccessibleLabel(this.i18n, sq, this.pieces.get(sq)));
+      const states: string[] = [];
+      if (highlights.legal.includes(sq)) states.push(this.i18n.t(this.pieces.has(sq) ? 'board.state.capture' : 'board.state.legal'));
+      if (highlights.lastMove?.includes(sq)) states.push(this.i18n.t('board.state.last'));
+      if (highlights.premove?.includes(sq)) states.push(this.i18n.t('board.state.premove'));
+      if (states.length) cell.setAttribute('aria-description', states.join(', '));
+      else cell.removeAttribute('aria-description');
+    }
+    if (this.overlay) {
+      this.overlay.setAttribute('aria-label', this.i18n.t('board.promotion.choose'));
+      const choices = this.overlay.querySelectorAll<HTMLButtonElement>('[data-promotion-role]');
+      for (const choice of choices) {
+        const role = choice.dataset.promotionRole;
+        if (role !== 'q' && role !== 'r' && role !== 'b' && role !== 'n') continue;
+        choice.setAttribute('aria-label', this.i18n.t('board.promotion.to', { piece: this.i18n.t(`board.piece.${role}`) }));
+      }
+      this.overlay.querySelector('.cb-promo-cancel')?.setAttribute('aria-label', this.i18n.t('board.promotion.cancel'));
+    }
   }
 
   /** Cancel the pending promotion and return keyboard focus to its destination square. */
@@ -660,7 +687,7 @@ export class BoardView {
         if (last.has(sq)) classes.push('cb-last');
         if (premove.has(sq)) classes.push('cb-premove');
         if (legal.has(sq)) classes.push(piece ? 'cb-capture' : 'cb-legal');
-        const label = squareAccessibleLabel(sq, piece);
+        const label = escapeAttribute(squareAccessibleLabel(this.i18n, sq, piece));
         const dragged = this.dragging && sq === this.dragFrom ? ' cb-dragging' : '';
         const inner = piece
           ? `<span class="cb-piece ${pieceClass(piece.color, piece.role)}${dragged}" aria-hidden="true"></span>`
@@ -677,16 +704,16 @@ export class BoardView {
 
         const states: string[] = [];
         if (legal.has(sq)) {
-          states.push(piece ? 'capture' : 'legal move');
+          states.push(this.i18n.t(piece ? 'board.state.capture' : 'board.state.legal'));
         }
         if (last.has(sq)) {
-          states.push('last move');
+          states.push(this.i18n.t('board.state.last'));
         }
         if (premove.has(sq)) {
-          states.push('premove');
+          states.push(this.i18n.t('board.state.premove'));
         }
         
-        const descAttr = states.length > 0 ? ` aria-description="${states.join(', ')}"` : '';
+        const descAttr = states.length > 0 ? ` aria-description="${escapeAttribute(states.join(', '))}"` : '';
 
         const currentAttr = sq === lastMoveTo ? ' aria-current="true"' : '';
 

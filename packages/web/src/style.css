@@ -203,6 +203,11 @@ body {
   border-radius: 6px;
   overflow: hidden;
 }
+
+/* The native language control keeps keyboard/focus behavior across locale changes. */
+.locale-control { max-inline-size: 100%; }
+#locale-select { min-block-size: 44px; max-inline-size: 100%; }
+html[lang="ar"] body { line-height: 1.6; }
 /* At desktop widths the board and sidebar sit side by side. Expose the grid's bounded height so the
    board can use whichever is smaller: its column width or the space below the wrapping topbar. */
 @media (min-width: 720px) {
