@@ -64,10 +64,26 @@ const mutations = [
   ['linked active pairing bypasses structural repair validation', [edit('migration', "FOR active_pairing IN SELECT key, value FROM jsonb_each(NEW.snapshot->'activeGames') LOOP", "FOR active_pairing IN SELECT key, value FROM jsonb_each(NEW.snapshot->'activeGames') LOOP\n        CONTINUE; -- MUTATION bypasses active pairing structure")], 'pg-migration'],
   ['duplicate simultaneous player escapes repair projection', [edit('migration', 'OR white_player = ANY(active_players) OR black_player = ANY(active_players)', 'OR false')], 'pg-migration'],
   ['invalid pairing sequence escapes repair projection', [edit('migration', 'IF sequence_value <= 0 OR sequence_value > 9007199254740991\n           OR sequence_value <> trunc(sequence_value) OR sequence_value > max_sequence THEN', 'IF false THEN')], 'pg-migration'],
+  ['exact NUMERIC counters reject JS-rounded integers', [edit('migration', "IF jsonb_typeof(counter) IS DISTINCT FROM 'number' THEN bad := true; EXIT; END IF;", "IF jsonb_typeof(counter) IS DISTINCT FROM 'number' THEN bad := true; EXIT; END IF;\n          IF (counter #>> '{}')::numeric <> trunc((counter #>> '{}')::numeric) THEN bad := true; EXIT; END IF;")], 'pg-migration'],
+  ['counter underflow becomes invalid instead of JS zero', [edit('migration', "IF abs((counter #>> '{}')::numeric) < 1 THEN count_value := 0;", 'IF false THEN count_value := 0;')], 'pg-migration'],
+  ['gamesPlayed equality compares exact decimal spellings', [edit('migration', 'IF counter_values[6] <> (counter_values[2] + counter_values[3]) + counter_values[4] THEN', "IF (stats->>'gamesPlayed')::numeric <> (stats->>'wins')::numeric + (stats->>'draws')::numeric + (stats->>'losses')::numeric THEN")], 'pg-migration'],
+  ['timing fields revert to exact NUMERIC fraction rejection', [edit('migration', "timing_value := (timing #>> '{}')::double precision;", "timing_value := (timing #>> '{}')::double precision;\n        IF (timing #>> '{}')::numeric <> trunc((timing #>> '{}')::numeric) THEN bad := true; END IF;")], 'pg-migration'],
+  ['timing underflow rejects a JS-valid zero start', [edit('migration', "IF abs((timing #>> '{}')::numeric) < 1 THEN timing_value := 0;", 'IF false THEN timing_value := 0;')], 'pg-migration'],
+  ['deadline uses original decimal timing spellings', [edit('migration', 'deadline := start_ms + duration_ms;', "deadline := coalesce((NEW.snapshot->>'startedAtMs')::numeric, 0) + (NEW.snapshot->'config'->>'durationMs')::numeric;")], 'pg-migration'],
+  ['deadline sum bypasses JS-safe integer bound', [edit('migration', 'bad := deadline > 9007199254740991;', 'bad := false;')], 'pg-migration'],
+  ['float-to-NUMERIC loses proven timing integer precision', [edit('migration', 'timing_value::bigint;', 'timing_value::numeric;')], 'pg-migration'],
 ];
 // A named PostgreSQL witness makes each kill attributable to its intended
 // invariant. Full positive suites run separately; mutation runs need no unrelated cases.
 const pgWitnesses = new Map([
+  ['timing fields revert to exact NUMERIC fraction rejection', 'timing projection matches repository JS materialization and canonical safe deadline sum'],
+  ['timing underflow rejects a JS-valid zero start', 'timing projection matches repository JS materialization and canonical safe deadline sum'],
+  ['deadline uses original decimal timing spellings', 'timing projection matches repository JS materialization and canonical safe deadline sum'],
+  ['deadline sum bypasses JS-safe integer bound', 'timing projection matches repository JS materialization and canonical safe deadline sum'],
+  ['float-to-NUMERIC loses proven timing integer precision', 'timing projection matches repository JS materialization and canonical safe deadline sum'],
+  ['exact NUMERIC counters reject JS-rounded integers', 'participant counter projection matches repository JavaScript rounding and underflow'],
+  ['counter underflow becomes invalid instead of JS zero', 'participant counter projection matches repository JavaScript rounding and underflow'],
+  ['gamesPlayed equality compares exact decimal spellings', 'participant counter projection matches repository JavaScript rounding and underflow'],
   ['linked active pairing bypasses structural repair validation', 'active pairing corruption is immediate repair even when linked before expiry'],
   ['duplicate simultaneous player escapes repair projection', 'active pairing corruption is immediate repair even when linked before expiry'],
   ['invalid pairing sequence escapes repair projection', 'active pairing corruption is immediate repair even when linked before expiry'],

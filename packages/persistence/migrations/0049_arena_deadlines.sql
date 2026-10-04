@@ -18,13 +18,17 @@ DECLARE
   start_ms NUMERIC;
   duration_ms NUMERIC;
   deadline NUMERIC;
+  timing JSONB;
+  timing_value DOUBLE PRECISION;
   bad BOOLEAN := false;
   pending BOOLEAN := false;
   participant JSONB;
   player_id TEXT;
   stats JSONB;
   field TEXT;
-  count_value NUMERIC;
+  counter JSONB;
+  count_value DOUBLE PRECISION;
+  counter_values DOUBLE PRECISION[];
   active_pairing RECORD;
   sequence_text TEXT;
   sequence_value DOUBLE PRECISION;
@@ -55,12 +59,29 @@ BEGIN
      OR jsonb_typeof(coalesce(NEW.snapshot->'gameLinks', '[]'::jsonb)) IS DISTINCT FROM 'array' THEN
     bad := true;
   ELSE
-    start_ms := coalesce((NEW.snapshot->>'startedAtMs')::numeric, 0);
-    duration_ms := (NEW.snapshot->'config'->>'durationMs')::numeric;
-    deadline := start_ms + duration_ms;
-    bad := start_ms < 0 OR start_ms <> trunc(start_ms)
-      OR duration_ms <= 0 OR duration_ms <> trunc(duration_ms)
-      OR deadline > 9007199254740991;
+    -- Classify the same doubles the repository/domain materialize, then retain
+    -- their proven integer values exactly. Never add original decimal spellings.
+    FOREACH field IN ARRAY ARRAY['startedAtMs','durationMs'] LOOP
+      timing := CASE WHEN field = 'durationMs' THEN NEW.snapshot->'config'->field
+        WHEN NEW.state = 'registration' THEN '0'::jsonb ELSE NEW.snapshot->field END;
+      BEGIN
+        timing_value := (timing #>> '{}')::double precision;
+      EXCEPTION WHEN numeric_value_out_of_range THEN
+        IF abs((timing #>> '{}')::numeric) < 1 THEN timing_value := 0;
+        ELSE bad := true; END IF;
+      END;
+      EXIT WHEN bad;
+      IF timing_value < 0 OR timing_value > 9007199254740991 OR timing_value <> trunc(timing_value)
+         OR (field = 'durationMs' AND timing_value <= 0) THEN bad := true; EXIT; END IF;
+      -- Float-to-NUMERIC can round to fewer decimal digits. BIGINT retains every
+      -- bit of these safe integers before exact overflow-safe NUMERIC addition.
+      IF field = 'startedAtMs' THEN start_ms := timing_value::bigint;
+      ELSE duration_ms := timing_value::bigint; END IF;
+    END LOOP;
+    IF NOT bad THEN
+      deadline := start_ms + duration_ms;
+      bad := deadline > 9007199254740991;
+    END IF;
     IF NEW.state <> 'running' AND NEW.snapshot->'activeGames' <> '{}'::jsonb THEN bad := true; END IF;
     IF NOT bad THEN
       -- Validate persisted participant state before it can hide behind a future
@@ -74,18 +95,25 @@ BEGIN
         stats := NEW.snapshot->'playerStates'->player_id;
         IF jsonb_typeof(stats) IS DISTINCT FROM 'object'
            OR jsonb_typeof(stats->'onFire') IS DISTINCT FROM 'boolean' THEN bad := true; EXIT; END IF;
-        FOREACH field IN ARRAY ARRAY['points','wins','draws','losses','consecutiveWins','gamesPlayed'] LOOP
-          IF jsonb_typeof(stats->field) IS DISTINCT FROM 'number' THEN bad := true; EXIT; END IF;
-          count_value := (stats->>field)::numeric;
+        counter_values := ARRAY[]::DOUBLE PRECISION[];
+        FOREACH field IN ARRAY ARRAY['points','wins','draws','losses','consecutiveWins','gamesPlayed','playedAsWhite','playedAsBlack'] LOOP
+          counter := CASE WHEN field IN ('playedAsWhite','playedAsBlack') THEN NEW.snapshot->field->player_id ELSE stats->field END;
+          IF jsonb_typeof(counter) IS DISTINCT FROM 'number' THEN bad := true; EXIT; END IF;
+          -- The repository parses JSONB numbers as JS doubles. Exact NUMERIC
+          -- checks would reject restorable rounded integers and tiny +/- zero.
+          BEGIN
+            count_value := (counter #>> '{}')::double precision;
+          EXCEPTION WHEN numeric_value_out_of_range THEN
+            IF abs((counter #>> '{}')::numeric) < 1 THEN count_value := 0;
+            ELSE bad := true; END IF;
+          END;
+          EXIT WHEN bad;
           IF count_value < 0 OR count_value > 9007199254740991 OR count_value <> trunc(count_value) THEN bad := true; EXIT; END IF;
+          counter_values := array_append(counter_values, count_value);
         END LOOP;
         EXIT WHEN bad;
-        IF (stats->>'gamesPlayed')::numeric <> (stats->>'wins')::numeric + (stats->>'draws')::numeric + (stats->>'losses')::numeric THEN bad := true; EXIT; END IF;
-        FOREACH field IN ARRAY ARRAY['playedAsWhite','playedAsBlack'] LOOP
-          IF jsonb_typeof(NEW.snapshot->field->player_id) IS DISTINCT FROM 'number' THEN bad := true; EXIT; END IF;
-          count_value := (NEW.snapshot->field->>player_id)::numeric;
-          IF count_value < 0 OR count_value > 9007199254740991 OR count_value <> trunc(count_value) THEN bad := true; EXIT; END IF;
-        END LOOP;
+        -- Same converted values and left-to-right addition as JS restoration.
+        IF counter_values[6] <> (counter_values[2] + counter_values[3]) + counter_values[4] THEN bad := true; EXIT; END IF;
       END LOOP;
       IF NOT bad THEN
         bad := EXISTS (SELECT 1 FROM jsonb_array_elements(NEW.snapshot->'withdrawn') AS withdrawn(value)

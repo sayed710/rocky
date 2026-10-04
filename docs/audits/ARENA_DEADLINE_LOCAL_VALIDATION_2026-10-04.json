@@ -7,8 +7,7 @@
     "signal": null,
     "passed": 0,
     "failed": 0,
-    "cancelled": 0,
-    "run": "fourth active-pairing correction"
+    "cancelled": 0
   },
   {
     "gate": "lint",
@@ -18,8 +17,7 @@
     "signal": null,
     "passed": 0,
     "failed": 0,
-    "cancelled": 0,
-    "run": "fourth active-pairing correction"
+    "cancelled": 0
   },
   {
     "gate": "check:observability",
@@ -124,23 +122,22 @@
     "gate": "hermetic",
     "exitCode": 0,
     "tests": 4003,
-    "skipped": 0,
-    "signal": null,
     "passed": 4003,
     "failed": 0,
+    "skipped": 0,
     "cancelled": 0,
-    "run": "fourth active-pairing correction"
+    "signal": null,
+    "evidence": "fresh unchanged first4 workspaces plus authorized one API run1248 and remaining14; failed original preserved separately; cause indeterminate"
   },
   {
     "gate": "postgres:persistence",
     "exitCode": 0,
-    "tests": 206,
+    "tests": 210,
     "skipped": 0,
     "signal": null,
-    "passed": 206,
+    "passed": 210,
     "failed": 0,
-    "cancelled": 0,
-    "run": "fourth active-pairing correction"
+    "cancelled": 0
   },
   {
     "gate": "postgres:api",
@@ -150,8 +147,7 @@
     "signal": null,
     "passed": 106,
     "failed": 0,
-    "cancelled": 0,
-    "run": "fourth active-pairing correction"
+    "cancelled": 0
   },
   {
     "gate": "gateway:build",
@@ -161,8 +157,7 @@
     "signal": null,
     "passed": 0,
     "failed": 0,
-    "cancelled": 0,
-    "run": "fourth active-pairing correction"
+    "cancelled": 0
   },
   {
     "gate": "gateway:lint",
@@ -172,8 +167,7 @@
     "signal": null,
     "passed": 0,
     "failed": 0,
-    "cancelled": 0,
-    "run": "fourth active-pairing correction"
+    "cancelled": 0
   },
   {
     "gate": "gateway:test",
@@ -184,30 +178,17 @@
     "passed": 86,
     "failed": 0,
     "cancelled": 0,
-    "run": "fourth active-pairing correction"
+    "redisTimeoutMessages": 2,
+    "diagnosis": "84/86 preserved;3 focused each and one86/86; cause indeterminate; two connect timeouts retained in passing full run"
   },
   {
-    "gate": "test:scripts:integration",
+    "gate": "backup:restore",
     "exitCode": 0,
     "tests": 2,
     "passed": 2,
     "failed": 0,
     "skipped": 0,
     "cancelled": 0,
-    "signal": null,
-    "rawLog": ".arena-qodo4-backup-restore.log"
-  },
-  {
-    "gate": "arena:mutations",
-    "exitCode": 0,
-    "attempts": 35,
-    "valid": 35,
-    "killed": 35,
-    "survivors": 0,
-    "invalid": 0,
-    "restoredSources": 8,
-    "expectedMutationCancellations": 2,
-    "unexpectedCancellations": 0,
     "signal": null
   },
   {

@@ -57,7 +57,13 @@ links can suppress pending work. Invalid sequences, seats, namespaces or duplica
 simultaneous players become immediate invalid work, even with a future deadline
 and complete links. Pairing-ID conversion preserves restoration's existing
 `Number(id.slice(2))` spellings and safe integer comparisons; guarded conversion
-errors become invalid evidence. Deadline arithmetic remains exact NUMERIC.
+errors become invalid evidence. Participant and colour counters use guarded JS
+double conversion, including zero underflow; their consistency comparison uses
+those same converted values. Legacy start and duration numbers follow existing
+domain materialization too: zero starts are valid, while zero durations are not.
+Proven safe timing integers pass through BIGINT before exact NUMERIC deadline
+addition and safe-sum validation. This preserves every integer bit and does not
+rewrite JSONB or relax new-create validation.
 
 Deadline and recovery branches have separate partial indexes, each limited before
 their UNION forms a bounded keyset page. A cycle captures the highest PostgreSQL

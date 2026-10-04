@@ -1,0 +1,211 @@
+[
+  {
+    "gate": "build",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "lint",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "check:observability",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "check:build-order",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "check:deploy-gates",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "check:adr-claims",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "check:ci-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "check:variant-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "check:engine-pin-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "check:test-topology",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "test:scripts",
+    "exitCode": 0,
+    "tests": 315,
+    "skipped": 0,
+    "signal": null,
+    "passed": 315,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "hermetic",
+    "exitCode": 0,
+    "tests": 4003,
+    "skipped": 0,
+    "signal": null,
+    "passed": 4003,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "postgres:persistence",
+    "exitCode": 0,
+    "tests": 208,
+    "skipped": 0,
+    "signal": null,
+    "passed": 208,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "postgres:api",
+    "exitCode": 0,
+    "tests": 106,
+    "skipped": 0,
+    "signal": null,
+    "passed": 106,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "gateway:build",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "gateway:lint",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "passed": 0,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "gateway:test",
+    "exitCode": 0,
+    "tests": 86,
+    "skipped": 0,
+    "signal": null,
+    "passed": 86,
+    "failed": 0,
+    "cancelled": 0,
+    "run": "fifth counter-parity correction"
+  },
+  {
+    "gate": "test:scripts:integration",
+    "exitCode": 0,
+    "tests": 2,
+    "passed": 2,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "rawLog": ".arena-qodo5-backup-restore.log"
+  },
+  {
+    "gate": "arena:mutations",
+    "exitCode": 0,
+    "attempts": 38,
+    "valid": 38,
+    "killed": 38,
+    "survivors": 0,
+    "invalid": 0,
+    "restoredSources": 8,
+    "expectedMutationCancellations": 2,
+    "unexpectedCancellations": 0
+  }
+]

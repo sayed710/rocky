@@ -11,6 +11,150 @@ const skip = process.env['DATABASE_URL'] ? false : 'DATABASE_URL not set';
 const migrations = resolve('migrations');
 const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } as const;
 
+// Insert raw legacy numeric spellings; JSON.stringify(number) would erase the
+// very precision/underflow that the real PostgreSQL repository must materialize.
+function counterSnapshot(id: string, numbers: Record<string, string>): string {
+  const arena = new ArenaTournament({ id, name: 'counter parity', format: 'arena', variant: 'standard', timeControl: TC, durationMs: 100 });
+  arena.register('A'); arena.start(9_000_000_000_000);
+  const snapshot = arena.toSnapshot();
+  const state = Object.entries(snapshot.playerStates.A!).map(([field, value]) =>
+    `${JSON.stringify(field)}:${numbers[field] ?? JSON.stringify(value)}`).join(',');
+  return JSON.stringify(snapshot)
+    .replace(`"playerStates":${JSON.stringify(snapshot.playerStates)}`, `"playerStates":{"A":{${state}}}`)
+    .replace(`"playedAsWhite":${JSON.stringify(snapshot.playedAsWhite)}`, `"playedAsWhite":{"A":${numbers.playedAsWhite ?? '0'}}`)
+    .replace(`"playedAsBlack":${JSON.stringify(snapshot.playedAsBlack)}`, `"playedAsBlack":{"A":${numbers.playedAsBlack ?? '0'}}`);
+}
+
+function timingSnapshot(id: string, startedAt: string, duration: string): string {
+  return counterSnapshot(id, {})
+    .replace('"startedAtMs":9000000000000', `"startedAtMs":${startedAt}`)
+    .replace('"durationMs":100', `"durationMs":${duration}`);
+}
+
+test('timing projection matches repository JS materialization and canonical safe deadline sum', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrations);
+    const repo = new PgTournamentsRepository(pool);
+    // Explicit expected JS results, proven through the real repository read.
+    const cases = [
+      ['integer', '9000000000000', '1', 9_000_000_000_000, 1, true],
+      ['rounded-duration', '9000000000000', '1.00000000000000001', 9_000_000_000_000, 1, true],
+      ['duration-underflow', '9000000000000', '1e-400', 9_000_000_000_000, 0, false],
+      ['duration-negative-zero', '9000000000000', '-1e-400', 9_000_000_000_000, -0, false],
+      ['duration-fractional', '9000000000000', '1.5', 9_000_000_000_000, 1.5, false],
+      ['duration-negative', '9000000000000', '-1', 9_000_000_000_000, -1, false],
+      ['duration-unsafe', '0', '9007199254740992', 0, Number.MAX_SAFE_INTEGER + 1, false],
+      ['duration-overflow', '0', '1e400', 0, Infinity, false],
+      ['rounded-start', '9000000000000.00001', '1', 9_000_000_000_000, 1, true],
+      ['start-underflow', '1e-400', '100', 0, 100, true],
+      ['start-negative-zero', '-1e-400', '100', -0, 100, true],
+      ['start-fractional', '1.5', '100', 1.5, 100, false],
+      ['start-negative', '-1', '100', -1, 100, false],
+      ['start-unsafe', '9007199254740992', '1', Number.MAX_SAFE_INTEGER + 1, 1, false],
+      ['start-overflow', '1e400', '1', Infinity, 1, false],
+      ['safe-sum', '9007199254740989', '2', Number.MAX_SAFE_INTEGER - 2, 2, true],
+      ['rounded-safe-sum', '9007199254740990.4', '1', Number.MAX_SAFE_INTEGER - 1, 1, true],
+      ['sum-overflow', '9007199254740991', '1', Number.MAX_SAFE_INTEGER, 1, false],
+    ] as const;
+    for (const [name, start, duration, expectedStart, expectedDuration, valid] of cases) {
+      const id = `timing-${name}`, raw = timingSnapshot(id, start, duration);
+      await pool.query("INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ($1,$1,'arena','running',1,$2::jsonb,1)", [id, raw]);
+      const read = (await repo.readArena(id))!, stored = read.snapshot;
+      assert.ok(Object.is(stored.startedAtMs, expectedStart), `repository startedAt materialization: ${name}`);
+      assert.ok(Object.is(stored.config.durationMs, expectedDuration), `repository duration materialization: ${name}`);
+      const fresh = new ArenaTournament(stored.config);
+      if (valid) { ArenaTournament.restore(stored); fresh.start(stored.startedAtMs!); }
+      else {
+        assert.throws(() => ArenaTournament.restore(stored), /Invalid persisted Arena deadline/);
+        assert.throws(() => fresh.start(stored.startedAtMs!), /Invalid Arena start\/deadline/);
+      }
+      if (name === 'rounded-duration') assert.equal((await pool.query("SELECT snapshot->'config'->>'durationMs' AS spelling FROM tournaments WHERE id=$1", [id])).rows[0].spelling, duration);
+      const deadline = stored.startedAtMs! + stored.config.durationMs;
+      const row = (await pool.query('SELECT invalid,pending_launch,deadline_ms FROM arena_deadlines WHERE tournament_id=$1', [id])).rows[0];
+      assert.deepEqual(row, { invalid: !valid, pending_launch: false, deadline_ms: valid ? String(deadline) : null }, name);
+      assert.equal((await repo.listArenaWorkAfter(null, 100)).includes(id), !valid || deadline <= read.nowMs, 'valid due work differs from invalid repair work');
+      assert.equal((await pool.query('SELECT snapshot=$2::jsonb AS unchanged FROM tournaments WHERE id=$1', [id, raw])).rows[0].unchanged, true, 'projection must not normalize legacy timing');
+    }
+  });
+});
+
+test('0049 backfill retains JS-restorable legacy timing and exact converted deadline', { skip }, async () => {
+  const earlier = await mkdtemp(join(process.cwd(), '.arena-migrations-'));
+  try {
+    for (const name of await readdir(migrations)) if (/^\d{4}_.*\.sql$/.test(name) && name < '0049') await copyFile(join(migrations, name), join(earlier, name));
+    await withTestDatabase(async ({ pool }) => {
+      await migrate(pool, earlier);
+      const id = 'legacy-timing-parity', raw = timingSnapshot(id, '9000000000000.00001', '1.00000000000000001');
+      await pool.query("INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ($1,$1,'arena','running',1,$2::jsonb,1)", [id, raw]);
+      const repo = new PgTournamentsRepository(pool);
+      ArenaTournament.restore((await repo.readArena(id))!.snapshot);
+      assert.equal(await migrate(pool, migrations), 1);
+      assert.equal(await migrate(pool, migrations), 0);
+      assert.deepEqual((await pool.query('SELECT invalid,pending_launch,deadline_ms FROM arena_deadlines WHERE tournament_id=$1', [id])).rows[0], { invalid: false, pending_launch: false, deadline_ms: '9000000000001' });
+      assert.deepEqual(await repo.listArenaWorkAfter(null, 50), []);
+      assert.equal((await pool.query('SELECT snapshot=$2::jsonb AS unchanged FROM tournaments WHERE id=$1', [id, raw])).rows[0].unchanged, true);
+    });
+  } finally { await rm(earlier, { recursive: true, force: true }); }
+});
+
+test('participant counter projection matches repository JavaScript rounding and underflow', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrations);
+    const repo = new PgTournamentsRepository(pool);
+    const fields = ['points', 'wins', 'draws', 'losses', 'consecutiveWins', 'gamesPlayed', 'playedAsWhite', 'playedAsBlack'];
+    const all = (value: string) => Object.fromEntries(fields.map(field => [field, value]));
+    const cases = [
+      { name: 'integer', numbers: {}, valid: true, points: 0 },
+      { name: 'rounded', numbers: { ...all('1.00000000000000001'), gamesPlayed: '3.00000000000000001' }, valid: true, points: 1 },
+      { name: 'underflow', numbers: all('1e-400'), valid: true, points: 0 },
+      { name: 'negative-underflow', numbers: all('-1e-400'), valid: true, points: -0 },
+      { name: 'safe-limit', numbers: { points: '9007199254740991', playedAsWhite: '9007199254740991' }, valid: true, points: Number.MAX_SAFE_INTEGER },
+      { name: 'fractional', numbers: { points: '1.5' }, valid: false, points: 1.5 },
+      { name: 'negative', numbers: { points: '-1' }, valid: false, points: -1 },
+      { name: 'unsafe', numbers: { points: '9007199254740992' }, valid: false, points: Number.MAX_SAFE_INTEGER + 1 },
+      { name: 'overflow', numbers: { points: '1e400' }, valid: false, points: Infinity },
+      { name: 'colour-fractional', numbers: { playedAsBlack: '1.5' }, valid: false, points: 0 },
+      { name: 'inconsistent', numbers: { wins: '1.00000000000000001', gamesPlayed: '2.00000000000000001' }, valid: false, points: 0 },
+    ];
+    for (const fixture of cases) {
+      const id = `counter-${fixture.name}`;
+      await pool.query('INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ($1,$1,\'arena\',\'running\',1,$2::jsonb,1)', [id, counterSnapshot(id, fixture.numbers)]);
+      const stored = (await repo.readArena(id))!.snapshot;
+      assert.ok(Object.is(stored.playerStates.A!.points, fixture.points), `actual repository materialization: ${fixture.name}`);
+      if (fixture.valid) ArenaTournament.restore(stored);
+      else assert.throws(() => ArenaTournament.restore(stored), /Invalid persisted Arena player state/);
+      if (fixture.name === 'rounded') {
+        assert.equal(stored.playerStates.A!.gamesPlayed, 3);
+        assert.equal(stored.playedAsWhite.A, 1); assert.equal(stored.playedAsBlack.A, 1);
+        assert.equal((await pool.query("SELECT snapshot->'playerStates'->'A'->>'points' AS spelling FROM tournaments WHERE id=$1", [id])).rows[0].spelling, '1.00000000000000001');
+      }
+      const row = (await pool.query('SELECT invalid,pending_launch,deadline_ms FROM arena_deadlines WHERE tournament_id=$1', [id])).rows[0];
+      assert.deepEqual(row, { invalid: !fixture.valid, pending_launch: false, deadline_ms: fixture.valid ? '9000000000100' : null }, fixture.name);
+      assert.equal((await repo.listArenaWorkAfter(null, 100)).includes(id), !fixture.valid, 'only domain-invalid counters are repair work');
+      assert.equal((await pool.query('SELECT snapshot=$2::jsonb AS unchanged FROM tournaments WHERE id=$1', [id, counterSnapshot(id, fixture.numbers)])).rows[0].unchanged, true, 'projection must not normalize the snapshot');
+    }
+  });
+});
+
+test('0049 backfill preserves restorable legacy counter precision without normalization', { skip }, async () => {
+  const earlier = await mkdtemp(join(process.cwd(), '.arena-migrations-'));
+  try {
+    for (const name of await readdir(migrations)) if (/^\d{4}_.*\.sql$/.test(name) && name < '0049') await copyFile(join(migrations, name), join(earlier, name));
+    await withTestDatabase(async ({ pool }) => {
+      await migrate(pool, earlier);
+      const raw = counterSnapshot('legacy-counter-parity', { wins: '1.00000000000000001', gamesPlayed: '1.00000000000000001', playedAsWhite: '-1e-400', playedAsBlack: '1e-400' });
+      await pool.query("INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ('legacy-counter-parity','legacy','arena','running',1,$1::jsonb,1)", [raw]);
+      const repo = new PgTournamentsRepository(pool);
+      ArenaTournament.restore((await repo.readArena('legacy-counter-parity'))!.snapshot);
+      assert.equal(await migrate(pool, migrations), 1);
+      assert.equal(await migrate(pool, migrations), 0);
+      assert.deepEqual((await pool.query('SELECT invalid,pending_launch,deadline_ms FROM arena_deadlines WHERE tournament_id=\'legacy-counter-parity\'')).rows[0], { invalid: false, pending_launch: false, deadline_ms: '9000000000100' });
+      assert.deepEqual(await repo.listArenaWorkAfter(null, 50), []);
+      assert.equal((await pool.query("SELECT snapshot=$1::jsonb AS unchanged FROM tournaments WHERE id='legacy-counter-parity'", [raw])).rows[0].unchanged, true);
+    });
+  } finally { await rm(earlier, { recursive: true, force: true }); }
+});
+
 test('active pairing corruption is immediate repair even when linked before expiry', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, migrations);
