@@ -450,8 +450,9 @@ test('topology: extractPlaywrightPatterns fails closed on non-literal static exp
 
 test('topology: getPlaywrightDiscoveredFiles derives reachable files directly from Playwright CLI', () => {
   const discovered = getPlaywrightDiscoveredFiles('packages/web');
-  assert.equal(discovered.size, 31);
+  assert.equal(discovered.size, 32);
   assert.ok(discovered.has('packages/web/e2e/illegal-move-feedback.spec.ts'));
+  assert.ok(discovered.has('packages/web/e2e/board-ownership.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/game-actions.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/app-loads.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/localization-state.spec.ts'));
@@ -470,7 +471,8 @@ test('topology: backend-free Playwright discovers only the eleven offline specs'
   assert.ok(offline.has('packages/web/e2e/seek-creator-rating.spec.ts'));
   assert.ok(!offline.has('packages/web/e2e/game-actions.spec.ts'));
   assert.ok(!offline.has('packages/web/e2e/illegal-move-feedback.spec.ts'));
-  assert.equal(full.size, 31);
+  assert.ok(!offline.has('packages/web/e2e/board-ownership.spec.ts'));
+  assert.equal(full.size, 32);
 });
 
 test('topology: falsification regression proves validation flags ignored test files unreachable', () => {

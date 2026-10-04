@@ -1189,8 +1189,22 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         controller.submitMove(uci);
       },
       i18n,
+      // Nobody owns the pieces until the server says who we are.
+      playerColor: null,
     },
   );
+
+  // Move input belongs to a joined player, for their own colour, while the game is live. Both inputs
+  // are read from one authoritative snapshot, so whichever of onColor / onActionState reports first
+  // cannot open a window between them; and an ended game never goes live again.
+  let boardFinished = false;
+  const syncBoardOwnership = (): void => {
+    const { myColor, status } = gameSync.getState();
+    if (status?.over === true) boardFinished = true;
+    const owner = boardFinished || myColor === null ? null : myColor === 'w' ? 'white' : 'black';
+    board.setPlayerColor(owner);
+    board.setInputEnabled(owner !== null);
+  };
 
   const renderMetadata = (state: GameMetadataState): void => {
     let liveAnnouncement = '';
@@ -1458,6 +1472,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onColor: (color) => {
         if (color === 'b') board.setOrientation('black');
+        syncBoardOwnership();
       },
       onMetadata: (state) => {
         lastMetadataState = state;
@@ -1475,8 +1490,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onActionState: (state) => {
         lastActionState = state;
-        // A finished board takes no moves, premoves or rejections; its only gesture was submitting.
-        board.setInputEnabled(!state.isOver);
+        // A finished or spectated board takes no moves, premoves or rejections.
+        syncBoardOwnership();
         renderActionState(state);
       },
     },
