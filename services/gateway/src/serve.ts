@@ -290,15 +290,16 @@ async function main(): Promise<void> {
       // Games launched by THIS process are watched immediately; games launched
       // by API replicas are picked up by the reporter's periodic scan.
       const reportingLauncher = {
-        launch: async (input: LaunchInput): Promise<import('@chess-platform/api').LaunchResult> => {
-          const res = await durableLauncher.launch(input);
+        launch: async (input: LaunchInput, signal?: AbortSignal): Promise<import('@chess-platform/api').LaunchResult> => {
+          const res = await durableLauncher.launch(input, signal);
+          signal?.throwIfAborted();
           if (res.terminalOutcome === undefined) reporter?.watch(input.tournamentId, res.gameId);
           return res;
         },
       };
 
       const tournamentService = new api.TournamentService(tournamentsRepo, reportingLauncher);
-      const arenaService = new api.ArenaService(tournamentsRepo, reportingLauncher);
+      const arenaService = new api.ArenaService(tournamentsRepo, reportingLauncher, undefined, logger);
       arenaDeadlines = new api.ArenaDeadlineWorker(tournamentsRepo, arenaService, { logger, metrics });
       arenaDeadlines.start();
 

@@ -12,6 +12,11 @@ export class PersistenceError extends Error {
   }
 }
 
+/** The requested durable tournament exists but is not an Arena. */
+export class ArenaFormatMismatchError extends PersistenceError {
+  constructor() { super('Not an arena tournament'); this.name = 'ArenaFormatMismatchError'; }
+}
+
 /** Bounded fair-play lock acquisition could not obtain capacity or a released player lock. */
 export class PlayerLockUnavailableError extends PersistenceError {
   constructor() {

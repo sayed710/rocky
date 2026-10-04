@@ -52,17 +52,40 @@ Malformed snapshots fail closed in pure restoration, with repair evidence in the
 queue and sampled worker logs. Operators must inspect and repair the underlying
 snapshot; the queue is a projection, never independent policy authority.
 
-Deadline and recovery branches have separate partial indexes, UNIONed into a
-bounded keyset page. Active expired games remain due until resolved. Reads may
-settle using the same atomic operation, but autonomous workers provide correctness
+Deadline and recovery branches have separate partial indexes, each limited before
+their UNION forms a bounded keyset page. A cycle captures the highest PostgreSQL
+queue-membership identity sequence once. Existing members retain their sequence
+when their projection changes; later memberships wait for another cycle regardless
+of ID ordering. This makes the cycle finite even with continuous arrivals between
+cursor positions. The sequence is represented as decimal text across the port to
+preserve bigint precision. No row is consumed or leased by scanning. Restart drops
+only the cursor hint and captures a fresh durable boundary from the beginning;
+concurrent workers still serialize each logical decision with the existing row lock.
+Identity allocation is not commit ordered: a transaction that allocated a sequence
+before capture can become visible afterward. It still belongs to the finite
+allocated prefix; the boundary is not a committed snapshot or a fencing token.
+An empty watermark completes an
+empty cycle. Active expired games remain due until resolved. Healthy spectator
+reads sample snapshot and database time in one unlocked statement; due idle reads
+settle using the same atomic operation. Autonomous workers provide correctness
 without reads. The worker uses the rotating-page and stop/drain pattern of
 [ADR-0149](0149-autonomous-flag-expiry.md): one page of 50 per second, no concurrent
 passes in one process, immediate startup catch-up, no busy loop, and a cursor that
 passes poison rows. A failure does not consume any durable work. Stop cancels the
-next poll and drains the bounded in-flight page, including failed scans.
+next poll, aborts the current operation, and drains its actual completion. Only
+that operation's borrowed database connection is destroyed; other clients remain
+usable. Queued acquisitions release eventual allocations without issuing queries.
+Cancellation stops further IDs, launcher probes, retries and linking. A cancelled
+COMMIT may already have succeeded, so recovery consults durable state rather than
+assuming rollback. Injected adapters must honor cancellation or complete to drain.
 
 Authorized pairings commit before external launch. Their pending work survives a
 crash before launch, after game creation and before linking, or before a response.
+Once a command commits, a downstream launch failure returns the proven committed
+snapshot and logs pending recovery; it does not falsely report that command as
+uncommitted. Invalid/ambiguous launches still fail closed during reconciliation.
+The existing typed 503 contract for exhausted player-lock coordination is retained;
+its committed authorization remains recoverable and retries are idempotent.
 The durable launcher still checks players, variant and time control and walks past
 another pairing's slot. An already-ended committed Arena game returns a distinct
 terminal outcome for reconciliation by pairing id; it is never linked as playable
@@ -103,7 +126,8 @@ are safe. All merges and deployment decisions remain owner-controlled.
 
 Observability uses unlabelled `arena_deadline_reconciliations_total` and
 `arena_deadline_failures_total` counters, and at most one sampled failure log per
-page. Logs include a tournament identifier and a repair-required boolean, without
+page. Logs include operation, vetted error code, finite category, tournament
+identifier and a repair-required boolean, without
 snapshots, user details or arbitrary exception payloads. No identifier labels are
 added to metrics. Polling delays settlement visibility, never pairing eligibility:
 the database guard always enforces the exact cutoff.

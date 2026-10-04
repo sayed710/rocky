@@ -7,10 +7,61 @@ import { ArenaDeadlineWorker } from '../src/tournament/arena-deadline-worker';
 import { ArenaTournament } from '@chess-platform/tournament';
 import { Pool } from 'pg';
 import { createPgApiServer } from '../src/bootstrap';
-import { NullLogger } from '../src/ports/logger';
+import { JsonLogger, NullLogger } from '../src/ports/logger';
+import { HttpError } from '../src/http/errors';
 import { InMemoryEmailSender } from '../src/ports/email';
 
 const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } as const;
+
+test('review regression: an empty cycle watermark never becomes an unbounded scan', async () => {
+  const r = await rig();
+  r.repo.arenaWorkCeiling = async () => null;
+  let scans = 0;
+  r.repo.listArenaWorkAfter = async () => { scans++; return ['new']; };
+  const worker = new ArenaDeadlineWorker(r.repo, r.service, { pageSize: 1 });
+  assert.deepEqual(await worker.runPass(), { scanned: 0, failed: 0 });
+  assert.equal(scans, 0);
+});
+
+test('review regression: continuous new work cannot prevent revisiting a newly due lower ID', async () => {
+  const r = await rig();
+  const work = [{ id: '0', sequence: 1, due: false }, { id: 'a', sequence: 2, due: true }, { id: 'c', sequence: 3, due: true }];
+  r.repo.listArenaWorkAfter = async (after, limit, _signal?: AbortSignal, through?: string | null) =>
+    work.filter(row => row.due && (!after || row.id > after) && (!through || row.sequence <= Number(through)))
+      .map(row => row.id).sort().slice(0, limit);
+  r.repo.arenaWorkCeiling = async () => String(work.at(-1)!.sequence);
+  const seen: string[] = [];
+  r.service.reconcile = async id => { seen.push(id); return r.service.load('arena'); };
+  const worker = new ArenaDeadlineWorker(r.repo, r.service, { pageSize: 1 });
+  await worker.runPass();
+  work[0]!.due = true; // became due behind the current cursor
+  for (const id of ['b', 'bb', 'bbb', 'bbbb']) { work.push({ id, sequence: work.length + 1, due: true }); await worker.runPass(); }
+  assert.ok(seen.includes('0'), 'a finite scan cycle must return to newly due lower IDs');
+});
+
+test('review regression: stop cancels an in-flight pass and never starts the next Arena', async () => {
+  const r = await rig();
+  r.repo.listArenaWorkAfter = async () => ['first', 'second'];
+  const seen: string[] = [];
+  let entered!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  r.service.reconcile = async (id: string, signal?: AbortSignal) => {
+    seen.push(id);
+    entered();
+    await new Promise<void>((resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+      // Keep the RED bounded without making a retry or changing a test timeout.
+      setImmediate(resolve);
+    });
+    return r.service.load('arena');
+  };
+  const worker = new ArenaDeadlineWorker(r.repo, r.service);
+  const pass = worker.runPass();
+  await ready;
+  await worker.stop();
+  await pass;
+  assert.deepEqual(seen, ['first']);
+});
 
 async function rig(players = 2) {
   const repo = new InMemoryTournamentsRepository();
@@ -82,7 +133,9 @@ test('failed launch leaves committed pre-deadline work recoverable after restart
   const r = await rig(0);
   await r.service.register('arena', 'A');
   const failed = new ArenaService(r.repo, { launch: async () => { throw new Error('crash before launch'); } }, () => 0);
-  await assert.rejects(failed.register('arena', 'B'), /crash before launch/);
+  const committed = await failed.register('arena', 'B');
+  assert.equal(committed.toSnapshot().gameLinks!.length, 0);
+  await assert.rejects(failed.reconcile('arena'), /crash before launch/);
   const authorized = (await r.service.load('arena')).toSnapshot();
   assert.equal(Object.keys(authorized.activeGames).length, 1);
   assert.equal(authorized.gameLinks!.length, 0);
@@ -126,6 +179,7 @@ test('database-time failure does not fallback or mutate/launch', async () => {
   const r = await rig();
   const before = (await r.service.load('arena')).toSnapshot();
   r.repo.mutateArena = async () => { throw new Error('authority unavailable'); };
+  r.repo.readArena = async () => { throw new Error('authority unavailable'); };
   await assert.rejects(r.service.getTournament('arena'), /authority unavailable/);
   await assert.rejects(r.service.register('arena', 'C'), /authority unavailable/);
   assert.deepEqual((await r.repo.findById('arena'))!.snapshot, before);
@@ -198,17 +252,20 @@ test('worker polls idle/failure with bounded scheduling and stop cancels the nex
 test('stop drains a failed in-flight database pass without rejecting shutdown', async () => {
   const r = await rig(0);
   let reject!: (error: Error) => void;
-  r.repo.listArenaWorkAfter = () => new Promise((_resolve, failure) => { reject = failure; });
+  let entered!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  r.repo.listArenaWorkAfter = () => new Promise((_resolve, failure) => { reject = failure; entered(); });
   const worker = new ArenaDeadlineWorker(r.repo, r.service);
   const pass = worker.runPass();
   const caught = assert.rejects(pass, /database failed/);
+  await ready;
   const stopping = worker.stop();
   reject(new Error('database failed'));
   await stopping;
   await caught;
 });
 
-test('production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown', { timeout: 5_000 }, async () => {
+test('production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown', { timeout: 5_000 }, async t => {
   const r = await rig(0);
   r.at(1_100);
   let finished!: () => void;
@@ -222,8 +279,64 @@ test('production API bootstrap starts autonomous Arena reconciliation and drains
   const pool = new Pool(); // lazy; the injected simulation repository performs no DB I/O
   const app = createPgApiServer({ pool, tournamentRepo: r.repo, gameLauncher: r.launcher,
     config: { accessTokenSecret: 'arena-test-secret-with-at-least-32-characters' }, logger: new NullLogger(), emailSender: new InMemoryEmailSender() });
-  try {
-    await settlement;
-    assert.equal((await r.service.load('arena')).getState(), 'finished');
-  } finally { await app.shutdownAnalysis(); await pool.end(); }
+  let http: Awaited<ReturnType<typeof app.server.listen>> | undefined;
+  // Teardown also runs if the existing test timeout cancels a pending await.
+  t.after(async () => {
+    try {
+      if (http) await new Promise<void>((resolve, reject) => http!.close(error => error ? reject(error) : resolve()));
+    } finally { await app.shutdownAnalysis(); await pool.end(); }
+  });
+  http = await app.server.listen(0, '127.0.0.1');
+  await settlement;
+  assert.equal((await r.service.load('arena')).getState(), 'finished');
+});
+
+test('review regression: repository failures remain internal errors and known unknown-game responses remain 404', async () => {
+  const r = await rig();
+  await assert.rejects(r.service.recordResultByGame('arena', 'missing', 'draw'),
+    (error: unknown) => error instanceof HttpError && error.status === 404 && !error.message.includes('missing'));
+  const unavailable = Object.assign(new Error('private connection details'), { code: 'ETIMEDOUT' });
+  r.repo.mutateArena = async () => { throw unavailable; };
+  (r.repo as unknown as { readArena: () => Promise<never> }).readArena = async () => { throw unavailable; };
+  await assert.rejects(r.service.getTournament('arena'), (error: unknown) => error === unavailable && !(error instanceof HttpError));
+  await assert.rejects(r.service.register('arena', 'C'), (error: unknown) => error === unavailable);
+});
+
+test('review regression: healthy active Arena reads do not acquire a mutation lock', async () => {
+  const r = await rig();
+  r.repo.mutateArena = async () => { throw new Error('unexpected spectator write lock'); };
+  assert.equal((await r.service.getTournament('arena')).getState(), 'running');
+  r.at(1_100);
+  assert.equal((await r.service.getStandings('arena')).length, 2);
+});
+
+test('review regression: committed registration succeeds with durable pending work despite launch failure', async () => {
+  const r = await rig(0);
+  await r.service.register('arena', 'A');
+  const failed = new ArenaService(r.repo, { launch: async () => { throw new Error('launcher unavailable'); } });
+  let committed!: ArenaTournament;
+  await assert.doesNotReject(async () => { committed = await failed.register('arena', 'B'); });
+  assert.equal(committed.toSnapshot().participants.length, 2);
+  assert.equal(Object.keys(committed.toSnapshot().activeGames).length, 1);
+  assert.equal(committed.toSnapshot().gameLinks!.length, 0);
+  assert.deepEqual(await r.repo.listArenaWorkAfter(null, 50), ['arena']);
+  await new ArenaDeadlineWorker(r.repo, r.service).runPass();
+  assert.equal((await r.service.load('arena')).toSnapshot().gameLinks!.length, 1);
+});
+
+test('review regression: sampled worker diagnostics preserve safe categories and codes without secrets', async () => {
+  const r = await rig(0);
+  r.at(1_100);
+  const records: string[] = [];
+  const logger = new JsonLogger({}, { sink: line => records.push(line) });
+  const fault = Object.assign(new Error('postgres://private-secret/user-snapshot'), { code: 'ETIMEDOUT' });
+  r.repo.mutateArena = async () => { throw fault; };
+  await new ArenaDeadlineWorker(r.repo, r.service, { logger }).runPass();
+  assert.equal(records.length, 1);
+  const record = JSON.parse(records[0]!);
+  assert.equal(record.operation, 'reconcile');
+  assert.equal(record.errorCode, 'ETIMEDOUT');
+  assert.equal(record.errorCategory, 'database_or_network');
+  assert.ok(!records[0]!.includes('private-secret'));
+  assert.equal(record.stack, undefined);
 });

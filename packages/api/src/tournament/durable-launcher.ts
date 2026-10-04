@@ -36,18 +36,19 @@ export class DurableGameLauncher implements GameLauncher {
    * is never started; the no-show deadline ends it. ADR-0152. New Arena authorizations
    * use a separate durable namespace and commit before launch (ADR-0156).
    */
-  async launch(input: LaunchInput): Promise<LaunchResult> {
+  async launch(input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult> {
     for (let probe = 0; probe < MAX_SLOT_PROBES; probe += 1) {
-      const launched = await this.launchAt({ ...input, attempt: input.attempt + probe });
+      signal?.throwIfAborted();
+      const launched = await this.launchAt({ ...input, attempt: input.attempt + probe }, signal);
       if (launched) return launched;
     }
     throw new Error(`launch slots ${input.tournamentId}/${input.matchId}#${input.attempt}+${MAX_SLOT_PROBES} all hold other pairings' games`);
   }
 
   /** Create or find this pairing's game at exactly this attempt; null when another pairing holds it. */
-  private async launchAt(input: LaunchInput): Promise<LaunchResult | null> {
+  private async launchAt(input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult | null> {
     const gameId = launchGameId(input);
-    if (await this.events.exists(gameId)) return this.existing(gameId, input);
+    if (await this.events.exists(gameId, signal)) return this.existing(gameId, input, signal);
 
     const variant = input.variant as Variant;
     const { events } = Game.create({
@@ -64,12 +65,14 @@ export class DurableGameLauncher implements GameLauncher {
     });
 
     try {
-      await this.events.append(gameId, -1, events);
+      signal?.throwIfAborted();
+      await this.events.append(gameId, -1, events, signal);
     } catch (error) {
+      signal?.throwIfAborted();
       // A concurrent replica may have won the deterministic-id race. Only
       // accept that failure when a game now exists durably at this id.
-      if (!(await this.events.exists(gameId))) throw error;
-      return this.existing(gameId, input);
+      if (!(await this.events.exists(gameId, signal))) throw error;
+      return this.existing(gameId, input, signal);
     }
     return { gameId };
   }
@@ -83,8 +86,8 @@ export class DurableGameLauncher implements GameLauncher {
    * update that linked the live one. A marked Arena pairing can instead recover a terminal
    * outcome after a game commit/link crash. An unmarked legacy ended slot cannot prove ownership.
    */
-  private async existing(gameId: string, input: LaunchInput): Promise<LaunchResult | null> {
-    const stored = await this.events.load(gameId);
+  private async existing(gameId: string, input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult | null> {
+    const stored = await this.events.load(gameId, signal);
     const ending = stored.find(({ event }) => event.type === 'GameEnded')?.event;
     if (!input.committedArenaPairing && ending) return null;
     const created = stored[0]?.event;

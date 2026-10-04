@@ -1,0 +1,185 @@
+{
+  "recordedAt": "2026-10-04T09:58:27.238Z",
+  "mergeCommit": "6b3de10a0c761b2fb7c81662e64be1897502c987",
+  "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+  "positiveGates": [
+    {
+      "gate": "build",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "lint",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "check:observability",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "check:build-order",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "check:deploy-gates",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "check:adr-claims",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "check:ci-parity",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "check:variant-parity",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "check:engine-pin-parity",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "check:test-topology",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "test:scripts",
+      "exitCode": 0,
+      "tests": 320,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "hermetic",
+      "exitCode": 0,
+      "tests": 4000,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "postgres:persistence",
+      "exitCode": 0,
+      "tests": 203,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "postgres:api",
+      "exitCode": 0,
+      "tests": 106,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "gateway:build",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "gateway:lint",
+      "exitCode": 0,
+      "tests": 0,
+      "skipped": 0,
+      "signal": null
+    },
+    {
+      "gate": "gateway:test",
+      "exitCode": 0,
+      "tests": 86,
+      "skipped": 0,
+      "signal": null
+    }
+  ],
+  "mutationSweep": {
+    "planned": 29,
+    "compiledAndKilled": 26,
+    "failedVariant": 27,
+    "name": "projection update advances existing membership",
+    "typescriptCompiled": true,
+    "behavioralKill": false,
+    "postgresCode": "428C9",
+    "error": "column \"work_sequence\" can only be updated to DEFAULT",
+    "remainingVariants": "28 and 29 not run",
+    "reruns": 0,
+    "runnerExitCode": 1
+  },
+  "restorationProof": [
+    {
+      "path": "packages/tournament/src/arena.ts",
+      "rawMatchesPreservedSourcePlusApprovedPatch": true,
+      "normalizedMatches": true,
+      "sha256": "20d268ef6752f77cd1a10c97fe0577aa98e0d15d59ea2daf4cde40e0af9e7071"
+    },
+    {
+      "path": "packages/api/src/tournament/arena.service.ts",
+      "rawMatchesPreservedSourcePlusApprovedPatch": true,
+      "normalizedMatches": true,
+      "sha256": "0955a665fcd86d6c6ad9dd24bdf25d1a008de4296ec8a75a22cb2a68952cba3e"
+    },
+    {
+      "path": "packages/api/src/tournament/durable-launcher.ts",
+      "rawMatchesPreservedSourcePlusApprovedPatch": true,
+      "normalizedMatches": true,
+      "sha256": "bb0853a548e86cde343d784e4d34622c1b166c78890c892b4e760e3eed3c3a60"
+    },
+    {
+      "path": "packages/persistence/src/pg/abortable-client.ts",
+      "rawMatchesPreservedSourcePlusApprovedPatch": true,
+      "normalizedMatches": true,
+      "sha256": "498d4e8779c62c90613f4ee749a677a58513f36417fe5531d49422471580926c"
+    },
+    {
+      "path": "packages/api/src/tournament/arena-deadline-worker.ts",
+      "rawMatchesPreservedSourcePlusApprovedPatch": true,
+      "normalizedMatches": true,
+      "sha256": "f3001524807b4a386af8eb9e02b444d0054c0bfe800b8662dee6a2b34a0d5025"
+    },
+    {
+      "path": "packages/persistence/src/pg/repositories.ts",
+      "rawMatchesPreservedSourcePlusApprovedPatch": true,
+      "normalizedMatches": true,
+      "sha256": "da45fd70cc0fc12f82ae09140210de7df4404bda77dc958d02fb2c64930623f5"
+    },
+    {
+      "path": "packages/persistence/migrations/0049_arena_deadlines.sql",
+      "rawMatchesPreservedSourcePlusApprovedPatch": true,
+      "normalizedMatches": true,
+      "sha256": "7d9b43501d0a00d7e920661df7a8ff91a7f7ac1a42e277d4c2e3b73999f039ea"
+    }
+  ],
+  "log": ".arena-fairness-mutations-2026-10-04.log",
+  "publication": "No new push, final exact-head review not run"
+}

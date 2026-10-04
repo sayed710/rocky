@@ -568,7 +568,7 @@ export function createPgApiServer(options: PgBootstrapOptions = {}): {
 } {
   const { deps, pool, shutdownAnalysis } = createPgDependencies(options);
   const server = createApiServer(deps, options.server);
-  const arenas = new ArenaService(deps.tournamentRepo, deps.gameLauncher);
+  const arenas = new ArenaService(deps.tournamentRepo, deps.gameLauncher, undefined, deps.logger);
   const deadlines = new ArenaDeadlineWorker(deps.tournamentRepo, arenas, { logger: deps.logger, metrics: deps.metrics });
   deadlines.start();
   return { server, pool, shutdownAnalysis: async () => {

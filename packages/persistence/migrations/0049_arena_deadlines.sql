@@ -2,6 +2,7 @@
 -- One row per running Arena, including malformed legacy rows needing operator repair.
 CREATE TABLE arena_deadlines (
   tournament_id TEXT PRIMARY KEY REFERENCES tournaments(id) ON DELETE CASCADE,
+  work_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
   deadline_ms BIGINT,
   pending_launch BOOLEAN NOT NULL,
   invalid BOOLEAN NOT NULL,
@@ -42,6 +43,23 @@ BEGIN
       OR duration_ms <= 0 OR duration_ms <> trunc(duration_ms)
       OR deadline > 9007199254740991;
     IF NEW.state <> 'running' AND NEW.snapshot->'activeGames' <> '{}'::jsonb THEN bad := true; END IF;
+    IF NOT bad THEN
+      -- A malformed/duplicate/foreign tuple cannot suppress pending recovery.
+      -- CASE guards array operations; SQL predicate evaluation order is not assumed.
+      bad := EXISTS (
+        SELECT 1 FROM jsonb_array_elements(coalesce(NEW.snapshot->'gameLinks', '[]'::jsonb)) AS link(value)
+        WHERE CASE
+          WHEN jsonb_typeof(link.value) IS DISTINCT FROM 'array' THEN true
+          WHEN jsonb_array_length(link.value) <> 2 THEN true
+          ELSE jsonb_typeof(link.value->0) IS DISTINCT FROM 'string'
+            OR jsonb_typeof(link.value->1) IS DISTINCT FROM 'string'
+            OR NOT (NEW.snapshot->'activeGames' ? (link.value->>0)) END);
+      IF NOT bad THEN
+        SELECT count(*) <> count(DISTINCT link.value->>0)
+          OR count(*) <> count(DISTINCT link.value->>1) INTO bad
+          FROM jsonb_array_elements(coalesce(NEW.snapshot->'gameLinks', '[]'::jsonb)) AS link(value);
+      END IF;
+    END IF;
     IF NOT bad THEN
       pending := EXISTS (
         SELECT 1 FROM jsonb_object_keys(NEW.snapshot->'activeGames') AS pairing(id)

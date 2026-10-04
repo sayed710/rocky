@@ -53,6 +53,141 @@ async function create(a: ArenaService, id = 'arena', count = 2) {
   for (const player of players.slice(0, count)) await a.register(id, player);
 }
 
+async function idleMember(repo: PgTournamentsRepository, id: string, startedAt: number): Promise<void> {
+  const arena = new ArenaTournament({ id, name: id, format: 'arena', variant: 'standard', timeControl: TC, durationMs: 100 });
+  arena.start(startedAt);
+  await repo.save(arena.toSnapshot(), 0);
+}
+
+test('membership boundary revisits earlier due work despite repeated middle-ID arrivals', { skip }, async () => fixture(async r => {
+  await idleMember(r.ra, '0', 1000);
+  await idleMember(r.ra, 'a', 0);
+  await idleMember(r.ra, 'c', 0);
+  const worker = new ArenaDeadlineWorker(r.ra, r.a, { pageSize: 1 });
+  await worker.runPass();
+  await r.at(1100);
+  for (const id of ['b', 'bb', 'bbb', 'bbbb']) {
+    await idleMember(r.ra, id, 0);
+    await worker.runPass();
+  }
+  assert.equal((await r.ra.findById('0'))!.snapshot.state, 'finished', 'new arrivals must not extend the captured cycle');
+  assert.equal((await r.ra.findById('c'))!.snapshot.state, 'finished');
+  assert.equal((await r.ra.findById('0'))!.version, 2, 'exactly one settlement');
+}));
+
+test('membership boundary survives worker restart with concurrent recovery and exact deadline', { skip }, async () => fixture(async r => {
+  assert.equal(await r.ra.arenaWorkCeiling(), null);
+  assert.deepEqual(await new ArenaDeadlineWorker(r.ra, r.a).runPass(), { scanned: 0, failed: 0 });
+  await idleMember(r.ra, '0', 1000);
+  await idleMember(r.ra, 'a', 0);
+  await idleMember(r.ra, 'c', 0);
+  const boundary = await r.ra.arenaWorkCeiling();
+  await new ArenaDeadlineWorker(r.ra, r.a, { pageSize: 1 }).runPass();
+  await idleMember(r.ra, 'b', 0);
+  await r.pool.query("UPDATE tournaments SET snapshot = snapshot WHERE id = 'c'");
+  await r.at(1100);
+  assert.deepEqual(await r.ra.listArenaWorkAfter('a', 10, undefined, boundary), ['c'], 'late membership excluded even between IDs');
+  assert.deepEqual(await r.ra.listArenaWorkAfter(null, 10, undefined, boundary), ['0', 'c']);
+  const first = new ArenaDeadlineWorker(r.ra, r.a, { pageSize: 1 });
+  const second = new ArenaDeadlineWorker(r.rb, r.b, { pageSize: 1 });
+  for (let page = 0; page < 5; page++) await Promise.all([first.runPass(), second.runPass()]);
+  for (const id of ['0', 'a', 'b', 'c']) {
+    const stored = (await r.ra.findById(id))!;
+    assert.equal(stored.snapshot.state, 'finished');
+    assert.equal(stored.version, 2, 'restart/concurrent workers do not duplicate settlement');
+  }
+  assert.equal(await r.ra.arenaWorkCeiling(), null);
+  await idleMember(r.ra, 'single', 1100);
+  await r.at(1199);
+  assert.equal((await first.runPass()).scanned, 0, 'T-1 is not due');
+  assert.equal((await r.ra.findById('single'))!.snapshot.state, 'running');
+  await r.at(1200);
+  await Promise.all([first.runPass(), second.runPass()]);
+  assert.equal((await r.ra.findById('single'))!.snapshot.state, 'finished', 'T is due');
+  assert.equal((await r.ra.findById('single'))!.version, 2);
+}));
+
+test('membership boundary excludes late due, pending and invalid arrivals on both query branches', { skip }, async () => fixture(async r => {
+  await idleMember(r.ra, 'c', 0);
+  const boundary = await r.ra.arenaWorkCeiling();
+  await idleMember(r.ra, 'b', 0);
+  const pending = new ArenaTournament({ id: 'bb', name: 'pending', format: 'arena', variant: 'standard', timeControl: TC, durationMs: 100 });
+  pending.register(players[0]!); pending.register(players[1]!);
+  pending.start(1000); pending.pairAvailable(1000);
+  await r.ra.save(pending.toSnapshot(), 0);
+  const broken = { ...pending.toSnapshot(), config: { ...pending.config, id: 'bbb' }, startedAtMs: null };
+  await r.ra.save(broken as never, 0);
+  assert.deepEqual(await r.ra.listArenaWorkAfter(null, 10, undefined, boundary), ['c']);
+  assert.deepEqual(await r.ra.listArenaWorkAfter(null, 10, undefined, await r.ra.arenaWorkCeiling()), ['b', 'bb', 'bbb', 'c']);
+}));
+
+async function waitForBlocked(pool: Pool, table: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const result = await pool.query(`SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+      AND wait_event_type = 'Lock' AND query LIKE $1`, [`%${table}%`]);
+    if (result.rowCount) return;
+    await new Promise<void>(resolve => setTimeout(resolve, 10));
+  }
+  assert.fail(`No blocked ${table} operation observed`);
+}
+
+test('review regression: worker stop drains a blocked PostgreSQL scan without closing other clients', { skip }, async () => fixture(async r => {
+  await create(r.a, 'arena', 0); await r.a.start('arena'); await r.at(1_100);
+  const blocker = await r.pool.connect();
+  try {
+    await blocker.query('BEGIN'); await blocker.query('LOCK arena_deadlines IN ACCESS EXCLUSIVE MODE');
+    const worker = new ArenaDeadlineWorker(r.ra, r.a);
+    const pass = worker.runPass();
+    const caught = assert.rejects(pass);
+    await waitForBlocked(r.pool, 'arena_deadlines');
+    await worker.stop();
+    await caught;
+    assert.equal((await r.pool.query('SELECT 1 AS value')).rows[0].value, 1);
+  } finally { await blocker.query('ROLLBACK'); blocker.release(); }
+  assert.deepEqual(await r.ra.listArenaWorkAfter(null, 10), ['arena']);
+  assert.equal((await r.a.load('arena')).getState(), 'running');
+}));
+
+test('review regression: cancelling a blocked game append preserves pending authorization for recovery', { skip }, async () => fixture(async r => {
+  const pending = new ArenaService(r.ra, { launch: async () => { throw new Error('launch unavailable'); } });
+  await create(pending); await pending.start('arena');
+  const blocker = await r.pool.connect();
+  const controller = new AbortController();
+  try {
+    await blocker.query('BEGIN'); await blocker.query('LOCK game_events IN SHARE MODE');
+    const recovery = r.a.reconcile('arena', controller.signal);
+    const caught = assert.rejects(recovery, { name: 'AbortError' });
+    await waitForBlocked(r.pool, 'INSERT INTO game_events');
+    controller.abort(); await caught;
+    assert.equal((await r.pool.query('SELECT count(*)::int AS n FROM game_events')).rows[0].n, 0);
+    assert.equal((await r.ra.findById('arena'))!.snapshot.state, 'running');
+    assert.equal((await r.pool.query('SELECT pending_launch FROM arena_deadlines')).rows[0].pending_launch, true);
+  } finally { await blocker.query('ROLLBACK'); blocker.release(); }
+  const recovered = await r.a.reconcile('arena');
+  assert.equal(recovered.toSnapshot().gameLinks!.length, 1);
+  assert.equal((await r.pool.query('SELECT count(*)::int AS n FROM game_events WHERE seq = 0')).rows[0].n, 1);
+}));
+
+test('review regression: registration reads leave PostgreSQL version and durable work unchanged', { skip }, async () => fixture(async r => {
+  await create(r.a, 'arena', 0);
+  const before = await r.ra.findById('arena');
+  await r.a.getTournament('arena');
+  await r.b.getStandings('arena');
+  assert.deepEqual(await r.ra.findById('arena'), before);
+  assert.equal((await r.pool.query('SELECT count(*)::int AS n FROM arena_deadlines')).rows[0].n, 0);
+}));
+
+test('review regression: healthy spectator reads complete while another connection holds the row lock', { skip }, async () => fixture(async r => {
+  await create(r.a); await r.a.start('arena');
+  const locker = await r.pool.connect();
+  try {
+    await locker.query('BEGIN');
+    await locker.query('SELECT id FROM tournaments WHERE id = $1 FOR UPDATE', ['arena']);
+    assert.equal((await r.a.getTournament('arena')).getState(), 'running');
+    assert.equal((await r.b.getStandings('arena')).length, 2);
+  } finally { await locker.query('ROLLBACK'); locker.release(); }
+}));
+
 test('production PostgreSQL clock establishes start independently of process clocks', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, join(process.cwd(), '../persistence/migrations'));
@@ -275,7 +410,9 @@ for (const result of ['*', '1-0'] as const) test(`committed pairing survives cra
   const crashing = new ArenaService(r.ra, { launch: async input => {
     await r.launcher.launch(input); throw new Error('response lost after game commit');
   } }, () => -1);
-  await assert.rejects(crashing.start('arena'), /response lost/);
+  const committed = await crashing.start('arena');
+  assert.equal(committed.toSnapshot().gameLinks!.length, 0);
+  await assert.rejects(crashing.reconcile('arena'), /response lost/);
   const authorized = (await r.a.load('arena')).toSnapshot();
   assert.equal(authorized.startedAtMs, 1_000);
   assert.equal(authorized.gameLinks!.length, 0);

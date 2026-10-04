@@ -346,7 +346,7 @@ export class ArenaTournament {
     return {
       config: this.config,
       state: this.state,
-      startedAtMs: this.startedAtMs,
+      ...(this.startedAtMs === undefined ? {} : { startedAtMs: this.startedAtMs }),
       participants: Array.from(this.participants),
       withdrawn: Array.from(this.withdrawn),
       // Copy the nested mutable objects so the snapshot is independent of the

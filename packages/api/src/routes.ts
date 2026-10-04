@@ -165,6 +165,7 @@ import {
  * declaration here, which is the one edit nobody makes by accident.
  */
 export interface RouteDeps {
+  readonly logger: Logger;
   readonly auth: AuthService;
   readonly repos: Repositories;
   readonly clock: Clock;
@@ -2579,7 +2580,7 @@ export function buildRouter(deps: RouteDeps): Router {
 
   // --- Tournaments ---------------------------------------------------------
   const tournamentService = new TournamentService(deps.tournamentRepo, deps.gameLauncher);
-  const arenaService = new ArenaService(deps.tournamentRepo, deps.gameLauncher, () => deps.clock.now());
+  const arenaService = new ArenaService(deps.tournamentRepo, deps.gameLauncher, () => deps.clock.now(), deps.logger);
 
   router.post(
     '/v1/tournaments',

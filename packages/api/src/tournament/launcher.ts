@@ -43,7 +43,7 @@ export interface LaunchInput {
  * `(tournamentId, matchId, attempt)`.
  */
 export interface GameLauncher {
-  launch(input: LaunchInput): Promise<LaunchResult>;
+  launch(input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult>;
 }
 
 /**
