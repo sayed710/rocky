@@ -1,0 +1,269 @@
+{
+  "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+  "publishedHead": "e866eac1f6e214bca1d35ccf3e3b027a71a98cac",
+  "sourceBefore": {
+    "services/gateway/test/flag-expiry.integration.test.ts": "98f1d02fbb0af33856b169fd02214da48f43308d070a9ae68f9a921a82228cf5",
+    "services/gateway/src/command-forwarder.ts": "3e914e962d4234c45bf2defbaa66a824e1b7517a75b1d12cbd19be9121f5438f",
+    "services/gateway/src/ownership.ts": "54427c5b15f90c7bafa6c6cc77a237719e73a013fb366bead3447430523368e3",
+    "services/gateway/src/redis-pubsub.ts": "c37c2cf146767e825c7e803cd08aa11c85cd490e541cb4db1db1e94788be2cea",
+    "services/gateway/src/serve.ts": "568a41a3a2dc874ab503754660898d4d420ec9cc606ea0f4eb602c3d034abfc9",
+    "scripts/run-gateway-tests.mjs": "5325f3a7115b63dd45ad6f73527cf640ccace5751fe235cae9f5f86cd83b2d18",
+    "Dockerfile.gateway-test": "11bc76813df3c171fc6ad89eedeefd57e958b1610d1f9231effbe04460b1a670",
+    "packages/api/src/tournament/arena.service.ts": "40d5b017dda0f6a46d85b8e41d5e76bb99d62f066b243cd537899ec04ff38f66",
+    "packages/persistence/migrations/0049_arena_deadlines.sql": "65230b8f6e3eccac337087c7887d74431ffd55cf30184beb174eb50f1ce3838f"
+  },
+  "runs": [
+    {
+      "label": "build",
+      "startedAt": "2026-10-04T12:14:45.717Z",
+      "finishedAt": "2026-10-04T12:14:49.414Z",
+      "exitCode": 0,
+      "signal": null,
+      "tests": 0,
+      "pass": 0,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    {
+      "label": "focused-1",
+      "startedAt": "2026-10-04T12:14:49.418Z",
+      "finishedAt": "2026-10-04T12:15:01.165Z",
+      "exitCode": 0,
+      "signal": null,
+      "tests": 1,
+      "pass": 1,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    {
+      "label": "focused-2",
+      "startedAt": "2026-10-04T12:15:01.169Z",
+      "finishedAt": "2026-10-04T12:15:12.087Z",
+      "exitCode": 0,
+      "signal": null,
+      "tests": 1,
+      "pass": 1,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    {
+      "label": "focused-3",
+      "startedAt": "2026-10-04T12:15:12.091Z",
+      "finishedAt": "2026-10-04T12:15:22.658Z",
+      "exitCode": 0,
+      "signal": null,
+      "tests": 1,
+      "pass": 1,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    },
+    {
+      "label": "full",
+      "startedAt": "2026-10-04T12:21:57.662Z",
+      "finishedAt": "2026-10-04T12:22:35.329Z",
+      "exitCode": 0,
+      "signal": null,
+      "tests": 86,
+      "pass": 86,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0
+    }
+  ],
+  "sourceAfter": {
+    "services/gateway/test/flag-expiry.integration.test.ts": "98f1d02fbb0af33856b169fd02214da48f43308d070a9ae68f9a921a82228cf5",
+    "services/gateway/src/command-forwarder.ts": "3e914e962d4234c45bf2defbaa66a824e1b7517a75b1d12cbd19be9121f5438f",
+    "services/gateway/src/ownership.ts": "54427c5b15f90c7bafa6c6cc77a237719e73a013fb366bead3447430523368e3",
+    "services/gateway/src/redis-pubsub.ts": "c37c2cf146767e825c7e803cd08aa11c85cd490e541cb4db1db1e94788be2cea",
+    "services/gateway/src/serve.ts": "568a41a3a2dc874ab503754660898d4d420ec9cc606ea0f4eb602c3d034abfc9",
+    "scripts/run-gateway-tests.mjs": "5325f3a7115b63dd45ad6f73527cf640ccace5751fe235cae9f5f86cd83b2d18",
+    "Dockerfile.gateway-test": "11bc76813df3c171fc6ad89eedeefd57e958b1610d1f9231effbe04460b1a670",
+    "packages/api/src/tournament/arena.service.ts": "40d5b017dda0f6a46d85b8e41d5e76bb99d62f066b243cd537899ec04ff38f66",
+    "packages/persistence/migrations/0049_arena_deadlines.sql": "65230b8f6e3eccac337087c7887d74431ffd55cf30184beb174eb50f1ce3838f"
+  },
+  "sourcesUnchanged": true,
+  "independentlyVerifiedSourceHashes": true,
+  "games": [
+    {
+      "focusedRun": 1,
+      "gameId": "656f893c-5966-4ae9-a318-9d684c9d96c4",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:14:55.221Z",
+        "2026-10-04T12:14:55.234Z"
+      ],
+      "firstEvent": "2026-10-04T12:14:55.149Z",
+      "lastEvent": "2026-10-04T12:14:55.309Z",
+      "errorFrames": [],
+      "appendFailures": []
+    },
+    {
+      "focusedRun": 1,
+      "gameId": "ac8323da-b253-4d82-bccb-a39bbcab0e06",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:14:57.681Z",
+        "2026-10-04T12:14:57.693Z"
+      ],
+      "firstEvent": "2026-10-04T12:14:57.610Z",
+      "lastEvent": "2026-10-04T12:14:57.766Z",
+      "errorFrames": [],
+      "appendFailures": []
+    },
+    {
+      "focusedRun": 1,
+      "gameId": "172e7dbd-1677-47bc-8202-cba6c3ed96e6",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:15:00.251Z",
+        "2026-10-04T12:15:00.262Z"
+      ],
+      "firstEvent": "2026-10-04T12:15:00.190Z",
+      "lastEvent": "2026-10-04T12:15:00.311Z",
+      "errorFrames": [],
+      "appendFailures": []
+    },
+    {
+      "focusedRun": 2,
+      "gameId": "32ee88d7-382e-4fbb-8178-071fff55a92d",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:15:06.121Z",
+        "2026-10-04T12:15:06.133Z"
+      ],
+      "firstEvent": "2026-10-04T12:15:06.049Z",
+      "lastEvent": "2026-10-04T12:15:06.207Z",
+      "errorFrames": [],
+      "appendFailures": []
+    },
+    {
+      "focusedRun": 2,
+      "gameId": "28f93727-e600-490f-8060-cb3aad273a34",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:15:08.625Z",
+        "2026-10-04T12:15:08.635Z"
+      ],
+      "firstEvent": "2026-10-04T12:15:08.544Z",
+      "lastEvent": "2026-10-04T12:15:08.704Z",
+      "errorFrames": [],
+      "appendFailures": []
+    },
+    {
+      "focusedRun": 2,
+      "gameId": "86004c5c-8bc1-4579-afd7-440d5314a6bd",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:15:11.158Z",
+        "2026-10-04T12:15:11.168Z"
+      ],
+      "firstEvent": "2026-10-04T12:15:11.095Z",
+      "lastEvent": "2026-10-04T12:15:11.212Z",
+      "errorFrames": [],
+      "appendFailures": []
+    },
+    {
+      "focusedRun": 3,
+      "gameId": "fdc5f95f-0714-47ca-a320-657e074c0064",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:15:17.006Z",
+        "2026-10-04T12:15:17.017Z"
+      ],
+      "firstEvent": "2026-10-04T12:15:16.926Z",
+      "lastEvent": "2026-10-04T12:15:17.066Z",
+      "errorFrames": [],
+      "appendFailures": []
+    },
+    {
+      "focusedRun": 3,
+      "gameId": "109376b7-f963-4c78-90ab-5cfe74d0129d",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:15:19.368Z",
+        "2026-10-04T12:15:19.377Z"
+      ],
+      "firstEvent": "2026-10-04T12:15:19.303Z",
+      "lastEvent": "2026-10-04T12:15:19.422Z",
+      "errorFrames": [],
+      "appendFailures": []
+    },
+    {
+      "focusedRun": 3,
+      "gameId": "54771cd1-675b-4b44-adb7-a4f705230cd7",
+      "joinedRoles": [
+        "white",
+        "black"
+      ],
+      "readyCommits": [
+        "2026-10-04T12:15:21.749Z",
+        "2026-10-04T12:15:21.759Z"
+      ],
+      "firstEvent": "2026-10-04T12:15:21.690Z",
+      "lastEvent": "2026-10-04T12:15:21.808Z",
+      "errorFrames": [],
+      "appendFailures": []
+    }
+  ],
+  "rootCause": "indeterminate",
+  "originalFailure": {
+    "passed": 85,
+    "failed": 1,
+    "skipped": 0,
+    "cancelled": 0,
+    "completed": true,
+    "ETIMEDOUTCaptured": false,
+    "test": "a move racing the expiry at the flag on different replicas yields exactly one timeout and no move",
+    "file": "services/gateway/test/flag-expiry.integration.test.ts",
+    "waitLine": 165,
+    "wait": "exactly two durable PlayerReady events",
+    "missingSeat": "unknown: original log did not capture events/seat/error frames; fixture database was dropped"
+  },
+  "limitations": [
+    "Preload mistakenly read PlayerReady.color instead of PlayerReady.by; colors were not logged. Original unchanged assertion and role frames prove readiness count only in successful focused runs.",
+    "PostgreSQL database-not-found message at 11:44:41.823Z cannot be attributed to original failing fixture without its database ID.",
+    "No code change, test timing/retry/sleep/threshold adjustment or service/security setting change.",
+    "Selected setup uses direct makeNode/GameAuthority/RedisCommandRouter/FlagExpiryWorker; not Arena create or diagnostic paths. Migration executes with empty tournament fixture. No causal exclusion claimed from unchanged test alone."
+  ],
+  "staleCheck": "No active task test/gateway processes or focused containers; Redis CLIENT LIST only current probe; service restartCount 0/OOM false before full run",
+  "serviceLogs": [
+    "original-service-postgres.log",
+    "original-service-redis.log"
+  ],
+  "command": "docker run --rm --platform=linux/amd64 --add-host=host.docker.internal:host-gateway -e DATABASE_URL -e REDIS_URL rocky-arena-qodo3-diagnostic:2026-10-04",
+  "runtime": "Linux amd64 / Node 22; unchanged npm run test:runtime",
+  "endpoints": {
+    "postgres": "127.0.0.1:55432/chess_arena_qodo3_v4 mapped to host.docker.internal in container",
+    "redis": "127.0.0.1:56379 mapped to host.docker.internal in container"
+  },
+  "rawEvidenceDirectory": "C:/Users/hp/AppData/Local/Temp/rocky-arena-gateway-qodo3-diagnosis",
+  "noRepositorySourceOrTestChanges": true
+}

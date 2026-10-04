@@ -52,6 +52,13 @@ Malformed snapshots fail closed in pure restoration, with repair evidence in the
 queue and sampled worker logs. Operators must inspect and repair the underlying
 snapshot; the queue is a projection, never independent policy authority.
 
+Repair projection validates participant state and active pairing members before
+links can suppress pending work. Invalid sequences, seats, namespaces or duplicate
+simultaneous players become immediate invalid work, even with a future deadline
+and complete links. Pairing-ID conversion preserves restoration's existing
+`Number(id.slice(2))` spellings and safe integer comparisons; guarded conversion
+errors become invalid evidence. Deadline arithmetic remains exact NUMERIC.
+
 Deadline and recovery branches have separate partial indexes, each limited before
 their UNION forms a bounded keyset page. A cycle captures the highest PostgreSQL
 queue-membership identity sequence once. Existing members retain their sequence

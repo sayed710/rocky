@@ -17,6 +17,7 @@ const paths = {
   migration: 'packages/persistence/migrations/0049_arena_deadlines.sql',
   launcher: 'packages/api/src/tournament/durable-launcher.ts',
   abort: 'packages/persistence/src/pg/abortable-client.ts',
+  diagnostics: 'packages/api/src/tournament/arena-diagnostics.ts',
 };
 const originals = Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, readFileSync(join(root, path))]));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -57,10 +58,19 @@ const mutations = [
   ['projection update advances existing membership', [edit('migration', 'invalid = EXCLUDED.invalid;', 'invalid = EXCLUDED.invalid, work_sequence = DEFAULT;')], 'pg'],
   ['skip earliest eligible member', [edit('worker', 'for (const id of ids) {', 'for (const id of ids.slice(1)) {')], 'pg'],
   ['recovered membership boundary excludes durable work', [edit('pg', 'return result.rows[0]?.ceiling ?? null;', 'return result.rows[0] ? \'0\' : null;')], 'pg'],
+  ['participant state validation skipped in repair projection', [edit('migration', "player_id := participant #>> '{}';", "CONTINUE; -- MUTATION skips participant state validation\n        player_id := participant #>> '{}';")], 'pg-migration'],
+  ['direct creation accepts invalid duration', [edit('service', 'if (!Number.isSafeInteger(cmd.durationMs) || cmd.durationMs <= 0)', 'if (false)')], 'unit'],
+  ['inactive games corruption loses repair classification', [edit('diagnostics', " || message.startsWith('Invalid inactive Arena games;')", '')], 'unit'],
+  ['linked active pairing bypasses structural repair validation', [edit('migration', "FOR active_pairing IN SELECT key, value FROM jsonb_each(NEW.snapshot->'activeGames') LOOP", "FOR active_pairing IN SELECT key, value FROM jsonb_each(NEW.snapshot->'activeGames') LOOP\n        CONTINUE; -- MUTATION bypasses active pairing structure")], 'pg-migration'],
+  ['duplicate simultaneous player escapes repair projection', [edit('migration', 'OR white_player = ANY(active_players) OR black_player = ANY(active_players)', 'OR false')], 'pg-migration'],
+  ['invalid pairing sequence escapes repair projection', [edit('migration', 'IF sequence_value <= 0 OR sequence_value > 9007199254740991\n           OR sequence_value <> trunc(sequence_value) OR sequence_value > max_sequence THEN', 'IF false THEN')], 'pg-migration'],
 ];
 // A named PostgreSQL witness makes each kill attributable to its intended
 // invariant. Full positive suites run separately; mutation runs need no unrelated cases.
 const pgWitnesses = new Map([
+  ['linked active pairing bypasses structural repair validation', 'active pairing corruption is immediate repair even when linked before expiry'],
+  ['duplicate simultaneous player escapes repair projection', 'active pairing corruption is immediate repair even when linked before expiry'],
+  ['invalid pairing sequence escapes repair projection', 'active pairing corruption is immediate repair even when linked before expiry'],
   ['ignore membership boundary on both query branches', 'membership boundary excludes late due, pending and invalid arrivals on both query branches'],
   ['recompute membership boundary every page', 'membership boundary revisits earlier due work despite repeated middle-ID arrivals'],
   ['projection update advances existing membership', 'membership boundary survives worker restart with concurrent recovery and exact deadline'],

@@ -2603,7 +2603,7 @@ export function buildRouter(deps: RouteDeps): Router {
       const timeControl = parseTimeControl(body['timeControl']);
 
       if (format === 'arena') {
-        const durationMs = optInt(body, 'durationMs');
+        const durationMs = optInt(body, 'durationMs', { min: 1, max: Number.MAX_SAFE_INTEGER });
         if (!durationMs) throw HttpError.validation('durationMs is required for arena format');
         const t = await arenaService.create({
           id: ids.next(),

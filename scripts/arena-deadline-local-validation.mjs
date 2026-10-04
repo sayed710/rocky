@@ -31,8 +31,8 @@ for (const [name, args, hermetic] of gates.slice(start)) {
     encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const output = (result.stdout ?? '') + (result.stderr ?? '');
   writeFileSync(join(root, `arena-validation-${name.replaceAll(':', '-')}.log`), output);
-  const totals = [...output.matchAll(/(?:ℹ|#) tests (\d+)/g)].map(match => Number(match[1]));
-  const skips = [...output.matchAll(/(?:ℹ|#) skipped (\d+)/g)].map(match => Number(match[1]));
+  const totals = [...output.matchAll(/^(?:ℹ|#) tests (\d+)\s*$/gm)].map(match => Number(match[1]));
+  const skips = [...output.matchAll(/^(?:ℹ|#) skipped (\d+)\s*$/gm)].map(match => Number(match[1]));
   const record = { gate: name, exitCode: result.status, tests: totals.reduce((a, b) => a + b, 0),
     skipped: skips.reduce((a, b) => a + b, 0), signal: result.signal };
   evidence.push(record);

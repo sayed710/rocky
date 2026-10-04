@@ -128,6 +128,9 @@ export class ArenaService {
   }
 
   async create(cmd: CreateArenaCommand): Promise<ArenaTournament> {
+    if (!Number.isSafeInteger(cmd.durationMs) || cmd.durationMs <= 0) {
+      throw HttpError.validation('durationMs must be a positive safe integer', { durationMs: 'must be a positive safe integer' });
+    }
     const existing = await this.repo.findById(cmd.id);
     if (existing) {
       throw HttpError.conflict('Tournament ID already exists', { id: cmd.id });

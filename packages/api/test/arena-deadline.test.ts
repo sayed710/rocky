@@ -10,8 +10,56 @@ import { createPgApiServer } from '../src/bootstrap';
 import { JsonLogger, NullLogger } from '../src/ports/logger';
 import { HttpError } from '../src/http/errors';
 import { InMemoryEmailSender } from '../src/ports/email';
+import { arenaFailureFields } from '../src/tournament/arena-diagnostics';
+import { startHarness } from './helpers';
 
 const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } as const;
+
+test('Qodo correction: direct creation rejects invalid duration before persistence', async () => {
+  const repo = new InMemoryTournamentsRepository();
+  const service = new ArenaService(repo, new InMemoryGameLauncher({ next: () => 'game' }));
+  for (const durationMs of [-1000, 0, Number.MAX_SAFE_INTEGER + 1, 1e300, 1.5, NaN, Infinity]) {
+    await assert.rejects(service.create({ id: 'invalid-duration', name: 'invalid', variant: 'standard', timeControl: TC, durationMs }),
+      (error: unknown) => error instanceof HttpError && error.status === 422 && error.code === 'validation_failed');
+    assert.equal(await repo.findById('invalid-duration'), null);
+  }
+  for (const durationMs of [1, 30 * 24 * 60 * 60 * 1000 + 1, Number.MAX_SAFE_INTEGER]) {
+    const id = `valid-${durationMs}`;
+    assert.equal((await service.create({ id, name: id, variant: 'standard', timeControl: TC, durationMs })).config.durationMs, durationMs);
+    assert.ok(await repo.findById(id));
+  }
+});
+
+test('Qodo correction: HTTP creation rejects invalid duration without a save', async t => {
+  const h = await startHarness();
+  t.after(() => h.close());
+  const { token } = await h.makeUser('duration_director', ['user', 'tournament_director']);
+  const save = h.tournamentRepo.save.bind(h.tournamentRepo);
+  let saves = 0;
+  h.tournamentRepo.save = async (...args) => { saves++; return save(...args); };
+  for (const durationMs of [-1000, 0, Number.MAX_SAFE_INTEGER + 1, 1e300, 1.5]) {
+    const response = await h.json('POST', '/v1/tournaments', { token,
+      body: { name: 'duration', format: 'arena', variant: 'standard', timeControl: TC, durationMs } });
+    assert.equal(response.status, 422, `duration ${durationMs}`);
+    assert.equal(response.body.error.code, 'validation_failed');
+    assert.equal(saves, 0, 'invalid input must never reach persistence');
+  }
+  const response = await h.json('POST', '/v1/tournaments', { token,
+    body: { name: 'valid', format: 'arena', variant: 'standard', timeControl: TC, durationMs: 1000 } });
+  assert.equal(response.status, 201);
+  assert.equal(saves, 1);
+});
+
+test('Qodo correction: repair diagnostics classify inactive games without leaking errors', () => {
+  for (const [error, expected] of [
+    [new Error('Invalid inactive Arena games; operator repair required'), { errorCategory: 'invalid_snapshot', repairRequired: true }],
+    [new Error('Invalid persisted Arena participants; operator repair required'), { errorCategory: 'invalid_snapshot', repairRequired: true }],
+    [new Error('Ambiguous ended legacy Arena launch; operator repair required'), { errorCategory: 'legacy_launch_repair', repairRequired: true }],
+    [Object.assign(new Error('private secret'), { code: 'ETIMEDOUT' }), { errorCategory: 'database_or_network', repairRequired: false, errorCode: 'ETIMEDOUT' }],
+    [Object.assign(new Error('private secret'), { code: '23505' }), { errorCategory: 'database_or_network', repairRequired: false, errorCode: '23505' }],
+    [Object.assign(new Error('unrelated private secret; operator repair required'), { code: 'unvetted secret' }), { errorCategory: 'unknown', repairRequired: false }],
+  ] as const) assert.deepEqual(arenaFailureFields(error), expected);
+});
 
 test('review regression: an empty cycle watermark never becomes an unbounded scan', async () => {
   const r = await rig();

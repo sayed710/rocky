@@ -1,0 +1,47 @@
+{
+  "startingHead": "e866eac1f6e214bca1d35ccf3e3b027a71a98cac",
+  "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+  "status": "STOP: unchanged gateway readiness test failed; cause unproven",
+  "focused": {
+    "apiAndDiagnosticsPassed": 3,
+    "postgresPassed": 2,
+    "skipped": 0
+  },
+  "fresh": {
+    "scriptsPassed": 320,
+    "hermeticPassed": 4003,
+    "gatewayExit": 1,
+    "persistencePassed": 205,
+    "guardsPassed": 8,
+    "apiPassed": 106,
+    "gatewaySkipped": 0,
+    "gatewayFailed": 1,
+    "gatewayBuildLint": "passed",
+    "buildLint": "passed",
+    "gatewayCancelled": 0,
+    "gatewayPassed": 85
+  },
+  "failingTest": "a move racing the expiry at the flag on different replicas yields exactly one timeout and no move",
+  "failure": "timed out waiting for both seats ready",
+  "compiledLocation": "flag-expiry.integration.test.js:129,176",
+  "redisETIMEDOUTInCapturedOutput": false,
+  "runtimeCompleted": true,
+  "mutations": "stale: fresh sweep not run; historical29/29 only e866eac",
+  "historicalInvalid": "variant27 SQLSTATE428C9: no kill credit",
+  "pending": [
+    "gateway diagnosis",
+    "backup/restore",
+    "fresh mutation sweep",
+    "final commit",
+    "exact-head review",
+    "new-head PR gates"
+  ],
+  "rawLogs": [
+    ".arena-qodo3-red-unit-correct-cwd.log",
+    ".arena-qodo3-red-pg.log",
+    ".arena-qodo3-green-unit.log",
+    ".arena-qodo3-green-pg-fixture-corrected.log",
+    ".arena-qodo3-full-validation.log",
+    "arena-validation-gateway-test.log"
+  ]
+}

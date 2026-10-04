@@ -11,6 +11,114 @@ const skip = process.env['DATABASE_URL'] ? false : 'DATABASE_URL not set';
 const migrations = resolve('migrations');
 const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } as const;
 
+test('active pairing corruption is immediate repair even when linked before expiry', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrations);
+    const repo = new PgTournamentsRepository(pool);
+    const arena = new ArenaTournament({ id: 'linked', name: 'future', format: 'arena', variant: 'standard', timeControl: TC, durationMs: 100 });
+    arena.register('A'); arena.register('B'); arena.start(9_000_000_000_000); arena.pairAvailable(9_000_000_000_000);
+    arena.register('C');
+    const original = arena.toSnapshot(), game = original.activeGames['a:1']!;
+    const member = (id: string, value: unknown, sequence: unknown = 1) => ({ activeGames: { [id]: value }, pairingSequence: sequence, gameLinks: [[id, 'linked-game']] });
+    const insert = async (id: string, change: Record<string, unknown>) => {
+      const snapshot = { ...original, ...change, config: { ...original.config, id } };
+      await pool.query('INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ($1,$1,\'arena\',\'running\',3,$2,1)', [id, JSON.stringify(snapshot)]);
+      return snapshot;
+    };
+    // Preserve Number(id.slice(2)) compatibility instead of inventing canonical-ID policy.
+    for (const [index, id] of ['a:1', 'a:01', 'a:+1', 'a:1e0', 'a:0x1', 'a:0o1', 'a:0b1', 'a:1.00000000000000001', 'a:\uFEFF1\u00A0'].entries()) {
+      const key = `valid-linked-${index}`;
+      ArenaTournament.restore(await insert(key, member(id, game)) as never);
+      const row = (await pool.query('SELECT invalid,pending_launch FROM arena_deadlines WHERE tournament_id=$1', [key])).rows[0];
+      assert.deepEqual(row, { invalid: false, pending_launch: false });
+      assert.ok(!(await repo.listArenaWorkAfter(null, 100)).includes(key));
+    }
+    ArenaTournament.restore(await insert('valid-pending', { gameLinks: [] }) as never);
+    assert.deepEqual((await pool.query('SELECT invalid,pending_launch FROM arena_deadlines WHERE tournament_id=$1', ['valid-pending'])).rows[0], { invalid: false, pending_launch: true });
+    assert.ok((await repo.listArenaWorkAfter(null, 100)).includes('valid-pending'));
+    const corruptions = [
+      member('a:1', { ...game, black: game.white }), member('a:1', null), member('a:1', []), member('a:1', {}),
+      member('a:1', { ...game, white: 1 }), member('a:1', { ...game, black: 'foreign' }),
+      member('a:1', { ...game, launchNamespace: 'unsupported' }), member('a:1', { ...game, launchNamespace: null }),
+      member('wrong:1', game), member('a:0', game), member('a:1.5', game), member('a:2', game),
+      member('a:9007199254740992', game, Number.MAX_SAFE_INTEGER), member('a:1e100000', game), member('a:1e-100000', game), member('a:1_0', game),
+      member('a:1', game, null), member('a:1', game, -1), member('a:1', game, 1.5), member('a:1', game, Number.MAX_SAFE_INTEGER + 1),
+      { activeGames: { 'a:1': game, 'a:2': { white: game.white, black: 'C' } }, pairingSequence: 2, gameLinks: [['a:1', 'one'], ['a:2', 'two']] },
+    ];
+    for (const [index, change] of corruptions.entries()) {
+      const key = `bad-pairing-${index}`;
+      const snapshot = await insert(key, change);
+      assert.throws(() => ArenaTournament.restore(snapshot as never), /Invalid persisted Arena/);
+      const row = (await pool.query('SELECT invalid,deadline_ms FROM arena_deadlines WHERE tournament_id=$1', [key])).rows[0];
+      assert.deepEqual(row, { invalid: true, deadline_ms: null }, `pairing corruption ${index}`);
+      assert.ok((await repo.listArenaWorkAfter(null, 100)).includes(key), 'linked corruption must be repair work without expiry');
+    }
+  });
+});
+
+test('Qodo correction: participant corruption is immediate repair work before future expiry', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrations);
+    const repo = new PgTournamentsRepository(pool);
+    const arena = new ArenaTournament({ id: 'healthy', name: 'future', format: 'arena', variant: 'standard', timeControl: TC, durationMs: 100 });
+    arena.register('A'); arena.start(9_000_000_000_000);
+    const original = arena.toSnapshot();
+    const corruptions = [
+      { playerStates: {} }, { participants: null }, { participants: {} }, { participants: ['A', 'A'] },
+      { participants: [17] }, { playerStates: [] }, { playerStates: { A: null } }, { playerStates: { A: 'state' } },
+      { playerStates: { A: { ...original.playerStates.A, points: -1 } } },
+      { playerStates: { A: { ...original.playerStates.A, wins: 1.5 } } },
+      { playerStates: { A: { ...original.playerStates.A, draws: '0' } } },
+      { playerStates: { A: { ...original.playerStates.A, gamesPlayed: 1 } } },
+      { playerStates: { A: { ...original.playerStates.A, consecutiveWins: Number.MAX_SAFE_INTEGER + 1 } } },
+      { playerStates: { A: { ...original.playerStates.A, onFire: null } } },
+      { playedAsWhite: {} }, { playedAsBlack: { A: -1 } }, { lastOpponents: [] },
+      { withdrawn: ['foreign'] }, { withdrawn: null },
+    ];
+    await repo.save(original, 0);
+    for (const [index, corruption] of corruptions.entries()) {
+      const id = `corrupt-${index}`;
+      const snapshot = { ...original, ...corruption, config: { ...original.config, id } };
+      assert.throws(() => ArenaTournament.restore(snapshot as never), /Invalid persisted Arena/);
+      // Legacy corruption must bypass the normal repository's participant-count
+      // derivation, which cannot represent a null participants container.
+      await pool.query('INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ($1,$1,\'arena\',\'running\',1,$2,1)', [id, JSON.stringify(snapshot)]);
+      const row = (await pool.query('SELECT invalid,deadline_ms FROM arena_deadlines WHERE tournament_id=$1', [id])).rows[0];
+      assert.equal(row.invalid, true, `corruption ${index} must surface immediately`);
+      assert.equal(row.deadline_ms, null);
+      assert.ok((await repo.listArenaWorkAfter(null, 100)).includes(id), 'worker scan encounters repair without expiry');
+    }
+    assert.ok(!(await repo.listArenaWorkAfter(null, 100)).includes('healthy'), 'healthy future Arena stays out of repair');
+  });
+});
+
+test('Qodo correction: 0049 backfills malformed participant and linked pairing repair membership', { skip }, async () => {
+  const earlier = await mkdtemp(join(process.cwd(), '.arena-migrations-'));
+  try {
+    for (const name of await readdir(migrations)) if (/^\d{4}_.*\.sql$/.test(name) && name < '0049') {
+      await copyFile(join(migrations, name), join(earlier, name));
+    }
+    await withTestDatabase(async ({ pool }) => {
+      await migrate(pool, earlier);
+      const arena = new ArenaTournament({ id: 'legacy-participant', name: 'legacy', format: 'arena', variant: 'standard', timeControl: TC, durationMs: 100 });
+      arena.register('A'); arena.start(9_000_000_000_000);
+      const snapshot = { ...arena.toSnapshot(), playerStates: {} };
+      await new PgTournamentsRepository(pool).save(snapshot, 0);
+      arena.register('B'); arena.pairAvailable(9_000_000_000_000);
+      const paired = arena.toSnapshot();
+      const corruptPairing = { ...paired, config: { ...paired.config, id: 'legacy-pairing' },
+        activeGames: { 'a:1': { ...paired.activeGames['a:1']!, white: 'A', black: 'A' } }, gameLinks: [['a:1', 'linked']] };
+      assert.throws(() => ArenaTournament.restore(corruptPairing as never), /Invalid persisted Arena pairing/);
+      await new PgTournamentsRepository(pool).save(corruptPairing as never, 0);
+      assert.equal(await migrate(pool, migrations), 1);
+      assert.equal(await migrate(pool, migrations), 0);
+      assert.equal((await pool.query('SELECT invalid FROM arena_deadlines WHERE tournament_id=$1', [arena.config.id])).rows[0].invalid, true);
+      assert.equal((await pool.query('SELECT invalid,deadline_ms FROM arena_deadlines WHERE tournament_id=$1', ['legacy-pairing'])).rows[0].invalid, true);
+      assert.deepEqual(await new PgTournamentsRepository(pool).listArenaWorkAfter(null, 50), ['legacy-pairing', arena.config.id]);
+    });
+  } finally { await rm(earlier, { recursive: true, force: true }); }
+});
+
 test('0049 backfills proven deadlines, preserves invalid evidence, reruns nothing, and uses work indexes', { skip }, async () => {
   const earlier = await mkdtemp(join(process.cwd(), '.arena-migrations-'));
   try {
