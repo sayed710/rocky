@@ -6,6 +6,9 @@
  */
 
 import type { Pool, PoolClient } from 'pg';
+import { isDeepStrictEqual } from 'node:util';
+import { abortableQuery, borrowClient } from './abortable-client';
+import type { ArenaSnapshot } from '@chess-platform/tournament';
 import type { Variant } from '@chess-platform/core';
 import type { ResultString, Termination, TimeControl, GameEvent } from '@chess-platform/game';
 import type {
@@ -48,7 +51,7 @@ import type {
 import { SEEK_TTL_MS, SPEEDS } from '../repositories';
 import { CURRENT_EVENT_VERSION } from '../event-store.js';
 import { lockGameCreationPlayers, retryPlayerLockContention } from './event-store.js';
-import { DuplicateUserError, VersionConflictError } from '../errors';
+import { ArenaFormatMismatchError, DuplicateUserError, VersionConflictError } from '../errors';
 
 const SEEK_TTL_INTERVAL = `${Math.floor(SEEK_TTL_MS / 1000)} seconds`;
 
@@ -852,6 +855,96 @@ export class PgGameStarter implements GameStarter {
 export class PgTournamentsRepository implements TournamentsRepository {
   constructor(private readonly pool: Pool) {}
 
+  private arenaSnapshot(row: TournamentDbRow, id: string): ArenaSnapshot {
+    if (row.format !== 'arena') throw new ArenaFormatMismatchError();
+    if (!row.snapshot?.config || row.snapshot.config.format !== 'arena' ||
+        row.snapshot.config.id !== id || row.snapshot.state !== row.state) {
+      throw new Error('Invalid persisted Arena structure; operator repair required');
+    }
+    return row.snapshot as ArenaSnapshot;
+  }
+
+  private arenaTime(ms: string | null | undefined): number {
+    if (ms == null) throw new Error('Arena database time is unavailable');
+    const nowMs = Number(ms);
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0) throw new Error('Arena database time is not an exact millisecond');
+    return nowMs;
+  }
+
+  async readArena(id: string, _simulationClock?: () => number, signal?: AbortSignal): Promise<{ snapshot: ArenaSnapshot; nowMs: number } | null> {
+    const result = await abortableQuery<TournamentDbRow & { ms: string | null }>(this.pool, signal,
+      `SELECT snapshot, version, state, format,
+         floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS ms
+       FROM tournaments WHERE id = $1`, [id]);
+    const row = result.rows[0];
+    return row ? { snapshot: this.arenaSnapshot(row, id), nowMs: this.arenaTime(row.ms) } : null;
+  }
+
+  async mutateArena(id: string, apply: (snapshot: ArenaSnapshot, nowMs: number) => ArenaSnapshot,
+    _simulationClock?: () => number, signal?: AbortSignal): Promise<ArenaSnapshot | null> {
+    const borrowed = await borrowClient(this.pool, signal);
+    const { client } = borrowed;
+    try {
+      await client.query('BEGIN');
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      const locked = await client.query<TournamentDbRow>('SELECT snapshot, version, state, format FROM tournaments WHERE id = $1 FOR UPDATE', [id]);
+      const row = locked.rows[0];
+      if (!row) { await client.query('COMMIT'); return null; }
+      const before = this.arenaSnapshot(row, id);
+      // clock_timestamp(), unlike transaction_timestamp(), advances while waiting for a lock.
+      const time = await client.query<{ ms: string | null }>('SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS ms');
+      const nowMs = this.arenaTime(time.rows[0]?.ms);
+      const snapshot = apply(structuredClone(before), nowMs);
+      if (snapshot.config.id !== id) throw new Error('Arena identity changed during mutation');
+      if (!isDeepStrictEqual(snapshot.config, before.config)) throw new Error('Arena configuration is immutable');
+      if (before.state === 'registration' && snapshot.state === 'running' && snapshot.startedAtMs !== nowMs) {
+        throw new Error('Arena start must use database time');
+      }
+      if (before.startedAtMs !== undefined && snapshot.startedAtMs !== before.startedAtMs) throw new Error('Arena start instant is immutable');
+      if (!isDeepStrictEqual(snapshot, before)) {
+        signal?.throwIfAborted();
+        const newPairing = snapshot.pairingSequence > before.pairingSequence;
+        const deadline = snapshot.startedAtMs === undefined ? null : snapshot.startedAtMs + snapshot.config.durationMs;
+        // Authorization linearizes at this write, never at an earlier process-side read.
+        const written = await client.query(
+          `UPDATE tournaments SET snapshot = $2::jsonb, state = $3, participant_count = $4,
+             version = version + 1, updated_at = clock_timestamp()
+           WHERE id = $1 AND version = $5
+             AND (NOT $6::boolean OR floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint < $7::bigint)`,
+          [id, JSON.stringify(snapshot), snapshot.state, snapshot.participants.length, row.version, newPairing, deadline]);
+        if (written.rowCount !== 1) throw new VersionConflictError(id, row.version);
+      }
+      signal?.throwIfAborted();
+      await client.query('COMMIT');
+      return snapshot;
+    } catch (error) { if (!signal?.aborted) await rollback(client); throw error; }
+    finally { borrowed.release(); }
+  }
+
+  async arenaWorkCeiling(signal?: AbortSignal): Promise<string | null> {
+    const result = await abortableQuery<{ ceiling: string }>(this.pool, signal,
+      'SELECT work_sequence::text AS ceiling FROM arena_deadlines ORDER BY work_sequence DESC LIMIT 1');
+    return result.rows[0]?.ceiling ?? null;
+  }
+
+  async listArenaWorkAfter(afterId: string | null, limit: number, signal?: AbortSignal, throughSequence?: string | null): Promise<string[]> {
+    const result = await abortableQuery<{ tournament_id: string }>(this.pool, signal,
+      `SELECT tournament_id FROM (
+         (SELECT tournament_id FROM arena_deadlines WHERE (invalid OR pending_launch)
+           AND ($1::text IS NULL OR tournament_id > $1)
+           AND ($3::bigint IS NULL OR work_sequence <= $3)
+           ORDER BY tournament_id LIMIT $2)
+         UNION
+         (SELECT tournament_id FROM arena_deadlines
+           WHERE NOT invalid AND deadline_ms <= floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint
+           AND ($1::text IS NULL OR tournament_id > $1)
+           AND ($3::bigint IS NULL OR work_sequence <= $3)
+           ORDER BY tournament_id LIMIT $2)
+       ) AS work
+       ORDER BY tournament_id LIMIT $2`, [afterId, limit, throughSequence ?? null]);
+    return result.rows.map(row => row.tournament_id);
+  }
+
   async save(snapshot: TournamentAnySnapshot, expectedVersion: number): Promise<void> {
     if (expectedVersion === 0) {
       try {
@@ -900,8 +993,8 @@ export class PgTournamentsRepository implements TournamentsRepository {
     }
   }
 
-  async findById(id: string): Promise<{ snapshot: TournamentAnySnapshot; version: number } | null> {
-    const res = await this.pool.query<TournamentDbRow>(
+  async findById(id: string, signal?: AbortSignal): Promise<{ snapshot: TournamentAnySnapshot; version: number } | null> {
+    const res = await abortableQuery<TournamentDbRow>(this.pool, signal,
       'SELECT snapshot, version FROM tournaments WHERE id = $1',
       [id]
     );

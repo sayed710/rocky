@@ -147,6 +147,7 @@ export function createApiServer(deps: ApiDependencies, options: ApiServerOptions
   // hand the router the password hasher and the token service, which no route has any business
   // reaching.
   const forwarded: ForwardedDeps = {
+    logger,
     repos: deps.repos,
     clock: deps.clock,
     ids: deps.ids,
@@ -184,6 +185,7 @@ export function createApiServer(deps: ApiDependencies, options: ApiServerOptions
 
   const router = buildRouter({
     ...forwarded,
+    logger,
     // The router builds neither of these, and the bundle carries neither.
     auth,
     info,

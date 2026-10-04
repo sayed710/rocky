@@ -20,6 +20,7 @@ export * from './tournament/durable-live-view';
 export * from './ports/pg-rate-limiter';
 export * from './tournament/service';
 export * from './tournament/arena.service';
+export * from './tournament/arena-deadline-worker';
 export * from './tournament/live-view';
 export * from './tournament/reporter';
 export * from './terminal-event-reconciler';

@@ -56,3 +56,13 @@ test('InMemoryGameLauncher treats a bumped attempt as a fresh game', async () =>
   assert.equal(replay.gameId, 'game-1', 'a new attempt launches a distinct game');
   assert.equal(launcher.launched.length, 2);
 });
+
+test('InMemoryGameLauncher isolates committed Arena namespace from legacy slots', async () => {
+  const launcher = new InMemoryGameLauncher(counterIds());
+  const legacy = await launcher.launch(input({ matchId: 'a:1' }));
+  const committed = input({ matchId: 'a:1', arenaLaunchNamespace: 'committed-v1', committedArenaPairing: true });
+  const fresh = await launcher.launch(committed);
+  assert.notEqual(fresh.gameId, legacy.gameId);
+  assert.deepEqual(await launcher.launch(committed), fresh);
+  assert.equal(launcher.launched.length, 2);
+});

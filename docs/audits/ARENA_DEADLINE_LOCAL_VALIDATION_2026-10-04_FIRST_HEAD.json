@@ -1,0 +1,239 @@
+[
+  {
+    "gate": "build",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "lint",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:observability",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:build-order",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:deploy-gates",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:adr-claims",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:ci-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:variant-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:engine-pin-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:test-topology",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "test:scripts",
+    "exitCode": 0,
+    "tests": 320,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "hermetic",
+    "exitCode": 0,
+    "tests": 3943,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "postgres:persistence",
+    "exitCode": 0,
+    "tests": 202,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "postgres:api",
+    "exitCode": 0,
+    "tests": 99,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "gateway:build",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "gateway:lint",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "gateway:test",
+    "exitCode": 1,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null,
+    "completedSuite": false,
+    "partialPassed": 39,
+    "partialFailed": 1,
+    "stopReason": "Unchanged flag-expiry seat-readiness assertion failed with Redis ETIMEDOUT; flag/no-show test processes remained alive without suite summary. Stopped task test container; no retry, timeout/worker/security change, or pass claim."
+  },
+  {
+    "gate": "gateway:flag-expiry-focused",
+    "exitCode": 0,
+    "tests": 1,
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "signal": null,
+    "startedAt": "2026-10-03T22:41:27.127Z",
+    "finishedAt": "2026-10-03T22:41:33.609Z",
+    "completedSuite": true,
+    "linux": true,
+    "redisTimeout": false,
+    "sourcesUnchanged": true,
+    "note": "One owner-authorized bounded execution; earlier failed/hung run retained. No test, production, timeout, retry, worker, Redis or security changes. Precise earlier transient cause remains unproven."
+  },
+  {
+    "gate": "gateway:test:bounded-clean",
+    "exitCode": 0,
+    "tests": 86,
+    "passed": 86,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "signal": null,
+    "startedAt": "2026-10-03T22:41:33.610Z",
+    "finishedAt": "2026-10-03T22:42:04.038Z",
+    "completedSuite": true,
+    "linux": true,
+    "redisTimeout": false,
+    "sourcesUnchanged": true,
+    "note": "One owner-authorized bounded execution; earlier failed/hung run retained. No test, production, timeout, retry, worker, Redis or security changes. Precise earlier transient cause remains unproven."
+  },
+  {
+    "gate": "test:scripts:integration",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 2,
+    "skipped": 0
+  },
+  {
+    "gate": "openapi:no-drift",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0,
+    "sourceUnchanged": false
+  },
+  {
+    "gate": "openapi:normalized-content-proof",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "normalizedContentEqualsMain": true,
+    "generatedArtifactRestored": true,
+    "note": "The preceding raw-byte check detected CRLF-to-LF generator normalization only. Entire normalized generated text exactly matches HEAD/main; no schema/public contract change. Generator was not rerun."
+  },
+  {
+    "gate": "check:observability:final",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0
+  },
+  {
+    "gate": "check:build-order:final",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0
+  },
+  {
+    "gate": "check:deploy-gates:final",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0
+  },
+  {
+    "gate": "check:adr-claims:final",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0
+  },
+  {
+    "gate": "check:ci-parity:final",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0
+  },
+  {
+    "gate": "check:variant-parity:final",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0
+  },
+  {
+    "gate": "check:engine-pin-parity:final",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0
+  },
+  {
+    "gate": "check:test-topology:final",
+    "exitCode": 0,
+    "signal": null,
+    "tests": 0,
+    "skipped": 0
+  }
+]

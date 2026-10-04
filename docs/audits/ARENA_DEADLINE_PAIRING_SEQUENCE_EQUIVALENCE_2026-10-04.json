@@ -1,0 +1,49 @@
+{
+  "scope": "Read-only bounded pairing-ID equivalence review; no repository or database row edits",
+  "source": "ArenaTournament.restore uses Number(id.slice(2)) and safe-integer bounds",
+  "records": [
+    {
+      "id": "a:1",
+      "jsSequence": 1,
+      "domainRestores": true,
+      "postgresNumeric": "1",
+      "canonicalDecimalId": true
+    },
+    {
+      "id": "a:01",
+      "jsSequence": 1,
+      "domainRestores": true,
+      "postgresNumeric": "1",
+      "canonicalDecimalId": false
+    },
+    {
+      "id": "a:1e0",
+      "jsSequence": 1,
+      "domainRestores": true,
+      "postgresNumeric": "1",
+      "canonicalDecimalId": false
+    },
+    {
+      "id": "a:0x1",
+      "jsSequence": 1,
+      "domainRestores": true,
+      "postgresNumeric": "1",
+      "canonicalDecimalId": false
+    },
+    {
+      "id": "a:0b1",
+      "jsSequence": 1,
+      "domainRestores": true,
+      "postgresNumeric": "1",
+      "canonicalDecimalId": false
+    },
+    {
+      "id": "a:1.00000000000000001",
+      "jsSequence": 1,
+      "domainRestores": true,
+      "postgresNumeric": "1.00000000000000001",
+      "canonicalDecimalId": false
+    }
+  ],
+  "conclusion": "Canonical decimal-only validation would reject currently restorable snapshots; raw NUMERIC integer validation differs for rounded decimal spellings. Full preservation requires deliberate Number-compatible conversion rather than a direct regex/cast."
+}

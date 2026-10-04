@@ -1,0 +1,402 @@
+{
+  "startingPublishedHead": "35c91fe893e1a677a6328a7dd1345d9c8627ee51",
+  "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+  "scope": "Owner-approved persisted startedAtMs/durationMs projection parity; preserve uncommitted fifth counter fix",
+  "RED": {
+    "isolatedOriginalWitness": {
+      "baseHead": "35c91fe893e1a677a6328a7dd1345d9c8627ee51",
+      "candidate": "approved counter-only correction, uncommitted",
+      "results": [
+        {
+          "durationSpelling": "1",
+          "materializedDuration": 1,
+          "restoreAccepted": true,
+          "domainState": "running",
+          "projection": {
+            "invalid": false,
+            "pending_launch": false,
+            "deadline_ms": "9000000000001"
+          }
+        },
+        {
+          "durationSpelling": "1.00000000000000001",
+          "materializedDuration": 1,
+          "restoreAccepted": true,
+          "domainState": "running",
+          "projection": {
+            "invalid": true,
+            "pending_launch": false,
+            "deadline_ms": null
+          }
+        }
+      ],
+      "fixtureCleanup": true,
+      "classification": "Different deadline/duration NUMERIC-versus-JS materialization boundary; policy not chosen; user explicit STOP condition applies",
+      "productionChangesForThisWitness": false
+    },
+    "compiledFocusedExit": 1,
+    "rawLogs": [
+      ".arena-qodo6-original-duration-red.log",
+      ".arena-qodo6-timing-red.log"
+    ],
+    "actualStoredRoundedDurationSpellingProvenByFocusedTest": true
+  },
+  "GREEN": {
+    "focusedTests": 7,
+    "passed": 7,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "rawLog": ".arena-qodo6-focused-green.log",
+    "originalUnchangedWitness": {
+      "results": [
+        {
+          "durationSpelling": "1",
+          "materializedDuration": 1,
+          "restoreAccepted": true,
+          "domainState": "running",
+          "projection": {
+            "invalid": false,
+            "pending_launch": false,
+            "deadline_ms": "9000000000001"
+          }
+        },
+        {
+          "durationSpelling": "1.00000000000000001",
+          "materializedDuration": 1,
+          "restoreAccepted": true,
+          "domainState": "running",
+          "projection": {
+            "invalid": false,
+            "pending_launch": false,
+            "deadline_ms": "9000000000001"
+          }
+        }
+      ],
+      "fixtureCleanup": true,
+      "candidate": "joint fifth/sixth correction after fresh positives and43 mutations; original probe descriptors are historical",
+      "exitCode": 0
+    }
+  },
+  "semantics": "Guarded JS DOUBLE PRECISION timing; start>=0, duration>0, individual safe integers; +/- underflow becomes zero and field-specific checks apply. Proven safe integers convert through BIGINT to exact NUMERIC sum, then safe-sum bound. Original decimal spellings never supply deadline addition; snapshot unchanged.",
+  "coverage": "18 representative actual repository/domain restore+start fixtures: rounded duration/start, +/- underflow, fractions, negatives, unsafe/overflow fields, full integer precision, safe and rounded-safe sum boundary, unsafe sum; migration/backfill/rerun. Fifth counter and prior participant/pairing controls remain green.",
+  "validation": {
+    "status": "All required local positive/mutation/documentation gates passed; final commit/exact-head and PR acceptance gates pending",
+    "build": "passed",
+    "lint": "passed",
+    "guards": 8,
+    "scripts": 315,
+    "hermetic": 4003,
+    "postgresPersistence": 210,
+    "postgresApi": 106,
+    "gatewayBuild": "passed",
+    "gatewayLint": "passed",
+    "gateway": {
+      "tests": 86,
+      "passed": 86,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "redisTimeoutMessages": 2,
+      "rootCauseProven": false,
+      "diagnosis": "ARENA_DEADLINE_QODO6_GATEWAY_DIAGNOSIS_2026-10-04.json"
+    },
+    "backupRestore": 2,
+    "positiveFailures": 0,
+    "positiveSkips": 0,
+    "positiveCancellations": 0,
+    "originalSocialFailure": "Preserved unreproduced1245/1; cause indeterminate",
+    "originalGatewayFailure": "Preserved84/2 and ETIMEDOUT; causality unproven",
+    "sourceFingerprintsUnchanged": true
+  },
+  "mutations": {
+    "totalAttempts": 43,
+    "validExecutableMutants": 43,
+    "killedValidMutants": 43,
+    "survivingValidMutants": 0,
+    "invalidMutants": 0,
+    "historicalInvalid": {
+      "variant": 27,
+      "code": "428C9",
+      "killCredit": 0
+    },
+    "rawSourcesVerified": 8,
+    "positiveSourceUnchanged": true,
+    "expectedCancellations": [
+      {
+        "mutant": 1,
+        "cancelled": 1,
+        "killCreditForCancellation": 0,
+        "independentAssertionKill": true
+      },
+      {
+        "mutant": 2,
+        "cancelled": 1,
+        "killCreditForCancellation": 0,
+        "independentAssertionKill": true
+      }
+    ],
+    "behavioralException": {
+      "mutant": 15,
+      "evidence": "Required successful DB-clock start throws after forbidden simulation-clock use; compiled, executable"
+    },
+    "otherKillEvidence": "42 mutants reach intended assertions; no compiler/schema/infrastructure kill credit",
+    "rawCaptureDirectory": "C:/Users/hp/AppData/Local/Temp/rocky-arena-qodo6-mutation-capture"
+  },
+  "review": "Pending true final commit and fresh reviewer hierarchy/new-head PR gates",
+  "hermeticDiagnosis": {
+    "preflight": {
+      "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+      "publishedHead": "35c91fe893e1a677a6328a7dd1345d9c8627ee51",
+      "pr": "OPEN/unmerged",
+      "preservedFiles": 35,
+      "backupHashMismatches": 0
+    },
+    "source": "packages/api/test/social-api.test.ts",
+    "compiled": "packages/api/dist-test/test/social-api.test.js",
+    "originalCommand": "npm test -> scripts/run-hermetic-tests.mjs -> npm run test --workspace @chess-platform/api -> build:test && test:unit -> node ../../scripts/run-zero-skip.mjs -- node --test --test-concurrency=1 \"dist-test/test/**/!(analysis-*smoke|analysis-real-stack|*.integration|*.posix).test.js\"",
+    "original": {
+      "exitCode": 1,
+      "outerSignal": null,
+      "apiPassed": 1245,
+      "apiFailed": 1,
+      "apiTests": 1246,
+      "skipped": 0,
+      "cancelled": 0,
+      "fileDurationMs": 706.1766,
+      "normalSocialSubtestDiagnosticsPresent": false,
+      "underlyingErrorRecovered": false,
+      "stderrCapture": "Original spawnSync concatenated stdout then stderr; existing raw output preserved, cannot reconstruct missing child diagnostics",
+      "childExitSignalOrAssertion": "Not recorded by original spec reporter; cannot distinguish crash/assertion from missing error",
+      "rawLog": "arena-validation-hermetic.log"
+    },
+    "dependencies": {
+      "harness": "In-memory repositories/manual clock with ephemeral local HTTP server, existing fetchable-port helper and awaited close",
+      "externalPostgresRedis": "DATABASE_URL and REDIS_URL removed by hermetic runner",
+      "staleArenaTestProcessesObserved": false,
+      "staleTaskGatewayContainerObserved": false,
+      "relevantServiceErrorsObserved": false,
+      "portResourceCollision": "No evidence proving collision; original child PID/port unrecorded",
+      "arenaInfluence": "Fifth/sixth local executable edits confined to migration0049, PostgreSQL integration tests and mutation script, not executed by social hermetic path. Published Arena branch has shared server/routes/fakes changes, but social test/helpers/harness runners match main. No causal connection proven."
+    },
+    "focused": [
+      {
+        "started": "2026-10-04T15:32:01.158Z",
+        "ended": "2026-10-04T15:32:02.009Z",
+        "cwd": "C:\\Users\\hp\\AppData\\Local\\Temp\\rocky-arena-deadline-authority/packages/api",
+        "executable": "C:\\Program Files\\nodejs\\node.exe",
+        "node": "v24.15.0",
+        "args": [
+          "--test",
+          "--test-concurrency=1",
+          "--test-reporter=tap",
+          "dist-test/test/social-api.test.js"
+        ],
+        "databaseEnvironmentRemoved": true,
+        "redisEnvironmentRemoved": true,
+        "exitCode": 0,
+        "signal": null,
+        "error": null,
+        "tests": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "cancelled": 0,
+        "stdout": ".arena-qodo6-social-focused-1.stdout.log",
+        "stderr": ".arena-qodo6-social-focused-1.stderr.log",
+        "stderrBytes": 0
+      },
+      {
+        "started": "2026-10-04T15:32:08.220Z",
+        "ended": "2026-10-04T15:32:09.081Z",
+        "cwd": "C:\\Users\\hp\\AppData\\Local\\Temp\\rocky-arena-deadline-authority/packages/api",
+        "executable": "C:\\Program Files\\nodejs\\node.exe",
+        "node": "v24.15.0",
+        "args": [
+          "--test",
+          "--test-concurrency=1",
+          "--test-reporter=tap",
+          "dist-test/test/social-api.test.js"
+        ],
+        "databaseEnvironmentRemoved": true,
+        "redisEnvironmentRemoved": true,
+        "exitCode": 0,
+        "signal": null,
+        "error": null,
+        "tests": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "cancelled": 0,
+        "stdout": ".arena-qodo6-social-focused-2.stdout.log",
+        "stderr": ".arena-qodo6-social-focused-2.stderr.log",
+        "stderrBytes": 0
+      },
+      {
+        "started": "2026-10-04T15:32:14.399Z",
+        "ended": "2026-10-04T15:32:15.262Z",
+        "cwd": "C:\\Users\\hp\\AppData\\Local\\Temp\\rocky-arena-deadline-authority/packages/api",
+        "executable": "C:\\Program Files\\nodejs\\node.exe",
+        "node": "v24.15.0",
+        "args": [
+          "--test",
+          "--test-concurrency=1",
+          "--test-reporter=tap",
+          "dist-test/test/social-api.test.js"
+        ],
+        "databaseEnvironmentRemoved": true,
+        "redisEnvironmentRemoved": true,
+        "exitCode": 0,
+        "signal": null,
+        "error": null,
+        "tests": 3,
+        "passed": 3,
+        "failed": 0,
+        "skipped": 0,
+        "cancelled": 0,
+        "stdout": ".arena-qodo6-social-focused-3.stdout.log",
+        "stderr": ".arena-qodo6-social-focused-3.stderr.log",
+        "stderrBytes": 0
+      }
+    ],
+    "fullApi": {
+      "started": "2026-10-04T15:32:34.734Z",
+      "ended": "2026-10-04T15:33:51.642Z",
+      "cwd": "C:\\Users\\hp\\AppData\\Local\\Temp\\rocky-arena-deadline-authority/packages/api",
+      "args": [
+        "../../scripts/run-zero-skip.mjs",
+        "--",
+        "C:\\Program Files\\nodejs\\node.exe",
+        "--test",
+        "--test-concurrency=1",
+        "--test-reporter=tap",
+        "dist-test/test/**/!(analysis-*smoke|analysis-real-stack|*.integration|*.posix).test.js"
+      ],
+      "node": "v24.15.0",
+      "exitCode": 0,
+      "signal": null,
+      "error": null,
+      "tests": 1248,
+      "passed": 1248,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0,
+      "stdout": ".arena-qodo6-social-full-api.stdout.log",
+      "stderr": ".arena-qodo6-social-full-api.stderr.log",
+      "countExplanation": "Original failed file counted as1 instead of its3 individual tests"
+    },
+    "classification": "Observed unreproduced failure; cause remains indeterminate; no transient/flaky/Redis/timing/infrastructure attribution",
+    "repositoryBehaviorChangesForDiagnosis": false
+  },
+  "validationHistory": [
+    {
+      "status": "STOPPED: required hermetic gate failed; no rerun",
+      "passed": [
+        "build",
+        "lint",
+        "all eight check:* guards",
+        "test:scripts 315/315"
+      ],
+      "hermetic": {
+        "exitCode": 1,
+        "completedTestCount": 1615,
+        "apiWorkspace": {
+          "tests": 1246,
+          "passed": 1245,
+          "failed": 1,
+          "cancelled": 0,
+          "skipped": 0,
+          "failingFile": "dist-test/test/social-api.test.js",
+          "reportedDurationMs": 706.1766,
+          "detail": "file-level test failed; no underlying assertion/child-process error present in captured output; cause indeterminate"
+        },
+        "rawLogs": [
+          ".arena-qodo6-full-validation.log",
+          "arena-validation-hermetic.log"
+        ]
+      },
+      "notRunAfterFailure": [
+        "full PostgreSQL persistence",
+        "PostgreSQL API",
+        "gateway build/lint/runtime",
+        "backup/restore",
+        "43-mutant sweep",
+        "final documentation guards",
+        "commit",
+        "exact-final-head review",
+        "push/new-head PR gates"
+      ]
+    },
+    {
+      "status": "STOPPED at gateway:test; no automatic rerun",
+      "build": "passed",
+      "lint": "passed",
+      "guards": 8,
+      "scripts": 315,
+      "hermetic": 4003,
+      "postgresPersistence": 210,
+      "postgresApi": 106,
+      "gatewayBuild": "passed",
+      "gatewayLint": "passed",
+      "positiveFailuresBeforeGateway": 0,
+      "positiveSkipsBeforeGateway": 0,
+      "positiveCancellationsBeforeGateway": 0,
+      "gateway": {
+        "exitCode": 1,
+        "signal": null,
+        "tests": 86,
+        "passed": 84,
+        "failed": 2,
+        "skipped": 0,
+        "cancelled": 0,
+        "durationMs": 29779.935894,
+        "failures": [
+          {
+            "test": "a move racing the expiry at the flag on different replicas yields exactly one timeout and no move",
+            "source": "services/gateway/test/flag-expiry.integration.test.ts:165",
+            "compiledWait": "dist-test/test/flag-expiry.integration.test.js:105",
+            "error": "timed out waiting for both seats ready",
+            "durationMs": 15930.723971
+          },
+          {
+            "test": "a first move racing the expiry at the deadline on different replicas yields exactly one no-show",
+            "source": "services/gateway/test/no-show-expiry.integration.test.ts:288",
+            "compiledWait": "dist-test/test/no-show-expiry.integration.test.js:111",
+            "error": "timed out waiting for both ready",
+            "durationMs": 14093.243271
+          }
+        ],
+        "redis": "Repeated connect ETIMEDOUT messages observed; causality not proven",
+        "classification": "indeterminate",
+        "rawLog": "arena-validation-gateway-test.log",
+        "continuationLog": ".arena-qodo6-remaining-validation.log",
+        "platform": "real linux/amd64 Docker, Dockerfile.gateway-test",
+        "command": "npm test --prefix services/gateway -> scripts/run-gateway-tests.mjs -> npm run test:runtime -> tsc + run-zero-skip node --test dist-test/test/**/*.test.js",
+        "environment": "Existing task-only chess_arena_timing_v7 on host PG55432 and Redis56379, loopback URLs mapped to host.docker.internal by unchanged gateway runner",
+        "lifecycle": "Temporary image build and --rm runtime; runner cleaned image; no matching task gateway container/process remained. happy_hellman is unrelated GitHub MCP server, untouched.",
+        "noRerun": true
+      },
+      "pending": [
+        "backup/restore",
+        "fresh43 mutation sweep",
+        "final documentation guards",
+        "commit",
+        "exact-final-head review",
+        "push/new-head PR gates"
+      ],
+      "sourceFingerprintsUnchanged": true
+    }
+  ],
+  "finalDocumentation": {
+    "guards": 8,
+    "allPassed": true,
+    "scripts": 315,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "openApiFullNormalizedTextEqualsMain": true,
+    "originalOpenApiBytesRestored": true,
+    "positiveSourceFingerprintsUnchanged": true,
+    "increment88PreservedExactly": true
+  }
+}

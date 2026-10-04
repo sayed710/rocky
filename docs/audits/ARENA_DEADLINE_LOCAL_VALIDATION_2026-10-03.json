@@ -1,0 +1,121 @@
+[
+  {
+    "gate": "build",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "lint",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:observability",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:build-order",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:deploy-gates",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:adr-claims",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:ci-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:variant-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:engine-pin-parity",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "check:test-topology",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "test:scripts",
+    "exitCode": 0,
+    "tests": 317,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "hermetic",
+    "exitCode": 0,
+    "tests": 3943,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "postgres:persistence",
+    "exitCode": 0,
+    "tests": 202,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "postgres:api",
+    "exitCode": 0,
+    "tests": 99,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "gateway:build",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "gateway:lint",
+    "exitCode": 0,
+    "tests": 0,
+    "skipped": 0,
+    "signal": null
+  },
+  {
+    "gate": "gateway:test",
+    "exitCode": 1,
+    "tests": 86,
+    "skipped": 0,
+    "signal": null
+  }
+]

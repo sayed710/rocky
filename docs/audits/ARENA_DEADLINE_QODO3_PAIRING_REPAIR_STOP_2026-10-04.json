@@ -1,0 +1,28 @@
+{
+  "status": "STOP: separately confirmed repair-discovery defect outside three approved Qodo corrections",
+  "head": "e866eac1f6e214bca1d35ccf3e3b027a71a98cac",
+  "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+  "proofExecutions": 1,
+  "proofExitCode": 1,
+  "compiledProductionUsed": true,
+  "mutation": false,
+  "case": "Running future Arena with valid participant/player states, linked a:1 pairing, and white=A/black=A",
+  "healthyControl": "Restoration succeeds; valid linked future work correctly excluded from scan",
+  "domainError": "Invalid persisted Arena pairing; operator repair required",
+  "actualProjection": {
+    "invalid": false,
+    "pending_launch": false,
+    "deadline_ms": "9000000000100"
+  },
+  "actualWorkerScan": [],
+  "failedAssertion": "domain-invalid paired snapshot must be immediately discoverable repair work: false !== true",
+  "effect": "Operator repair discovery delayed until expiry. Domain restoration still fails closed; unsafe pairing execution not demonstrated.",
+  "fixtureCleanup": "Disposable withTestDatabase callback completed and database cleaned before assertion",
+  "rawLog": ".arena-qodo3-pairing-gap-red.log",
+  "proofScript": "C:/Users/hp/AppData/Local/Temp/rocky-arena-qodo3-pairing-gap-proof.cjs",
+  "sourceChangeForFourthIssue": false,
+  "commitOrPush": false,
+  "exactFinalHeadReview": "not run; acceptance stopped before final commit",
+  "PRGates": "Published e866eac evidence is stale for local corrections; three unresolved Qodo threads remain",
+  "nextBoundary": "Owner authorization required before a fourth implementation fix; preserve current source/tests/evidence"
+}

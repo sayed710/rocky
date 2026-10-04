@@ -438,8 +438,20 @@ export interface TournamentSummaryRow {
 }
 
 export interface TournamentsRepository {
+  /** Lock-free snapshot and server-time sample from one database statement. */
+  readArena(id: string, simulationClock?: () => number, signal?: AbortSignal): Promise<{ snapshot: ArenaSnapshot; nowMs: number } | null>;
+  /** Short atomic Arena decision. Database time is sampled AFTER row-lock acquisition.
+   * The callback must be synchronous and perform no external work. simulationClock is
+   * used only by the in-memory test adapter; PostgreSQL never calls it. */
+  mutateArena(id: string, apply: (snapshot: ArenaSnapshot, nowMs: number) => ArenaSnapshot,
+    simulationClock?: () => number, signal?: AbortSignal): Promise<ArenaSnapshot | null>;
+  /** Rotating keyset scan; database-owned time determines due membership. */
+  listArenaWorkAfter(afterId: string | null, limit: number, signal?: AbortSignal, throughSequence?: string | null): Promise<string[]>;
+  /** Database-assigned membership sequence, including not-yet-due rows.
+   * Later memberships wait for a new cycle regardless of their tournament IDs. */
+  arenaWorkCeiling(signal?: AbortSignal): Promise<string | null>;
   save(snapshot: TournamentAnySnapshot, expectedVersion: number): Promise<void>;
-  findById(id: string): Promise<{ snapshot: TournamentAnySnapshot; version: number } | null>;
+  findById(id: string, signal?: AbortSignal): Promise<{ snapshot: TournamentAnySnapshot; version: number } | null>;
   list(limit: number): Promise<TournamentSummaryRow[]>;
   /** Running tournaments plus finished ones with terminal outcomes still requiring confirmation. */
   listRecoverableIdsAfter(afterId: string | null, limit: number): Promise<string[]>;

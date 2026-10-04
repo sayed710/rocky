@@ -1,0 +1,204 @@
+{
+  "startingHead": "35c91fe893e1a677a6328a7dd1345d9c8627ee51",
+  "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+  "ownerScope": "Participant/colour counters JS Number projection parity only",
+  "priorStop": {
+    "QodoBugs": 1,
+    "QodoRules": 0,
+    "GreptileActionable": 1,
+    "unresolvedThreads": 2,
+    "confirmedRealPostgresRED": true
+  },
+  "RED": {
+    "originalUnchangedWitnessExit": 1,
+    "focusedCompiledExit": 1,
+    "rawLogs": [
+      ".arena-qodo5-original-red.log",
+      ".arena-qodo5-counter-red-correct-cwd.log"
+    ],
+    "actualRepositoryMaterialization": {
+      "results": [
+        {
+          "input": "1.00000000000000001",
+          "materialized": 1,
+          "negativeZero": false,
+          "domainAccepted": true,
+          "projection": {
+            "invalid": true,
+            "pending_launch": false,
+            "deadline_ms": null
+          },
+          "work": true
+        },
+        {
+          "input": "1e-400",
+          "materialized": 0,
+          "negativeZero": false,
+          "domainAccepted": true,
+          "projection": {
+            "invalid": true,
+            "pending_launch": false,
+            "deadline_ms": null
+          },
+          "work": true
+        },
+        {
+          "input": "-1e-400",
+          "materialized": 0,
+          "negativeZero": true,
+          "domainAccepted": true,
+          "projection": {
+            "invalid": true,
+            "pending_launch": false,
+            "deadline_ms": null
+          },
+          "work": true
+        }
+      ],
+      "cleanup": true
+    },
+    "excludedInvocationError": "First compiled test invocation ran from root, ENOENT migrations; no RED/kill credit, corrected to persistence cwd"
+  },
+  "GREEN": {
+    "focused": 5,
+    "passed": 5,
+    "failed": 0,
+    "skipped": 0,
+    "cancelled": 0,
+    "rawLog": ".arena-qodo5-focused-green.log",
+    "actualRepositoryMaterialization": {
+      "results": [
+        {
+          "input": "1.00000000000000001",
+          "materialized": 1,
+          "negativeZero": false,
+          "domainAccepted": true,
+          "projection": {
+            "invalid": false,
+            "pending_launch": false,
+            "deadline_ms": "9000000000100"
+          },
+          "work": false
+        },
+        {
+          "input": "1e-400",
+          "materialized": 0,
+          "negativeZero": false,
+          "domainAccepted": true,
+          "projection": {
+            "invalid": false,
+            "pending_launch": false,
+            "deadline_ms": "9000000000100"
+          },
+          "work": false
+        },
+        {
+          "input": "-1e-400",
+          "materialized": 0,
+          "negativeZero": true,
+          "domainAccepted": true,
+          "projection": {
+            "invalid": false,
+            "pending_launch": false,
+            "deadline_ms": "9000000000100"
+          },
+          "work": false
+        }
+      ],
+      "cleanup": true
+    },
+    "originalUnchangedWitnessExit": 0,
+    "rawLogs": [
+      ".arena-qodo5-focused-green.log",
+      ".arena-qodo5-original-green.log",
+      ".arena-qodo5-materialization-green.log"
+    ]
+  },
+  "invariant": "All six participant counters and both colour maps use guarded DOUBLE PRECISION from proven JSON numbers; underflow becomes JS zero including negative zero equivalence, overflow is invalid. gamesPlayed equality uses those same eight converted values with left-to-right IEEE addition. Deadline/start/duration NUMERIC logic, domain restore and persisted JSONB remain unchanged.",
+  "coverage": "Rounded eight-counter spelling; +/- underflow; integer/MAX safe; fractional/negative/unsafe/overflow/inconsistent and colour fractional controls; real repository read; JSONB unchanged; pre49 backfill and rerun.",
+  "validation": {
+    "build": "pass",
+    "lint": "pass",
+    "guards": 8,
+    "scripts": 315,
+    "hermetic": 4003,
+    "persistence": 208,
+    "api": 106,
+    "gateway": 86,
+    "backupRestore": 2,
+    "positiveFailures": 0,
+    "unexpectedSkips": 0,
+    "unexpectedCancellations": 0,
+    "taskOnlyDatabase": "chess_arena_counter_v6",
+    "rawLog": ".arena-qodo5-full-validation.log",
+    "applicability": "Final counter-only source; subsequent stop documentation not rerun through guards; no final acceptance claimed"
+  },
+  "review": "Final local scope review discovered a separate duration NUMERIC/JS compatibility boundary. Explicit owner STOP condition applies; no final commit or new exact-head reviewer invocation.",
+  "mutations": {
+    "totalAttempts": 38,
+    "validExecutableMutants": 38,
+    "killedValidMutants": 38,
+    "survivingValidMutants": 0,
+    "invalidMutants": 0,
+    "historicalInvalid": {
+      "variant": 27,
+      "SQLSTATE": "428C9",
+      "killCredit": 0
+    },
+    "correctedVariant27": "work_sequence = DEFAULT compiled/killed by intended membership assertion",
+    "restoredSources": 8,
+    "independentlyVerified": true,
+    "positiveSourceHashesUnchanged": true,
+    "rawEvidenceDirectory": "C:/Users/hp/AppData/Local/Temp/rocky-arena-qodo5-mutation-capture",
+    "behavioralEvidence": "37 assertion kills; variant15 required DB-clock start throws after consuming forbidden simulation clock. No compiler/schema/infrastructure credit.",
+    "expectedMutantCancellations": [
+      {
+        "variant": 1,
+        "count": 1,
+        "case": "existing unchanged bootstrap settlement timeout under clock/cutoff mutation",
+        "killCredit": 0,
+        "independentAssertionKill": true
+      },
+      {
+        "variant": 2,
+        "count": 1,
+        "case": "existing unchanged bootstrap settlement timeout under clock/cutoff mutation",
+        "killCredit": 0,
+        "independentAssertionKill": true
+      }
+    ],
+    "unexpectedCancellations": 0,
+    "prior35Audit": "ARENA_DEADLINE_MUTATIONS_2026-10-04_35C91FE.json"
+  },
+  "stop": {
+    "baseHead": "35c91fe893e1a677a6328a7dd1345d9c8627ee51",
+    "candidate": "approved counter-only correction, uncommitted",
+    "results": [
+      {
+        "durationSpelling": "1",
+        "materializedDuration": 1,
+        "restoreAccepted": true,
+        "domainState": "running",
+        "projection": {
+          "invalid": false,
+          "pending_launch": false,
+          "deadline_ms": "9000000000001"
+        }
+      },
+      {
+        "durationSpelling": "1.00000000000000001",
+        "materializedDuration": 1,
+        "restoreAccepted": true,
+        "domainState": "running",
+        "projection": {
+          "invalid": true,
+          "pending_launch": false,
+          "deadline_ms": null
+        }
+      }
+    ],
+    "fixtureCleanup": true,
+    "classification": "Different deadline/duration NUMERIC-versus-JS materialization boundary; policy not chosen; user explicit STOP condition applies",
+    "productionChangesForThisWitness": false
+  }
+}

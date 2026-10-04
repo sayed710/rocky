@@ -1,0 +1,38 @@
+{
+  "recordedAt": "2026-10-04T09:23:09.777Z",
+  "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+  "localHead": "d66231e5aff50e38bd09f6cbb372f70744476db6",
+  "mergePending": true,
+  "prHead": "f2f78deb1c6899718d5d94b91111adb0596234b3",
+  "classification": "confirmed Arena worker fairness defect",
+  "repetitions": 1,
+  "productionEdits": false,
+  "assertion": {
+    "expected": "finished",
+    "actual": "running",
+    "code": "ERR_ASSERTION"
+  },
+  "initialCeiling": "c",
+  "firstPage": "a",
+  "newDueBehindCursor": "0",
+  "arrivals": [
+    "b",
+    "bb",
+    "bbb",
+    "bbbb"
+  ],
+  "remainingDueRows": [
+    "0",
+    "c"
+  ],
+  "rawLog": ".arena-pr90-fairness-falsification-2026-10-04.log",
+  "runner": ".arena-pr90-fairness-falsification-runner.log",
+  "sources": {
+    "packages/api/src/tournament/arena-deadline-worker.ts": "39e4f0563a1a61fe41ed19327c3ebc7ee281ebb152aa540257653552f6e53685",
+    "packages/persistence/src/pg/repositories.ts": "3bfabe2c174fcfcbc0739d10581364a9d16fe5450f2be2ff2e7351400ed6dd01",
+    "packages/persistence/migrations/0049_arena_deadlines.sql": "62cec895df4f978a5da03de5178aa8240d74cac2a445c44adf633dad59f49695"
+  },
+  "remainingMutationSweep": "NOT RUN after falsification failure; owner stop rule",
+  "strictExactHeadReview": "NOT RUN",
+  "publication": "No new push; PR91 remains open at prior head"
+}

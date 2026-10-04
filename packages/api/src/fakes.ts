@@ -39,7 +39,7 @@ import type {
   LoginStepUpCheck,
   IdentityTokensRepository,
 } from '@chess-platform/persistence';
-import { DuplicateUserError, VersionConflictError, SEEK_TTL_MS, SPEEDS } from '@chess-platform/persistence';
+import { ArenaFormatMismatchError, DuplicateUserError, VersionConflictError, SEEK_TTL_MS, SPEEDS } from '@chess-platform/persistence';
 
 import { InMemoryLearningRepository } from '@chess-platform/learning';
 import type { AuditEntry, AuditRepository } from './ports/audit';
@@ -699,6 +699,49 @@ export class InMemoryAuditRepository implements AuditRepository {
 }
 
 export class InMemoryTournamentsRepository implements TournamentsRepository {
+  private membershipSequence = 0;
+  private readonly membership = new Map<string, number>();
+  private projectMembership(snapshot: TournamentAnySnapshot): void {
+    const id = snapshot.config.id;
+    if (snapshot.config.format !== 'arena' || snapshot.state !== 'running') this.membership.delete(id);
+    else if (!this.membership.has(id)) this.membership.set(id, ++this.membershipSequence);
+  }
+  /** Explicit simulation authority shared by all test replicas. */
+  public arenaClock?: () => number;
+  async readArena(id: string, simulationClock?: () => number): Promise<{ snapshot: import('@chess-platform/tournament').ArenaSnapshot; nowMs: number } | null> {
+    const stored = this.byId.get(id);
+    if (!stored) return null;
+    if (stored.snap.config.format !== 'arena') {
+      throw new ArenaFormatMismatchError();
+    }
+    return { snapshot: structuredClone(stored.snap) as import('@chess-platform/tournament').ArenaSnapshot,
+      nowMs: (this.arenaClock ?? simulationClock ?? (() => Date.now()))() };
+  }
+  async mutateArena(id: string, apply: (snapshot: import('@chess-platform/tournament').ArenaSnapshot, nowMs: number) => import('@chess-platform/tournament').ArenaSnapshot,
+    simulationClock?: () => number): Promise<import('@chess-platform/tournament').ArenaSnapshot | null> {
+    const stored = this.byId.get(id);
+    if (!stored) return null;
+    if (stored.snap.config.format !== 'arena') throw new ArenaFormatMismatchError();
+    // No await between read, synchronous decision and write: one atomic simulation step.
+    const snapshot = apply(structuredClone(stored.snap) as import('@chess-platform/tournament').ArenaSnapshot,
+      (this.arenaClock ?? simulationClock ?? (() => Date.now()))());
+    if (JSON.stringify(snapshot) !== JSON.stringify(stored.snap)) {
+      this.byId.set(id, { snap: structuredClone(snapshot), version: stored.version + 1 });
+      this.projectMembership(snapshot);
+    }
+    return structuredClone(snapshot);
+  }
+  async arenaWorkCeiling(signal?: AbortSignal): Promise<string | null> {
+    signal?.throwIfAborted();
+    return this.membership.size ? String(Math.max(...this.membership.values())) : null;
+  }
+  async listArenaWorkAfter(afterId: string | null, limit: number, signal?: AbortSignal, throughSequence?: string | null): Promise<string[]> {
+    signal?.throwIfAborted();
+    return [...this.byId.entries()].filter(([id, row]) => row.snap.config.format === 'arena'
+      && row.snap.state === 'running' && (afterId === null || id > afterId)
+      && (throughSequence == null || this.membership.get(id)! <= Number(throughSequence)))
+      .map(([id]) => id).sort().slice(0, limit);
+  }
   private readonly byId = new Map<string, { snap: TournamentAnySnapshot; version: number }>();
   private readonly order: string[] = []; // for newest-first list
 
@@ -710,6 +753,7 @@ export class InMemoryTournamentsRepository implements TournamentsRepository {
     }
     const isNew = !existing;
     this.byId.set(snapshot.config.id, { snap: structuredClone(snapshot), version: expectedVersion + 1 });
+    this.projectMembership(snapshot);
     if (isNew) {
       this.order.push(snapshot.config.id);
     }

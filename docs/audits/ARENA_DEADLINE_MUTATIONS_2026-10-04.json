@@ -1,0 +1,623 @@
+{
+  "mutations": [
+    {
+      "name": "local Date.now authority",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (1.524ms)",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (0.7795ms)",
+        "✖ worker rotates past corrupt Arena, coalesces passes and drains in-flight work on stop (1.1002ms)",
+        "✖ stale authorization retry reloads state before creating any external game (5.7155ms)",
+        "✖ worker polls idle/failure with bounded scheduling and stop cancels the next pass (0.646ms)",
+        "✖ stop drains a failed in-flight database pass without rejecting shutdown (4.9401ms)",
+        "✖ production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown (5017.7775ms)",
+        "✖ review regression: committed registration succeeds with durable pending work despite launch failure (0.7724ms)",
+        "✖ review regression: sampled worker diagnostics preserve safe categories and codes without secrets (0.5749ms)",
+        "✖ failing tests:",
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (1.524ms)",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (0.7795ms)",
+        "✖ worker rotates past corrupt Arena, coalesces passes and drains in-flight work on stop (1.1002ms)",
+        "✖ stale authorization retry reloads state before creating any external game (5.7155ms)",
+        "✖ worker polls idle/failure with bounded scheduling and stop cancels the next pass (0.646ms)",
+        "✖ stop drains a failed in-flight database pass without rejecting shutdown (4.9401ms)",
+        "✖ production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown (5017.7775ms)",
+        "✖ review regression: committed registration succeeds with durable pending work despite launch failure (0.7724ms)",
+        "✖ review regression: sampled worker diagnostics preserve safe categories and codes without secrets (0.5749ms)"
+      ]
+    },
+    {
+      "name": "pairing permitted at exact T",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (1.4142ms)",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (0.9821ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (0.9002ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (2.7981ms)",
+        "✖ worker rotates past corrupt Arena, coalesces passes and drains in-flight work on stop (0.6079ms)",
+        "✖ pure domain preserves exact deadline across snapshot restore and active games (0.3691ms)",
+        "✖ production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown (5010.8659ms)",
+        "✖ review regression: sampled worker diagnostics preserve safe categories and codes without secrets (2.2983ms)",
+        "✖ failing tests:",
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (1.4142ms)",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (0.9821ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (0.9002ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (2.7981ms)",
+        "✖ worker rotates past corrupt Arena, coalesces passes and drains in-flight work on stop (0.6079ms)",
+        "✖ pure domain preserves exact deadline across snapshot restore and active games (0.3691ms)",
+        "✖ production API bootstrap starts autonomous Arena reconciliation and drains it on shutdown (5010.8659ms)",
+        "✖ review regression: sampled worker diagnostics preserve safe categories and codes without secrets (2.2983ms)"
+      ]
+    },
+    {
+      "name": "settlement at T-1",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (1.4416ms)",
+        "✖ result/abandon white_win at T-1 uses exact cutoff (1.3149ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (1.0093ms)",
+        "✖ pure domain preserves exact deadline across snapshot restore and active games (0.3274ms)",
+        "✖ failing tests:",
+        "✖ opposite replica clocks cannot establish or expire the authoritative deadline (1.4416ms)",
+        "✖ result/abandon white_win at T-1 uses exact cutoff (1.3149ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (1.0093ms)",
+        "✖ pure domain preserves exact deadline across snapshot restore and active games (0.3274ms)"
+      ]
+    },
+    {
+      "name": "post-deadline abandon repartner",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ result/abandon * at T+0 uses exact cutoff (1.6667ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (0.8975ms)",
+        "✖ failing tests:",
+        "✖ result/abandon * at T+0 uses exact cutoff (1.6667ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (0.8975ms)"
+      ]
+    },
+    {
+      "name": "post-deadline result reparing",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ result/abandon white_win at T+0 uses exact cutoff (2.0856ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (1.0737ms)",
+        "✖ result/abandon white_win at T+1 uses exact cutoff (0.9004ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (0.8195ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (3.5165ms)",
+        "✖ failing tests:",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (2.0856ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (1.0737ms)",
+        "✖ result/abandon white_win at T+1 uses exact cutoff (0.9004ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (0.8195ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (3.5165ms)"
+      ]
+    },
+    {
+      "name": "duplicate logical settlement writes",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "opposite-clock replicas and workers cannot finish idle Arena before T",
+      "failingTests": [
+        "✖ opposite-clock replicas and workers cannot finish idle Arena before T (1360.3659ms)",
+        "✖ failing tests:",
+        "✖ opposite-clock replicas and workers cannot finish idle Arena before T (1360.3659ms)"
+      ]
+    },
+    {
+      "name": "start retry changes effective deadline",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "lost response after authoritative start commit recovers the same deadline and one game",
+      "failingTests": [
+        "✖ lost response after authoritative start commit recovers the same deadline and one game (1404.2896ms)",
+        "✖ failing tests:",
+        "✖ lost response after authoritative start commit recovers the same deadline and one game (1404.2896ms)"
+      ]
+    },
+    {
+      "name": "authority failure falls back locally",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ database-time failure does not fallback or mutate/launch (1.3509ms)",
+        "✖ review regression: repository failures remain internal errors and known unknown-game responses remain 404 (1.1635ms)",
+        "✖ review regression: sampled worker diagnostics preserve safe categories and codes without secrets (0.956ms)",
+        "✖ failing tests:",
+        "✖ database-time failure does not fallback or mutate/launch (1.3509ms)",
+        "✖ review regression: repository failures remain internal errors and known unknown-game responses remain 404 (1.1635ms)",
+        "✖ review regression: sampled worker diagnostics preserve safe categories and codes without secrets (0.956ms)"
+      ]
+    },
+    {
+      "name": "generic stale snapshot save bypasses version CAS",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "row lock wait crosses deadline; time is read after acquisition and stale saves fail",
+      "failingTests": [
+        "✖ row lock wait crosses deadline; time is read after acquisition and stale saves fail (1387.0091ms)",
+        "✖ failing tests:",
+        "✖ row lock wait crosses deadline; time is read after acquisition and stale saves fail (1387.0091ms)"
+      ]
+    },
+    {
+      "name": "poison Arena stops page processing",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "two PostgreSQL workers settle once, skip poison rows and catch up after restart",
+      "failingTests": [
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1536.4157ms)",
+        "✖ failing tests:",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1536.4157ms)"
+      ]
+    },
+    {
+      "name": "crash permanently consumes due work",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "rollback before commit preserves due work for restarted worker",
+      "failingTests": [
+        "✖ rollback before commit preserves due work for restarted worker (1356.9911ms)",
+        "✖ failing tests:",
+        "✖ rollback before commit preserves due work for restarted worker (1356.9911ms)"
+      ]
+    },
+    {
+      "name": "finished Arena keeps due row",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "two PostgreSQL workers settle once, skip poison rows and catch up after restart",
+      "failingTests": [
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1442.857ms)",
+        "✖ failing tests:",
+        "✖ two PostgreSQL workers settle once, skip poison rows and catch up after restart (1442.857ms)"
+      ]
+    },
+    {
+      "name": "pre-deadline committed pairing discarded in recovery",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ result/abandon white_win at T-1 uses exact cutoff (0.8588ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (0.6591ms)",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (0.5951ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (0.5042ms)",
+        "✖ result/abandon white_win at T+1 uses exact cutoff (0.5141ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (0.452ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (0.8793ms)",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (1.5327ms)",
+        "✖ database-time failure does not fallback or mutate/launch (0.8865ms)",
+        "✖ review regression: committed registration succeeds with durable pending work despite launch failure (2.1778ms)",
+        "✖ failing tests:",
+        "✖ result/abandon white_win at T-1 uses exact cutoff (0.8588ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (0.6591ms)",
+        "✖ result/abandon white_win at T+0 uses exact cutoff (0.5951ms)",
+        "✖ result/abandon * at T+0 uses exact cutoff (0.5042ms)",
+        "✖ result/abandon white_win at T+1 uses exact cutoff (0.5141ms)",
+        "✖ result/abandon * at T+1 uses exact cutoff (0.452ms)",
+        "✖ two results, reporter replay and settlement race converge without applying scores twice (0.8793ms)",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (1.5327ms)",
+        "✖ database-time failure does not fallback or mutate/launch (0.8865ms)",
+        "✖ review regression: committed registration succeeds with durable pending work despite launch failure (2.1778ms)"
+      ]
+    },
+    {
+      "name": "duplicate reporter scores next pairing twice",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ result/abandon white_win at T-1 uses exact cutoff (3.0911ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (1.5877ms)",
+        "✖ failing tests:",
+        "✖ result/abandon white_win at T-1 uses exact cutoff (3.0911ms)",
+        "✖ result/abandon * at T-1 uses exact cutoff (1.5877ms)"
+      ]
+    },
+    {
+      "name": "replica skew changes database decision",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "production PostgreSQL clock establishes start independently of process clocks",
+      "failingTests": [
+        "✖ production PostgreSQL clock establishes start independently of process clocks (1274.3063ms)",
+        "✖ failing tests:",
+        "✖ production PostgreSQL clock establishes start independently of process clocks (1274.3063ms)"
+      ]
+    },
+    {
+      "name": "new authorization collides with legacy orphan namespace",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "new committed authorization cannot consume a legacy ended orphan in the same slot",
+      "failingTests": [
+        "✖ new committed authorization cannot consume a legacy ended orphan in the same slot (1483.5184ms)",
+        "✖ failing tests:",
+        "✖ new committed authorization cannot consume a legacy ended orphan in the same slot (1483.5184ms)"
+      ]
+    },
+    {
+      "name": "legacy ended slot is incorrectly consumed as proven outcome",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "legacy unlinked pairing refuses ambiguous ended slot",
+      "failingTests": [
+        "✖ legacy unlinked pairing refuses ambiguous ended slot (1394.017ms)",
+        "✖ failing tests:",
+        "✖ legacy unlinked pairing refuses ambiguous ended slot (1394.017ms)"
+      ]
+    },
+    {
+      "name": "postcommit recovery failure falsely rejects durable registration",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (0.9269ms)",
+        "✖ review regression: committed registration succeeds with durable pending work despite launch failure (1.3207ms)",
+        "✖ failing tests:",
+        "✖ failed launch leaves committed pre-deadline work recoverable after restart and deadline (0.9269ms)",
+        "✖ review regression: committed registration succeeds with durable pending work despite launch failure (1.3207ms)"
+      ]
+    },
+    {
+      "name": "continuous arrival scan discards finite watermark",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ review regression: continuous new work cannot prevent revisiting a newly due lower ID (1.7759ms)",
+        "✖ failing tests:",
+        "✖ review regression: continuous new work cannot prevent revisiting a newly due lower ID (1.7759ms)"
+      ]
+    },
+    {
+      "name": "empty watermark admits an unbounded arrival scan",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ review regression: an empty cycle watermark never becomes an unbounded scan (12.9406ms)",
+        "✖ failing tests:",
+        "✖ review regression: an empty cycle watermark never becomes an unbounded scan (12.9406ms)"
+      ]
+    },
+    {
+      "name": "stop fails to cancel or prevent subsequent Arena work",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ review regression: stop cancels an in-flight pass and never starts the next Arena (6.1256ms)",
+        "✖ failing tests:",
+        "✖ review regression: stop cancels an in-flight pass and never starts the next Arena (6.1256ms)"
+      ]
+    },
+    {
+      "name": "malformed links suppress repair projection",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "failingTests": [
+        "✖ 0049 backfills proven deadlines, preserves invalid evidence, reruns nothing, and uses work indexes (1605.4742ms)",
+        "✖ failing tests:",
+        "✖ 0049 backfills proven deadlines, preserves invalid evidence, reruns nothing, and uses work indexes (1605.4742ms)"
+      ]
+    },
+    {
+      "name": "work branches sort entire dense backlog before limiting",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "failingTests": [
+        "✖ production keyset query limits both branches before sorting a dense due backlog (2362.8278ms)",
+        "✖ failing tests:",
+        "✖ production keyset query limits both branches before sorting a dense due backlog (2362.8278ms)"
+      ]
+    },
+    {
+      "name": "cancellation returns an active query client instead of destroying it",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-client",
+      "failingTests": [
+        "✖ active cancellation destroys only its own client and release remains idempotent (1.1969ms)",
+        "✖ failing tests:",
+        "✖ active cancellation destroys only its own client and release remains idempotent (1.1969ms)"
+      ]
+    },
+    {
+      "name": "ignore membership boundary on both query branches",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "membership boundary excludes late due, pending and invalid arrivals on both query branches",
+      "failingTests": [
+        "✖ membership boundary excludes late due, pending and invalid arrivals on both query branches (1889.1185ms)",
+        "✖ failing tests:",
+        "✖ membership boundary excludes late due, pending and invalid arrivals on both query branches (1889.1185ms)"
+      ]
+    },
+    {
+      "name": "recompute membership boundary every page",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "membership boundary revisits earlier due work despite repeated middle-ID arrivals",
+      "failingTests": [
+        "✖ membership boundary revisits earlier due work despite repeated middle-ID arrivals (2206.3055ms)",
+        "✖ failing tests:",
+        "✖ membership boundary revisits earlier due work despite repeated middle-ID arrivals (2206.3055ms)"
+      ]
+    },
+    {
+      "name": "projection update advances existing membership",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "membership boundary survives worker restart with concurrent recovery and exact deadline",
+      "failingTests": [
+        "✖ membership boundary survives worker restart with concurrent recovery and exact deadline (2003.1338ms)",
+        "✖ failing tests:",
+        "✖ membership boundary survives worker restart with concurrent recovery and exact deadline (2003.1338ms)"
+      ]
+    },
+    {
+      "name": "skip earliest eligible member",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "membership boundary revisits earlier due work despite repeated middle-ID arrivals",
+      "failingTests": [
+        "✖ membership boundary revisits earlier due work despite repeated middle-ID arrivals (2387.2319ms)",
+        "✖ failing tests:",
+        "✖ membership boundary revisits earlier due work despite repeated middle-ID arrivals (2387.2319ms)"
+      ]
+    },
+    {
+      "name": "recovered membership boundary excludes durable work",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg",
+      "testNamePattern": "membership boundary survives worker restart with concurrent recovery and exact deadline",
+      "failingTests": [
+        "✖ membership boundary survives worker restart with concurrent recovery and exact deadline (1835.3026ms)",
+        "✖ failing tests:",
+        "✖ membership boundary survives worker restart with concurrent recovery and exact deadline (1835.3026ms)"
+      ]
+    },
+    {
+      "name": "participant state validation skipped in repair projection",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "failingTests": [
+        "✖ participant counter projection matches repository JavaScript rounding and underflow (2091.888ms)",
+        "✖ Qodo correction: participant corruption is immediate repair work before future expiry (2160.0005ms)",
+        "✖ Qodo correction: 0049 backfills malformed participant and linked pairing repair membership (2343.6491ms)",
+        "✖ failing tests:",
+        "✖ participant counter projection matches repository JavaScript rounding and underflow (2091.888ms)",
+        "✖ Qodo correction: participant corruption is immediate repair work before future expiry (2160.0005ms)",
+        "✖ Qodo correction: 0049 backfills malformed participant and linked pairing repair membership (2343.6491ms)"
+      ]
+    },
+    {
+      "name": "direct creation accepts invalid duration",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ Qodo correction: direct creation rejects invalid duration before persistence (1.9927ms)",
+        "✖ failing tests:",
+        "✖ Qodo correction: direct creation rejects invalid duration before persistence (1.9927ms)"
+      ]
+    },
+    {
+      "name": "inactive games corruption loses repair classification",
+      "compiled": true,
+      "killed": true,
+      "suite": "unit",
+      "failingTests": [
+        "✖ Qodo correction: repair diagnostics classify inactive games without leaking errors (2.4694ms)",
+        "✖ failing tests:",
+        "✖ Qodo correction: repair diagnostics classify inactive games without leaking errors (2.4694ms)"
+      ]
+    },
+    {
+      "name": "linked active pairing bypasses structural repair validation",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "active pairing corruption is immediate repair even when linked before expiry",
+      "failingTests": [
+        "✖ active pairing corruption is immediate repair even when linked before expiry (2001.1946ms)",
+        "✖ failing tests:",
+        "✖ active pairing corruption is immediate repair even when linked before expiry (2001.1946ms)"
+      ]
+    },
+    {
+      "name": "duplicate simultaneous player escapes repair projection",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "active pairing corruption is immediate repair even when linked before expiry",
+      "failingTests": [
+        "✖ active pairing corruption is immediate repair even when linked before expiry (2216.072ms)",
+        "✖ failing tests:",
+        "✖ active pairing corruption is immediate repair even when linked before expiry (2216.072ms)"
+      ]
+    },
+    {
+      "name": "invalid pairing sequence escapes repair projection",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "active pairing corruption is immediate repair even when linked before expiry",
+      "failingTests": [
+        "✖ active pairing corruption is immediate repair even when linked before expiry (2060.7319ms)",
+        "✖ failing tests:",
+        "✖ active pairing corruption is immediate repair even when linked before expiry (2060.7319ms)"
+      ]
+    },
+    {
+      "name": "exact NUMERIC counters reject JS-rounded integers",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "participant counter projection matches repository JavaScript rounding and underflow",
+      "failingTests": [
+        "✖ participant counter projection matches repository JavaScript rounding and underflow (1865.1842ms)",
+        "✖ failing tests:",
+        "✖ participant counter projection matches repository JavaScript rounding and underflow (1865.1842ms)"
+      ]
+    },
+    {
+      "name": "counter underflow becomes invalid instead of JS zero",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "participant counter projection matches repository JavaScript rounding and underflow",
+      "failingTests": [
+        "✖ participant counter projection matches repository JavaScript rounding and underflow (1753.8458ms)",
+        "✖ failing tests:",
+        "✖ participant counter projection matches repository JavaScript rounding and underflow (1753.8458ms)"
+      ]
+    },
+    {
+      "name": "gamesPlayed equality compares exact decimal spellings",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "participant counter projection matches repository JavaScript rounding and underflow",
+      "failingTests": [
+        "✖ participant counter projection matches repository JavaScript rounding and underflow (1781.4594ms)",
+        "✖ failing tests:",
+        "✖ participant counter projection matches repository JavaScript rounding and underflow (1781.4594ms)"
+      ]
+    },
+    {
+      "name": "timing fields revert to exact NUMERIC fraction rejection",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "timing projection matches repository JS materialization and canonical safe deadline sum",
+      "failingTests": [
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (1994.3874ms)",
+        "✖ failing tests:",
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (1994.3874ms)"
+      ]
+    },
+    {
+      "name": "timing underflow rejects a JS-valid zero start",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "timing projection matches repository JS materialization and canonical safe deadline sum",
+      "failingTests": [
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (1837.7196ms)",
+        "✖ failing tests:",
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (1837.7196ms)"
+      ]
+    },
+    {
+      "name": "deadline uses original decimal timing spellings",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "timing projection matches repository JS materialization and canonical safe deadline sum",
+      "failingTests": [
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (1899.7596ms)",
+        "✖ failing tests:",
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (1899.7596ms)"
+      ]
+    },
+    {
+      "name": "deadline sum bypasses JS-safe integer bound",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "timing projection matches repository JS materialization and canonical safe deadline sum",
+      "failingTests": [
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (2061.0293ms)",
+        "✖ failing tests:",
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (2061.0293ms)"
+      ]
+    },
+    {
+      "name": "float-to-NUMERIC loses proven timing integer precision",
+      "compiled": true,
+      "killed": true,
+      "suite": "pg-migration",
+      "testNamePattern": "timing projection matches repository JS materialization and canonical safe deadline sum",
+      "failingTests": [
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (2091.3065ms)",
+        "✖ failing tests:",
+        "✖ timing projection matches repository JS materialization and canonical safe deadline sum (2091.3065ms)"
+      ]
+    }
+  ],
+  "restoredByteIdentically": true,
+  "sourceSha256": {
+    "packages/tournament/src/arena.ts": "20d268ef6752f77cd1a10c97fe0577aa98e0d15d59ea2daf4cde40e0af9e7071",
+    "packages/api/src/tournament/arena.service.ts": "40d5b017dda0f6a46d85b8e41d5e76bb99d62f066b243cd537899ec04ff38f66",
+    "packages/persistence/src/pg/repositories.ts": "da45fd70cc0fc12f82ae09140210de7df4404bda77dc958d02fb2c64930623f5",
+    "packages/api/src/tournament/arena-deadline-worker.ts": "f3001524807b4a386af8eb9e02b444d0054c0bfe800b8662dee6a2b34a0d5025",
+    "packages/persistence/migrations/0049_arena_deadlines.sql": "9491c981ae135b8e29793858e19c9061c6b4348bcf178354b70009aa98a22f39",
+    "packages/api/src/tournament/durable-launcher.ts": "bb0853a548e86cde343d784e4d34622c1b166c78890c892b4e760e3eed3c3a60",
+    "packages/persistence/src/pg/abortable-client.ts": "498d4e8779c62c90613f4ee749a677a58513f36417fe5531d49422471580926c",
+    "packages/api/src/tournament/arena-diagnostics.ts": "4deaf69537e3a604d99f8307bc9978574b0b4e8aeac6ca56ac35e8dfab2dd815"
+  },
+  "independentVerification": {
+    "totalAttempts": 43,
+    "validExecutableMutants": 43,
+    "killedValidMutants": 43,
+    "survivingValidMutants": 0,
+    "invalidMutants": 0,
+    "historicalInvalid": {
+      "variant": 27,
+      "code": "428C9",
+      "killCredit": 0
+    },
+    "rawSourcesVerified": 8,
+    "positiveSourceUnchanged": true,
+    "expectedCancellations": [
+      {
+        "mutant": 1,
+        "cancelled": 1,
+        "killCreditForCancellation": 0,
+        "independentAssertionKill": true
+      },
+      {
+        "mutant": 2,
+        "cancelled": 1,
+        "killCreditForCancellation": 0,
+        "independentAssertionKill": true
+      }
+    ],
+    "behavioralException": {
+      "mutant": 15,
+      "evidence": "Required successful DB-clock start throws after forbidden simulation-clock use; compiled, executable"
+    },
+    "otherKillEvidence": "42 mutants reach intended assertions; no compiler/schema/infrastructure kill credit",
+    "rawCaptureDirectory": "C:/Users/hp/AppData/Local/Temp/rocky-arena-qodo6-mutation-capture"
+  }
+}

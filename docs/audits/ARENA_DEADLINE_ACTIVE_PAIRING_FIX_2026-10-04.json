@@ -1,0 +1,109 @@
+{
+  "startingPublishedHead": "e866eac1f6e214bca1d35ccf3e3b027a71a98cac",
+  "main": "59ee7497a9e20f3c8d41484506eef1bdf01b88b6",
+  "scope": "Fourth approved active pairing structural projection correction; earlier three Qodo fixes preserved",
+  "RED": {
+    "unchangedWitnessExit": 1,
+    "compiledStructuralTestExit": 1,
+    "actual": {
+      "invalid": false,
+      "pending_launch": false,
+      "deadline_ms": "9000000000100",
+      "workerWork": []
+    },
+    "rawLogs": [
+      ".arena-qodo4-identical-seat-red.log",
+      ".arena-qodo4-structural-red.log"
+    ]
+  },
+  "GREEN": {
+    "unchangedWitnessExit": 0,
+    "actual": {
+      "invalid": true,
+      "pending_launch": false,
+      "deadline_ms": null,
+      "workerWork": [
+        "corrupt-pairing"
+      ]
+    },
+    "focusedTests": 3,
+    "skipped": 0,
+    "cancelled": 0,
+    "rawLogs": [
+      ".arena-qodo4-identical-seat-green.log",
+      ".arena-qodo4-final-focused-green.log"
+    ]
+  },
+  "invariants": [
+    "activeGames object (existing guard)",
+    "safe nonnegative pairingSequence",
+    "pairing member object with string seats",
+    "a: prefix and safe positive Number-compatible sequence within pairingSequence",
+    "absent or committed-v1 namespace",
+    "distinct seats belonging to participants",
+    "no simultaneous repeated player",
+    "valid linked stays non-pending; valid unlinked stays pending",
+    "malformed linked becomes invalid/deadline NULL repair before expiry"
+  ],
+  "conversion": "ECMAScript whitespace and decimal/exponent/unsigned-base spellings retained. Syntax proven before float/base-N NUMERIC conversions; invalid text/range rejected into repair. PairingSequence underflow matches JS zero. Deadline NUMERIC and membership unchanged.",
+  "initialImplementationFailure": "PL/pgSQL record name pairing collided with existing pending-query alias; SQLSTATE42703. Renamed record to active_pairing. Initial relative normalization path also failed before writing; corrected to absolute path. No failed implementation run credited as RED or a mutation kill.",
+  "freshValidation": {
+    "scripts": 315,
+    "hermetic": 4003,
+    "persistence": 206,
+    "api": 106,
+    "gateway": 86,
+    "backupRestore": 2,
+    "guards": 8,
+    "unexpectedSkips": 0,
+    "unexpectedCancellations": 0
+  },
+  "freshMutations": {
+    "totalAttempts": 35,
+    "validExecutableMutants": 35,
+    "killedValidMutants": 35,
+    "survivingValidMutants": 0,
+    "invalidMutants": 0,
+    "historicalInvalid": {
+      "variant": 27,
+      "SQLSTATE": "428C9",
+      "killCredit": 0
+    },
+    "correctedVariant27": "work_sequence = DEFAULT; compiled and killed by restart/concurrent membership assertion",
+    "restoredSources": 8,
+    "independentlyVerified": true,
+    "positiveSourceHashesUnchanged": true,
+    "rawEvidenceDirectory": "C:/Users/hp/AppData/Local/Temp/rocky-arena-qodo4-mutation-capture",
+    "behavioralEvidence": "34 assertion kills; variant15 causes required DB-clock start to throw after consulting forbidden simulation clock. No parser/schema/compiler/infrastructure rejection credited.",
+    "expectedMutantCancellations": [
+      {
+        "variant": 1,
+        "count": 1,
+        "case": "existing bootstrap 5000ms settlement wait under local clock mutation",
+        "killCredit": "independent assertion failures, not cancellation"
+      },
+      {
+        "variant": 2,
+        "count": 1,
+        "case": "existing bootstrap 5000ms settlement wait under T-inclusive pairing mutation",
+        "killCredit": "independent assertion failures, not cancellation"
+      }
+    ],
+    "unexpectedCancellations": 0,
+    "prior32Audit": "ARENA_DEADLINE_MUTATIONS_2026-10-04_BEFORE_PAIRING_FIX.json"
+  },
+  "sourceSha256": {
+    "packages/tournament/src/arena.ts": "20d268ef6752f77cd1a10c97fe0577aa98e0d15d59ea2daf4cde40e0af9e7071",
+    "packages/api/src/tournament/arena.service.ts": "40d5b017dda0f6a46d85b8e41d5e76bb99d62f066b243cd537899ec04ff38f66",
+    "packages/persistence/src/pg/repositories.ts": "da45fd70cc0fc12f82ae09140210de7df4404bda77dc958d02fb2c64930623f5",
+    "packages/api/src/tournament/arena-deadline-worker.ts": "f3001524807b4a386af8eb9e02b444d0054c0bfe800b8662dee6a2b34a0d5025",
+    "packages/persistence/migrations/0049_arena_deadlines.sql": "64aec20e35c19a219a83024410e2f90bedae22bc28dc090dce8ef313a052c2cf",
+    "packages/api/src/tournament/durable-launcher.ts": "bb0853a548e86cde343d784e4d34622c1b166c78890c892b4e760e3eed3c3a60",
+    "packages/persistence/src/pg/abortable-client.ts": "498d4e8779c62c90613f4ee749a677a58513f36417fe5531d49422471580926c",
+    "packages/api/src/tournament/arena-diagnostics.ts": "4deaf69537e3a604d99f8307bc9978574b0b4e8aeac6ca56ac35e8dfab2dd815"
+  },
+  "rawEvidenceOutsideWorktree": true,
+  "previousGatewayFailure": "85/86 observed, no ETIMEDOUT, cause indeterminate; three focused 1/1 and subsequent full86/86 reproduced cleanly before fourth fix. After fourth fix a fresh full86/86 also passed. No root cause proved.",
+  "reviewStatus": "Read-only candidate architecture/security reviews found no actionable issue; final commit/exact-head independent review and new PR gates pending",
+  "validationCountCorrection": "Historical script count320 overcounted embedded summary text in a test name; actual standalone count315, pass315. Independent anchored reparse confirms hermetic4003, persistence206, API106, gateway86, backup2 unchanged."
+}

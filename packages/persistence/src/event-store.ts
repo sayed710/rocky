@@ -85,13 +85,13 @@ export interface EventStore {
    * brand-new game). Atomic. Returns the new head seq. Throws {@link ConcurrencyError}
    * if the head has moved.
    */
-  append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number>;
+  append(gameId: string, expectedSeq: number, events: readonly GameEvent[], signal?: AbortSignal): Promise<number>;
   /** Full ordered log for a game (feed straight into `Game.fromEvents`). */
-  load(gameId: string): Promise<StoredEvent[]>;
+  load(gameId: string, signal?: AbortSignal): Promise<StoredEvent[]>;
   /** Events with `seq > afterSeq` (resume / spectator catch-up). */
   loadSince(gameId: string, afterSeq: number): Promise<StoredEvent[]>;
   /** Whether any events exist for a game. */
-  exists(gameId: string): Promise<boolean>;
+  exists(gameId: string, signal?: AbortSignal): Promise<boolean>;
   /** Active games in which `userId` occupies either seat, derived from the durable event log. */
   findActiveGamesByPlayer(userId: string): Promise<ActiveGameRecord[]>;
   /**

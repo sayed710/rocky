@@ -165,6 +165,7 @@ import {
  * declaration here, which is the one edit nobody makes by accident.
  */
 export interface RouteDeps {
+  readonly logger: Logger;
   readonly auth: AuthService;
   readonly repos: Repositories;
   readonly clock: Clock;
@@ -2579,7 +2580,7 @@ export function buildRouter(deps: RouteDeps): Router {
 
   // --- Tournaments ---------------------------------------------------------
   const tournamentService = new TournamentService(deps.tournamentRepo, deps.gameLauncher);
-  const arenaService = new ArenaService(deps.tournamentRepo, deps.gameLauncher, () => deps.clock.now());
+  const arenaService = new ArenaService(deps.tournamentRepo, deps.gameLauncher, () => deps.clock.now(), deps.logger);
 
   router.post(
     '/v1/tournaments',
@@ -2602,7 +2603,7 @@ export function buildRouter(deps: RouteDeps): Router {
       const timeControl = parseTimeControl(body['timeControl']);
 
       if (format === 'arena') {
-        const durationMs = optInt(body, 'durationMs');
+        const durationMs = optInt(body, 'durationMs', { min: 1, max: Number.MAX_SAFE_INTEGER });
         if (!durationMs) throw HttpError.validation('durationMs is required for arena format');
         const t = await arenaService.create({
           id: ids.next(),
@@ -2762,7 +2763,7 @@ export function buildRouter(deps: RouteDeps): Router {
       const snap = stored?.snapshot;
       if (!snap) throw HttpError.notFound('tournament not found');
       if (snap.config.format === 'arena') {
-        const t = await arenaService.start(ctx.params['id']!, deps.clock.now());
+        const t = await arenaService.start(ctx.params['id']!);
         return json(200, arenaTournamentView(t));
       }
       const t = await tournamentService.start(ctx.params['id']!);

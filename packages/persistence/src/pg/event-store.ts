@@ -6,6 +6,7 @@
  */
 
 import { Pool, type PoolClient } from 'pg';
+import { abortableQuery, borrowClient } from './abortable-client';
 import type { GameEvent } from '@chess-platform/game';
 import {
   CURRENT_EVENT_VERSION,
@@ -40,12 +41,14 @@ const TOO_MANY_CONNECTIONS = '53300';
 export class PlayerLockBusyError extends PersistenceError {}
 
 /** Never let game-creation waiters monopolize the query pool; report exhausted retries as temporary unavailability. */
-export async function retryPlayerLockContention<T>(operation: () => Promise<T>, maxWaitMs = 60_000): Promise<T> {
+export async function retryPlayerLockContention<T>(operation: () => Promise<T>, maxWaitMs = 60_000, signal?: AbortSignal): Promise<T> {
   const deadline = Date.now() + maxWaitMs;
   for (;;) {
+    signal?.throwIfAborted();
     try {
       return await operation();
     } catch (error) {
+      signal?.throwIfAborted();
       if (!(error instanceof PlayerLockBusyError)) throw error;
       if (Date.now() >= deadline) throw new PlayerLockUnavailableError();
       // Desynchronize overlapping game-creation retries after the short PostgreSQL lock timeout.
@@ -110,14 +113,16 @@ export class PostgresEventStore implements EventStore {
   }
 
   /** Append one game stream atomically, coordinating human creation with player delivery locks. */
-  async append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
-    return retryPlayerLockContention(() => this.appendOnce(gameId, expectedSeq, events));
+  async append(gameId: string, expectedSeq: number, events: readonly GameEvent[], signal?: AbortSignal): Promise<number> {
+    return retryPlayerLockContention(() => this.appendOnce(gameId, expectedSeq, events, signal), 60_000, signal);
   }
 
   /** Retryable single transaction; a lock-contention retry must restart the whole append. */
-  private async appendOnce(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
+  private async appendOnce(gameId: string, expectedSeq: number, events: readonly GameEvent[], signal?: AbortSignal): Promise<number> {
+    signal?.throwIfAborted();
     if (events.length === 0) return expectedSeq;
-    const client = await this.pool.connect();
+    const borrowed = await borrowClient(this.pool, signal);
+    const { client } = borrowed;
     let committed = false;
     try {
       await client.query('BEGIN');
@@ -129,6 +134,7 @@ export class PostgresEventStore implements EventStore {
       }
       let seq = head;
       for (const event of events) {
+        signal?.throwIfAborted();
         seq += 1;
         await client.query(
           `INSERT INTO game_events (game_id, seq, type, event_version, payload)
@@ -136,11 +142,12 @@ export class PostgresEventStore implements EventStore {
           [gameId, seq, event.type, CURRENT_EVENT_VERSION, JSON.stringify(event)],
         );
       }
+      signal?.throwIfAborted();
       await client.query('COMMIT');
       committed = true;
       return seq;
     } catch (err) {
-      if (!committed) {
+      if (!committed && !signal?.aborted) {
         try {
           await client.query('ROLLBACK');
         } catch {
@@ -150,12 +157,12 @@ export class PostgresEventStore implements EventStore {
       if (isUniqueViolation(err)) throw new ConcurrencyError(gameId, expectedSeq);
       throw err;
     } finally {
-      client.release();
+      borrowed.release();
     }
   }
 
-  async load(gameId: string): Promise<StoredEvent[]> {
-    const res = await this.pool.query<EventRow>(
+  async load(gameId: string, signal?: AbortSignal): Promise<StoredEvent[]> {
+    const res = await abortableQuery<EventRow>(this.pool, signal,
       `SELECT game_id, seq, type, event_version, payload, server_ts
        FROM game_events WHERE game_id = $1 ORDER BY seq ASC`,
       [gameId],
@@ -172,8 +179,8 @@ export class PostgresEventStore implements EventStore {
     return res.rows.map(toStored);
   }
 
-  async exists(gameId: string): Promise<boolean> {
-    const res = await this.pool.query(
+  async exists(gameId: string, signal?: AbortSignal): Promise<boolean> {
+    const res = await abortableQuery(this.pool, signal,
       'SELECT 1 FROM game_events WHERE game_id = $1 LIMIT 1',
       [gameId],
     );
