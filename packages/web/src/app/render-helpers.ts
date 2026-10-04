@@ -118,7 +118,7 @@ export function appendPanelRow(
   label: string,
   actions: readonly RowAction[],
   busy: boolean,
-): void {
+): HTMLElement {
   const doc = container.ownerDocument ?? document;
   const row = doc.createElement('div');
   row.className = 'panel-row';
@@ -146,4 +146,5 @@ export function appendPanelRow(
   }
 
   container.appendChild(row);
+  return name;
 }

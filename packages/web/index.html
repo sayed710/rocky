@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#242224" />
     <title>Rookzen</title>
+    <script src="/locale-init.js"></script>
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="alternate icon" type="image/png" sizes="192x192" href="/icon-192.png" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
@@ -22,7 +23,7 @@
           <span class="brand-name" data-i18n="shell.brand">Rookzen</span>
         </a>
       </h1>
-      <nav class="nav">
+      <nav class="nav" aria-label="Main navigation" data-i18n-aria-label="shell.navigation">
         <a data-i18n="nav.play" href="/" data-route="lobby">Play</a>
         <a data-i18n="nav.learn" href="/courses" data-route="courses">Learn</a>
         <a data-i18n="nav.profile" href="/profile" data-route="profile">Profile</a>
@@ -39,6 +40,13 @@
         </form>
       </nav>
       <span id="auth-status" role="status" aria-live="polite">Not signed in</span>
+      <label class="locale-control" for="locale-select">
+        <span class="sr-only" data-i18n="shell.language">Language</span>
+        <select id="locale-select" name="locale">
+          <option value="en" lang="en" dir="ltr">English</option>
+          <option value="ar" lang="ar" dir="rtl">العربية</option>
+        </select>
+      </label>
       <button id="auth-logout" type="button" aria-label="Sign out" data-i18n-aria-label="shell.authStatus.signOut" data-i18n="shell.authStatus.signOut" hidden>Sign out</button>
       <button id="theme-toggle" type="button" aria-label="Toggle light/dark theme" data-i18n-aria-label="shell.themeToggle">🌙</button>
       <button id="flip" type="button" aria-label="Flip board" data-i18n-aria-label="shell.flipBoardAria" data-i18n="shell.flipBoard" hidden>Flip</button>
@@ -231,7 +239,7 @@
       <form id="auth-form" class="auth-form" novalidate>
         <div class="auth-field">
           <label for="auth-handle" data-i18n="auth.handle">Handle</label>
-          <input id="auth-handle" type="text" autocomplete="username" required />
+          <input id="auth-handle" type="text" dir="auto" autocomplete="username" required />
         </div>
         <div class="auth-field">
           <label for="auth-password" data-i18n="auth.password">Password</label>
@@ -242,13 +250,13 @@
              carries no `required` attribute; the register action checks it. -->
         <div class="auth-field auth-field-full">
           <label for="auth-email" data-i18n="auth.emailLabel">Email (required to register)</label>
-          <input id="auth-email" type="email" autocomplete="email" maxlength="320" />
+          <input id="auth-email" type="email" dir="ltr" autocomplete="email" maxlength="320" />
         </div>
         <!-- Shown only after the server answers `step_up_required`: many recent failed sign-ins
              for this handle mean the password also needs the code emailed to the account. -->
         <div id="auth-code-row" class="auth-field auth-field-full" hidden>
           <label for="auth-code" data-i18n="auth.codeLabel">Sign-in code</label>
-          <input id="auth-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+          <input id="auth-code" type="text" dir="ltr" inputmode="numeric" autocomplete="one-time-code"
                  pattern="[0-9]{8}" maxlength="8" />
         </div>
         <div class="auth-actions">
@@ -503,7 +511,7 @@
           <div id="endgame-position-rows" class="panel-list" aria-label="Training position" data-i18n-aria-label="learning.endgames.positionAria"></div>
           <form id="endgame-form" class="step-form">
             <label class="sr-only" for="endgame-move" data-i18n="learning.endgames.placeholder">Your move, in UCI (for example e2e4)</label>
-            <input id="endgame-move" class="step-san-input" type="text" autocomplete="off"
+            <input id="endgame-move" class="step-san-input" type="text" dir="ltr" autocomplete="off"
                    maxlength="5" placeholder="e2e4" />
             <button id="endgame-submit" type="submit" class="button" data-i18n="learning.endgames.playMove">Play move</button>
           </form>

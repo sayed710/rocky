@@ -116,6 +116,7 @@ function container(): HTMLElement {
         children: [] as unknown[],
         appendChild(c: unknown) { (node['children'] as unknown[]).push(c); return c; },
         setAttribute: () => {},
+        removeAttribute: () => {},
         addEventListener: (_e: string, fn: () => void) => { node['click'] = fn; },
       };
       return node;

@@ -7,4 +7,5 @@
 Historical findings must be re-verified against current `main`. A finding in an old audit does not mean it remains open. Future remediation should distinguish the original historical finding, the currently verified open issue, an already-fixed or merged issue, and an optional or deferred item.
 
 Future agents should prefer a current remediation ledger when one exists, and consult the original audit for source and acceptance context. This index does not create a remediation ledger.
+- [Arabic / RTL shell evidence — 2026-10-04](ARABIC_RTL_SHELL_2026-10-04.md) reconciles the historical identity/localization/RTL findings against main after PR #91 and records the focused EN/AR implementation and reviewable screenshots. Final legal content and permanent visual/IA choices remain owner-controlled.
 - [Codex adjudication of Gemini planning — 2026-10-02](CODEX_GEMINI_PLANNING_ADJUDICATION_2026-10-02.md) verifies the five preserved Gemini artifacts against main `07946b9b03538ed73a3f7b773e7ad5a327d83805`. Use its correction/disposition ledger with the original historical sources; it is not feature authorization or owner sign-off.

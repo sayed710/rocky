@@ -15,6 +15,7 @@
 
 import type { MoveExplanationResponse, MoveOutcome } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
+import { renderInterpolatedText, renderChessText, applyAutoDirection } from '../i18n/bidi.js';
 import type { MessageKey } from '../i18n/catalog/index.js';
 
 export const EXPLAIN_MESSAGE_KEYS = {
@@ -108,11 +109,11 @@ function evidenceRow(
 
   const moveEl = doc.createElement('span');
   moveEl.className = 'explain-move';
-  moveEl.textContent = prefix ? `${prefix} ${move}` : move;
+  renderInterpolatedText(moveEl, prefix ? '{prefix} {move}' : '{move}', { prefix: prefix ?? '', move });
 
   const valueEl = doc.createElement('span');
   valueEl.className = 'explain-value';
-  valueEl.textContent = value;
+  renderChessText(valueEl, value);
 
   main.appendChild(moveEl);
   main.appendChild(valueEl);
@@ -123,6 +124,7 @@ function evidenceRow(
 /** The model's prose. Plain text only — never `innerHTML`, since this is third-party generated. */
 export function renderProse(el: HTMLElement, result: MoveExplanationResponse): void {
   el.textContent = result.explanation;
+  applyAutoDirection(el);
 }
 
 /**
@@ -137,7 +139,7 @@ export function renderSource(
   result: MoveExplanationResponse,
   i18n: I18nManager,
 ): void {
-  el.textContent = i18n.t('ai.generatedBy', { provider: result.providerId, model: result.model });
+  renderInterpolatedText(el, i18n.t('ai.generatedBy'), { provider: result.providerId, model: result.model });
 }
 
 /** Show or hide the whole result group, and mark it busy while a request is in flight. */

@@ -3,7 +3,7 @@ import { shortId } from '../api/graphql.js';
 import { MessagesController } from './messages-controller.js';
 import type { MessagesCallbacks } from './messages-controller.js';
 import { renderInbox, renderThread } from './messages-view.js';
-import { applyAutoDirection } from '../i18n/bidi.js';
+import { renderInterpolatedText } from '../i18n/bidi.js';
 import type { I18n } from '../i18n/manager.js';
 import type { ConversationSummary, MessageView, SocialPlayer } from '../api/models.js';
 
@@ -53,8 +53,8 @@ function updateParticipantHeader(
     headerEl.removeAttribute('dir');
   } else {
     const handle = names.get(otherParticipantId)?.handle ?? shortId(otherParticipantId);
-    headerEl.textContent = i18n.t('community.messages.conversationWith', { handle });
-    applyAutoDirection(headerEl);
+    headerEl.removeAttribute('dir');
+    renderInterpolatedText(headerEl, i18n.t('community.messages.conversationWith'), { handle });
   }
 }
 

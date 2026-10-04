@@ -8,7 +8,7 @@ import type { AnalysisResponse } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { enMessages } from '../i18n/catalog/en.js';
 import { formatEvaluation, formatPrincipalVariation, formatSeconds } from './analysis-format.js';
-import { applyLtrIsolation } from '../i18n/bidi.js';
+import { applyLtrIsolation, renderInterpolatedText } from '../i18n/bidi.js';
 
 export const ANALYSIS_MESSAGES = {
   idle: enMessages['game.analysis.idle'],
@@ -89,7 +89,7 @@ export function renderReached(el: HTMLElement, result: AnalysisResponse, i18n: I
     el.textContent = '';
     return;
   }
-  el.textContent = i18n.t('game.analysis.reachedDepth', {
+  renderInterpolatedText(el, i18n.t('game.analysis.reachedDepth'), {
     depth: String(first.depth),
     time: formatSeconds(first.timeMs),
   });
@@ -103,7 +103,7 @@ export function renderReached(el: HTMLElement, result: AnalysisResponse, i18n: I
 export function renderLimits(el: HTMLElement, result: AnalysisResponse, i18n: I18nManager): void {
   const linesCount = result.applied.multiPv;
   const linesLabel = linesCount === 1 ? i18n.t('game.analysis.oneLine') : i18n.t('game.analysis.lineCount', { count: String(linesCount) });
-  el.textContent = i18n.t('game.analysis.limits', {
+  renderInterpolatedText(el, i18n.t('game.analysis.limits'), {
     depth: String(result.applied.depth),
     movetime: formatSeconds(result.applied.movetimeMs),
     lines: linesLabel,

@@ -145,6 +145,10 @@ describe('i18n bidi & chess isolation', () => {
     assert.equal(isChessNotation('+0.45'), true);
     assert.equal(isChessNotation('-1.20'), true);
     assert.equal(isChessNotation('#+2'), true);
+    assert.equal(isChessNotation('0 / 12'), true);
+    for (const result of ['1-0', '0-1', '1/2-1/2', '*']) {
+      assert.equal(isChessNotation(result), true);
+    }
 
     // Not chess notation
     assert.equal(isChessNotation('Play chess'), false);

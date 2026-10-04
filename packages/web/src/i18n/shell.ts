@@ -1,6 +1,7 @@
 import type { I18n } from './manager.js';
 import { isMessageKey } from './catalog/index.js';
 import type { MessageKey } from './catalog/index.js';
+import { isSupportedLocale } from './metadata.js';
 
 export interface LocalizedShellHandle {
   dispose: () => void;
@@ -27,7 +28,14 @@ const STATIC_HEADING_IDS: Readonly<Record<string, MessageKey>> = {
  * - `data-i18n-alt="key"`: sets alt
  */
 export function localizeShell(doc: Document, i18n: I18n): LocalizedShellHandle {
+  const selector = (typeof doc.getElementById === 'function'
+    ? doc.getElementById('locale-select') : null) as HTMLSelectElement | null;
+  const selectLocale = (): void => {
+    if (selector && isSupportedLocale(selector.value)) i18n.setLocale(selector.value);
+  };
+  selector?.addEventListener('change', selectLocale);
   function update(): void {
+    if (selector) selector.value = i18n.locale;
     // 0. Static heading IDs
     for (const [id, key] of Object.entries(STATIC_HEADING_IDS)) {
       const el = typeof doc.getElementById === 'function'
@@ -95,6 +103,9 @@ export function localizeShell(doc: Document, i18n: I18n): LocalizedShellHandle {
   });
 
   return {
-    dispose: unsub,
+    dispose: () => {
+      unsub();
+      selector?.removeEventListener('change', selectLocale);
+    },
   };
 }

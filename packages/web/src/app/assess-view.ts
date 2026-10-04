@@ -23,6 +23,8 @@
 
 import type { MistakeMoveOutcome, MistakePredictionResponse } from '../api/models.js';
 import type { I18nManager } from '../i18n/manager.js';
+import { renderInterpolatedText, renderChessText } from '../i18n/bidi.js';
+import type { InterpolationParams } from '../i18n/types.js';
 import type { MessageKey } from '../i18n/catalog/index.js';
 
 export const ASSESS_MESSAGE_KEYS = {
@@ -115,12 +117,12 @@ export function renderVerdict(
   const playedTheBest = result.bestMove !== null && result.bestMove === result.move;
   if (!playedTheBest && result.bestMove !== null) {
     container.appendChild(
-      row(doc, i18n.t('ai.assess.enginePrefers', { move: result.bestMove }), result.before.evalLabel),
+      row(doc, i18n.t('ai.assess.enginePrefers'), result.before.evalLabel, undefined, { move: result.bestMove }),
     );
   }
 }
 
-function row(doc: Document, main: string, value: string, extraClass?: string): HTMLElement {
+function row(doc: Document, main: string, value: string, extraClass?: string, params?: InterpolationParams): HTMLElement {
   const el = doc.createElement('div');
   el.className = 'panel-row';
 
@@ -129,11 +131,12 @@ function row(doc: Document, main: string, value: string, extraClass?: string): H
 
   const label = doc.createElement('span');
   label.className = extraClass ? `assess-move ${extraClass}` : 'assess-move';
-  label.textContent = main;
+  if (params) renderInterpolatedText(label, main, params);
+  else renderChessText(label, main);
 
   const figure = doc.createElement('span');
   figure.className = 'assess-value';
-  figure.textContent = value;
+  renderChessText(figure, value);
 
   line.appendChild(label);
   line.appendChild(figure);

@@ -27,6 +27,7 @@ const E2E_DIR = resolve(PACKAGE_ROOT, 'e2e');
  * deliberate, reviewable choice rather than inheriting a default.
  */
 const STATIC_SPECS = new Set([
+  'arabic-shell.spec.ts',
   'app-loads.spec.ts',
   'auth-responsive.spec.ts',
   'create-game-responsive.spec.ts',

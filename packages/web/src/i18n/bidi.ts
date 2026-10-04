@@ -7,7 +7,60 @@
  * does NOT insert invisible control characters that break chess engines or notation parsers.
  */
 
+import type { InterpolationParams } from './types.js';
+import { interpolate } from './interpolate.js';
+
 const UCI_REGEX = /^[a-h][1-8][a-h][1-8][qrbn]?$/i;
+
+/** Render translated prose with each dynamic value isolated, without altering copied data. */
+export function renderInterpolatedText(element: HTMLElement, template: string, params: InterpolationParams): void {
+  const doc = element.ownerDocument;
+  // Non-DOM hosts can consume the same copy without rendering primitives.
+  if (!doc || typeof doc.createTextNode !== 'function') {
+    element.textContent = interpolate(template, params);
+    return;
+  }
+  element.textContent = '';
+  let cursor = 0;
+  for (const match of template.matchAll(/\{([a-zA-Z0-9_]+)\}/g)) {
+    element.appendChild(doc.createTextNode(template.slice(cursor, match.index)));
+    const key = match[1]!;
+    const value = Object.prototype.hasOwnProperty.call(params, key) ? params[key] : undefined;
+    if (value === undefined || value === null) element.appendChild(doc.createTextNode(match[0]));
+    else {
+      const token = String(value);
+      const ltr = isChessNotation(token) || /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(token)
+        || /^\d{4}-\d{2}-\d{2}$/.test(token) || /^(\d{1,3}\.){3}\d{1,3}$/.test(token)
+        || /^(?:[\da-f]{40}|[\da-f]{64})$/i.test(token) || /^https?:\/\//.test(token);
+      element.appendChild(ltr ? createLtrElement(doc, 'bdi', token) : createUserTextElement(doc, 'bdi', token));
+    }
+    cursor = match.index + match[0].length;
+  }
+  element.appendChild(doc.createTextNode(template.slice(cursor)));
+}
+
+/** Isolate result tokens in an already formatted game-status sentence. */
+export function renderGameStatusText(element: HTMLElement, text: string): void {
+  const results: Record<string, string> = {};
+  const reserved = new Set([...text.matchAll(/\{([a-zA-Z0-9_]+)\}/g)].map((match) => match[1]));
+  let index = 0;
+  const template = text.replace(/\b(1-0|0-1|1\/2-1\/2)\b/g, (result) => {
+    let key: string;
+    do { key = `result${index++}`; } while (reserved.has(key));
+    results[key] = result;
+    return `{${key}}`;
+  });
+  renderInterpolatedText(element, template, results);
+}
+
+/** Render a complete chess value, or prose containing result tokens, with its own direction. */
+export function renderChessText(element: HTMLElement, text: string): void {
+  if (isChessNotation(text)) renderInterpolatedText(element, '{value}', { value: text });
+  else {
+    applyAutoDirection(element);
+    renderGameStatusText(element, text);
+  }
+}
 const SAN_REGEX = /^([NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQK])?|O-O(-O)?)[+#]?$/;
 const SAN_WITH_UCI_REGEX = /^([NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQK])?|O-O(-O)?)[+#]?\s*\([a-h][1-8][a-h][1-8][qrbn]?\)$/i;
 const CLOCK_REGEX = /^\d+:\d{2}(\s*[–-]\s*\d+:\d{2})?$/;
@@ -15,6 +68,7 @@ const FEN_PARTS = /^([rnbqkpRNBQKP1-8]+\/){7}[rnbqkpRNBQKP1-8]+ [wb] (-|[KQkq]+|
 const EVAL_REGEX = /^[+-]?(\d+(\.\d+)?|#[+-]?\d+)$/;
 const RATING_REGEX = /^\d+(\s*\((?:±|RD\s*)\d+\))?$/;
 const TIME_CONTROL_REGEX = /^\d+(\.\d+)?\+\d+$/;
+const COUNTER_RATIO_REGEX = /^\d+(\.\d+)?\s*\/\s*\d+(\.\d+)?$/;
 
 const PGN_TERMINATION_REGEX = /^(1-0|0-1|1\/2-1\/2|\*)$/;
 const PGN_MOVE_NUMBER_REGEX = /^\d+\.{1,3}$/;
@@ -96,6 +150,8 @@ export function isChessNotation(text: string): boolean {
     EVAL_REGEX.test(trimmed) ||
     RATING_REGEX.test(trimmed) ||
     TIME_CONTROL_REGEX.test(trimmed) ||
+    COUNTER_RATIO_REGEX.test(trimmed) ||
+    PGN_TERMINATION_REGEX.test(trimmed) ||
     isPgnMovetext(trimmed)
   );
 }

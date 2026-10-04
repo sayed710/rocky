@@ -25,6 +25,7 @@ const zeroSkipReporter = fileURLToPath(
   new URL('../../scripts/playwright-zero-skip-reporter.mjs', import.meta.url)
 );
 const backendSpecs = [
+  'arabic-live-game.spec.ts',
   'account-security-sessions.spec.ts',
   'achievements.spec.ts',
   'analysis.spec.ts',

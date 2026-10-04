@@ -3,6 +3,8 @@ import type { PuzzleEvidence, PuzzleGenerationResponse } from '../api/models.js'
 import { formatEvaluation, formatPrincipalVariation } from './analysis-format.js';
 
 import type { I18nManager } from '../i18n/manager.js';
+import { applyLtrIsolation, renderChessText } from '../i18n/bidi.js';
+import { aiDifficultyLabel } from './ai-labels.js';
 import type { MessageKey } from '../i18n/catalog/index.js';
 
 export const PUZZLE_MESSAGE_KEYS = {
@@ -44,9 +46,9 @@ export function renderPuzzleResult(
   const doc = rows.ownerDocument ?? document;
   if (result.kind === 'puzzle') {
     rows.appendChild(row(doc, i18n.t('ai.puzzle.label.solution'), result.solutionMove));
-    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.line'), formatPrincipalVariation(result.solutionLine)));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.line'), formatPrincipalVariation(result.solutionLine), true));
     rows.appendChild(row(doc, i18n.t('ai.puzzle.label.evidence'), evidenceLabel(result.evidence, i18n)));
-    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.difficulty'), result.difficulty));
+    rows.appendChild(row(doc, i18n.t('ai.puzzle.label.difficulty'), aiDifficultyLabel(result.difficulty, i18n)));
   } else {
     rows.appendChild(row(doc, i18n.t('ai.puzzle.label.bestMove'), result.bestMove));
     rows.appendChild(row(doc, i18n.t('ai.puzzle.label.alternative'), result.comparisonMove));
@@ -54,7 +56,7 @@ export function renderPuzzleResult(
     rows.appendChild(row(
       doc,
       i18n.t('ai.puzzle.label.evaluations'),
-      `${formatEvaluation(result.bestEvaluation, result.fen)} / ${formatEvaluation(result.comparisonEvaluation, result.fen)}`,
+      `${formatEvaluation(result.bestEvaluation, result.fen)} / ${formatEvaluation(result.comparisonEvaluation, result.fen)}`, true,
     ));
   }
   resultEl.hidden = false;
@@ -83,7 +85,7 @@ export function renderPuzzleError(el: HTMLElement, text: string | null): void {
 
 function evidenceLabel(evidence: PuzzleEvidence, i18n: I18nManager): string {
   if (evidence.kind === 'centipawn_gap') return i18n.t('ai.puzzle.pawnGap', { gap: (evidence.gapCp / 100).toFixed(2) });
-  const relation = evidence.relation.replaceAll('_', ' ');
+  const relation = i18n.t(`ai.puzzle.relation.${evidence.relation}`);
   if (evidence.distanceGap === null) return relation;
   const unit = evidence.distanceGap === 1 ? i18n.t('ai.puzzle.move') : i18n.t('ai.puzzle.moves');
   return i18n.t('ai.puzzle.distanceGap', {
@@ -93,7 +95,7 @@ function evidenceLabel(evidence: PuzzleEvidence, i18n: I18nManager): string {
   });
 }
 
-function row(doc: Document, labelText: string, valueText: string): HTMLElement {
+function row(doc: Document, labelText: string, valueText: string, technical = false): HTMLElement {
   const item = doc.createElement('div');
   item.className = 'panel-row';
   const label = doc.createElement('span');
@@ -101,7 +103,8 @@ function row(doc: Document, labelText: string, valueText: string): HTMLElement {
   label.textContent = labelText;
   const value = doc.createElement('span');
   value.className = 'puzzle-value';
-  value.textContent = valueText;
+  renderChessText(value, valueText);
+  if (technical) applyLtrIsolation(value);
   item.appendChild(label);
   item.appendChild(value);
   return item;

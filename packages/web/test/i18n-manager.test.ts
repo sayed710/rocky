@@ -46,11 +46,12 @@ describe('i18n manager', () => {
     assert.equal(result, 'nonexistent.key');
   });
 
-  it('rejects activating ar in production when no Arabic catalog is registered, remaining en', () => {
+  it('activates the complete production Arabic catalogue without injection', () => {
     const i18n = createI18n();
     assert.equal(i18n.locale, 'en');
     i18n.setLocale('ar');
-    assert.equal(i18n.locale, 'en');
+    assert.equal(i18n.locale, 'ar');
+    assert.equal(i18n.t('nav.play'), 'العب');
   });
 
   it('setLocale changes active locale and notifies subscribers when catalog is registered', () => {

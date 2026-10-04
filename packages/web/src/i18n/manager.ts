@@ -1,6 +1,6 @@
 import type { Locale, InterpolationParams } from './types.js';
 import { DEFAULT_LOCALE, isSupportedLocale } from './metadata.js';
-import { enMessages, type MessageKey, type MessagesCatalog } from './catalog/index.js';
+import { enMessages, arMessages, type MessageKey, type MessagesCatalog } from './catalog/index.js';
 import { interpolate } from './interpolate.js';
 import { applyDocumentLocale } from './document.js';
 import type { LocaleStorage } from './storage.js';
@@ -41,6 +41,7 @@ export class I18n {
     this.strict = opts.strict ?? false;
     this.doc = opts.doc;
     this.catalogs.set('en', enMessages);
+    this.catalogs.set('ar', arMessages);
     if (opts.catalogs) {
       for (const [loc, cat] of Object.entries(opts.catalogs)) {
         if (cat && isSupportedLocale(loc)) {
@@ -121,12 +122,12 @@ export class I18n {
     if (!isSupportedLocale(locale) || !this.catalogs.has(locale)) {
       return;
     }
+    this.storage?.save(locale);
     if (this.activeLocale === locale) {
       return;
     }
 
     this.activeLocale = locale;
-    this.storage?.save(locale);
     applyDocumentLocale(locale, this.doc);
 
     for (const listener of this.listeners) {

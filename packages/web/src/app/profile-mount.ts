@@ -18,7 +18,7 @@ import {
 } from './render-helpers.js';
 import type { RowAction } from './render-helpers.js';
 import { getSpeedLabel, getVariantLabel } from './variant-labels.js';
-import { applyAutoDirection, applyLtrIsolation } from '../i18n/bidi.js';
+import { applyAutoDirection, applyLtrIsolation, createLtrElement } from '../i18n/bidi.js';
 import type { I18nManager } from '../i18n/manager.js';
 
 /**
@@ -277,7 +277,10 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
         const speedStr = getSpeedLabel(g.speed, i18n);
         const resultStr = g.result ?? i18n.t('profile.games.ongoing');
         const plyStr = i18n.t('profile.games.plyCount', { count: g.plyCount });
-        row.textContent = `${variantStr} · ${speedStr} · ${resultStr} · ${plyStr}`;
+        row.append(`${variantStr} · ${speedStr} · `);
+        if (g.result) row.append(createLtrElement(doc, 'bdi', resultStr));
+        else row.append(resultStr);
+        row.append(` · ${plyStr}`);
         gamesEl.appendChild(row);
       }
     }

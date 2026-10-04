@@ -62,6 +62,7 @@ import { mountPublicDocument, type MountedPublicDocument } from './public-docume
 import { readBuildSourceMetadata } from './source-metadata.js';
 import { applyRouteSurface } from './route-surface.js';
 import { localizeShell } from '../i18n/index.js';
+import { renderInterpolatedText } from '../i18n/bidi.js';
 
 export { renderEmpty, formatClock, formatTimeControl };
 export type { EmptyStateOptions };
@@ -279,9 +280,8 @@ export function bootstrap(
   let currentAuthError: AuthErrorInfo | null = null;
   const updateAuthStatus = (): void => {
     if (authStatusEl) {
-      authStatusEl.textContent = currentAuthSession
-        ? app.i18n.t('shell.authStatus.signedIn', { handle: currentAuthSession.handle })
-        : app.i18n.t('shell.authStatus.notSignedIn');
+      if (currentAuthSession) renderInterpolatedText(authStatusEl, app.i18n.t('shell.authStatus.signedIn'), { handle: currentAuthSession.handle });
+      else authStatusEl.textContent = app.i18n.t('shell.authStatus.notSignedIn');
     }
   };
   const updatePlayBotButton = (): void => {
@@ -293,7 +293,7 @@ export function bootstrap(
   };
   const updateAuthError = (): void => {
     if (authErrorEl && currentAuthError) {
-      authErrorEl.textContent = app.i18n.t(currentAuthError.key, currentAuthError.params);
+      renderInterpolatedText(authErrorEl, app.i18n.t(currentAuthError.key), currentAuthError.params ?? {});
     }
   };
   const unsubAuthLocale = app.i18n.onLocaleChange(() => {

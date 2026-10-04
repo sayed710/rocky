@@ -63,8 +63,8 @@ export function renderStudyList(
       const tag = document.createElement('span');
       tag.className = 'count';
       tag.textContent = study.visibility === 'private'
-        ? i18n.t('community.teams.privateTag')
-        : study.visibility;
+        ? i18n.t('learning.studies.visibility.private')
+        : i18n.t('learning.studies.visibility.unlisted');
       row.appendChild(tag);
     }
 
@@ -100,7 +100,7 @@ export function renderStudyDetail(
   }
   if (elements.visEl) {
     elements.visEl.textContent = study.visibility !== 'public'
-      ? i18n.t('learning.studies.visibility', { visibility: study.visibility })
+      ? i18n.t('learning.studies.visibility', { visibility: i18n.t(`learning.studies.visibility.${study.visibility}`) })
       : '';
   }
   if (elements.exportEl) {
@@ -150,11 +150,11 @@ export function renderStudyDetail(
         const main = document.createElement('div');
         main.className = 'row-main';
         main.textContent = col.playerId;
-        applyAutoDirection(main);
+        applyLtrIsolation(main);
 
         const role = document.createElement('span');
         role.className = 'count';
-        role.textContent = col.role;
+        role.textContent = i18n.t(`learning.studies.role.${col.role}`);
 
         row.appendChild(main);
         row.appendChild(role);

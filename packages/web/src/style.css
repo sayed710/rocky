@@ -203,6 +203,11 @@ body {
   border-radius: 6px;
   overflow: hidden;
 }
+
+/* The native language control keeps keyboard/focus behavior across locale changes. */
+.locale-control { max-inline-size: 100%; }
+#locale-select { min-block-size: 44px; max-inline-size: 100%; }
+html[lang="ar"] body { line-height: 1.6; }
 /* At desktop widths the board and sidebar sit side by side. Expose the grid's bounded height so the
    board can use whichever is smaller: its column width or the space below the wrapping topbar. */
 @media (min-width: 720px) {
@@ -222,6 +227,18 @@ body {
   .sidebar {
     overflow-y: auto;
     min-height: 0;
+  }
+  /* A guest's sign-in panel also occupies this column. Let the page scroll instead of
+     allowing that panel to consume the size container and collapse the board to zero. */
+  body.route-game:has(#auth:not([hidden])) {
+    height: auto;
+  }
+  body.route-game:has(#auth:not([hidden])) .game {
+    container-type: normal;
+    flex: none;
+  }
+  body.route-game:has(#auth:not([hidden])) .cb-board {
+    width: 100%;
   }
 }
 .cb-row {

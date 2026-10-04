@@ -8,7 +8,7 @@ import type {
   LessonView,
   StepView,
 } from '../api/models.js';
-import { applyAutoDirection } from '../i18n/bidi.js';
+import { applyAutoDirection, renderInterpolatedText } from '../i18n/bidi.js';
 import type { I18nManager } from '../i18n/manager.js';
 import { mountBoard } from './board.js';
 import { difficultyLabel, courseProgressLabel, stepStatusLabel } from './learning-helpers.js';
@@ -219,7 +219,7 @@ export function renderLessonDetail(
 
       const boardDesc = doc.createElement('p');
       boardDesc.className = 'sr-only';
-      boardDesc.textContent = i18n.t('learning.step.boardSrOnly', { fen: step.fen });
+      renderInterpolatedText(boardDesc, i18n.t('learning.step.boardSrOnly'), { fen: step.fen });
       boardContainer.appendChild(boardDesc);
 
       const boardEl = doc.createElement('div');
@@ -228,7 +228,7 @@ export function renderLessonDetail(
       block.appendChild(boardContainer);
 
       // Mount read-only board
-      const mounted = mountBoard({ boardEl });
+      const mounted = mountBoard({ boardEl }, { i18n });
       boards.push(mounted);
       mounted.setTurn(false);
       mounted.setPosition(step.fen);
@@ -254,6 +254,7 @@ export function renderLessonDetail(
       input.id = `san-input-${step.id}`;
       input.type = 'text';
       input.className = 'step-san-input';
+      input.setAttribute('dir', 'ltr');
       input.placeholder = i18n.t('learning.step.sanPlaceholder');
       input.autocomplete = 'off';
       input.required = true;

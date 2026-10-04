@@ -306,7 +306,7 @@ export function mountStudyChapter({
   i18n,
 }: StudyChapterMountDependencies): MountedStudyChapter {
   const boardElement = doc.getElementById('chapter-board');
-  const board = boardElement ? mountBoard({ boardEl: boardElement }) : null;
+  const board = boardElement ? mountBoard({ boardEl: boardElement }, { i18n }) : null;
   board?.setTurn(false);
 
   const elements = studyChapterElements(doc);
