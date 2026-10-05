@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-05 — Launch Preparation D02: Greptile SPA-fallback cache correction verified; new final-head PR gates pending; Fable + Astra engineering remediation remains closed._
+_Last updated: 2026-10-05 — Launch Preparation D03: closed by current production-web Lighthouse evidence; documentation PR gates pending; Fable + Astra engineering remediation remains closed._
+
+Prior: _Last updated: 2026-10-05 — Launch Preparation D02: Greptile SPA-fallback cache correction verified; new final-head PR gates pending; Fable + Astra engineering remediation remains closed._
 
 Prior: _Last updated: 2026-10-05 — Launch Preparation D02: mutable service-worker staleness reproduced and corrected locally; final PR gates pending; Fable + Astra engineering remediation remains closed._
 
@@ -5358,3 +5360,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Review and boundary**: genuine Gemini 3.8 Flash High and Claude Sonnet 4.6 Thinking 429 quota failures permit strict Codex self-review. No independent-model result is fabricated. The owner merges manually. No public launch or deployed-topology certification is claimed.
 
 - **PR95 review correction**: Greptile at `599d1fd` found successful Nginx SPA HTML could overwrite a cached mutable file during a partial rollout. The actual built-HTML fallback was reproduced RED for both locale/piece consumers and cached bytes. Successful HTML for non-HTML file URLs now falls back to the valid cached asset or503 without overwriting it; intended HTML documents and HTTP-error behavior remain. Focused Chromium15/15 and four intended mutation kills (survivors0/invalid0, restored GREEN1/1) passed. New final-head CI/Qodo/Greptile/zero-thread acceptance supersedes earlier-head results only after completion.
+
+## Launch Preparation — D03 production Lighthouse evidence (2026-10-05)
+
+- **Baseline and closure**: required clean isolated-worktree preflight/fetch confirmed origin/main `c8df3e08e8d81999178742f3f5256b4bbf7b0154`, owner-merged PR #95. D03 is closed by [bounded current production-web evidence](audits/LAUNCH_D03_LIGHTHOUSE_VERIFICATION_2026-10-05.md), with no production code/configuration/test/visual changes. The canonical checkout and historical audit/closure/pinned ledger are untouched; Fable + Astra engineering remediation remains closed.
+- **Executed evidence**: actual Dockerfile.web image and unchanged entrypoint-rendered Nginx1.31.3 template served `/`; only intended upstream variables point at the current in-memory acceptance backend. Lighthouse11.4.0/Playwright1.61.1 Chromium149.0.7827.55, desktop/accessibility-only, scored production1.00 and fresh preview1.00, no failed audits/warnings/runtime errors. Exact-production-asset preview also scored1.00 with matching JS/CSS bytes; the fail-closed reproduction pair again scored1.00/1.00. Unreachable-server negative control failed before report/summary and has no behavioral credit. Setup errors are recorded separately.
+- **Comparison and limits**: exact-main CI37300745500 scores0.96 with one color-contrast failure on the HTTP500 lobby alert (4.03:1 versus4.5:1); its logs prove API connection refusal during Lighthouse. Healthy production evidence does not credit that server failure or correct the retained error-state contrast limitation. The historical0.93 cannot establish a current production discrepancy. A06/A07/O06/O09, other routes/states/locales/devices and public-launch approval remain separate; this is web-delivery evidence with bounded upstreams, not deployed Compose/cluster/gameplay certification.
+- **Publication checkpoint**: documentation-only CI path exclusions apply. Applicable exact-head Qodo/Greptile/zero-thread review and safe branch/PR acceptance remain pending at this source checkpoint; the PR handoff will record actual results without rewriting history. Owner alone merges.
