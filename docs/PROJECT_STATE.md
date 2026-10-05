@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-05 — M15 Increment 92: PR #93 owner-merged; Fable + Astra engineering remediation closed on main d42bcea (P0=0, required P1=0); public-launch readiness remains separate._
+_Last updated: 2026-10-05 — Launch Preparation D02: mutable service-worker staleness reproduced and corrected locally; final PR gates pending; Fable + Astra engineering remediation remains closed._
+
+Prior: _Last updated: 2026-10-05 — M15 Increment 92: PR #93 owner-merged; Fable + Astra engineering remediation closed on main d42bcea (P0=0, required P1=0); public-launch readiness remains separate._
 
 Prior: _Last updated: 2026-10-05 — M15 Increment 91: Current-main Fable/Astra ledger confirms one required P1; durable seek receipt correction locally verified; external PR gates pending._
 
@@ -5345,3 +5347,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Closure**: `CURRENT_ACTIONABLE_P0 = 0`, required `CURRENT_ACTIONABLE_P1 = 0`. Of 102 normalized findings: RESOLVED 60, OWNER_DEPENDENCY 11, NEEDS_EVIDENCE 7, deferred P2 12, deferred P3 11, OBSOLETE 1. **Fable + Astra engineering remediation is closed on current main.** The [closure record](audits/FABLE_ASTRA_FINAL_CLOSURE_2026-10-05.md) lists the 11 owner dependencies and 7 evidence items; the latter are evidence/deployment/manual-certification items, not confirmed engineering defects.
 - **Pinned ledger unchanged**: the [102-finding ledger](audits/FABLE_ASTRA_CURRENT_REMEDIATION_2026-10-05.md) remains a snapshot pinned to `3aa2010`, before #93, and still shows C02 open. It is not rewritten.
 - **Public launch is separate**: engineering closure does not approve launch. Owner/legal policies, discoverability, operated backup/recovery, moderation readiness, deployment acceptance and the visual/IA decisions remain independent dependencies. Documentation-only increment; no production code, test, configuration, policy or visual change.
+
+## Launch Preparation — D02 cache freshness (2026-10-05)
+
+- **Baseline**: origin/main `c31ecc2fc7f50a150695fa7ec6b8f6e5af89671e` verified in the provided clean isolated worktree. Fable + Astra engineering remediation remains closed; historical closure/ledger rows are unchanged.
+- **D02 reproduced and corrected**: native Chromium returned build-A locale bootstrap and chess-piece SVG bytes after build-B worker activation/reload, while the installation-refreshed icon returned B. Cache-first runtime entries survived under the unchanged cache name. [ADR-0158](adr/0158-service-worker-mutable-freshness.md) keeps cache-first for Nginx-compatible hashed assets; mutable same-origin resources revalidate online with cached offline fallback. Navigation/API/WebSocket/origin boundaries remain.
+- **Bounded verification**: [evidence](audits/LAUNCH_D02_VERIFICATION_2026-10-05.md) records final-test RED against original worker and GREEN corrected, unchanged-worker asset update, three targeted mutations killed (survivors0/invalid0), restored GREEN1/1 and focused Chromium15/15 (retries0/skips0). Full build/lint, hermetic4007/4007 across19 workspaces (web1476/1476, zero failures/skips/cancellations), scripts315/315 and eight guards passed. Discovery expectations explicitly include the new backend-free spec; exact-head external gates remain pending at this checkpoint.
+- **Review and boundary**: genuine Gemini 3.8 Flash High and Claude Sonnet 4.6 Thinking 429 quota failures permit strict Codex self-review. No independent-model result is fabricated. The owner merges manually. No public launch or deployed-topology certification is claimed.
