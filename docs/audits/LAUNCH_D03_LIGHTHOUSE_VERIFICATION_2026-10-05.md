@@ -34,7 +34,7 @@ The fresh default preview bundle differs from the production bundle because prod
 | `/assets/index-BqLL7Hht.js` | 420627 | `c36c0660b24ed21168ddee0da432082b4be8312dad7684dc7efa13d9ed8741c7` |
 | `/assets/index-BNUlepaa.css` | 31064 | `b5adb73869da98f9ab29dc263a95dbeb7974b634ed14c95c703ea0a4c5ee49b5` |
 
-Report fingerprints (original JSON bytes): production `f441d4709f7f7a3fd89fdab2d807910cda4990556ef47012b5d2c02d53967fe4`; fresh preview `057522951f1a09cca1bb07be4efdd56e88c116bc62356306d090a3f8e8acdd86`; matched preview `ea04047b22c50e78049409c386f0f65ca390a6b433e9483f6e624d684232b345`; downloaded CI `350a9f2a7d3e538714698249979ac81596fcc26b884915cf41f2755b251ed9c0`. The [immutable public evidence snapshot](https://gist.github.com/edwardnewgate710/2e6fb9a75077bd5e5052ab4cb4136af4/edcffc1eb8b01554c21a30d3d6f08552c2957fe9) contains the primary JSON/HTML reports, exact-main CI JSON, original summaries, all three shell captures in `shell-captures.html`, the final stricter reproduction runner and its new JSON/HTML reports/summary, plus cleanup and browser-request-failure control scripts. All 18 published files were downloaded and SHA256-verified against local originals. Original CI logs remain accessible through the linked GitHub job above. Local working copies remain at `C:/Users/hp/AppData/Local/Temp/rocky-d03-evidence-20261005`; reviewers need no access to that directory. The procedure below regenerates reviewable reports.
+Report fingerprints (original JSON bytes): production `f441d4709f7f7a3fd89fdab2d807910cda4990556ef47012b5d2c02d53967fe4`; fresh preview `057522951f1a09cca1bb07be4efdd56e88c116bc62356306d090a3f8e8acdd86`; matched preview `ea04047b22c50e78049409c386f0f65ca390a6b433e9483f6e624d684232b345`; downloaded CI `350a9f2a7d3e538714698249979ac81596fcc26b884915cf41f2755b251ed9c0`. The [immutable public evidence snapshot](https://gist.github.com/edwardnewgate710/2e6fb9a75077bd5e5052ab4cb4136af4/0334066d469e59f373a4b036f385bb52c11c0c17) contains the primary JSON/HTML reports, exact-main CI JSON, original summaries, all three shell captures in `shell-captures.html`, the final stricter reproduction runner and its new JSON/HTML reports/summary, plus cleanup and browser-request-failure control scripts, the completed shell procedure and its final rebuilt-image identity. All 22 published files were downloaded and SHA256-verified against local originals. Original CI logs remain accessible through the linked GitHub job above. Local working copies remain at `C:/Users/hp/AppData/Local/Temp/rocky-d03-evidence-20261005`; reviewers need no access to that directory. The procedure below regenerates reviewable reports.
 
 The original audit documents Lighthouse11.4.0 with mobile-like simulated throttling (150 ms RTT, 1.6 Mbps, 4× CPU), older application assets and a historical Compose score0.93; its original individual failed audits are not present in the repository. The cause of that historical score remains unproven. It cannot establish a current defect against this new production-path report. Closure means the current shell clears the repository's ≥0.95 gate under explicitly comparable M6 settings; it does not reconstruct the old result or certify every route/state/preset.
 
@@ -80,7 +80,7 @@ import crypto from 'node:crypto';
 const out='/evidence/final-reproduction';
 fs.mkdirSync(out,{recursive:true});
 const metadata={node:process.version,browserExecutable:chromium.executablePath(),runs:[]};
-for(const [name,url] of [['production','http://127.0.0.1:8080/'],['preview','http://127.0.0.1:4173/']]) {
+for(const [name,url] of [['production','http://127.0.0.1:8080/'],['preview','http://127.0.0.1:4173/'],['preview-matched','http://127.0.0.1:4177/']]) {
   const response=await fetch(url);
   assert.equal(response.status,200);
   const html=await response.text();
@@ -141,10 +141,11 @@ EVIDENCE=/absolute/path/to/scratch
 REV=c8df3e08e8d81999178742f3f5256b4bbf7b0154
 docker build -f Dockerfile.web --build-arg VITE_GIT_SHA="$REV" -t rocky-d03-web:c8df3e0 .
 docker build -f "$EVIDENCE/Dockerfile.audit" -t rocky-d03-audit:c8df3e0 .
-D03_AUDIT_ID=$(docker run -d --name rocky-d03-audit \
+D03_AUDIT_ID=$(docker create --name rocky-d03-audit \
   --mount "type=bind,source=$EVIDENCE,target=/evidence" \
   -p 127.0.0.1:14380:8080 -p 127.0.0.1:14373:4173 \
   rocky-d03-audit:c8df3e0 sh /evidence/start.sh)
+docker start "$D03_AUDIT_ID"
 # Require the backend and preview to respond before proceeding (bounded 30 seconds).
 docker exec rocky-d03-audit node --input-type=module -e '
 for (const url of ["http://127.0.0.1:4174/v1/health", "http://127.0.0.1:4173/"]) {
@@ -155,17 +156,24 @@ for (const url of ["http://127.0.0.1:4174/v1/health", "http://127.0.0.1:4173/"])
   }
   if(!ready) throw new Error("Startup failed: "+url);
 }'
-D03_WEB_ID=$(docker run -d --name rocky-d03-web --network container:rocky-d03-audit \
+D03_WEB_ID=$(docker create --name rocky-d03-web --network container:rocky-d03-audit \
   -e API_UPSTREAM=127.0.0.1:4174 -e GATEWAY_UPSTREAM=127.0.0.1:4175 rocky-d03-web:c8df3e0)
+docker start "$D03_WEB_ID"
 docker exec rocky-d03-web nginx -t
-docker exec rocky-d03-audit node /evidence/reproduce.mjs
-# Optional exact-asset control: copy image files, preview them, change the runner's
-# cases to only ["preview-matched","http://127.0.0.1:4177/"] and use a separate out path.
-docker cp rocky-d03-web:/usr/share/nginx/html "$EVIDENCE/production-dist"
-docker cp "$EVIDENCE/production-dist" rocky-d03-audit:/production-dist
+# Exact-asset control is measured before the EXIT trap stops the containers.
+docker cp rocky-d03-web:/usr/share/nginx/html/. "$EVIDENCE/production-dist"
+docker cp "$EVIDENCE/production-dist/." rocky-d03-audit:/production-dist
 docker exec -d -w /app/packages/web rocky-d03-audit /app/node_modules/.bin/vite \
   preview --outDir /production-dist --port 4177 --host 127.0.0.1 --strictPort
-# Inspect saved reports/captures; EXIT cleanup removes only IDs created by this run.
+docker exec rocky-d03-audit node --input-type=module -e '
+let ready=false;
+for(let i=0;i<30;i++) {
+  try { if((await fetch("http://127.0.0.1:4177/")).ok) {ready=true;break;} } catch {}
+  await new Promise(r=>setTimeout(r,1000));
+}
+if(!ready) throw new Error("Matched preview startup failed");'
+docker exec rocky-d03-audit node /evidence/reproduce.mjs
+# All three reports are saved before EXIT cleanup removes only this run's created IDs.
 ```
 
 Infrastructure-negative control: changing the production URL to unused `127.0.0.1:65534` returned nonzero `ECONNREFUSED` before any report/summary; it receives no accessibility credit. A separate missing-report control replaced Lighthouse with `/bin/true` in scratch tooling: even with command exit0, reading the newly required report failed `ENOENT`, with no accepted summary. Earlier stopped Docker, CRLF shell startup and an invalid guest-board preflight assertion were corrected as setup-only failures; none was treated as RED accessibility or a passing run. No tests were skipped or counted through missing reports.
@@ -178,6 +186,8 @@ Documentation-only changes follow CI's Markdown path exclusions; no unrelated he
 
 Greptile review correction: the first published head kept primary reports only locally and allowed nonempty warning/failed-audit lists when score≥0.95. The public snapshot now exposes the actual evidence, and the stricter runner enforces the clean observation. Its fresh production/preview pair passed **1.00/1.00**, zero failed audits/warnings/runtime errors. This changes only documented evidence/reproduction; no production behavior changed.
 
-Qodo substantive review correction: the documented shell sequence now installs an EXIT cleanup trap before starting containers and tracks only IDs returned by successful creation. A Docker POSIX-shell control using the same cleanup helper removed both running test containers on successful completion and on an injected nonzero exit. A name-collision control exited nonzero and preserved the pre-existing task-owned fixture; it was then explicitly removed by the test owner. Final container inventory showed no D03 containers. Native Bash invocation was unavailable under the local Lean-ctx allowlist; the controls ran in the permitted Docker environment without changing that allowlist. At that review checkpoint, browser request-failure recording was a robustness limitation; the following correction supersedes it. The measured shell's HTTP/asset status, visible lobby/auth, empty lobby-error, page exceptions and Lighthouse runtime/audit checks passed.
+Qodo substantive review correction: the documented shell sequence now installs an EXIT cleanup trap before starting containers and tracks IDs returned by creation. The final create/start separation below supersedes the earlier combined docker-run approach. A Docker POSIX-shell control using the same cleanup helper removed both running test containers on successful completion and on an injected nonzero exit. A name-collision control exited nonzero and preserved the pre-existing task-owned fixture; it was then explicitly removed by the test owner. Final container inventory showed no D03 containers. Native Bash invocation was unavailable under the local Lean-ctx allowlist; the controls ran in the permitted Docker environment without changing that allowlist. At that review checkpoint, browser request-failure recording was a robustness limitation; the following correction supersedes it. The measured shell's HTTP/asset status, visible lobby/auth, empty lobby-error, page exceptions and Lighthouse runtime/audit checks passed.
 
 Final Qodo robustness correction: the browser preflight now records each `requestfailed` URL/error in shell metadata and requires an empty list before Lighthouse runs. Fresh strict production/preview again scored **1.00/1.00**, with request failures0, page exceptions0, failed audits0 and warnings0. An aborted production CSS request reached the intended request-failure assertion (`net::ERR_FAILED`,1 versus0) before any report; it is a rejected infrastructure-negative control, not an accessibility result. The final runner/reports and both control scripts are in the new immutable public snapshot; all18 published files were downloaded and byte-verified. No production bytes changed.
+
+Final Greptile reproducibility corrections: container creation and startup are now separate, so the EXIT trap knows each newly created ID even when startup fails. Real create/start controls passed success and injected failure, preserved a name-collision fixture, and removed the created-but-unstarted container after an occupied-port startup failure while retaining the port-owning fixture. The copied-assets preview is now a third required runner case and is audited before EXIT cleanup; copy-content paths avoid nested stale directories when reusing scratch. The complete documented shell sequence was executed in Docker's POSIX environment, including real builds, readiness, Nginx validation, all three Lighthouse reports and cleanup: **production1.00 / preview1.00 / matched-preview1.00**, request failures/page errors/failed audits/warnings0. Final inventory has no D03 containers. The final public snapshot contains22 downloaded/SHA256-verified files. `final-image-id.txt` records the full-procedure rebuilt web image `sha256:638cb7e7d04a9d1243c19663fb9d4ab63fc28167996351569c1ad59638bf0f12`; its production JS/CSS paths, lengths and hashes match both the original measured image and the copied-assets preview. The initial image identity above remains the attribution for the original primary reports. No production application/configuration/visual changes occurred.
