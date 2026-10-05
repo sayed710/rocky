@@ -11,8 +11,8 @@
   --sel-deep: #83414B;
   /* Contrast edge for the board selection ring. */
   --sel-edge: #242224;
-  /* Ember: error/danger only — deliberately a different hue from --sel. */
-  --ember: #e5484d;
+  /* Ember: error/danger only; readable on dark panels as well as the page. */
+  --ember: #ff858a;
   /* Panel surfaces lift a row a hair off the background without a hard edge. */
   --panel: rgba(233, 228, 222, 0.05);
   --panel-strong: rgba(233, 228, 222, 0.09);

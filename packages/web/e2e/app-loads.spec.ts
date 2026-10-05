@@ -110,3 +110,39 @@ test('skip link is present for keyboard users', async ({ page }) => {
   const skipLink = page.locator('.skip-link');
   await expect(skipLink).toBeAttached();
 });
+
+for (const locale of ['en', 'ar'] as const) {
+  for (const theme of ['dark', 'light'] as const) {
+    test(`lobby failure text has readable contrast (${locale}, ${theme})`, async ({ page }) => {
+      await page.addInitScript(({ locale, theme }) => {
+        localStorage.setItem('rookzen_locale_v1', locale);
+        localStorage.setItem('gambit-theme', theme);
+      }, { locale, theme });
+      await page.route('**/v1/seeks', async (route) => {
+        await route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"unavailable"}' });
+      });
+      await page.goto('/');
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+      await expect(page.locator('html')).toHaveClass(new RegExp(theme));
+      const error = page.locator('#lobby-error');
+      await expect(error).toBeVisible();
+      await expect(error).not.toBeEmpty();
+      await expect(error).toHaveAttribute('role', 'alert');
+      const ratio = await error.evaluate((element) => {
+        const luminance = (color: string): number => {
+          const values = color.match(/[\d.]+/g)!.map(Number);
+          if (values.length === 4 && values[3] !== 1) throw new Error('expected opaque colour');
+          const channels = values.slice(0, 3).map((value) => {
+            const channel = value / 255;
+            return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+          });
+          return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+        };
+        const ink = luminance(getComputedStyle(element).color);
+        const background = luminance(getComputedStyle(document.body).backgroundColor);
+        return (Math.max(ink, background) + 0.05) / (Math.min(ink, background) + 0.05);
+      });
+      expect(ratio).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+}
