@@ -32,6 +32,7 @@ const STATIC_SPECS = new Set([
   'auth-responsive.spec.ts',
   'create-game-responsive.spec.ts',
   'offline-navigation.spec.ts',
+  'service-worker-update.spec.ts',
   'leaderboard.spec.ts',
   'password-recovery.spec.ts',
   'email-verification.spec.ts',

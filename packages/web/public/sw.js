@@ -2,18 +2,19 @@
  * Rookzen service worker — app-shell caching for PWA installability.
  *
  * Strategy (option b — runtime caching, no build-time precache injection):
- * - Precache: only the manifest and index.html are precached on install.
+ * - Precache: the shell, manifest and icons are precached on install.
  *   Hashed production assets (JS/CSS in dist/assets/) are NOT precached
  *   because the build does not inject them into this file. Instead, they
  *   are cached on first visit via the runtime cache-first handler below.
  *   This means offline support requires at least one online visit.
  * - Navigations: network-first (always try the network, fall back to
  *   cached index.html for offline support).
- * - Static assets (same-origin GET): cache-first (immutable hashed assets
- *   are safe to serve from cache after first fetch).
+ * - Static assets (same-origin GET): cache-first for immutable hashed assets;
+ *   mutable URLs revalidate on the network, falling back to cache offline.
  * - API (/v1/) and WebSocket: NEVER cached — always go to network.
  *
- * The cache is versioned by CACHE_VERSION so deploys invalidate old caches.
+ * CACHE_VERSION invalidates incompatible cache formats, not every deployment.
+ * Mutable freshness does not depend on changing worker bytes or the cache name.
  *
  * To implement build-time precache injection (option a), a postbuild script
  * would rewrite APP_SHELL in dist/sw.js from the actual dist/assets/* listing.
@@ -75,8 +76,29 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Same-origin static assets: cache-first (hashed assets are immutable).
+  // Match the immutable Vite asset contract in docker/web/nginx.conf.template.
   if (url.origin === self.location.origin) {
+    const immutable = /^\/assets\/(?:.*\/)?[^/]+-[A-Za-z0-9_-]{8}\.[^/]+$/.test(url.pathname);
+    if (!immutable) {
+      event.respondWith(
+        fetch(new Request(req, { cache: 'no-cache' })).then(async (response) => {
+          // Nginx's SPA fallback can answer a missing public asset with successful HTML.
+          // Preserve its last valid bytes rather than delivering/caching the shell as JS or an image.
+          const assetFile = /\.[^/]+$/.test(url.pathname) && !/\.html?$/i.test(url.pathname);
+          const html = response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() === 'text/html';
+          if (response.ok && assetFile && html) {
+            return (await caches.match(req)) || new Response('Offline', { status: 503, statusText: 'Offline' });
+          }
+          if (response.ok) {
+            const clone = response.clone();
+            await caches.open(CACHE_NAME).then((cache) => cache.put(req, clone)).catch(() => {});
+          }
+          return response;
+        }).catch(async () => (await caches.match(req)) || new Response('Offline', { status: 503, statusText: 'Offline' })),
+      );
+      return;
+    }
+    // Immutable assets keep the established cache-first/offline behavior.
     event.respondWith(
       caches.match(req).then((cached) => {
         if (cached) return cached;
