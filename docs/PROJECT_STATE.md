@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-05 — Launch Preparation D03: production evidence and failure-safe reproduction cleanup verified; final-head PR gates pending; Fable + Astra engineering remediation remains closed._
+_Last updated: 2026-10-05 — Launch Preparation D03: production evidence, cleanup and browser-request-failure rejection verified; final-head PR gates pending; Fable + Astra engineering remediation remains closed._
+
+Prior: _Last updated: 2026-10-05 — Launch Preparation D03: production evidence and failure-safe reproduction cleanup verified; final-head PR gates pending; Fable + Astra engineering remediation remains closed._
 
 Prior: _Last updated: 2026-10-05 — Launch Preparation D03: public production Lighthouse artifacts and strict clean-report reproduction verified; new final-head PR gates pending; Fable + Astra engineering remediation remains closed._
 
@@ -5375,3 +5377,5 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **PR96 evidence review correction**: Greptile on first head80e7c51 validly requested reviewer-accessible primary artifacts and explicit clean-audit/warning enforcement. The linked immutable public snapshot exposes16 byte-verified report/summary/capture/runner files; CI logs retain their public job link. Updated scratch reproduction rejects warnings and failed accessibility audits in addition to infrastructure/report/threshold errors; fresh production1.00/preview1.00 passed with empty failures/warnings. Documentation-only correction; no production code changed. Fresh exact-head external gates remain pending here, with earlier reviewer evidence historical.
 
 - **PR96 Qodo cleanup correction**: substantive current-diff review of a3fd84e reported Bugs0/Rules0/Requirements0 with one actionable cleanup improvement; its skipped automated update was not credited as fresh review. The documented POSIX sequence now traps EXIT and removes only successfully created IDs. Real Docker controls verified cleanup after success and injected failure, plus preservation of a pre-existing name-collision fixture; all task controls were removed. Prior scores and production bytes remain unchanged; refreshed exact-head review gates are required after this documentation correction.
+
+- **PR96 final request-failure correction**: Qodo's substantive da2583f review confirmed cleanup fixed but requested explicit browser request-failure recording. The documented preflight now records URL/error and rejects nonempty requestFailures before Lighthouse. Fresh strict production1.00/preview1.00 passed with request failures/page errors/audit failures/warnings0. An intentionally aborted CSS request failed its exact requestFailures assertion before a report and received no accessibility credit. Final public snapshot contains18 downloaded/hash-verified files, including final reports/runner and cleanup/request controls. No production application/visual changes; new exact-head review acceptance remains separately pending.
