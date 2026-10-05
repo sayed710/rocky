@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-05 — Launch Preparation D02: mutable service-worker staleness reproduced and corrected locally; final PR gates pending; Fable + Astra engineering remediation remains closed._
+_Last updated: 2026-10-05 — Launch Preparation D02: Greptile SPA-fallback cache correction verified; new final-head PR gates pending; Fable + Astra engineering remediation remains closed._
+
+Prior: _Last updated: 2026-10-05 — Launch Preparation D02: mutable service-worker staleness reproduced and corrected locally; final PR gates pending; Fable + Astra engineering remediation remains closed._
 
 Prior: _Last updated: 2026-10-05 — M15 Increment 92: PR #93 owner-merged; Fable + Astra engineering remediation closed on main d42bcea (P0=0, required P1=0); public-launch readiness remains separate._
 
@@ -5354,3 +5356,5 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **D02 reproduced and corrected**: native Chromium returned build-A locale bootstrap and chess-piece SVG bytes after build-B worker activation/reload, while the installation-refreshed icon returned B. Cache-first runtime entries survived under the unchanged cache name. [ADR-0158](adr/0158-service-worker-mutable-freshness.md) keeps cache-first for Nginx-compatible hashed assets; mutable same-origin resources revalidate online with cached offline fallback. Navigation/API/WebSocket/origin boundaries remain.
 - **Bounded verification**: [evidence](audits/LAUNCH_D02_VERIFICATION_2026-10-05.md) records final-test RED against original worker and GREEN corrected, unchanged-worker asset update, three targeted mutations killed (survivors0/invalid0), restored GREEN1/1 and focused Chromium15/15 (retries0/skips0). Full build/lint, hermetic4007/4007 across19 workspaces (web1476/1476, zero failures/skips/cancellations), scripts315/315 and eight guards passed. Discovery expectations explicitly include the new backend-free spec; exact-head external gates remain pending at this checkpoint.
 - **Review and boundary**: genuine Gemini 3.8 Flash High and Claude Sonnet 4.6 Thinking 429 quota failures permit strict Codex self-review. No independent-model result is fabricated. The owner merges manually. No public launch or deployed-topology certification is claimed.
+
+- **PR95 review correction**: Greptile at `599d1fd` found successful Nginx SPA HTML could overwrite a cached mutable file during a partial rollout. The actual built-HTML fallback was reproduced RED for both locale/piece consumers and cached bytes. Successful HTML for non-HTML file URLs now falls back to the valid cached asset or503 without overwriting it; intended HTML documents and HTTP-error behavior remain. Focused Chromium15/15 and four intended mutation kills (survivors0/invalid0, restored GREEN1/1) passed. New final-head CI/Qodo/Greptile/zero-thread acceptance supersedes earlier-head results only after completion.

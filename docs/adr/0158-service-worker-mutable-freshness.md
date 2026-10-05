@@ -10,7 +10,7 @@ Launch Preparation D02 was NEEDS_EVIDENCE on main `c31ecc2fc7f50a150695fa7ec6b8f
 
 ## Decision
 
-Keep cache-first only for the content-hashed `/assets/` paths matching the existing Nginx immutable contract. Other same-origin non-navigation GET resources use network-first with HTTP cache revalidation (`cache: 'no-cache'`). Cache successful responses before resolving the fetch; on network failure, use the cached response or the established 503 fallback. HTTP errors remain network responses and do not overwrite successful cached bytes.
+Keep cache-first only for the content-hashed `/assets/` paths matching the existing Nginx immutable contract. Other same-origin non-navigation GET resources use network-first with HTTP cache revalidation (`cache: 'no-cache'`). Cache successful responses before resolving the fetch; on network failure, use the cached response or the established 503 fallback. HTTP errors remain network responses and do not overwrite successful cached bytes. A successful `text/html` response for a file URL other than `.html`/`.htm` is the Nginx SPA fallback, not valid asset bytes: use the cached asset or 503 without caching that HTML. Deliberate HTML document URLs remain eligible for caching.
 
 Retain the existing cache name so the newly installed worker can use previously cached resources offline. Freshness no longer depends on manually changing that name or changing worker bytes on each asset deployment. Navigation and API/WebSocket exclusion branches remain unchanged. No third-party origin is admitted to caching.
 

@@ -82,6 +82,13 @@ self.addEventListener('fetch', (event) => {
     if (!immutable) {
       event.respondWith(
         fetch(new Request(req, { cache: 'no-cache' })).then(async (response) => {
+          // Nginx's SPA fallback can answer a missing public asset with successful HTML.
+          // Preserve its last valid bytes rather than delivering/caching the shell as JS or an image.
+          const assetFile = /\.[^/]+$/.test(url.pathname) && !/\.html?$/i.test(url.pathname);
+          const html = response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() === 'text/html';
+          if (response.ok && assetFile && html) {
+            return (await caches.match(req)) || new Response('Offline', { status: 503, statusText: 'Offline' });
+          }
           if (response.ok) {
             const clone = response.clone();
             await caches.open(CACHE_NAME).then((cache) => cache.put(req, clone)).catch(() => {});

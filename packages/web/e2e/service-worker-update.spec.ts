@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 test('deployment refreshes mutable runtime assets while preserving immutable and offline assets', async ({ browser }) => {
   let revision = 'A';
   let workerRevision = 'A';
+  let missingAssets = false;
   const requests = new Map<string, number>();
   const dist = fileURLToPath(new URL('../dist/', import.meta.url));
   const html = await readFile(`${dist}index.html`, 'utf8');
@@ -21,6 +22,13 @@ test('deployment refreshes mutable runtime assets while preserving immutable and
       return;
     }
     try {
+      // Production Nginx location / falls back to index.html, including a missing public file.
+      if (missingAssets && mutable.includes(path)) {
+        res.setHeader('Content-Type', 'text/html');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.end(html);
+        return;
+      }
       const file = path === '/' || !path.includes('.') ? '/index.html' : path;
       let bytes = await readFile(`${dist}${file.slice(1)}`);
       const type = file.endsWith('.js') ? 'application/javascript' : file.endsWith('.svg') ? 'image/svg+xml' : file.endsWith('.html') ? 'text/html' : file.endsWith('.css') ? 'text/css' : 'application/octet-stream';
@@ -79,6 +87,12 @@ test('deployment refreshes mutable runtime assets while preserving immutable and
     await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.update());
     await page.reload();
     for (const path of [...mutable, '/icon.svg']) expect(await fetchText(path)).toContain('build C');
+    missingAssets = true;
+    for (const path of mutable) expect.soft(await fetchText(path)).toContain('build C');
+    // Successful SPA fallback HTML must neither reach an asset consumer nor poison its cache.
+    for (const path of mutable) {
+      expect.soft(await page.evaluate(async (url) => (await caches.match(url))!.text(), path)).toContain('build C');
+    }
     await context.setOffline(true);
     for (const path of mutable) expect(await fetchText(path)).toContain('build C');
     expect(await fetchText(hashed)).toBe(immutableA);
