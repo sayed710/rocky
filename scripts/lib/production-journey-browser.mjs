@@ -5,6 +5,15 @@ import { requireComplete, requireEdge, requireFinished, requireRatings, ratingIn
 
 const expect = playwrightExpect.configure({ timeout: 20_000 });
 
+/** Reach the native link through the real tab order; programmatic focus would hide regressions. */
+async function focusByKeyboard(page, link) {
+  for (let attempt = 0; attempt < 64; attempt++) {
+    await page.keyboard.press('Tab');
+    if (await link.evaluate(element => element === element.ownerDocument.activeElement)) return;
+  }
+  throw new Error('Finished-game history link is not keyboard reachable');
+}
+
 /** Execute product actions in independent contexts; deployment controls stay with the runner. */
 export async function browserJourney({ baseURL, evidence, stage, database, restart, replayObserved, setBrowser, protect }) {
   const browser = await chromium.launch();
@@ -136,15 +145,28 @@ export async function browserJourney({ baseURL, evidence, stage, database, resta
       await expect(link).toBeVisible();
       await expect(link).toHaveCSS('display', 'block');
       await expect(link).toHaveCSS('text-decoration-line', 'none');
-      await page.keyboard.press('Tab');
-      await link.focus();
+      if (!evidence.keyboardControl) {
+        // An isolated DOM mutation proves that bypassing the tab order cannot satisfy this check.
+        const originalTabindex = await link.getAttribute('tabindex');
+        await link.evaluate(element => element.setAttribute('tabindex', '-1'));
+        try {
+          await assert.rejects(focusByKeyboard(page, link), /not keyboard reachable/);
+        } finally {
+          await link.evaluate((element, original) => {
+            if (original === null) element.removeAttribute('tabindex');
+            else element.setAttribute('tabindex', original);
+          }, originalTabindex);
+        }
+        evidence.keyboardControl = 'tabindex=-1 rejected';
+      }
+      await focusByKeyboard(page, link);
       assert.equal(await link.evaluate(element => element.matches(':focus-visible')), true);
       await expect(link).toHaveCSS('outline-width', '3px');
       await expect(link).toHaveCSS('outline-style', 'solid');
       await expect(link).toHaveCSS('outline-offset', '2px');
       const games = await json(page, `/v1/users/${evidence.handles[index]}/games`);
       requireFinished(games.find(game => game.id === evidence.gameId), evidence.gameId, ...evidence.players);
-      await link.click();
+      await page.keyboard.press('Enter');
       await page.waitForURL(`${baseURL}/game/${evidence.gameId}`);
       await expect(page.locator('[data-square="h4"]')).toHaveAttribute('aria-label', 'h4, black queen');
       await expect(page.locator('#status')).toContainText('0-1');
