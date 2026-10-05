@@ -127,14 +127,22 @@ Run from the pinned isolated checkout, using unused task-owned container names a
 
 ```sh
 set -eu
+# Track only IDs returned by this run; a pre-existing named container is never removed.
+D03_AUDIT_ID=
+D03_WEB_ID=
+cleanup() {
+  if [ -n "$D03_WEB_ID" ]; then docker rm -f "$D03_WEB_ID"; fi
+  if [ -n "$D03_AUDIT_ID" ]; then docker rm -f "$D03_AUDIT_ID"; fi
+}
+trap cleanup EXIT
 EVIDENCE=/absolute/path/to/scratch
 REV=c8df3e08e8d81999178742f3f5256b4bbf7b0154
 docker build -f Dockerfile.web --build-arg VITE_GIT_SHA="$REV" -t rocky-d03-web:c8df3e0 .
 docker build -f "$EVIDENCE/Dockerfile.audit" -t rocky-d03-audit:c8df3e0 .
-docker run -d --name rocky-d03-audit \
+D03_AUDIT_ID=$(docker run -d --name rocky-d03-audit \
   --mount "type=bind,source=$EVIDENCE,target=/evidence" \
   -p 127.0.0.1:14380:8080 -p 127.0.0.1:14373:4173 \
-  rocky-d03-audit:c8df3e0 sh /evidence/start.sh
+  rocky-d03-audit:c8df3e0 sh /evidence/start.sh)
 # Require the backend and preview to respond before proceeding (bounded 30 seconds).
 docker exec rocky-d03-audit node --input-type=module -e '
 for (const url of ["http://127.0.0.1:4174/v1/health", "http://127.0.0.1:4173/"]) {
@@ -145,8 +153,8 @@ for (const url of ["http://127.0.0.1:4174/v1/health", "http://127.0.0.1:4173/"])
   }
   if(!ready) throw new Error("Startup failed: "+url);
 }'
-docker run -d --name rocky-d03-web --network container:rocky-d03-audit \
-  -e API_UPSTREAM=127.0.0.1:4174 -e GATEWAY_UPSTREAM=127.0.0.1:4175 rocky-d03-web:c8df3e0
+D03_WEB_ID=$(docker run -d --name rocky-d03-web --network container:rocky-d03-audit \
+  -e API_UPSTREAM=127.0.0.1:4174 -e GATEWAY_UPSTREAM=127.0.0.1:4175 rocky-d03-web:c8df3e0)
 docker exec rocky-d03-web nginx -t
 docker exec rocky-d03-audit node /evidence/reproduce.mjs
 # Optional exact-asset control: copy image files, preview them, change the runner's
@@ -155,8 +163,7 @@ docker cp rocky-d03-web:/usr/share/nginx/html "$EVIDENCE/production-dist"
 docker cp "$EVIDENCE/production-dist" rocky-d03-audit:/production-dist
 docker exec -d -w /app/packages/web rocky-d03-audit /app/node_modules/.bin/vite \
   preview --outDir /production-dist --port 4177 --host 127.0.0.1 --strictPort
-# After reports have been copied/inspected, remove only these task-owned containers.
-docker rm -f rocky-d03-web rocky-d03-audit
+# Inspect saved reports/captures; EXIT cleanup removes only IDs created by this run.
 ```
 
 Infrastructure-negative control: changing the production URL to unused `127.0.0.1:65534` returned nonzero `ECONNREFUSED` before any report/summary; it receives no accessibility credit. A separate missing-report control replaced Lighthouse with `/bin/true` in scratch tooling: even with command exit0, reading the newly required report failed `ENOENT`, with no accepted summary. Earlier stopped Docker, CRLF shell startup and an invalid guest-board preflight assertion were corrected as setup-only failures; none was treated as RED accessibility or a passing run. No tests were skipped or counted through missing reports.
@@ -168,3 +175,5 @@ This closes only D03's historical production-web versus M6 accessibility discrep
 Documentation-only changes follow CI's Markdown path exclusions; no unrelated heavy suite is required or claimed for this evidence PR. Exact-head Qodo/Greptile and PR-state acceptance are recorded in the PR handoff after they actually complete. The owner alone merges.
 
 Greptile review correction: the first published head kept primary reports only locally and allowed nonempty warning/failed-audit lists when score≥0.95. The public snapshot now exposes the actual evidence, and the stricter runner enforces the clean observation. Its fresh production/preview pair passed **1.00/1.00**, zero failed audits/warnings/runtime errors. This changes only documented evidence/reproduction; no production behavior changed.
+
+Qodo substantive review correction: the documented shell sequence now installs an EXIT cleanup trap before starting containers and tracks only IDs returned by successful creation. A Docker POSIX-shell control using the same cleanup helper removed both running test containers on successful completion and on an injected nonzero exit. A name-collision control exited nonzero and preserved the pre-existing task-owned fixture; it was then explicitly removed by the test owner. Final container inventory showed no D03 containers. Native Bash invocation was unavailable under the local Lean-ctx allowlist; the controls ran in the permitted Docker environment without changing that allowlist. Browser request-failure recording remains an explicitly acknowledged robustness limitation; the measured shell's HTTP/asset status, visible lobby/auth, empty lobby-error, page exceptions and Lighthouse runtime/audit checks passed.
