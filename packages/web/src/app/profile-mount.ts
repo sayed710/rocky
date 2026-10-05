@@ -271,8 +271,10 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     } else {
       gamesEl.innerHTML = '';
       for (const g of games) {
-        const row = doc.createElement('div');
+        const row = doc.createElement('a');
         row.className = 'game-row';
+        row.setAttribute('href', `/game/${encodeURIComponent(g.id)}`);
+        row.setAttribute('data-route', 'game');
         const variantStr = getVariantLabel(g.variant, i18n);
         const speedStr = getSpeedLabel(g.speed, i18n);
         const resultStr = g.result ?? i18n.t('profile.games.ongoing');

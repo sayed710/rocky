@@ -1,0 +1,29 @@
+name: O09 production browser journey
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  production-journey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: node scripts/run-zero-skip.mjs -- node --test scripts/test/production-journey-contract.test.mjs
+      - run: node scripts/production-journey-mutations.mjs
+      - run: npm run acceptance:production-journey
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: o09-evidence
+          path: test-results/production-journey/**/evidence.json
+          if-no-files-found: error
+          retention-days: 14

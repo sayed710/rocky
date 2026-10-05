@@ -1,5 +1,7 @@
 # Rookzen audit sources
 
+- [Launch Preparation O09 — deployed game-to-review journey — 2026-10-05](LAUNCH_O09_PRODUCTION_JOURNEY_VERIFICATION_2026-10-05.md) records the real Compose/Nginx two-browser rated game, durable result, exactly-once replay, refreshed history and local-engine review; includes the reusable command and scope limits. Owner merge/public launch remain separate.
+
 - [Launch Preparation O10 — Windows Signature B verification — 2026-10-05](LAUNCH_O10_WINDOWS_SIGNATURE_B_VERIFICATION_2026-10-05.md) records three bounded Windows runs on main `5ee3441` with no Signature B captures, identifies the `packages/api` DB-backed suites that ran and the `packages/persistence` suites that did not, and preserves the unresolved-cause caveat.
 - [Fable + Astra final closure — 2026-10-05](FABLE_ASTRA_FINAL_CLOSURE_2026-10-05.md) records engineering remediation as closed on main `d42bcea` after PR #93 (P0=0, required P1=0). The ledger below stays a pre-#93 snapshot. Public launch, owner dependencies and evidence items remain separate.
 - [Current-main Fable/Astra remediation ledger — 2026-10-05](FABLE_ASTRA_CURRENT_REMEDIATION_2026-10-05.md) reconciles 102 findings at owner-merged PR #92 main `3aa2010`. It confirms one required P1: ended-game seek receipts before projection. [Focused verification](SEEK_TERMINAL_RECEIPTS_VERIFICATION_2026-10-05.json) records real PostgreSQL/REST RED and GREEN, including invalid setup attempts without behavioral credit. The ledger is pinned to audited main, not a claim that the new fix is merged or public launch approved.
