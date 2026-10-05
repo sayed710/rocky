@@ -6,7 +6,9 @@ current-main Windows pass. Its root cause remains unproven, and non-observation 
 ## What Signature B is (committed record, ADR-0140 §4)
 
 - **Known fact:** a per-test-file `node --test` child on Windows dies with the parent reporting a bare
-  `test failed`. Five captures were taken historically, only in DB-backed `*.integration` files of
+  `test failed`. Early occurrences hit non-integration files (`move-explanation-route`,
+  `tournament-commentary-route`, `bot-detection-analyze`, `anti-cheat-analysis`) with no exit status
+  captured. A later instrumented campaign captured it five times, in DB-backed `*.integration` files of
   `packages/api` and `packages/persistence`. All five reported `exitCode 3221226505` (`0xC0000409`), no
   signal, child lifecycle `start`, `preload-installed` only. The four fully instrumented captures had no
   fatal markers and no Node diagnostic report.
@@ -31,8 +33,8 @@ current-main Windows pass. Its root cause remains unproven, and non-observation 
 | Per-run suite | 1368 tests: 1358 pass, 1 fail, 9 skipped, concurrency 1 as in `npm test` |
 | `summary.json` sha256 | `be6a32afb86714e0bf2e4a6f9295cdd0dccc7789b7ee33da9e4ba6466be8cfd5` (kept outside the repo; every figure above is reproduced here) |
 
-The DB-backed suites that historically captured (`pg-security`, `auth-signin-schema`, and the rest of the
-`*.integration` set) executed in all three runs.
+The DB-backed suites from the instrumented captures (`pg-security`, `auth-signin-schema`, and the rest of
+the `*.integration` set) executed in all three runs.
 
 **The one failure and the 9 skips (no success credit taken for either):**
 
