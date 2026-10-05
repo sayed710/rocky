@@ -33,8 +33,9 @@ current-main Windows pass. Its root cause remains unproven, and non-observation 
 | Per-run suite | 1368 tests: 1358 pass, 1 fail, 9 skipped, concurrency 1 as in `npm test` |
 | `summary.json` sha256 | `be6a32afb86714e0bf2e4a6f9295cdd0dccc7789b7ee33da9e4ba6466be8cfd5` (kept outside the repo; every figure above is reproduced here) |
 
-The DB-backed suites from the instrumented captures (`pg-security`, `auth-signin-schema`, and the rest of
-the `*.integration` set) executed in all three runs.
+The `packages/api` DB-backed suites from the instrumented captures (`pg-security` and
+`auth-signin-schema`) executed in all three runs. This pass did not run the `packages/persistence` suites
+from the other two instrumented captures.
 
 **The one failure and the 9 skips (no success credit taken for either):**
 
