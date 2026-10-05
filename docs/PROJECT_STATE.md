@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-05 — Launch Preparation D03: full three-report production reproduction and failed-start cleanup verified; final-head PR gates pending; Fable + Astra engineering remediation remains closed._
+_Last updated: 2026-10-05 — Launch Preparation O10: closed by bounded current Windows evidence (3 readable runs on 5ee3441, 0 Signature B captures); root cause remains historically unproven and non-observation is not a fix; [verification audit](audits/LAUNCH_O10_WINDOWS_SIGNATURE_B_VERIFICATION_2026-10-05.md); documentation PR gates pending; Fable + Astra engineering remediation remains closed; public-launch readiness tracked separately._
+
+Prior: _Last updated: 2026-10-05 — Launch Preparation D03: full three-report production reproduction and failed-start cleanup verified; final-head PR gates pending; Fable + Astra engineering remediation remains closed._
 
 Prior: _Last updated: 2026-10-05 — Launch Preparation D03: production evidence, cleanup and browser-request-failure rejection verified; final-head PR gates pending; Fable + Astra engineering remediation remains closed._
 
