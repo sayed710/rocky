@@ -184,7 +184,9 @@ test('seek-created rows are reconciled, follow progress, and the ended-game seek
     const receipt = async () => (await seeks.listOpen(10, creator)).some((s) => s.gameId === gameId);
     assert.equal(await receipt(), true, 'the creator is redirected to the live game');
     await play(new PostgresEventStore(pool), gameId, FOOLS_MATE, 8_000);
-    assert.equal(await receipt(), true, 'before projection the guard still sees an unfinished game');
+    assert.ok((await new PostgresEventStore(pool).load(gameId)).some((stored) => stored.event.type === 'GameEnded'), 'the ending is committed');
+    assert.equal((await gameRow(pool, gameId))?.ended_at, null, 'the projection has not seen the ending');
+    assert.equal(await receipt(), false, 'the committed ending must suppress the receipt before projection');
     await drain(projector, pool);
     assert.equal(await receipt(), false, 'once the ending is projected the creator is not sent to a finished game');
     assert.equal((await gameRow(pool, gameId))?.ply_count, 4);
