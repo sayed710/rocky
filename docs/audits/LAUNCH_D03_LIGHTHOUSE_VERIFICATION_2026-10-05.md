@@ -34,13 +34,13 @@ The fresh default preview bundle differs from the production bundle because prod
 | `/assets/index-BqLL7Hht.js` | 420627 | `c36c0660b24ed21168ddee0da432082b4be8312dad7684dc7efa13d9ed8741c7` |
 | `/assets/index-BNUlepaa.css` | 31064 | `b5adb73869da98f9ab29dc263a95dbeb7974b634ed14c95c703ea0a4c5ee49b5` |
 
-Report fingerprints (original JSON bytes): production `f441d4709f7f7a3fd89fdab2d807910cda4990556ef47012b5d2c02d53967fe4`; fresh preview `057522951f1a09cca1bb07be4efdd56e88c116bc62356306d090a3f8e8acdd86`; matched preview `ea04047b22c50e78049409c386f0f65ca390a6b433e9483f6e624d684232b345`; downloaded CI `350a9f2a7d3e538714698249979ac81596fcc26b884915cf41f2755b251ed9c0`. Raw JSON/HTML reports, screenshots, summaries, reproduction reports and CI logs are retained locally at `C:/Users/hp/AppData/Local/Temp/rocky-d03-evidence-20261005`; that scratch directory is not a portable repository dependency. The procedure below regenerates reviewable reports.
+Report fingerprints (original JSON bytes): production `f441d4709f7f7a3fd89fdab2d807910cda4990556ef47012b5d2c02d53967fe4`; fresh preview `057522951f1a09cca1bb07be4efdd56e88c116bc62356306d090a3f8e8acdd86`; matched preview `ea04047b22c50e78049409c386f0f65ca390a6b433e9483f6e624d684232b345`; downloaded CI `350a9f2a7d3e538714698249979ac81596fcc26b884915cf41f2755b251ed9c0`. The [immutable public evidence snapshot](https://gist.github.com/edwardnewgate710/2e6fb9a75077bd5e5052ab4cb4136af4/9bcfdc4d9378385744a5dc31e41cd79bccddabfd) contains the primary JSON/HTML reports, exact-main CI JSON, original summaries, all three shell captures in `shell-captures.html`, the final stricter reproduction runner and its new JSON/HTML reports/summary. All 16 published files were downloaded and SHA256-verified against local originals. Original CI logs remain accessible through the linked GitHub job above. Local working copies remain at `C:/Users/hp/AppData/Local/Temp/rocky-d03-evidence-20261005`; reviewers need no access to that directory. The procedure below regenerates reviewable reports.
 
 The original audit documents Lighthouse11.4.0 with mobile-like simulated throttling (150 ms RTT, 1.6 Mbps, 4× CPU), older application assets and a historical Compose score0.93; its original individual failed audits are not present in the repository. The cause of that historical score remains unproven. It cannot establish a current defect against this new production-path report. Closure means the current shell clears the repository's ≥0.95 gate under explicitly comparable M6 settings; it does not reconstruct the old result or certify every route/state/preset.
 
 ## Fail-closed reproduction
 
-Use the pinned source above in an isolated checkout. Create the following three scratch files outside tracked paths. Commands below use POSIX shell on a Docker host; use an absolute host directory for `EVIDENCE` and LF line endings for `start.sh`. Image base tags are mutable; the tested digests are recorded above. Before accepting results, require successful image builds/startup, `nginx -t`, the browser preflight, zero Lighthouse command exit, a newly created report, correct final URL/version, no runtime/audit error and a numeric score≥0.95. No stale report is reused.
+Use the pinned source above in an isolated checkout. Create the following three scratch files outside tracked paths. Commands below use POSIX shell on a Docker host; use an absolute host directory for `EVIDENCE` and LF line endings for `start.sh`. Image base tags are mutable; the tested digests are recorded above. Before accepting results, require successful image builds/startup, `nginx -t`, the browser preflight, zero Lighthouse command exit, a newly created report, correct final URL/version, no runtime/audit error and a numeric score≥0.95. No stale report is reused. The stricter reproduction also requires zero run warnings and zero failed accessibility audits to reproduce the clean healthy-shell observations in the table; merely clearing the numeric repository gate is insufficient for this procedure.
 
 `Dockerfile.audit` (scratch image only; no production changes):
 
@@ -77,7 +77,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-const out='/evidence/reproduction';
+const out='/evidence/final-reproduction';
 fs.mkdirSync(out,{recursive:true});
 const metadata={node:process.version,browserExecutable:chromium.executablePath(),runs:[]};
 for(const [name,url] of [['production','http://127.0.0.1:8080/'],['preview','http://127.0.0.1:4173/']]) {
@@ -114,6 +114,8 @@ for(const [name,url] of [['production','http://127.0.0.1:8080/'],['preview','htt
   assert.equal(typeof score,'number');
   const audits=report.categories.accessibility.auditRefs.map(ref=>({id:ref.id,weight:ref.weight,score:report.audits[ref.id].score,mode:report.audits[ref.id].scoreDisplayMode,details:report.audits[ref.id].details}));
   assert.ok(!audits.some(a=>a.mode==='error'),'audit error');
+  assert.equal(report.runWarnings.length,0,'Lighthouse warnings');
+  assert.equal(audits.filter(a=>a.score!==null && a.score<1).length,0,'failed accessibility audits');
   metadata.runs.push({name,url,score,shell,delivered,lighthouseVersion:report.lighthouseVersion,environment:report.environment,configSettings:report.configSettings,runWarnings:report.runWarnings,failedAudits:audits.filter(a=>a.score!==null && a.score<1),reportSHA256:crypto.createHash('sha256').update(fs.readFileSync(`${prefix}.report.json`)).digest('hex')});
   console.log(name,score,metadata.runs.at(-1).failedAudits.map(a=>a.id));
 }
@@ -164,3 +166,5 @@ Infrastructure-negative control: changing the production URL to unused `127.0.0.
 This closes only D03's historical production-web versus M6 accessibility discrepancy on the pinned source. No visual redesign, CSS change, performance work, accessibility expansion or historical-ledger rewrite occurred. A06 (manual screen-reader/RTL reading order/low vision/200% zoom), A07 (physical mobile/orientation/Firefox/Safari), O06 (deployment/cluster/TLS/email/passkeys) and O09 (full deployed gameplay journey) remain open evidence boundaries. Anonymous English default-theme `/` with an empty healthy lobby is the measured state; other locales/themes/auth/game routes and full durable upstreams are not certified.
 
 Documentation-only changes follow CI's Markdown path exclusions; no unrelated heavy suite is required or claimed for this evidence PR. Exact-head Qodo/Greptile and PR-state acceptance are recorded in the PR handoff after they actually complete. The owner alone merges.
+
+Greptile review correction: the first published head kept primary reports only locally and allowed nonempty warning/failed-audit lists when score≥0.95. The public snapshot now exposes the actual evidence, and the stricter runner enforces the clean observation. Its fresh production/preview pair passed **1.00/1.00**, zero failed audits/warnings/runtime errors. This changes only documented evidence/reproduction; no production behavior changed.

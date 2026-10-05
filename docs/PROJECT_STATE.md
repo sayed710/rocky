@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-05 — Launch Preparation D03: closed by current production-web Lighthouse evidence; documentation PR gates pending; Fable + Astra engineering remediation remains closed._
+_Last updated: 2026-10-05 — Launch Preparation D03: public production Lighthouse artifacts and strict clean-report reproduction verified; new final-head PR gates pending; Fable + Astra engineering remediation remains closed._
+
+Prior: _Last updated: 2026-10-05 — Launch Preparation D03: closed by current production-web Lighthouse evidence; documentation PR gates pending; Fable + Astra engineering remediation remains closed._
 
 Prior: _Last updated: 2026-10-05 — Launch Preparation D02: Greptile SPA-fallback cache correction verified; new final-head PR gates pending; Fable + Astra engineering remediation remains closed._
 
@@ -5367,3 +5369,5 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Executed evidence**: actual Dockerfile.web image and unchanged entrypoint-rendered Nginx1.31.3 template served `/`; only intended upstream variables point at the current in-memory acceptance backend. Lighthouse11.4.0/Playwright1.61.1 Chromium149.0.7827.55, desktop/accessibility-only, scored production1.00 and fresh preview1.00, no failed audits/warnings/runtime errors. Exact-production-asset preview also scored1.00 with matching JS/CSS bytes; the fail-closed reproduction pair again scored1.00/1.00. Unreachable-server negative control failed before report/summary and has no behavioral credit. Setup errors are recorded separately.
 - **Comparison and limits**: exact-main CI37300745500 scores0.96 with one color-contrast failure on the HTTP500 lobby alert (4.03:1 versus4.5:1); its logs prove API connection refusal during Lighthouse. Healthy production evidence does not credit that server failure or correct the retained error-state contrast limitation. The historical0.93 cannot establish a current production discrepancy. A06/A07/O06/O09, other routes/states/locales/devices and public-launch approval remain separate; this is web-delivery evidence with bounded upstreams, not deployed Compose/cluster/gameplay certification.
 - **Publication checkpoint**: documentation-only CI path exclusions apply. Applicable exact-head Qodo/Greptile/zero-thread review and safe branch/PR acceptance remain pending at this source checkpoint; the PR handoff will record actual results without rewriting history. Owner alone merges.
+
+- **PR96 evidence review correction**: Greptile on first head80e7c51 validly requested reviewer-accessible primary artifacts and explicit clean-audit/warning enforcement. The linked immutable public snapshot exposes16 byte-verified report/summary/capture/runner files; CI logs retain their public job link. Updated scratch reproduction rejects warnings and failed accessibility audits in addition to infrastructure/report/threshold errors; fresh production1.00/preview1.00 passed with empty failures/warnings. Documentation-only correction; no production code changed. Fresh exact-head external gates remain pending here, with earlier reviewer evidence historical.
