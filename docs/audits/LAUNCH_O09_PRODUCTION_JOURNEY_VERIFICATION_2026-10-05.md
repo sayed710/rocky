@@ -18,13 +18,13 @@ The command builds the unchanged production Dockerfiles, starts normal Compose i
 
 The global execution deadline is 20 minutes, subprocesses/readiness/browser actions have bounds, and cleanup has its own 60-second budget. Failure stage, observed durable state and container status are retained in ignored `test-results/production-journey/<run>/evidence.json`. No cookies, credentials, auth frames, storage state, traces, email-console logs or database dumps are retained. Generated password/email values are redacted from Playwright errors. Cleanup failure makes the command fail and cannot print PASSED.
 
-The heavier launch gate is explicitly invocable as [O09 production browser journey](../../.github/workflows/production-journey.yml), using workflow_dispatch on the desired branch. It builds three images and runs six containers, so it is separate from mandatory per-PR suites. No existing CI gate was weakened. The workflow uploads sanitized evidence, runs contract tests with zero-skip enforcement and runs the four mutation controls.
+The heavier launch gate is [O09 production browser journey](../../.github/workflows/production-journey.yml), using workflow_dispatch on the desired branch once the workflow exists on the default branch. GitHub rejected pre-merge dispatch with HTTP 404 because this is a new workflow; the documented local command is available immediately. It builds three images and runs six containers, so it is separate from mandatory per-PR suites. No existing CI gate was weakened. The workflow uploads sanitized evidence, runs contract tests with zero-skip enforcement and runs the four mutation controls.
 
 ## Actual deployment and journey
 
 Environment: Windows host, Docker Desktop 4.93.0 Linux backend, Docker client/server 29.8.1, Compose 5.5.1, Node 24.15.0, Playwright 1.61.1, Chromium 149.0.7827.55. Local Compose intentionally uses HTTP and console email; this is its supported deployment contract, not production email/TLS certification.
 
-Initial complete run: `o09-6444654b`, public endpoint `http://127.0.0.1:11706`, completed at `2026-10-05T18:02:38.119Z`; [sanitized primary evidence](LAUNCH_O09_PRODUCTION_JOURNEY_RUN_2026-10-05.json). Source was based on the audited SHA with implementation changes present. Subsequent clean-commit and CI evidence records its own exact `head`, base SHA, dirty flag, endpoint and versions. **The exact final PR HEAD and matching final-head CI/review evidence are recorded in the PR's owner-handoff attestation**, avoiding a self-referential commit hash in this document.
+Initial complete run: `o09-6444654b`, completed at `2026-10-05T18:02:38.119Z`, based on the audited SHA with implementation changes present. The subsequent [sanitized clean-head primary evidence](LAUNCH_O09_PRODUCTION_JOURNEY_RUN_2026-10-05.json) records run `o09-33484332`, exact source HEAD `031ae3cd81713a37db8c564b9a08929f175f9157`, dirty=false, public endpoint `http://127.0.0.1:8333`, completion `2026-10-05T18:07:49.441Z`, and every required stage including smoke=true. Later failure-diagnostic header redaction has separate regression coverage. **The exact final PR HEAD and matching final-head runtime/CI/review evidence are recorded in the PR's owner-handoff attestation**, avoiding a self-referential commit hash in this document.
 
 Services exercised: production web/Nginx, API, Gateway, PostgreSQL, Redis, and normal trust-worker deployment. Projection and rating workers are existing always-on Gateway workers whenever DATABASE_URL is configured; trust-worker does not own either function. API runs migrations before Gateway starts. Browser HTTP goes through `/v1/` at Nginx; browser WebSockets go through the same public origin's `/ws`. The runner rejects published backend ports and captures both contexts' real socket URLs and assigned player roles.
 
@@ -40,15 +40,15 @@ Authoritative moves and GameEnded live in PostgreSQL `game_events`. `PgGamesProj
 
 ## Durable result and exactly-once proof
 
-Initial complete game's ID: `01a10d3a-6c5f-7000-b810-fe86007a589c`.
+Clean-head complete game's ID: `01a10d3f-27ce-7000-90e4-d6015c151806`.
 
 | Contract | Observed |
 | --- | --- |
-| White | `01a10d3a-4418-7000-8996-36ea4c7edf3f` |
-| Black | `01a10d3a-4559-7000-9509-560ea9796db3` |
+| White | `01a10d3e-ff4a-7000-9b0b-d8350e286b40` |
+| Black | `01a10d3f-00a5-7000-847d-4761a4752e10` |
 | Variant / rated / pool | standard / true / blitz |
 | Result / termination / plies | 0-1 / checkmate / 4 |
-| endedAt | 2026-10-05T18:01:43.880Z |
+| endedAt | 2026-10-05T18:06:53.936Z |
 | White effective rating → API rating | 1500 → 1337.69 |
 | Black effective rating → API rating | 1500 → 1662.31 |
 | Full-precision application values | White 1337.6891060937023; Black 1662.3108939062977 |
@@ -63,8 +63,8 @@ Current-main product defect: profile history rendered summaries as noninteractiv
 
 Harness failures corrected during development: nonexistent auth selector; ambiguous shared submit selector; rendered label capitalization; API-versus-ledger numeric presentation; Docker ephemeral port changes on stop/start. Independent read-only review also caught shallow workflow checkout, misleading PASSED on cleanup failure, and Playwright error credential disclosure; all were corrected. Failed runs are not credited as successful certification.
 
-`node scripts/production-journey-mutations.mjs` runs copies in an owned temporary directory, never modifying production source. All four mutants are killed: accepting a casual result, ignoring loser rating direction, allowing backend-port bypass, and omitting review requests. The original four-test contract is GREEN. A surviving direction mutation exposed an overlapping fixture assertion; correcting the fixture made the intended direction failure independent of ledger mismatch. Negative contract controls also cover wrong game/participants, incomplete terminal projection, missing pool, duplicate applications, missing stages/moves and absent sockets.
+`node scripts/production-journey-mutations.mjs` runs copies in an owned temporary directory, never modifying production source. All four mutants are killed: accepting a casual result, ignoring loser rating direction, allowing backend-port bypass, and omitting review requests. The original five-test contract is GREEN, including generated form values and case-insensitive/ANSI-bearing Cookie, Authorization and Set-Cookie diagnostic redaction. A surviving direction mutation exposed an overlapping fixture assertion; correcting the fixture made the intended direction failure independent of ledger mismatch. Negative contract controls also cover wrong game/participants, incomplete terminal projection, missing pool, duplicate applications, missing stages/moves and absent sockets.
 
-Executed local validation: full `npm run build`, full `npm run lint`, `npm test` across all 19 hermetic workspaces with zero skips; profile mount 8/8; contract 4/4; script suite 319/319 with zero skips; four killed mutations and original GREEN; test-topology (490 files/21 suites), CI parity, ADR claims, observability, deploy gates, Docker build order, engine pins and variant parity all passed. The production browser journey passed before adding the smoke integration; final clean-head evidence must also show `smoke: true`. Existing trusted-edge/web-delivery suites remain mandatory CI gates and production edge wiring is unchanged. Final CI, Qodo, Greptile, unresolved-thread and exact-head fallback-review acceptance are attested in the PR, not inferred from local passes.
+Executed local validation: full `npm run build`, full `npm run lint`, `npm test` across all 19 hermetic workspaces with zero skips; profile mount 8/8; contract 5/5; initial script suite 319/319 with zero skips (before the additional credential-header test); four killed mutations and original GREEN; test-topology (490 files/21 suites), CI parity, ADR claims, observability, deploy gates, Docker build order, engine pins and variant parity all passed. The clean-head production browser journey includes the existing Compose smoke test. Existing trusted-edge/web-delivery suites remain mandatory CI gates and production edge wiring is unchanged. Final CI, Qodo, Greptile, unresolved-thread and exact-head fallback-review acceptance are attested in the PR, not inferred from local passes.
 
 Limits: one Standard human game and local Compose deployment, two desktop Chromium contexts, no full variant/device/browser matrix, no public infrastructure or operator-policy certification. Cross-cluster rating restore is outside the documented same-cluster replay proof. O06/A06/A07, owner product/legal decisions and public-launch approval remain separate.

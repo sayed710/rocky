@@ -27,7 +27,7 @@ try {
   await writeFile(join(directory, 'contract.mjs'), source);
   const green = spawnSync(process.execPath, ['--test', join(directory, 'contract.test.mjs')], { encoding: 'utf8', timeout: 30_000 });
   assert.equal(green.status, 0, green.stdout + green.stderr);
-  console.log('[O09 mutation] GREEN: original contract, 4 tests; no production files modified');
+  console.log('[O09 mutation] GREEN: original contract; no production files modified');
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

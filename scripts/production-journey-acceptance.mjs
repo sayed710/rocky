@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { browserJourney } from './lib/production-journey-browser.mjs';
+import { redactDiagnostic } from './lib/production-journey-contract.mjs';
 import { waitForHealth } from './lib/wait-for-health.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,7 +24,7 @@ let interrupted = false;
 let webPort;
 const sensitive = [];
 const protect = value => { sensitive.push(value); return value; };
-const redact = message => sensitive.reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), String(message));
+const redact = message => redactDiagnostic(message, sensitive);
 
 /** Bound subprocesses by the global deadline; no shell interpolation of identities or SQL. */
 function command(binary, args, timeout = 120_000, cleanup = false, extraEnv = {}) {

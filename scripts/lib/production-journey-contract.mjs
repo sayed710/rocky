@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
 
+/** Playwright request errors include auth headers; diagnostics must never retain them. */
+export function redactDiagnostic(message, sensitive = []) {
+  const plain = String(message).replace(/\u001b\[[0-9;]*m/g, '');
+  const withoutHeaders = plain.replace(/\b(?:cookie|set-cookie|authorization)\s*:[^\r\n]*/gi, '[REDACTED HEADER]');
+  return sensitive.reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), withoutHeaders);
+}
+
 /** Refuse backend bypasses, including differing ports on the same host. */
 export function requireEdge(url, base, websocket = false) {
   const actual = new URL(url);

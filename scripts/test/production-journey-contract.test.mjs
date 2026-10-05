@@ -1,9 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { requireComplete, requireEdge, requireFinished, requireRatings, ratingInPool } from '../lib/production-journey-contract.mjs';
+import { requireComplete, requireEdge, requireFinished, requireRatings, ratingInPool, redactDiagnostic } from '../lib/production-journey-contract.mjs';
 
 const game = { id: 'game', whiteId: 'white', blackId: 'black', variant: 'standard', speed: 'blitz', rated: true, result: '0-1', termination: 'checkmate', plyCount: 4, endedAt: '2026-10-05T12:00:00Z' };
 const application = { game_id: 'game', white_id: 'white', black_id: 'black', variant: 'standard', speed: 'blitz', white_score: 0, white_rating_before: 1500, black_rating_before: 1500, white_rating_after: 1350, black_rating_after: 1650 };
+
+test('failure evidence removes Playwright auth headers and generated form secrets', () => {
+  const diagnostic = 'request.get: timeout\n  - \u001b[2mCoOkIe: gambit_refresh=COOKIE-CANARY\u001b[22m\n  - Authorization: Bearer TOKEN-CANARY\n  - Set-Cookie: refresh=SET-COOKIE-CANARY\n fill("PASSWORD-CANARY") user@example.test\n stage: history';
+  const safe = redactDiagnostic(diagnostic, ['PASSWORD-CANARY', 'user@example.test']);
+  for (const secret of ['COOKIE-CANARY', 'TOKEN-CANARY', 'SET-COOKIE-CANARY', 'PASSWORD-CANARY', 'user@example.test']) assert.ok(!safe.includes(secret), secret);
+  assert.ok(!safe.includes('\u001b'));
+  assert.match(safe, /stage: history/);
+});
 
 test('durable result rejects wrong game, participants, casual or incomplete projection', () => {
   requireFinished(game, 'game', 'white', 'black');
