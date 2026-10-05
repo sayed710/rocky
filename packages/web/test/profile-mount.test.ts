@@ -185,7 +185,7 @@ class FakeElement {
     const results: FakeElement[] = [];
     const walk = (el: FakeElement): void => {
       for (const child of el.children) {
-        if (selector === 'button' && child.tagName === 'BUTTON') {
+        if ((selector === 'button' && child.tagName === 'BUTTON') || (selector === 'a' && child.tagName === 'A')) {
           results.push(child);
         } else if (selector.startsWith('.') && child.classList.contains(selector.slice(1))) {
           results.push(child);
@@ -495,6 +495,11 @@ test('sign-out private-state clearing protects disclosure', async () => {
   assert.equal(elements.get('passkeys-self')!.hidden, false);
   assert.equal(elements.get('achievements')!.hidden, false);
   assert.equal(elements.get('social-friend-count')!.textContent, '1');
+  const gameLink = elements.get('profile-games')!.querySelectorAll('a')[0];
+  assert.ok(gameLink, 'Recent games must offer a keyboard-accessible link to the durable game');
+  assert.equal(gameLink.getAttribute('href'), '/game/g1');
+  assert.equal(gameLink.getAttribute('data-route'), 'game');
+  assert.match(gameLink.textContent, /Standard.*Rapid.*1-0.*40/);
 
   // Sign out
   currentSession = null;

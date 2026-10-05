@@ -1026,6 +1026,17 @@ a.button.primary:active {
 }
 
 /* --- Social (M10) --- */
+a.game-row {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+a.game-row:hover { background: var(--panel-strong); }
+a.game-row:focus-visible {
+  outline: 3px solid var(--sel);
+  outline-offset: 2px;
+}
+
 /* A row that carries an action keeps the label and the control on one line,
    with the control hugging the trailing edge so a column of rows has a single
    predictable target position. */
