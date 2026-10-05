@@ -1,5 +1,7 @@
 # Rookzen audit sources
 
+- [Current-main Fable/Astra remediation ledger — 2026-10-05](FABLE_ASTRA_CURRENT_REMEDIATION_2026-10-05.md) reconciles 102 findings at owner-merged PR #92 main `3aa2010`. It confirms one required P1: ended-game seek receipts before projection. [Focused verification](SEEK_TERMINAL_RECEIPTS_VERIFICATION_2026-10-05.json) records real PostgreSQL/REST RED and GREEN, including invalid setup attempts without behavioral credit. The ledger is pinned to audited main, not a claim that the new fix is merged or public launch approved.
+
 - [FABLE_ASTRA_FULL_AUDIT.md](FABLE_ASTRA_FULL_AUDIT.md) is the authoritative original historical Fable + Astra audit and launch-readiness baseline.
 - [ROOKZEN_VISUAL_HANDOFF.md](ROOKZEN_VISUAL_HANDOFF.md) is the authoritative historical visual and design handoff. It includes recommendations and unresolved owner decisions; it is not blanket approval to implement a permanent visual direction.
 - [RECOVERY_INDEX.md](RECOVERY_INDEX.md) preserves the provenance and inventory for the recovered visual evidence; the 265 recovered raw artifacts themselves are not included in this repository. Windows paths in this historical source record provenance and are not expected to be accessible to contributors. It is not a substitute for the Fable + Astra audit.

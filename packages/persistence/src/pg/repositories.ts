@@ -672,6 +672,7 @@ export class PgSeeksRepository implements SeeksRepository {
   /**
    * Lists unaccepted seeks within TTL and optionally the requesting creator's latest match receipt.
    * Joins creator handles directly in SQL.
+   * Committed terminal events suppress receipts even when the games projection is behind.
    *
    * @param limit - Maximum number of open seeks to return
    * @param creatorId - Optional user ID of the requesting player
@@ -688,6 +689,9 @@ export class PgSeeksRepository implements SeeksRepository {
            LEFT JOIN users u ON u.id = s.creator_id
            LEFT JOIN games g ON g.id = s.game_id
            WHERE s.creator_id = $2 AND s.game_id IS NOT NULL AND s.accepted_at > NOW() - interval '5 minutes' AND (g.id IS NULL OR g.ended_at IS NULL)
+             AND NOT EXISTS (
+               SELECT 1 FROM game_events e WHERE e.game_id = s.game_id AND e.type = 'GameEnded'
+             )
            ORDER BY s.accepted_at DESC, s.created_at DESC, s.id DESC
            LIMIT 1
          )
