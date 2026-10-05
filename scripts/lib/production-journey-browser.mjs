@@ -134,6 +134,14 @@ export async function browserJourney({ baseURL, evidence, stage, database, resta
       await expect(link).toContainText(/standard.*blitz.*0-1.*4/i);
       await page.reload();
       await expect(link).toBeVisible();
+      await expect(link).toHaveCSS('display', 'block');
+      await expect(link).toHaveCSS('text-decoration-line', 'none');
+      await page.keyboard.press('Tab');
+      await link.focus();
+      assert.equal(await link.evaluate(element => element.matches(':focus-visible')), true);
+      await expect(link).toHaveCSS('outline-width', '3px');
+      await expect(link).toHaveCSS('outline-style', 'solid');
+      await expect(link).toHaveCSS('outline-offset', '2px');
       const games = await json(page, `/v1/users/${evidence.handles[index]}/games`);
       requireFinished(games.find(game => game.id === evidence.gameId), evidence.gameId, ...evidence.players);
       await link.click();

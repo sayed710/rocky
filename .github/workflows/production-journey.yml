@@ -17,7 +17,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: node scripts/run-zero-skip.mjs -- node --test scripts/test/production-journey-contract.test.mjs
+      - run: node scripts/run-zero-skip.mjs -- node --test scripts/test/production-journey-contract.test.mjs scripts/test/production-journey-lifecycle.test.mjs
       - run: node scripts/production-journey-mutations.mjs
       - run: npm run acceptance:production-journey
       - uses: actions/upload-artifact@v4

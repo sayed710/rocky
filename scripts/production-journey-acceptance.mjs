@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { browserJourney } from './lib/production-journey-browser.mjs';
 import { redactDiagnostic } from './lib/production-journey-contract.mjs';
+import { awaitJourney, startOnAvailablePort } from './lib/production-journey-lifecycle.mjs';
 import { waitForHealth } from './lib/wait-for-health.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -21,7 +22,7 @@ let browser;
 let stageName = 'preflight';
 let started = false;
 let interrupted = false;
-let webPort;
+let webPort = 0;
 const sensitive = [];
 const protect = value => { sensitive.push(value); return value; };
 const redact = message => redactDiagnostic(message, sensitive);
@@ -83,8 +84,7 @@ async function restart() {
 async function main() {
   await mkdir(output, { recursive: true });
   await writeFile(override, 'services:\n  postgres:\n    ports: !reset []\n  redis:\n    ports: !reset []\n');
-  // Choose once: Docker's HostPort=0 can allocate a different endpoint after stop/start.
-  webPort = await new Promise((resolvePort, reject) => {
+  const choosePort = () => new Promise((resolvePort, reject) => {
     const server = createServer();
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => {
@@ -93,7 +93,6 @@ async function main() {
       server.close(error => error ? reject(error) : resolvePort(address.port));
     });
   });
-  let timer;
   try {
     evidence.baseSHA = await command('git', ['rev-parse', 'origin/main']);
     evidence.head = await command('git', ['rev-parse', 'HEAD']);
@@ -111,7 +110,11 @@ async function main() {
     started = true;
     await command('docker', [...composeArgs, 'build'], 15 * 60_000);
     stage('start isolated Compose stack');
-    await compose('up', '-d', '--wait', '--wait-timeout', '120');
+    // Select after the build, retry only bind collisions, then retain the endpoint across restart.
+    webPort = await startOnAvailablePort(choosePort, async port => {
+      webPort = port;
+      await compose('up', '-d', '--wait', '--wait-timeout', '120');
+    });
     const port = await compose('port', 'web', '8080');
     assert.match(port, /^127\.0\.0\.1:\d+$/);
     evidence.baseURL = `http://${port}`;
@@ -121,13 +124,10 @@ async function main() {
       API_URL: evidence.baseURL, WEB_URL: evidence.baseURL, WS_URL: `${evidence.baseURL.replace(/^http:/, 'ws:')}/ws`,
     });
     evidence.stages.smoke = true;
-    let rejectDeadline;
-    const expired = new Promise((_, reject) => { rejectDeadline = reject; });
-    timer = setTimeout(() => { interrupted = true; void browser?.close(); rejectDeadline(new Error('Global browser journey deadline exceeded')); }, Math.max(1, deadline - Date.now()));
-    await Promise.race([browserJourney({ baseURL: evidence.baseURL, evidence, stage, restart, replayObserved, protect, setBrowser: value => { browser = value; }, database: async id => {
+    await awaitJourney(browserJourney({ baseURL: evidence.baseURL, evidence, stage, restart, replayObserved, protect, setBrowser: value => { browser = value; }, database: async id => {
       assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
       return JSON.parse(await sql(`SELECT coalesce(json_agg(r), '[]'::json) FROM (SELECT * FROM rating_applications WHERE game_id='${id}') r`));
-    } }), expired]);
+    } }), deadline - Date.now(), async () => { interrupted = true; await browser?.close(); });
     evidence.passed = true;
   } catch (error) {
     evidence.passed = false;
@@ -136,7 +136,6 @@ async function main() {
     if (started) evidence.containers = await command('docker', [...composeArgs, 'ps', '-a', '--format', 'json'], 15_000, true).catch(error => error.message);
     throw error;
   } finally {
-    clearTimeout(timer);
     await browser?.close().catch(() => {});
     if (started) {
       try {

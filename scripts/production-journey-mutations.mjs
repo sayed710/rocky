@@ -28,6 +28,25 @@ try {
   const green = spawnSync(process.execPath, ['--test', join(directory, 'contract.test.mjs')], { encoding: 'utf8', timeout: 30_000 });
   assert.equal(green.status, 0, green.stdout + green.stderr);
   console.log('[O09 mutation] GREEN: original contract; no production files modified');
+  const lifecycle = await readFile(new URL('./lib/production-journey-lifecycle.mjs', import.meta.url), 'utf8');
+  const lifecycleTests = (await readFile(new URL('./test/production-journey-lifecycle.test.mjs', import.meta.url), 'utf8'))
+    .replace('../lib/production-journey-lifecycle.mjs', './lifecycle.mjs');
+  const target = '    await work;';
+  assert.ok(lifecycle.includes(target), 'Lifecycle mutation target drift');
+  await writeFile(join(directory, 'lifecycle.test.mjs'), lifecycleTests);
+  const racedSource = lifecycle
+    .replace('  let expired = false;', '  let expired = false; let rejectDeadline; const deadline = new Promise((_, reject) => { rejectDeadline = reject; });')
+    .replace('    expired = true;', '    expired = true; rejectDeadline(new Error("deadline exceeded"));')
+    .replace(target, '    await Promise.race([work, deadline]);');
+  await writeFile(join(directory, 'lifecycle.mjs'), racedSource);
+  const raced = spawnSync(process.execPath, ['--test', join(directory, 'lifecycle.test.mjs')], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(raced.status, 1, `Deadline race mutation survived\n${raced.stdout}${raced.stderr}`);
+  assert.match(raced.stdout, /AssertionError|ERR_ASSERTION/, 'Deadline race did not fail its cleanup assertion');
+  console.log('[O09 mutation] KILLED: cleanup races active work');
+  await writeFile(join(directory, 'lifecycle.mjs'), lifecycle);
+  const settled = spawnSync(process.execPath, ['--test', join(directory, 'lifecycle.test.mjs')], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(settled.status, 0, settled.stdout + settled.stderr);
+  console.log('[O09 mutation] GREEN: original lifecycle');
 } finally {
   await rm(directory, { recursive: true, force: true });
 }
