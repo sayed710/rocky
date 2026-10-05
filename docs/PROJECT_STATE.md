@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-05 — M15 Increment 91: Current-main Fable/Astra ledger confirms one required P1; durable seek receipt correction locally verified; external PR gates pending._
+_Last updated: 2026-10-05 — M15 Increment 92: PR #93 owner-merged; Fable + Astra engineering remediation closed on main d42bcea (P0=0, required P1=0); public-launch readiness remains separate._
+
+Prior: _Last updated: 2026-10-05 — M15 Increment 91: Current-main Fable/Astra ledger confirms one required P1; durable seek receipt correction locally verified; external PR gates pending._
 
 Prior: _Last updated: 2026-10-04 — M15 Increment 90: Arabic/RTL product-shell local release gates passed; final committed-head PR acceptance pending._
 
@@ -5336,3 +5338,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Pending handoff**: complete corrective-tree build/lint/hermetic, all8 guards/scripts, PostgreSQL/API, backup/restore and clean-install/Linux gateway runtime, meaningful mutation witnesses, final independent reviewer, fresh pre-push main checkpoint, CI/Qodo/exact-head Greptile/zero-thread and Git equality must finish before a merge-ready claim. No PR is merged. Engineering is not closed on main until owner integration and reverification; public launch still depends on owner-approved policies/discoverability and operational evidence.
 
 - **Completed local correction gates**: full build/typecheck, eight repository guards and OpenAPI zero-drift passed; hermetic4007/4007, scripts315/315, persistence PostgreSQL210/210, API PostgreSQL109/109, populated backup/restore2/2 and clean-install Linux gateway86/86 passed, with positive failures/skips/cancellations0. Four compiling/executable SQL mutations (removed guard, uncorrelated game, wrong terminal type, inverted predicate) failed the intended REST assertions; survivors0/invalid0. Source bytes were restored exactly, persistence rebuilt and restored REST3/3 passed. The verification JSON records the counts and source fingerprints; setup failures retain no mutation credit. clean-code-guard: clean. These are pre-commit local executions; final external gates remain separately pending.
+
+## M15 Increment 92 — Fable + Astra engineering closure (2026-10-05)
+
+- **Integrated baseline**: PR #93 (durable ended-game seek receipts, the C02 correction recorded in Increment 91) was owner-merged as main `d42bcea3b2bb20abf25f212ff402767d18ec095f`, confirmed against fetched origin/main. The correlated `GameEnded` exclusion in `PgSeeksRepository.listOpen` and its production-router test are present on that main. Increment 91's pending external gates are superseded by the owner merge; its text is unchanged.
+- **Closure**: `CURRENT_ACTIONABLE_P0 = 0`, required `CURRENT_ACTIONABLE_P1 = 0`. Of 102 normalized findings: RESOLVED 60, OWNER_DEPENDENCY 11, NEEDS_EVIDENCE 7, deferred P2 12, deferred P3 11, OBSOLETE 1. **Fable + Astra engineering remediation is closed on current main.** The [closure record](audits/FABLE_ASTRA_FINAL_CLOSURE_2026-10-05.md) lists the 11 owner dependencies and 7 evidence items; the latter are evidence/deployment/manual-certification items, not confirmed engineering defects.
+- **Pinned ledger unchanged**: the [102-finding ledger](audits/FABLE_ASTRA_CURRENT_REMEDIATION_2026-10-05.md) remains a snapshot pinned to `3aa2010`, before #93, and still shows C02 open. It is not rewritten.
+- **Public launch is separate**: engineering closure does not approve launch. Owner/legal policies, discoverability, operated backup/recovery, moderation readiness, deployment acceptance and the visual/IA decisions remain independent dependencies. Documentation-only increment; no production code, test, configuration, policy or visual change.
