@@ -495,6 +495,9 @@ a.button:hover {
 }
 button:focus-visible,
 a.button:focus-visible { outline: 3px solid var(--sel); }
+/* In the light theme the primary fill and focus ink coincide. A surface-coloured
+   gap keeps the keyboard ring distinct from the filled button's silhouette. */
+.button.primary:focus-visible { outline-offset: 3px; }
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
