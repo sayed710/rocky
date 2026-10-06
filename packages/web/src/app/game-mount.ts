@@ -1664,8 +1664,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   bindClick(btnOfferDraw, () => controller.offerDraw());
   bindClick(btnClaimFlag, () => controller.claimFlag());
-  bindClick(btnAcceptDraw, () => controller.acceptDraw());
-  bindClick(btnDeclineDraw, () => controller.declineDraw());
+  bindClick(btnAcceptDraw, () => {
+    if (controller.acceptDraw()) statusEl?.focus();
+  });
+  bindClick(btnDeclineDraw, () => {
+    if (controller.declineDraw()) statusEl?.focus();
+  });
   bindClick(analysisRunBtn, () => {
     // Read the selector, but trust only the values this UI offers. The `<select>` cannot produce
     // anything else, so this is not about the user interface — it is about the request never

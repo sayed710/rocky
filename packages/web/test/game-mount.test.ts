@@ -537,6 +537,21 @@ test('action buttons and confirmations wiring and focus behavior', () => {
   assert.equal(btnAbort.hidden, false);
   assert.equal(btnAbort.focused, true);
 
+  for (const [id, method] of [
+    ['action-accept-draw', 'acceptDraw'],
+    ['action-decline-draw', 'declineDraw'],
+  ] as const) {
+    const status = elements.get('status')!;
+    mounted.controller[method] = () => false;
+    status.focused = false;
+    elements.get(id)!.disabled = false;
+    elements.get(id)!.click();
+    assert.equal(status.focused, false, 'a refused action must not move focus');
+    mounted.controller[method] = () => true;
+    elements.get(id)!.click();
+    assert.equal(status.focused, true, 'browse-mode activation must focus game status');
+  }
+
   mounted.controller.dispose();
   mounted.board.dispose();
   mounted.connectivity.dispose();
