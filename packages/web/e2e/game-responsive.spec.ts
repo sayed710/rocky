@@ -8,6 +8,113 @@ const VIEWPORTS = [
   { name: 'compact desktop', width: 762, height: 698, minimumBoardWidth: 400 },
 ] as const;
 
+for (const locale of ['en', 'ar'] as const) {
+  test(`promotion choices stay inside the board and remain reachable in ${locale}`, async ({ browser, request }) => {
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const players = [];
+    for (const color of ['white', 'black']) {
+      const handle = `e2e-promo-${color}-${suffix}`;
+      const registration = await request.post('/v1/auth/register', {
+        data: { handle, password: 'test-password-123', email: `${handle}@example.test` },
+      });
+      expect(registration.ok()).toBeTruthy();
+      players.push({ handle, ...(await registration.json()) });
+    }
+    const [white, black] = players;
+    const gameResponse = await request.post('/e2e/games', {
+      data: { whiteId: white.user.id, blackId: black.user.id },
+    });
+    expect(gameResponse.ok()).toBeTruthy();
+    const game = await gameResponse.json();
+    const contexts = [];
+    try {
+      const pages = [];
+      for (const player of players) {
+        const context = await browser.newContext({ viewport: { width: 1140, height: 428 } });
+        contexts.push(context);
+        await context.addCookies([{
+          name: 'gambit_refresh', value: player.tokens.refreshToken,
+          domain: 'localhost', path: '/v1/auth', httpOnly: true, secure: false, sameSite: 'Strict',
+        }]);
+        const page = await context.newPage();
+        await page.addInitScript(({ handle, userId }) => {
+          localStorage.setItem('gambit-session', JSON.stringify({ handle, userId }));
+        }, { handle: player.handle, userId: player.user.id });
+        await page.goto(`/game/${game.gameId}`);
+        await expect(page.locator('#meta-connection')).toHaveText('Connected');
+        pages.push(page);
+      }
+      const [whitePage, blackPage] = pages;
+      for (const [page, from, to] of [
+        [whitePage, 'a2', 'a4'], [blackPage, 'h7', 'h5'],
+        [whitePage, 'a4', 'a5'], [blackPage, 'h5', 'h4'],
+        [whitePage, 'a5', 'a6'], [blackPage, 'h4', 'h3'],
+        [whitePage, 'a6', 'b7'], [blackPage, 'h3', 'g2'],
+      ] as const) {
+        await page.locator(`.cb-sq[data-square="${from}"]`).click();
+        await page.locator(`.cb-sq[data-square="${to}"]`).click();
+        await expect(page.locator(`.cb-sq[data-square="${from}"]`)).toHaveAttribute('aria-label', `${from}, empty`);
+        await expect(page.locator(`.cb-sq[data-square="${to}"]`)).not.toHaveAttribute('aria-label', `${to}, empty`);
+      }
+      await whitePage.locator('#locale-select').selectOption(locale);
+      for (const theme of ['dark', 'light']) {
+        await whitePage.evaluate((value) => {
+          localStorage.setItem('gambit-theme', value);
+          document.documentElement.classList.toggle('light', value === 'light');
+        }, theme);
+        for (const viewport of [
+          { width: 1140, height: 428 }, { width: 570, height: 214 },
+          { width: 1280, height: 720 }, { width: 390, height: 844 },
+        ]) {
+          await test.step(`${theme} ${viewport.width}x${viewport.height}`, async () => {
+            // Constrained geometry is regression evidence, not a claim of real browser zoom.
+            await whitePage.setViewportSize(viewport);
+            await whitePage.locator('.cb-sq[data-square="b7"]').focus();
+            await whitePage.keyboard.press('Enter');
+            await whitePage.keyboard.press('ArrowUp');
+            await whitePage.keyboard.press('ArrowLeft');
+            await whitePage.keyboard.press('Enter');
+            const overlay = whitePage.locator('.cb-promotion');
+            await expect(overlay).toBeVisible();
+            const boardBox = await whitePage.locator('.cb-board').boundingBox();
+            const overlayBox = await overlay.boundingBox();
+            if (!boardBox || !overlayBox) throw new Error('Promotion has no rendered bounds');
+            expect(Math.abs(overlayBox.x - boardBox.x)).toBeLessThan(1);
+            expect(Math.abs(overlayBox.y - boardBox.y)).toBeLessThan(1);
+            expect(Math.abs(overlayBox.width - boardBox.width)).toBeLessThan(1);
+            expect(Math.abs(overlayBox.height - boardBox.height)).toBeLessThan(1);
+            const buttons = overlay.locator('button');
+            await expect(buttons).toHaveCount(5);
+            await expect(buttons.first()).toBeFocused();
+            for (let index = 0; index < 5; index++) {
+              const button = buttons.nth(index);
+              await expect(button).toBeFocused();
+              const bounds = await button.boundingBox();
+              if (!bounds) throw new Error('Promotion control has no rendered bounds');
+              expect(bounds.x).toBeGreaterThanOrEqual(boardBox.x);
+              expect(bounds.y).toBeGreaterThanOrEqual(boardBox.y);
+              expect(bounds.x + bounds.width).toBeLessThanOrEqual(boardBox.x + boardBox.width);
+              expect(bounds.y + bounds.height).toBeLessThanOrEqual(boardBox.y + boardBox.height);
+              // Fractional scroll positions can round an edge by less than one CSS pixel.
+              expect(bounds.x).toBeGreaterThanOrEqual(-1);
+              expect(bounds.y).toBeGreaterThanOrEqual(-1);
+              expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width + 1);
+              expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height + 1);
+              if (index < 4) await whitePage.keyboard.press('Tab');
+            }
+            await whitePage.keyboard.press('Enter');
+            await expect(overlay).toHaveCount(0);
+            await expect(whitePage.locator('.cb-sq[data-square="a8"]')).toBeFocused();
+            await expect(whitePage.locator('.cb-sq[data-square="b7"]')).toHaveAttribute('aria-label', locale === 'ar' ? 'b7، بيدق أبيض' : 'b7, white pawn');
+          });
+        }
+      }
+    } finally {
+      for (const context of contexts) await context.close();
+    }
+  });
+}
+
 async function squareBox(page: Page, square: string) {
   const box = await page.locator(`.cb-sq[data-square="${square}"]`).boundingBox();
   if (box === null) throw new Error(`Square ${square} has no rendered bounds`);

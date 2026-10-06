@@ -190,6 +190,7 @@ body {
    viewport column with the stacked sidebar and collapsed to 115px at 390×844. Let the page scroll
    vertically instead: width establishes the square and the sidebar follows below it. */
 .cb-board {
+  position: relative;
   direction: ltr;
   display: flex;
   flex-direction: column;
