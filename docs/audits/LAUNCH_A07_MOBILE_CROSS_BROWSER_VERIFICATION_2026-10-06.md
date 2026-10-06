@@ -52,7 +52,7 @@ Two early runs stalled because the script clicked the Chromium opponent's Accept
 - *Observed:* at 570×214 (the A06 1140×428-at-200% shape) release Firefox 157 and Playwright Gecko both left the focused Queen choice at y 155–273 in a 214 px viewport: 59 px of the focused control below the fold (WCAG 2.4.11 focus not obscured). Chromium reveals the whole control. Board sizing is width-driven below 720 px by design, so the 538 px board and page scroll are expected; the difference is focus scrolling, where Firefox leaves a partly visible focused element in place.
 - *Second issue, same surface, engine-independent:* while the chooser covered the board, the roving square beneath it kept `tabindex=0`, so Shift+Tab from the first choice reached a square hidden behind the dialog. A unit test reproduced this (RED: `e7` still tabbable).
 - *Fix* (`packages/web/src/ui/board-view.ts`): squares render `tabindex=-1` while the chooser exists, opening the chooser re-renders once (render already preserves the overlay), and the chooser scrolls each focused choice to `block/inline: nearest` on `focusin`. Every close path already re-renders, restoring the roving square.
-- *Regression coverage:* `packages/web/test/board-a11y.test.ts` › "an open promotion chooser takes the covered squares out of the tab order until it closes", covering the open state, the reveal call and restoration after cancel. Mutation check: removing the reveal turns it RED.
+- *Regression coverage:* `packages/web/test/board-a11y.test.ts` › "an open promotion chooser takes the covered squares out of the tab order until it closes" covers the open state, the reveal call and restoration after cancel. `packages/web/e2e/game-responsive.spec.ts` adds a browser-level check in the CI engine. At 570×214 it scrolls so the Queen is only partly visible, then moves focus with `preventScroll` (suppressing Chromium's native reveal), and asserts the focused choices lie inside the viewport. Mutation checks: removing the reveal turns the unit test RED, and in Chromium the e2e fails in both locales (bottom 292.4/292.6 > 215).
 - *Retest:* Playwright Gecko `game-responsive.spec.ts` 4/4 in isolation after the fix (before: both locales failed at 570×214 with bottom 272.9/273.1 > 215); release Firefox journeys above; Chromium focused promotion/keyboard/create-game specs 86/86.
 
 ## Investigated and not product defects
@@ -92,7 +92,7 @@ On the final source:
 - `npm run build`: pass. `npm run lint`: pass (19 workspaces).
 - `npm test`: all 19 hermetic workspaces with zero skips; web 1485/1485 (main 1484 plus the new regression).
 - `npm run test:scripts`: 324/324, zero skips.
-- Full Chromium acceptance (`GAMBIT_E2E_BACKEND=1 npm run e2e`): 278/278 passed, zero skips, zero retries.
+- Full Chromium acceptance (`GAMBIT_E2E_BACKEND=1 npm run e2e`): 278/278 passed, zero skips, zero retries before the browser-level regression was added. After adding it: 277 direct passes plus 1 flaky (`seek-creator-rating` keyboard focus, en/light, unrelated to this change) that passed on its configured retry, zero skips; that spec then passed 21/21 over three repeats with retries disabled.
 - Focused board unit suites 85/85 during the RED → GREEN cycle; the regression was RED before the fix and RED again under the mutation.
 - No delivery, Nginx, service-worker or CI configuration changed, so Nginx delivery was not re-run.
 

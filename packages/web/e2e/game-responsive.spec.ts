@@ -86,6 +86,16 @@ for (const locale of ['en', 'ar'] as const) {
             const buttons = overlay.locator('button');
             await expect(buttons).toHaveCount(5);
             await expect(buttons.first()).toBeFocused();
+            if (viewport.height < 300) {
+              // Firefox leaves a partly visible focused choice where it is. Chromium would reveal it
+              // natively, so suppress that with preventScroll: only the chooser's own reveal remains.
+              await whitePage.evaluate(() => {
+                const [queen, rook] = Array.from(document.querySelectorAll<HTMLElement>('.cb-promotion button'));
+                rook!.focus({ preventScroll: true });
+                window.scrollTo(0, queen!.getBoundingClientRect().top + window.scrollY - window.innerHeight + 40);
+                queen!.focus({ preventScroll: true });
+              });
+            }
             for (let index = 0; index < 5; index++) {
               const button = buttons.nth(index);
               await expect(button).toBeFocused();
