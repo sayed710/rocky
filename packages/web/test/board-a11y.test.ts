@@ -663,6 +663,56 @@ test('promotion overlay announces accessible dialog and full piece labels', () =
   }
 });
 
+// The chooser covers the board, so the roving square beneath it must not stay in the tab sequence:
+// Shift+Tab from the first choice otherwise lands on a square hidden behind the dialog (A07).
+test('an open promotion chooser takes the covered squares out of the tab order until it closes', () => {
+  const fen = '4k3/4P3/8/8/8/8/8/4K3 w - - 0 1';
+  const root = new FakeBoardRoot();
+  const interaction = new BoardInteraction({ oracle: new StaticMoveOracle({ [fen]: { e7: ['e8'] } }) });
+  const view = new BoardView(root as unknown as HTMLElement, { interaction, i18n: new I18n() });
+  view.setPosition(fen);
+  const tabbableSquares = (): string[] => root.querySelectorAll<FakeDOMNode>('[data-square]')
+    .filter((cell) => cell.tabIndex === 0)
+    .map((cell) => cell.getAttribute('data-square') ?? '');
+
+  const prevDoc = globalThis.document;
+  try {
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: root.ownerDocument });
+    for (const square of ['e7', 'e8']) {
+      const target = root.querySelector<FakeDOMNode>(`[data-square="${square}"]`);
+      assert.ok(target);
+      root.dispatchEvent('keydown', { key: 'Enter', target, preventDefault: () => undefined });
+    }
+    const overlay = root.querySelector('[role="dialog"]');
+    assert.ok(overlay, 'promotion dialog must open');
+    assert.deepEqual(tabbableSquares(), [], 'no covered square stays in the tab order');
+
+    // Firefox leaves a partly visible focused element in place; the chooser reveals it whole.
+    const prevHTMLElement = globalThis.HTMLElement;
+    Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: FakeDOMNode });
+    try {
+      const reveals: unknown[] = [];
+      const queen = overlay.querySelectorAll('button')[0]! as FakeDOMNode & { scrollIntoView?: (options: unknown) => void };
+      queen.scrollIntoView = (options) => reveals.push(options);
+      overlay.dispatchEvent('focusin', { target: queen });
+      assert.deepEqual(reveals, [{ block: 'nearest', inline: 'nearest' }]);
+    } finally {
+      Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: prevHTMLElement });
+    }
+
+    overlay.querySelectorAll('button')[4]!.dispatchEvent('click', { stopPropagation: () => undefined });
+    assert.equal(root.querySelector('[role="dialog"]'), null);
+    assert.deepEqual(tabbableSquares(), ['e8'], 'the roving square returns once the chooser closes');
+  } finally {
+    view.destroy();
+    if (prevDoc !== undefined) {
+      Object.defineProperty(globalThis, 'document', { configurable: true, value: prevDoc });
+    } else {
+      Reflect.deleteProperty(globalThis, 'document');
+    }
+  }
+});
+
 // ---- locally rejected moves ----
 
 const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';

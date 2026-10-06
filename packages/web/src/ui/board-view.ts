@@ -597,8 +597,14 @@ export class BoardView {
       this.cancelPromotion();
     });
     overlay.appendChild(cancel);
-    this.root.appendChild(overlay);
     this.overlay = overlay;
+    // Firefox leaves a partly visible focused element where it is; on a short landscape viewport that
+    // put most of the focused choice below the fold. Reveal it whole, as Chromium already does.
+    overlay.addEventListener('focusin', (event) => {
+      if (event.target instanceof HTMLElement) event.target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    });
+    // Re-render rather than append: the covered squares leave the tab order while the chooser is open.
+    this.render();
     this.root.ownerDocument.addEventListener('keydown', this.onPromotionKeyDown, true);
     const first = overlay.querySelector('button');
     if (first instanceof HTMLElement) first.focus();
@@ -718,7 +724,7 @@ export class BoardView {
         const currentAttr = sq === lastMoveTo ? ' aria-current="true"' : '';
 
         cellElements.push(
-          `<div class="${classes.join(' ')}" role="gridcell" data-square="${sq}" aria-label="${label}" aria-selected="${sq === hl.selected}" aria-rowindex="${rowIndex}" aria-colindex="${colIndex}" tabindex="${sq === this.focusedSquare ? '0' : '-1'}"${descAttr}${currentAttr}>${rankCoordinate}${fileCoordinate}${inner}</div>`,
+          `<div class="${classes.join(' ')}" role="gridcell" data-square="${sq}" aria-label="${label}" aria-selected="${sq === hl.selected}" aria-rowindex="${rowIndex}" aria-colindex="${colIndex}" tabindex="${sq === this.focusedSquare && !this.overlay ? '0' : '-1'}"${descAttr}${currentAttr}>${rankCoordinate}${fileCoordinate}${inner}</div>`,
         );
       }
       rowElements.push(
