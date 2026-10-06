@@ -72,6 +72,7 @@ export const arMessages = {
   "auth.resendVerification": "إعادة إرسال رسالة التحقق",
   "auth.error.stepUpRequired": "يلزم تحقق إضافي. إذا كان لهذا الحساب بريد إلكتروني مؤكّد، فقد أرسلنا إليه رمز تسجيل الدخول. أدخل الرمز أو سجّل الدخول بمفتاح مرور.",
   "auth.error.emailUnverified": "أكّد بريدك الإلكتروني قبل تسجيل الدخول. أرسلنا رابط تحقق جديدًا.",
+  "auth.error.invalidCredentials": "اسم المستخدم أو كلمة المرور غير صحيحة.",
   "auth.error.handleRequiredPasskey": "أدخل اسم المستخدم لتسجيل الدخول بمفتاح مرور.",
   "auth.error.passkeyUnsupported": "لا يدعم هذا المتصفح تسجيل الدخول بمفتاح مرور.",
   "auth.error.passkeyFailed": "تعذّر تسجيل الدخول بمفتاح مرور.",

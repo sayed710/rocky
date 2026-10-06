@@ -8,6 +8,7 @@ import type { StoredSession, KeyValueStorage } from '../src/net/session.js';
 import { MemoryTokenStore } from '../src/net/session.js';
 import { json } from './support/fake-transport.js';
 import { ForbiddenError, NetworkError, UnauthorizedError } from '../src/net/errors.js';
+import { createI18nManager } from '../src/i18n/index.js';
 
 /** Provide isolated Web Storage semantics for each controller test. */
 function makeFakeStorage(): KeyValueStorage {
@@ -265,6 +266,31 @@ test('an unverified email is explained, and does not ask for a code', async () =
   assert.equal(await controller.login('alice', 'pw'), null);
   assert.deepEqual(stepUps, []);
   assert.equal(errors[0], 'Verify your email address before signing in. We sent a new verification link.');
+});
+
+test('refused credentials use localized copy and retain a key for a later language switch', async () => {
+  for (const locale of ['en', 'ar'] as const) {
+    const errors: Array<{ message: string; key: string | null }> = [];
+    const client = makeFakeClient({ login: async () => {
+      throw new UnauthorizedError({ status: 401, code: 'unauthorized', message: 'invalid credentials', retryable: false });
+    } }) as unknown as GambitClient;
+    const controller = new AuthController({
+      client,
+      i18n: createI18nManager({ initialLocale: locale }),
+      callbacks: {
+        onSessionChange: () => {},
+        onPending: () => {},
+        onError: (message, info) => { errors.push({ message, key: info?.key ?? null }); },
+      },
+    });
+    assert.equal(await controller.login('missing-account', 'wrong-password'), null);
+    assert.deepEqual(errors, [{
+      message: locale === 'en' ? 'The handle or password is incorrect.' : 'اسم المستخدم أو كلمة المرور غير صحيحة.',
+      key: 'auth.error.invalidCredentials',
+    }]);
+    assert.equal(controller.isAuthenticated(), false);
+    controller.dispose();
+  }
 });
 
 test('a successful sign-in withdraws the code field', async () => {

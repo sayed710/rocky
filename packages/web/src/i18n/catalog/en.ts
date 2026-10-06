@@ -84,6 +84,7 @@ export const enMessages = {
   'auth.resendVerification': 'Resend verification email',
   'auth.error.stepUpRequired': 'Additional verification is required. If this account has a verified email address, a sign-in code has been sent to it. Enter the code, or sign in with a passkey.',
   'auth.error.emailUnverified': 'Verify your email address before signing in. We sent a new verification link.',
+  'auth.error.invalidCredentials': 'The handle or password is incorrect.',
   'auth.error.handleRequiredPasskey': 'Please enter your handle to sign in with a passkey.',
   'auth.error.passkeyUnsupported': 'Passkey sign-in is not supported on this browser.',
   'auth.error.passkeyFailed': 'Sign in with passkey failed.',
