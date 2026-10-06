@@ -550,6 +550,33 @@ test('renderSeeks: renders empty state when no seeks are open', () => {
   assert.equal(empty.querySelector('.empty-body')?.textContent, 'Create a game above — the first player to accept joins you.');
 });
 
+test('renderSeeks: unchanged empty refreshes preserve live-region nodes but locale and list transitions update them', () => {
+  const { doc } = createTestDoc();
+  const container = doc.createElement('div') as unknown as HTMLElement & FakeDOMElement;
+  const i18n = createI18nManager();
+  renderSeeksBase(container, [], null, undefined, i18n);
+  const empty = container.children[0];
+  const title = container.querySelector('.empty-title');
+  renderSeeksBase(container, [], null, undefined, i18n);
+  assert.equal(container.children[0], empty, 'idle polls must not replace a spoken status');
+  assert.equal(container.querySelector('.empty-title'), title);
+  assert.equal(container.getAttribute('role'), 'status');
+
+  const arabic = createI18nManager({ initialLocale: 'ar' });
+  renderSeeksBase(container, [], null, undefined, arabic);
+  assert.equal(container.querySelector('.empty-title')?.textContent, arabic.t('lobby.emptySeeksTitle'));
+  assert.notEqual(container.children[0], empty);
+  const arabicEmpty = container.children[0];
+  renderSeeksBase(container, [], null, undefined, arabic);
+  assert.equal(container.children[0], arabicEmpty);
+
+  renderSeeksBase(container, [makeSeek()], null, undefined, arabic);
+  assert.equal(container.getAttribute('role'), 'list');
+  renderSeeksBase(container, [], null, undefined, arabic);
+  assert.equal(container.getAttribute('role'), 'status');
+  assert.equal(container.querySelector('.empty-title')?.textContent, arabic.t('lobby.emptySeeksTitle'));
+});
+
 test('seek ratings stay beside their opponent and pool, isolated from RTL and rating constraints', () => {
   const { doc, elements } = createTestDoc();
   const container = elements.get('seek-list')!;
