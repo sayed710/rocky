@@ -90,6 +90,43 @@ function contrast(first: string, second: string): number {
     / (Math.min(firstLuminance, secondLuminance) + 0.05);
 }
 
+/** Composite a theme's translucent panel token over an opaque surface. */
+function panelBackground(body: string, name: string, background: string): string {
+  const match = body.match(new RegExp(`--${name}\\s*:\\s*rgba\\(\\s*(\\d+),\\s*(\\d+),\\s*(\\d+),\\s*([\\d.]+)\\s*\\)`));
+  assert.ok(match, `missing rgba --${name} token`);
+  const alpha = Number(match[4]);
+  assert.ok(alpha >= 0 && alpha <= 1, 'panel opacity must be bounded');
+  const base = background.slice(1).match(/../g)!.map((pair) => Number.parseInt(pair, 16));
+  return '#' + base.map((channel, index) => Math.round(
+    Number(match[index + 1]) * alpha + channel * (1 - alpha),
+  ).toString(16).padStart(2, '0')).join('');
+}
+
+test('error and blunder text meets AA contrast on theme and panel surfaces', () => {
+  const root = rules().find((rule) => rule.selectors.includes(':root'));
+  const light = rules().find((rule) => rule.selectors.includes(':root.light'));
+  assert.ok(root && light, 'both theme declarations must exist');
+  assert.match(light.body, /--ember\s*:\s*var\(--light-ember\)/);
+  for (const prefix of ['', 'light-']) {
+    const ink = hexProperty(root.body, `${prefix}ember`);
+    const background = hexProperty(root.body, `${prefix}bg`);
+    const panel = panelBackground(root.body, `${prefix}panel`, background);
+    const strongPanel = panelBackground(root.body, `${prefix}panel-strong`, background);
+    const nestedPanel = panelBackground(root.body, `${prefix}panel`, strongPanel);
+    for (const surface of [background, panel, strongPanel, nestedPanel]) {
+      const ratio = contrast(ink, surface);
+      assert.ok(ratio >= 4.5, `${prefix}error text on ${surface}: ${ratio.toFixed(2)}:1 < 4.5:1`);
+    }
+  }
+  for (const selector of ['.error', '.cg-field-error', '.game-review-blunder strong']) {
+    const rule = rules().find((candidate) => candidate.selectors.includes(selector));
+    assert.ok(rule, `missing ${selector}`);
+    assert.match(rule.body, /color\s*:\s*var\(--ember\)/);
+  }
+  // Historical ink is a negative control: removing the production correction must fail.
+  assert.ok(contrast('#e5484d', hexProperty(root.body, 'bg')) < 4.5);
+});
+
 test('at-rule parsing ignores braces in comments and quoted values', () => {
   const source = `@media (min-width: 720px) {
     /* A closing brace here must not terminate the at-rule: } */

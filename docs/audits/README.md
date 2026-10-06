@@ -1,5 +1,7 @@
 # Rookzen audit sources
 
+- [Launch Preparation A06 — manual accessibility preparation — 2026-10-05](LAUNCH_A06_MANUAL_ACCESSIBILITY_CHECKLIST_2026-10-05.md) maps the current accessibility contract, records the dark error-text contrast fix and supporting checks, and supplies the remaining owner NVDA/RTL/real-zoom/low-vision procedure. **READY_FOR_MANUAL_EVIDENCE**, not closed; A07/O06 and public-launch approval remain separate.
+
 - [Launch Preparation O09 — deployed game-to-review journey — 2026-10-05](LAUNCH_O09_PRODUCTION_JOURNEY_VERIFICATION_2026-10-05.md) records the real Compose/Nginx two-browser rated game, durable result, exactly-once replay, refreshed history and local-engine review; includes the reusable command and scope limits. Owner merge/public launch remain separate.
 
 - [Launch Preparation O10 — Windows Signature B verification — 2026-10-05](LAUNCH_O10_WINDOWS_SIGNATURE_B_VERIFICATION_2026-10-05.md) records three bounded Windows runs on main `5ee3441` with no Signature B captures, identifies the `packages/api` DB-backed suites that ran and the `packages/persistence` suites that did not, and preserves the unresolved-cause caveat.

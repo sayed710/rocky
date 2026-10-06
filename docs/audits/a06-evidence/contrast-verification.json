@@ -1,0 +1,73 @@
+{
+  "baseSHA": "ceab1365fa912f01895dfc226a5f0377767f4598",
+  "date": "2026-10-05",
+  "status": "READY_FOR_MANUAL_EVIDENCE",
+  "manual": {
+    "screenReader": "not performed",
+    "arabicSpeechOrder": "not performed",
+    "actual200PercentZoom": "not performed",
+    "practicalLowVision": "not performed"
+  },
+  "productionCSS": {
+    "path": "packages/web/src/style.css",
+    "sha256": "e31dadf0a2a09fc182ab48d78789a2c21785e91637024b61f3bbdbb97586d014"
+  },
+  "emittedCSS": {
+    "path": "packages/web/dist/assets/index-B-lRlxn_.css",
+    "sha256": "7f98bf1ee4ddaabc47ecdc72a54497f334be727d7dde1ae59b36345150f3e5c7"
+  },
+  "red": {
+    "lighthouseVersion": "11.4.0",
+    "url": "http://127.0.0.1:4184/",
+    "score": 0.96,
+    "commandExit": 1,
+    "limitation": "Windows temporary-profile cleanup EPERM; no passing gate credit",
+    "contrast": [
+      {
+        "selector": "body > main#app-main > section#lobby > p#lobby-error",
+        "text": "HTTP 500",
+        "explanation": "Fix any of the following:\n  Element has insufficient color contrast of 4.03 (foreground color: #e5484d, background color: #242224, font size: 10.5pt (14px), font weight: normal). Expected contrast ratio of 4.5:1"
+      }
+    ]
+  },
+  "green": {
+    "lighthouseVersion": "11.4.0",
+    "url": "http://127.0.0.1:4184/",
+    "score": 1,
+    "commandExit": 0,
+    "browser": "Playwright Chromium 149.0.7827.55",
+    "os": "Linux Docker tooling; Windows host",
+    "input": "newly built worktree dist, unavailable API",
+    "runtimeError": null,
+    "warnings": [],
+    "failedAccessibilityAudits": [],
+    "contrastScore": 1
+  },
+  "unitRed": {
+    "tests": 1,
+    "failed": 1,
+    "observedRatio": 4.036,
+    "reason": "unmodified historical dark error token fails >=4.5 requirement"
+  },
+  "final": {
+    "hermeticWorkspaces": 19,
+    "hermeticExit": 0,
+    "webTests": 1477,
+    "webFailures": 0,
+    "webSkips": 0,
+    "focusedTests": 138,
+    "scriptBaselineTests": 324,
+    "browserTotal": 272,
+    "browserDirectPass": 271,
+    "browserRetryPass": 1,
+    "browserSkips": 0,
+    "retryReason": "Windows PGN-download worker exit 3221226505",
+    "nginxDeliveryTests": 12,
+    "nginxDeliveryFailures": 0,
+    "nginxDeliverySkips": 0
+  },
+  "independentReview": {
+    "completed": false,
+    "reason": "Gemini authentication UNSUPPORTED_CLIENT; not a quota fallback"
+  }
+}
