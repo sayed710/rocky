@@ -1570,14 +1570,18 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         row.type = 'button';
         const annotation = gameReviewAnnotation(move.classification);
         row.className = `panel-row game-review-move game-review-${annotation.tone}`;
-        const loss = move.assessment.centipawnLoss === null
-          ? ''
-          : ` · ${move.assessment.centipawnLoss} cp`;
         const moveLabel = doc.createElement('span');
         moveLabel.textContent = `${move.ply}. ${move.san}`;
         applyLtrIsolation(moveLabel);
         const verdict = doc.createElement('strong');
-        verdict.textContent = `${annotation.symbol} ${classificationLabel(annotation.label)}${loss}`;
+        verdict.textContent = `${annotation.symbol} ${classificationLabel(annotation.label)}`;
+        if (move.assessment.centipawnLoss !== null) {
+          verdict.textContent += ' · ';
+          const loss = doc.createElement('span');
+          loss.textContent = `${move.assessment.centipawnLoss} cp`;
+          applyLtrIsolation(loss);
+          verdict.appendChild(loss);
+        }
         row.replaceChildren(moveLabel, verdict);
         row.addEventListener('click', () => {
           board.setPosition(move.fenBefore);
