@@ -1,6 +1,8 @@
 # Rookzen audit sources
 
-- [Launch Preparation A06 — manual accessibility preparation — 2026-10-05](LAUNCH_A06_MANUAL_ACCESSIBILITY_CHECKLIST_2026-10-05.md) maps the current accessibility contract, records the dark error-text contrast fix and supporting checks, and supplies the remaining owner NVDA/RTL/real-zoom/low-vision procedure. **READY_FOR_MANUAL_EVIDENCE**, not closed; A07/O06 and public-launch approval remain separate.
+- [Launch Preparation A06 — genuine manual accessibility verification — 2026-10-06](LAUNCH_A06_ACCESSIBILITY_VERIFICATION_2026-10-06.md) records bounded A06 closure with actual NVDA/EN/AR/RTL/mixed-direction/Chrome 200%/low-vision evidence and retested corrections. [Selected actual NVDA excerpts](LAUNCH_A06_NVDA_EXCERPTS_2026-10-06.md) preserve sanitized provenance. Final-head implementation delivery gates and owner integration are separate; A07/O06/public-launch approval remain separate.
+
+- [Launch Preparation A06 — manual accessibility preparation — 2026-10-05](LAUNCH_A06_MANUAL_ACCESSIBILITY_CHECKLIST_2026-10-05.md) maps the current accessibility contract, records the dark error-text contrast fix and supporting checks, and supplies the remaining owner NVDA/RTL/real-zoom/low-vision procedure. Historical **READY_FOR_MANUAL_EVIDENCE** preparation, superseded for manual status by the verification above; A07/O06 and public-launch approval remain separate.
 
 - [Launch Preparation O09 — deployed game-to-review journey — 2026-10-05](LAUNCH_O09_PRODUCTION_JOURNEY_VERIFICATION_2026-10-05.md) records the real Compose/Nginx two-browser rated game, durable result, exactly-once replay, refreshed history and local-engine review; includes the reusable command and scope limits. Owner merge/public launch remain separate.
 

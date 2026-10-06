@@ -8,7 +8,7 @@ import type { StateView, WsColor } from '../src/net/ws-protocol.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
 import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
 
-function setup() {
+function setup(locale: 'en' | 'ar' = 'en') {
   const factory = new FakeSocketFactory();
   const scheduler = new ManualScheduler();
   const client = new WsClient({
@@ -29,7 +29,7 @@ function setup() {
   const metadatas: Array<any> = [];
   const controller = new GameController({
     gameSync: sync,
-    i18n: createI18nManager(),
+    i18n: createI18nManager({ initialLocale: locale }),
     callbacks: {
       onPosition: (fen) => positions.push(fen),
       onTurn: (myTurn) => turns.push(myTurn),
@@ -170,6 +170,64 @@ test('game ended emits checkmate status', () => {
   assert.equal(statuses.at(-1), 'Checkmate — White wins (1-0)');
   controller.stop();
   sync.stop();
+});
+
+test('checked side is identified in localized player and spectator status after reconnect', () => {
+  for (const locale of ['en', 'ar'] as const) {
+    for (const role of ['white', 'black', 'spectator'] as const) {
+      const { factory, sync, controller, statuses } = setup(locale);
+      controller.start();
+      sync.start();
+      factory.last.open();
+      try {
+        factory.last.emit({
+          t: 'joined', gameId: 'g1', role,
+          state: stateView(5, 'b', 'rnbqkbnr/ppp2ppp/3p4/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 1 3', [
+            { ply: 5, uci: 'f1b5', san: 'Bb5+', by: 'w' },
+          ]),
+        });
+        const turn = locale === 'en'
+          ? role === 'black' ? 'Your move' : 'Black to move'
+          : role === 'black' ? 'دورك' : 'الدور لـ الأسود';
+        assert.equal(statuses.at(-1), locale === 'en'
+          ? `${turn}. Black is in check.`
+          : `${turn}. الأسود في كش.`);
+      } finally {
+        controller.stop();
+        sync.stop();
+      }
+    }
+  }
+});
+
+test('live check status clears after an authoritative reply and terminal result takes precedence', () => {
+  const { factory, sync, controller, statuses } = setup();
+  controller.start();
+  sync.start();
+  factory.last.open();
+  try {
+    factory.last.emit({
+      t: 'joined', gameId: 'g1', role: 'black',
+      state: stateView(4, 'w', 'rnbqkbnr/ppp2ppp/3p4/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3'),
+    });
+    factory.last.emit({
+      t: 'move', gameId: 'g1', ply: 5, uci: 'f1b5', san: 'Bb5+', by: 'w',
+      fenHash: 'h5', clock: { w: 59_000, b: 60_000 }, serverTs: 5, legalMoves: {},
+    });
+    assert.equal(statuses.at(-1), 'Your move. Black is in check.');
+    factory.last.emit({
+      t: 'move', gameId: 'g1', ply: 6, uci: 'c7c6', san: 'c6', by: 'b',
+      fenHash: 'h6', clock: { w: 59_000, b: 59_000 }, serverTs: 6, legalMoves: {},
+    });
+    assert.equal(statuses.at(-1), 'White to move');
+    factory.last.emit({
+      t: 'ended', gameId: 'g1', result: '1-0', termination: 'checkmate', winner: 'w', serverTs: 7,
+    });
+    assert.equal(statuses.at(-1), 'Checkmate — White wins (1-0)');
+  } finally {
+    controller.stop();
+    sync.stop();
+  }
 });
 
 test('submitMove forwards to GameSync', () => {

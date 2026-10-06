@@ -32,6 +32,14 @@ export function renderSeeks(
   names: ReadonlyMap<string, SocialPlayer> | undefined,
   i18n: I18nManager,
 ): void {
+  // Polling an unchanged live status must not speak the empty list again.
+  // Compare localized copy so a language change still replaces the status.
+  if (seeks.length === 0
+    && container.getAttribute('role') === 'status'
+    && container.querySelector('.empty-title')?.textContent === i18n.t('lobby.emptySeeksTitle')
+    && container.querySelector('.empty-body')?.textContent === i18n.t('lobby.emptySeeksBody')) {
+    return;
+  }
   const doc = container.ownerDocument ?? document;
   const active = doc.activeElement;
   const renderedRows = [...container.querySelectorAll<HTMLElement>('.seek-row')];

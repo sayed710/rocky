@@ -93,8 +93,13 @@ test('EN/AR live game, lobby/create game and profile remain contained at all rel
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       await expect(page.locator('#action-offer-draw')).toHaveText('عرض التعادل');
       const clock = page.locator('#clock');
-      await expect(clock).toHaveAttribute('dir', 'ltr');
-      await expect(clock).toHaveText(/\d+:\d{2} – \d+:\d{2}/);
+      await expect(clock.locator('#clock-white .clock-label')).toHaveText('الأبيض');
+      await expect(clock.locator('#clock-black .clock-label')).toHaveText('الأسود');
+      for (const side of ['white', 'black']) {
+        const time = clock.locator(`#clock-${side} .clock-time`);
+        await expect(time).toHaveText(/^\d+:\d{2}$/);
+        await expect(time).toHaveCSS('direction', 'ltr');
+      }
       await expect(page.locator('#auth-status bdi')).toHaveText(handle);
       if (process.env['ROOKZEN_CAPTURE_EVIDENCE'] && [1440, 390].includes(width)) {
         for (const locale of ['en', 'ar']) {

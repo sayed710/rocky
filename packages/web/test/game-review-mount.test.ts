@@ -326,6 +326,38 @@ test('Game Review stays unavailable while the game is live and unlocks only when
   }
 });
 
+test('review centipawn values retain their sign and unit in either locale', async () => {
+  for (const loss of [-1, 0, 10, null]) {
+    const g = setup();
+    try {
+      await waitUntil(() => g.elements.get('game-review-run')!.disabled === false);
+      runReview(g.elements);
+      await waitUntil(() => g.pendingReviews.length === 1);
+      g.pendingReviews[0]!.resolve(json(200, {
+        ...COMPLETED_REVIEW_WITH_MOVE,
+        moves: [{ ...REVIEWED_MOVE, assessment: { ...REVIEWED_MOVE.assessment, centipawnLoss: loss } }],
+      }));
+      await waitUntil(() => g.elements.get('game-review-moves')!.childElementCount === 1);
+      for (const locale of ['en', 'ar'] as const) {
+        g.app.i18n.setLocale(locale);
+        const verdict = g.elements.get('game-review-moves')!.children[0]!.children[1]!;
+        if (loss === null) {
+          assert.equal(verdict.children.length, 0, 'unavailable loss has no numeric token');
+        } else {
+          const token = verdict.children[0];
+          assert.ok(token, 'centipawn value must be isolated from translated prose');
+          assert.equal(token.textContent, `${loss} cp`);
+          assert.equal(token.getAttribute('dir'), 'ltr');
+          assert.match(token.className, /\bbidi-ltr\b/);
+          assert.doesNotMatch(token.textContent, /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+        }
+      }
+    } finally {
+      dispose(g);
+    }
+  }
+});
+
 test('reviewed-position navigation preserves every coordinate in the flipped orientation', async () => {
   const mountedGame = setup();
   try {
@@ -337,7 +369,8 @@ test('reviewed-position navigation preserves every coordinate in the flipped ori
 
     mountedGame.mounted.board.view.flip();
     const reviewedMove = mountedGame.elements.get('game-review-moves')!.children[0]!;
-    assert.equal(reviewedMove.children[1]!.textContent, '★ Best move · 10 cp');
+    const verdict = reviewedMove.children[1]!;
+    assert.equal(verdict.textContent + verdict.children[0]!.textContent, '★ Best move · 10 cp');
     reviewedMove.click();
 
     const boardHtml = mountedGame.elements.get('board')!.innerHTML;

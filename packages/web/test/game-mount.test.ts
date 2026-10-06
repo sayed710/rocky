@@ -52,8 +52,12 @@ class FakeElement {
     return child;
   };
 
+  contains = (node: FakeElement): boolean =>
+    node === this || this.children.some((child) => child.contains(node));
+
   querySelectorAll = () => [];
-  querySelector = () => null;
+  querySelector = (selector: string): FakeElement | null =>
+    this.children.find((child) => selector.startsWith('.') && child.classList.has(selector.slice(1))) ?? null;
   style: Record<string, string> = {};
 
   click() {
@@ -186,6 +190,99 @@ function gameServices(app: ReturnType<typeof createTestApp>) {
     i18n: app.i18n,
   };
 }
+
+test('mountGame clock updates preserve colour labels and update only the time spans', () => {
+  for (const labels of [['White', 'Black'], ['الأبيض', 'الأسود']]) {
+    const sockets = new FakeSocketFactory();
+    const app = createTestApp(sockets);
+    const { doc, elements } = createGameDocument();
+    const clocks = elements.get('clock')!;
+    const sides = ['clock-white', 'clock-black'].map((id, index) => {
+      const side = elements.get(id)!;
+      const label = new FakeElement();
+      label.classList.add('clock-label');
+      label.textContent = labels[index]!;
+      const time = new FakeElement();
+      time.classList.add('clock-time');
+      time.textContent = '10:00';
+      side.appendChild(label);
+      side.appendChild(time);
+      clocks.appendChild(side);
+      return { side, label, time };
+    });
+    const mounted = mountGame({
+      doc, boardEl: elements.get('board')! as unknown as HTMLElement,
+      gameId: 'clock-labels', ...gameServices(app), token: 'test-token',
+      restorePromise: Promise.resolve(null),
+    });
+    try {
+      sockets.last.open();
+      for (const clock of [{ w: 64_000, b: 58_000 }, { w: 62_000, b: 57_000 }]) {
+        sockets.last.emit({
+          t: 'joined', gameId: 'clock-labels', role: 'white',
+          state: {
+            gameId: 'clock-labels', variant: 'standard', players: { white: 'u1', black: 'u2' },
+            timeControl: { initialMs: 600_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            fenHash: 'clock-labels', ply: 0, turn: 'w', clock, turnStartedAt: null,
+            status: { over: false }, drawOffer: null, moves: [], legalMoves: {}, chess960StartId: null,
+          },
+        });
+        assert.deepEqual(sides.map(({ time }) => time.textContent),
+          clock.w === 64_000 ? ['1:04', '0:58'] : ['1:02', '0:57']);
+        assert.deepEqual(clocks.children, sides.map(({ side }) => side));
+        assert.equal(clocks.textContent, '', 'clock updates must not replace the clocks group');
+        sides.forEach(({ side, label, time }, index) => {
+          assert.deepEqual(side.children, [label, time]);
+          assert.equal(label.textContent, labels[index]);
+          assert.equal(side.textContent, '', 'clock updates must not replace the labelled container');
+        });
+      }
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      app.dispose();
+    }
+  }
+});
+
+test('withdrawn draw controls return focus to game status only when they contain focus', () => {
+  for (const focusedId of ['action-decline-draw', 'action-accept-draw', 'board']) {
+    const sockets = new FakeSocketFactory();
+    const app = createTestApp(sockets);
+    const { doc, elements } = createGameDocument();
+    const drawControls = elements.get('draw-offer-received')!;
+    drawControls.appendChild(elements.get('action-accept-draw')!);
+    drawControls.appendChild(elements.get('action-decline-draw')!);
+    const mounted = mountGame({
+      doc, boardEl: elements.get('board')! as unknown as HTMLElement,
+      gameId: 'draw-focus', ...gameServices(app), token: 'test-token',
+      restorePromise: Promise.resolve(null),
+    });
+    try {
+      sockets.last.open();
+      const state = {
+        gameId: 'draw-focus', variant: 'standard', players: { white: 'u1', black: 'u2' },
+        timeControl: { initialMs: 600_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+        fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        fenHash: 'draw-focus', ply: 0, turn: 'w', clock: { w: 600_000, b: 600_000 },
+        turnStartedAt: null, status: { over: false }, moves: [], legalMoves: {}, chess960StartId: null,
+      };
+      sockets.last.emit({ t: 'joined', gameId: 'draw-focus', role: 'white', state: { ...state, drawOffer: 'b' } });
+      assert.equal(drawControls.hidden, false);
+      Object.defineProperty(doc, 'activeElement', { value: elements.get(focusedId) });
+      sockets.last.emit({ t: 'joined', gameId: 'draw-focus', role: 'white', state: { ...state, drawOffer: null } });
+      assert.equal(drawControls.hidden, true);
+      assert.equal(elements.get('status')!.focused, focusedId !== 'board');
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      app.dispose();
+    }
+  }
+});
 
 test('mountGame opens WebSocket immediately when token is provided', () => {
   const sockets = new FakeSocketFactory();
@@ -439,6 +536,21 @@ test('action buttons and confirmations wiring and focus behavior', () => {
   assert.equal(confirmAbort.hidden, true);
   assert.equal(btnAbort.hidden, false);
   assert.equal(btnAbort.focused, true);
+
+  for (const [id, method] of [
+    ['action-accept-draw', 'acceptDraw'],
+    ['action-decline-draw', 'declineDraw'],
+  ] as const) {
+    const status = elements.get('status')!;
+    mounted.controller[method] = () => false;
+    status.focused = false;
+    elements.get(id)!.disabled = false;
+    elements.get(id)!.click();
+    assert.equal(status.focused, false, 'a refused action must not move focus');
+    mounted.controller[method] = () => true;
+    elements.get(id)!.click();
+    assert.equal(status.focused, true, 'browse-mode activation must focus game status');
+  }
 
   mounted.controller.dispose();
   mounted.board.dispose();

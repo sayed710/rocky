@@ -34,6 +34,7 @@ import { createI18nManager } from '../i18n/index.js';
 export type AuthErrorMessageKey =
   | 'auth.error.stepUpRequired'
   | 'auth.error.emailUnverified'
+  | 'auth.error.invalidCredentials'
   | 'auth.error.handleRequiredPasskey'
   | 'auth.error.passkeyUnsupported'
   | 'auth.error.passkeyFailed'
@@ -73,14 +74,8 @@ function refusalReason(err: unknown): string | undefined {
  * or not the handle exists, because the server's answer is.
  */
 function signInError(err: unknown, i18n: I18nManager): string {
-  switch (refusalReason(err)) {
-    case 'step_up_required':
-      return i18n.t('auth.error.stepUpRequired');
-    case 'email_unverified':
-      return i18n.t('auth.error.emailUnverified');
-    default:
-      return err instanceof Error ? err.message : String(err);
-  }
+  const info = signInErrorInfo(err);
+  return info ? i18n.t(info.key) : err instanceof Error ? err.message : String(err);
 }
 
 function signInErrorInfo(err: unknown): AuthErrorInfo | null {
@@ -90,7 +85,9 @@ function signInErrorInfo(err: unknown): AuthErrorInfo | null {
     case 'email_unverified':
       return { key: 'auth.error.emailUnverified' };
     default:
-      return null;
+      return err instanceof HttpError && err.status === 401
+        ? { key: 'auth.error.invalidCredentials' }
+        : null;
   }
 }
 
