@@ -172,9 +172,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   const statusEl = doc.getElementById('status');
   const flipEl = doc.getElementById('flip');
-  const clockEl = doc.getElementById('clock');
-  const whiteClockEl = doc.getElementById('clock-white');
-  const blackClockEl = doc.getElementById('clock-black');
+  const whiteClockTimeEl = doc.getElementById('clock-white')?.querySelector<HTMLElement>('.clock-time');
+  const blackClockTimeEl = doc.getElementById('clock-black')?.querySelector<HTMLElement>('.clock-time');
 
   // Game metadata
   const metaConnectionEl = doc.getElementById('meta-connection');
@@ -1449,17 +1448,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         board.setTurn(myTurn);
       },
       onClock: (whiteMs: number, blackMs: number) => {
-        if (whiteClockEl) {
-          whiteClockEl.textContent = formatClock(whiteMs);
-          applyLtrIsolation(whiteClockEl);
+        if (whiteClockTimeEl) {
+          whiteClockTimeEl.textContent = formatClock(whiteMs);
+          applyLtrIsolation(whiteClockTimeEl);
         }
-        if (blackClockEl) {
-          blackClockEl.textContent = formatClock(blackMs);
-          applyLtrIsolation(blackClockEl);
-        }
-        if (clockEl) {
-          clockEl.textContent = `${formatClock(whiteMs)} – ${formatClock(blackMs)}`;
-          applyLtrIsolation(clockEl);
+        if (blackClockTimeEl) {
+          blackClockTimeEl.textContent = formatClock(blackMs);
+          applyLtrIsolation(blackClockTimeEl);
         }
       },
       onStatus: (text: string) => {

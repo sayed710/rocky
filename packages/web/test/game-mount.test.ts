@@ -53,7 +53,8 @@ class FakeElement {
   };
 
   querySelectorAll = () => [];
-  querySelector = () => null;
+  querySelector = (selector: string): FakeElement | null =>
+    this.children.find((child) => selector.startsWith('.') && child.classList.has(selector.slice(1))) ?? null;
   style: Record<string, string> = {};
 
   click() {
@@ -186,6 +187,62 @@ function gameServices(app: ReturnType<typeof createTestApp>) {
     i18n: app.i18n,
   };
 }
+
+test('mountGame clock updates preserve colour labels and update only the time spans', () => {
+  for (const labels of [['White', 'Black'], ['الأبيض', 'الأسود']]) {
+    const sockets = new FakeSocketFactory();
+    const app = createTestApp(sockets);
+    const { doc, elements } = createGameDocument();
+    const clocks = elements.get('clock')!;
+    const sides = ['clock-white', 'clock-black'].map((id, index) => {
+      const side = elements.get(id)!;
+      const label = new FakeElement();
+      label.classList.add('clock-label');
+      label.textContent = labels[index]!;
+      const time = new FakeElement();
+      time.classList.add('clock-time');
+      time.textContent = '10:00';
+      side.appendChild(label);
+      side.appendChild(time);
+      clocks.appendChild(side);
+      return { side, label, time };
+    });
+    const mounted = mountGame({
+      doc, boardEl: elements.get('board')! as unknown as HTMLElement,
+      gameId: 'clock-labels', ...gameServices(app), token: 'test-token',
+      restorePromise: Promise.resolve(null),
+    });
+    try {
+      sockets.last.open();
+      for (const clock of [{ w: 64_000, b: 58_000 }, { w: 62_000, b: 57_000 }]) {
+        sockets.last.emit({
+          t: 'joined', gameId: 'clock-labels', role: 'white',
+          state: {
+            gameId: 'clock-labels', variant: 'standard', players: { white: 'u1', black: 'u2' },
+            timeControl: { initialMs: 600_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            fenHash: 'clock-labels', ply: 0, turn: 'w', clock, turnStartedAt: null,
+            status: { over: false }, drawOffer: null, moves: [], legalMoves: {}, chess960StartId: null,
+          },
+        });
+        assert.deepEqual(sides.map(({ time }) => time.textContent),
+          clock.w === 64_000 ? ['1:04', '0:58'] : ['1:02', '0:57']);
+        assert.deepEqual(clocks.children, sides.map(({ side }) => side));
+        assert.equal(clocks.textContent, '', 'clock updates must not replace the clocks group');
+        sides.forEach(({ side, label, time }, index) => {
+          assert.deepEqual(side.children, [label, time]);
+          assert.equal(label.textContent, labels[index]);
+          assert.equal(side.textContent, '', 'clock updates must not replace the labelled container');
+        });
+      }
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      app.dispose();
+    }
+  }
+});
 
 test('mountGame opens WebSocket immediately when token is provided', () => {
   const sockets = new FakeSocketFactory();
