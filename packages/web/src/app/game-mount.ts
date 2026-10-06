@@ -1363,7 +1363,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
 
     if (drawOfferReceivedEl) {
-      drawOfferReceivedEl.hidden = state.drawOffer !== 'received' || state.isOver;
+      const hideDrawOffer = state.drawOffer !== 'received' || state.isOver;
+      if (hideDrawOffer && !drawOfferReceivedEl.hidden && doc.activeElement && drawOfferReceivedEl.contains(doc.activeElement)) {
+        statusEl?.focus();
+      }
+      drawOfferReceivedEl.hidden = hideDrawOffer;
     }
     if (btnAcceptDraw) {
       (btnAcceptDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
