@@ -635,6 +635,7 @@ export const enMessages = {
   'game.review.unavailableError': 'The review is not available right now. Please try again.',
   'game.status.turnToMove': '{color} to move',
   'game.status.yourTurn': 'Your move',
+  'game.status.inCheck': '{turn}. {color} is in check.',
   'game.status.checkmateWins': 'Checkmate — {winner} wins ({result})',
   'game.status.resignationWins': '{winner} wins by resignation ({result})',
   'game.status.timeoutWins': '{winner} wins on time ({result})',

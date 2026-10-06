@@ -569,6 +569,7 @@ export const arMessages = {
   "game.review.unavailableError": "المراجعة غير متاحة حاليًا. حاول مجددًا.",
   "game.status.turnToMove": "الدور لـ {color}",
   "game.status.yourTurn": "دورك",
+  "game.status.inCheck": "{turn}. {color} في كش.",
   "game.status.checkmateWins": "كش مات — فوز {winner} ({result})",
   "game.status.resignationWins": "فوز {winner} بالاستسلام ({result})",
   "game.status.timeoutWins": "فوز {winner} بانتهاء الوقت ({result})",

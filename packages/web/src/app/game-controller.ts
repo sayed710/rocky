@@ -548,13 +548,14 @@ export class GameController {
       if (state.turn === null) return t('game.status.waiting');
       if (awaitingReadiness(state)) return this.readinessText(state);
       const turnLabel = state.turn === 'w' ? t('game.player.white') : t('game.player.black');
-      if (state.myColor === null) {
-        return t('game.status.turnToMove', { color: turnLabel });
-      }
-      const myTurn = state.turn === state.myColor;
-      return myTurn
+      const turnText = state.turn === state.myColor
         ? t('game.status.yourTurn')
         : t('game.status.turnToMove', { color: turnLabel });
+      // SAN comes from the authoritative ledger, including reconnect snapshots.
+      // Keep check discoverable without deriving rules from the view-only mover.
+      return state.moves.at(-1)?.san.endsWith('+')
+        ? t('game.status.inCheck', { turn: turnText, color: turnLabel })
+        : turnText;
     }
     // Game over
     const { result, termination, winner } = state.status;
