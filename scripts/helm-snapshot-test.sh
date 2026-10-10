@@ -716,7 +716,7 @@ compose() {
     fi
     eval "$COMPOSITION"
     printf '%s\0' "${EXTRA_ARGS[@]}"
-  ) > "$out" 2>/dev/null
+  ) > "$out" 2> "$out.err"
 }
 
 # deployed_values ARGS_FILE OUT_JSON: what `helm get values --all` would return after
@@ -734,17 +734,29 @@ deployed_values() {
 
 # wf_step NAME FROM STRATEGY VERSION [TARGET_COLOR ACTIVE_COLOR CANARY_WEIGHT]
 # One deploy.yml run on top of the release run FROM left deployed ("" = none yet).
+# Errors from every stage go to $TMPDIR/wf-NAME.err, so wf_run can show why a run
+# that should succeed did not, while expected rejections stay quiet.
 wf_step() {
-  local name="$1" from="$2" args=()
-  compose "$TMPDIR/wf-$name.args" "$3" "$4" "${5:-green}" "${6:-blue}" "${7:-10}" "${from:+$TMPDIR/wf-$from.tags}" || return 1
+  local name="$1" from="$2" args=() err="$TMPDIR/wf-$1.err"
+  : > "$err"
+  if ! compose "$TMPDIR/wf-$name.args" "$3" "$4" "${5:-green}" "${6:-blue}" "${7:-10}" "${from:+$TMPDIR/wf-$from.tags}"; then
+    # ::error:: annotations go to stdout, as GitHub Actions reads them there.
+    { echo "deploy.yml composition refused:"; tr '\0' ' ' < "$TMPDIR/wf-$name.args"; cat "$TMPDIR/wf-$name.args.err"; } >> "$err"
+    return 1
+  fi
   mapfile -d '' args < "$TMPDIR/wf-$name.args"
   helm template "$CHART_DIR" -f "$WF_ENV_FILE" "${HELM_PRODUCTION_EMAIL[@]}" "${args[@]}" \
-    > "$TMPDIR/wf-$name.yaml" 2>/dev/null || return 1
-  deployed_values "$TMPDIR/wf-$name.args" "$TMPDIR/wf-$name.values.json" || return 1
-  node scripts/resolve-deployed-image-tags.mjs < "$TMPDIR/wf-$name.values.json" > "$TMPDIR/wf-$name.tags"
+    > "$TMPDIR/wf-$name.yaml" 2>> "$err" || return 1
+  deployed_values "$TMPDIR/wf-$name.args" "$TMPDIR/wf-$name.values.json" 2>> "$err" || return 1
+  node scripts/resolve-deployed-image-tags.mjs < "$TMPDIR/wf-$name.values.json" > "$TMPDIR/wf-$name.tags" 2>> "$err"
 }
 wf_run() {
-  if wf_step "$@"; then check "Workflow run '$1' composes and renders" 0; else check "Workflow run '$1' composes and renders" 1; fi
+  if wf_step "$@"; then
+    check "Workflow run '$1' composes and renders" 0
+  else
+    check "Workflow run '$1' composes and renders" 1
+    sed 's/^/      /' "$TMPDIR/wf-$1.err"
+  fi
 }
 
 # "<init images> | <container images>" of one Deployment in a run's render.
