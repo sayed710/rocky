@@ -440,7 +440,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
       resultNote = renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
     }
-    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, currentPuzzleNoteKey ? puzzleMessage(currentPuzzleNoteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
+    const noteKey = !isUserAuthenticated() ? 'signedOut'
+      : currentPuzzleNoteKey === 'signedOut' ? 'idle' : currentPuzzleNoteKey;
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, noteKey ? puzzleMessage(noteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
     if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, currentPuzzleErrorKey ? puzzleMessage(currentPuzzleErrorKey, i18n) : null);
   };
 
@@ -463,20 +465,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (puzzleRunBtn) {
       puzzleRunBtn.disabled = !authed || !hasPosition() || puzzleController.isPending;
     }
-    if (!authed) {
-      currentPuzzleNoteKey = 'signedOut';
-      if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('signedOut', i18n));
-      return;
-    }
-    if (currentPuzzleNoteKey === 'signedOut') {
-      currentPuzzleNoteKey = lastPuzzleResult || currentPuzzleErrorKey ? null : 'idle';
-      renderPuzzlePresentation();
-      return;
-    }
-    const ownsControlNote = currentPuzzleNoteKey === 'idle';
-    if (!ownsControlNote || lastPuzzleResult || currentPuzzleErrorKey) return;
-    currentPuzzleNoteKey = 'idle';
-    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(currentPuzzleNoteKey, i18n));
+    renderPuzzlePresentation();
   };
 
   // Opening identification (M15 inc 19), keyed on the game's move order rather than its position.
@@ -832,8 +821,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (phase === 'loading') {
           currentPuzzleNoteKey = 'running';
           currentPuzzleErrorKey = null;
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('running', i18n));
-          if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
+          renderPuzzlePresentation();
         }
       },
       onResult: (result) => {
@@ -858,23 +846,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         const key = noteFor[failure];
         if (key) {
           currentPuzzleNoteKey = key;
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(key, i18n));
         } else {
           currentPuzzleNoteKey = null;
           currentPuzzleErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, null);
-          if (puzzleErrorEl) {
-            renderPuzzleError(
-              puzzleErrorEl,
-              failure === 'rejected' ? puzzleMessage('rejected', i18n) : puzzleMessage('failed', i18n),
-            );
-          }
         }
+        renderPuzzlePresentation();
       },
       onInvalidated: () => {
         resetPuzzleBlock();
         currentPuzzleNoteKey = 'positionChanged';
-        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('positionChanged', i18n));
+        renderPuzzlePresentation();
       },
     },
   });

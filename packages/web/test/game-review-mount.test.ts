@@ -241,6 +241,42 @@ for (const responseStatus of [200, 422]) {
   });
 }
 
+for (const outcome of ['pending', 'rate-limited', 'unavailable', 'settled-while-out'] as const) {
+  test(`Find tactic preserves ${outcome} request state across sign-out and sign-in`, async () => {
+    const g = setup();
+    try {
+      await waitUntil(() => g.elements.get('puzzle-run')!.disabled === false);
+      const session = g.app.api.session.current!;
+      g.elements.get('puzzle-run')!.click();
+      await waitUntil(() => g.pendingPuzzles.length === 1);
+      if (outcome === 'rate-limited' || outcome === 'unavailable') {
+        g.pendingPuzzles[0]!.resolve(json(outcome === 'rate-limited' ? 429 : 503, {}));
+        await waitUntil(() => g.elements.get('puzzle-note')!.textContent === g.app.i18n.t(
+          outcome === 'rate-limited' ? 'ai.puzzle.rateLimited' : 'ai.puzzle.unavailable'));
+      }
+      let expectedNote = g.elements.get('puzzle-note')!.textContent;
+      g.app.api.session.reset(false);
+      g.mounted.onSessionChange(null);
+      assert.equal(g.elements.get('puzzle-note')!.textContent, g.app.i18n.t('ai.puzzle.signedOut'));
+      g.app.i18n.registerCatalog('ar', enMessages);
+      g.app.i18n.setLocale('ar');
+      assert.equal(g.elements.get('puzzle-note')!.textContent, g.app.i18n.t('ai.puzzle.signedOut'));
+      if (outcome === 'settled-while-out') {
+        g.pendingPuzzles[0]!.resolve(json(429, {}));
+        await settle();
+        await settle();
+        expectedNote = g.app.i18n.t('ai.puzzle.rateLimited');
+        assert.equal(g.elements.get('puzzle-note')!.textContent, g.app.i18n.t('ai.puzzle.signedOut'));
+      }
+      g.app.api.session.adopt(session);
+      g.mounted.onSessionChange({ userId: session.user.id, handle: session.user.handle });
+      assert.equal(g.elements.get('puzzle-note')!.textContent, expectedNote);
+      assert.equal(g.elements.get('puzzle-run')!.disabled, outcome === 'pending');
+      assert.equal(g.pendingPuzzles.length, 1);
+    } finally { dispose(g); }
+  });
+}
+
 for (const tool of POSITION_TOOLS) {
   test(`${tool.name} targets the displayed review FEN and clears completed results on selection`, async () => {
     const g = setup({ fen: AFTER_E4_FEN });
