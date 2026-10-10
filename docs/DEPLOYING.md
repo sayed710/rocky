@@ -375,10 +375,24 @@ express both:
 Setting `target_color` equal to `active_color` in a single run is a straight cutover — legitimate,
 but it skips the preview, which is the reason to choose blue/green in the first place.
 
-The colour that does *not* receive the version keeps falling back to `images.api.tag` /
-`images.web.tag` from the environment values file. **That is the rollback target, so keep it at the
-version currently live in that environment.** Overriding those tags with the incoming version would
-make both colours resolve to the same image, and the chart refuses to render that (ADR-0075).
+Everything the run does *not* change stays on what the deployed release runs. Before the upgrade the
+workflow reads the deployed revision's tags (`helm history` + `helm get values --all`, via
+`scripts/resolve-deployed-image-tags.mjs`) and pins them: on a stage, the live colour, the gateway
+and the trust worker keep their versions; on a cutover, the other colour keeps its previous
+assignment. That is the version just replaced only when you cut over to the standby colour (the
+normal stage-then-flip); cutting over onto the colour already live replaces that version, so to keep
+it as the rollback target, always target the standby. Without this, `helm upgrade` (which does not reuse the
+release's values) would fall back to the baseline `images.*.tag` in the environment values file. If
+the deployed tags cannot be read exactly, or the newest release revision is not the deployed one,
+the deploy is refused. A stage must also keep `active_color` on the colour serving traffic now; to
+change the serving colour, run a cutover. What is kept is the image *version*: a strategy switch or a
+new chart version can still restart the gateway and trust worker (their `wait-for-api` init image
+follows `images.api.tag`, and their pod labels carry the chart version).
+
+A canary run works the same way: the stable track, the gateway and the trust worker stay on the
+deployed version and only the canary track gets the new one. Promote it with a `rolling` run of that
+version. The chart refuses a canary whose tag equals the stable track's, and the workflow refuses a
+canary initial install for the same reason it refuses a blue/green one.
 
 A blue/green **initial install is rejected**: with no live release there is no published baseline for
 the standby colour to hold, and nothing to roll back to. Install first with `strategy=rolling`.

@@ -674,46 +674,207 @@ else
   check "Blue/green with preview disabled needs no standby tag" 1
 fi
 
-# --- Workflow flag compositions (.github/workflows/deploy.yml) --------------
-# NOTE: These test assertions mirror the exact flag compositions produced by
-# deploy.yml for each strategy. If deploy.yml changes its flag composition,
-# update these snapshot assertions to match.
+# --- Workflow strategy compositions (.github/workflows/deploy.yml) ----------
+# These renders EXECUTE the composition deploy.yml contains: its
+# `case "$STRATEGY" in` block is extracted from the workflow and run, so this
+# test cannot drift from the pipeline. Every run starts from the values the
+# previous run left deployed (what `helm get values --all` returns, modelled by
+# coalescing chart defaults, the environment file and that run's flags) and
+# passes them through the same resolver the workflow uses. Asserting only that a
+# render succeeds is what let both defects through: the canary composition put
+# the stable track on the new version (a 100% rollout), and a blue/green stage
+# dropped the live colour, the gateway and the trust worker to the environment
+# file's baseline tag. So these assert the image of every Deployment.
 echo ""
-echo "Workflow strategy flag compositions (deploy.yml):"
+echo "Workflow strategy compositions (deploy.yml, executed):"
 
-if helm template "$CHART_DIR" -f deploy/environments/production.values.yaml \
-     "${HELM_PRODUCTION_EMAIL[@]}" \
-     --set rollout.strategy=rolling \
-     --set images.api.tag=1.2.3 \
-     --set images.gateway.tag=1.2.3 \
-     --set images.web.tag=1.2.3 >/dev/null 2>&1; then
-  check "Workflow composition: rolling renders cleanly with production values" 0
+WF_ENV_FILE=deploy/environments/production.values.yaml
+WF_BASELINE_TAG=0.1.0  # images.*.tag in the environment files and chart defaults; nothing may fall back to it
+R=ghcr.io/senasehs19-oss/gambit
+COMPOSITION=$(awk '
+  /EXTRA_ARGS=\(\)/ { on = 1 }
+  on { sub(/\r$/, ""); print }
+  on && /^[[:space:]]*esac[[:space:]]*$/ { exit }
+' .github/workflows/deploy.yml)
+check "Workflow composition: the strategy case block is extracted from deploy.yml" \
+  "$(printf '%s\n' "$COMPOSITION" | grep -q 'case "$STRATEGY" in' && printf '%s\n' "$COMPOSITION" | grep -qx '[[:space:]]*esac' && echo 0 || echo 1)"
+
+# compose OUT STRATEGY VERSION TARGET_COLOR ACTIVE_COLOR CANARY_WEIGHT [DEPLOYED_TAGS_FILE]
+# Runs the extracted block exactly as the workflow step does and writes EXTRA_ARGS,
+# NUL-separated, to OUT. Fails if the block refuses (it calls `exit 1`).
+compose() {
+  local out="$1"
+  (
+    STRATEGY="$2" VERSION="$3" TARGET_COLOR="$4" ACTIVE_COLOR="$5" CANARY_WEIGHT="$6"
+    DEPLOYED_API_TAG="" DEPLOYED_WEB_TAG="" DEPLOYED_GATEWAY_TAG="" DEPLOYED_LIVE_API_TAG=""
+    DEPLOYED_LIVE_WEB_TAG="" DEPLOYED_BLUE_TAG="" DEPLOYED_GREEN_TAG="" DEPLOYED_STRATEGY="" DEPLOYED_ACTIVE_COLOR=""
+    if [ -n "${7:-}" ]; then
+      # The resolver's $GITHUB_OUTPUT lines become the step's env, as in deploy.yml.
+      while IFS='=' read -r key value; do
+        [ -n "$key" ] && printf -v "$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')" '%s' "$value"
+      done < "$7"
+    fi
+    eval "$COMPOSITION"
+    printf '%s\0' "${EXTRA_ARGS[@]}"
+  ) > "$out" 2>/dev/null
+}
+
+# deployed_values ARGS_FILE OUT_JSON: what `helm get values --all` would return after
+# the run — chart defaults, then the environment file, then the run's flags.
+deployed_values() {
+  local args=() i
+  mapfile -d '' args < "$1"
+  yq -o json eval-all '. as $item ireduce ({}; . * $item)' "$CHART_DIR/values.yaml" "$WF_ENV_FILE" > "$2.tmp"
+  for ((i = 0; i < ${#args[@]}; i += 2)); do
+    VALUE_PATH=".${args[i+1]%%=*}" VALUE="${args[i+1]#*=}" \
+      yq -o json -i 'eval(strenv(VALUE_PATH)) = strenv(VALUE)' "$2.tmp"
+  done
+  mv "$2.tmp" "$2"
+}
+
+# wf_step NAME FROM STRATEGY VERSION [TARGET_COLOR ACTIVE_COLOR CANARY_WEIGHT]
+# One deploy.yml run on top of the release run FROM left deployed ("" = none yet).
+wf_step() {
+  local name="$1" from="$2" args=()
+  compose "$TMPDIR/wf-$name.args" "$3" "$4" "${5:-green}" "${6:-blue}" "${7:-10}" "${from:+$TMPDIR/wf-$from.tags}" || return 1
+  mapfile -d '' args < "$TMPDIR/wf-$name.args"
+  helm template "$CHART_DIR" -f "$WF_ENV_FILE" "${HELM_PRODUCTION_EMAIL[@]}" "${args[@]}" \
+    > "$TMPDIR/wf-$name.yaml" 2>/dev/null || return 1
+  deployed_values "$TMPDIR/wf-$name.args" "$TMPDIR/wf-$name.values.json" || return 1
+  node scripts/resolve-deployed-image-tags.mjs < "$TMPDIR/wf-$name.values.json" > "$TMPDIR/wf-$name.tags"
+}
+wf_run() {
+  if wf_step "$@"; then check "Workflow run '$1' composes and renders" 0; else check "Workflow run '$1' composes and renders" 1; fi
+}
+
+# "<init images> | <container images>" of one Deployment in a run's render.
+wf_images() {
+  yq "select(.kind==\"Deployment\" and .metadata.name==\"release-name-gambit-$2\") | (((.spec.template.spec.initContainers // []) | map(.image) | join(\",\")) + \" | \" + (.spec.template.spec.containers | map(.image) | join(\",\")))" "$TMPDIR/wf-$1.yaml" 2>/dev/null || echo ""
+}
+api_img() { echo "$R-api:$1 | $R-api:$1"; }          # migrate init + api, same variant tag
+web_img() { echo " | $R-web:$1"; }
+gw_img() { echo "$R-api:$2 | $R-gateway:$1"; }       # wait-for-api init reads images.api.tag
+expect_images() {  # RUN DEPLOYMENT EXPECTED DESCRIPTION
+  local got; got=$(wf_images "$1" "$2")
+  check "$1: $4" "$([ "$got" = "$3" ] && echo 0 || echo 1)"
+  [ "$got" = "$3" ] || echo "      $2: got '$got', expected '$3'"
+}
+expect_unchanged() {  # RUN BEFORE DEPLOYMENT: the whole Deployment is byte-identical (no restart, no image change)
+  check "$1: $3 Deployment is unchanged from '$2' (not restarted, not moved)" \
+    "$([ -n "$(doc_by_name "$TMPDIR/wf-$2.yaml" Deployment "release-name-gambit-$3")" ] && [ "$(doc_by_name "$TMPDIR/wf-$1.yaml" Deployment "release-name-gambit-$3")" = "$(doc_by_name "$TMPDIR/wf-$2.yaml" Deployment "release-name-gambit-$3")" ] && echo 0 || echo 1)"
+}
+expect_primary() {  # RUN SELECTOR_KEY VALUE
+  check "$1: the primary api and web Services select $2=$3" \
+    "$([ "$(doc_by_name "$TMPDIR/wf-$1.yaml" Service release-name-gambit-api | yq ".spec.selector.\"$2\"")" = "$3" ] && [ "$(doc_by_name "$TMPDIR/wf-$1.yaml" Service release-name-gambit-web | yq ".spec.selector.\"$2\"")" = "$3" ] && echo 0 || echo 1)"
+}
+
+# 0. The first install is rolling, and rolling still moves every component.
+wf_run live110 "" rolling 1.1.0
+for d in api web; do expect_images live110 "$d" "$(${d}_img 1.1.0)" "rolling puts $d on the version"; done
+expect_images live110 gateway "$(gw_img 1.1.0 1.1.0)" "rolling puts the gateway on the version"
+expect_images live110 trust-worker "$(gw_img 1.1.0 1.1.0)" "rolling puts the trust worker on the version"
+
+# 1. R-07: a canary of 1.2.3 over live 1.1.0 keeps the stable track on 1.1.0.
+wf_run canary123 live110 canary 1.2.3 green blue 10
+expect_images canary123 api-stable "$(api_img 1.1.0)" "stable api stays on the live version"
+expect_images canary123 web-stable "$(web_img 1.1.0)" "stable web stays on the live version"
+expect_images canary123 api-canary "$(api_img 1.2.3)" "canary api runs the new version"
+expect_images canary123 web-canary "$(web_img 1.2.3)" "canary web runs the new version"
+expect_primary canary123 gambit.dev/track stable
+check "canary123: the canary Ingress carries the requested weight" \
+  "$([ "$(doc_by_name "$TMPDIR/wf-canary123.yaml" Ingress release-name-gambit-web-canary | yq '.metadata.annotations."nginx.ingress.kubernetes.io/canary-weight"')" = "10" ] && echo 0 || echo 1)"
+expect_unchanged canary123 live110 gateway
+expect_unchanged canary123 live110 trust-worker
+
+# 2. R-08: a blue/green stage keeps the live colour, the gateway and the trust worker.
+wf_run stage123 live110 blueGreen 1.2.3 green blue
+expect_images stage123 api-blue "$(api_img 1.1.0)" "live blue api stays on the live version"
+expect_images stage123 web-blue "$(web_img 1.1.0)" "live blue web stays on the live version"
+expect_images stage123 api-green "$(api_img 1.2.3)" "standby green api is staged with the new version"
+expect_images stage123 web-green "$(web_img 1.2.3)" "standby green web is staged with the new version"
+expect_primary stage123 gambit.dev/color blue
+expect_unchanged stage123 live110 gateway
+expect_unchanged stage123 live110 trust-worker
+
+# 3. The cutover moves traffic and the gateway, and keeps the old colour as the rollback target.
+wf_run flip123 stage123 blueGreen 1.2.3 green green
+expect_primary flip123 gambit.dev/color green
+expect_images flip123 api-blue "$(api_img 1.1.0)" "blue keeps the replaced version as the rollback target"
+expect_images flip123 web-blue "$(web_img 1.1.0)" "blue web keeps the replaced version as the rollback target"
+for d in api-blue api-green web-blue web-green; do
+  check "flip123: the cutover does not change the $d image" "$([ "$(wf_images flip123 $d)" = "$(wf_images stage123 $d)" ] && echo 0 || echo 1)"
+done
+expect_images flip123 gateway "$(gw_img 1.2.3 1.1.0)" "the cutover moves the gateway to the new version"
+expect_images flip123 trust-worker "$(gw_img 1.2.3 1.1.0)" "the cutover moves the trust worker to the new version"
+
+# 4. Repeating the cutover changes nothing, rather than losing the rollback target.
+wf_run recut123 flip123 blueGreen 1.2.3 green green
+for d in api-blue api-green web-blue web-green gateway trust-worker; do expect_unchanged recut123 flip123 "$d"; done
+
+# 5. The next stage starts from green live on 1.2.3, not from any fallback.
+wf_run stage130 flip123 blueGreen 1.3.0 blue green
+expect_images stage130 api-green "$(api_img 1.2.3)" "live green api stays on the live version"
+expect_images stage130 web-green "$(web_img 1.2.3)" "live green web stays on the live version"
+expect_images stage130 api-blue "$(api_img 1.3.0)" "standby blue is staged with the new version"
+expect_images stage130 web-blue "$(web_img 1.3.0)" "standby blue web is staged with the new version"
+expect_primary stage130 gambit.dev/color green
+expect_unchanged stage130 flip123 gateway
+expect_unchanged stage130 flip123 trust-worker
+
+# 6. Rolling back through the workflow restores blue and still keeps green's version.
+wf_run back110 flip123 blueGreen 1.1.0 blue blue
+expect_primary back110 gambit.dev/color blue
+expect_images back110 api-blue "$(api_img 1.1.0)" "blue serves the rollback version"
+expect_images back110 api-green "$(api_img 1.2.3)" "green keeps the version it ran"
+expect_images back110 web-green "$(web_img 1.2.3)" "green web keeps the version it ran"
+expect_images back110 gateway "$(gw_img 1.1.0 1.1.0)" "the gateway follows the cutover back"
+expect_images back110 trust-worker "$(gw_img 1.1.0 1.1.0)" "the trust worker follows the cutover back"
+
+# 7. A canary started from a blue/green release keeps stable on the LIVE colour's version.
+wf_run canary130 flip123 canary 1.3.0 green blue 10
+expect_images canary130 api-stable "$(api_img 1.2.3)" "stable api is the live colour's version, not the fallback"
+expect_images canary130 web-stable "$(web_img 1.2.3)" "stable web is the live colour's version, not the fallback"
+expect_images canary130 api-canary "$(api_img 1.3.0)" "canary api runs the new version"
+expect_images canary130 web-canary "$(web_img 1.3.0)" "canary web runs the new version"
+# Main images stay on the live version. The wait-for-api init image follows the
+# stable api tag, so this strategy switch does restart them (expected, ADR-0075).
+expect_images canary130 gateway "$(gw_img 1.2.3 1.2.3)" "the gateway stays on the live version"
+expect_images canary130 trust-worker "$(gw_img 1.2.3 1.2.3)" "the trust worker stays on the live version"
+
+# 8. Nothing in the lifecycle fell back to the environment file's baseline tag.
+for run in live110 canary123 stage123 flip123 recut123 stage130 back110 canary130; do
+  check "$run: no image falls back to the baseline tag $WF_BASELINE_TAG" \
+    "$(grep -Eq "image: \"?$R-[a-z]+:${WF_BASELINE_TAG//./\\.}\"?\$" "$TMPDIR/wf-$run.yaml" && echo 1 || echo 0)"
+done
+
+# 9. Fail closed.
+for s in canary blueGreen; do
+  if compose "$TMPDIR/wf-unresolved.args" "$s" 1.2.3 green blue 10; then
+    check "Workflow composition: $s refuses to compose without the deployed tags" 1
+  else
+    check "Workflow composition: $s refuses to compose without the deployed tags" 0
+  fi
+done
+# A "stage" onto the colour that is live now (green serves 1.2.3 after flip123)
+# while naming blue active would switch production to blue's older 1.1.0.
+if wf_step badstage flip123 blueGreen 1.3.0 green blue; then
+  check "Workflow composition: a stage that would switch the serving colour is rejected" 1
 else
-  check "Workflow composition: rolling renders cleanly with production values" 1
+  check "Workflow composition: a stage that would switch the serving colour is rejected" 0
 fi
-
-if helm template "$CHART_DIR" -f deploy/environments/production.values.yaml \
-     "${HELM_PRODUCTION_EMAIL[@]}" \
-     --set rollout.strategy=blueGreen \
-     --set rollout.blueGreen.activeColor=blue \
-     --set rollout.blueGreen.colors.blue.tag=1.2.3 \
-     --set images.gateway.tag=1.2.3 >/dev/null 2>&1; then
-  check "Workflow composition: blueGreen renders cleanly with production values" 0
+if wf_step canary110 live110 canary 1.1.0 green blue 10; then
+  check "Workflow composition: a canary of the version already live is rejected" 1
 else
-  check "Workflow composition: blueGreen renders cleanly with production values" 1
+  check "Workflow composition: a canary of the version already live is rejected" 0
 fi
-
-if helm template "$CHART_DIR" -f deploy/environments/production.values.yaml \
-     "${HELM_PRODUCTION_EMAIL[@]}" \
-     --set rollout.strategy=canary \
-     --set rollout.canary.tag=1.2.3 \
-     --set rollout.canary.weight=10 \
-     --set images.api.tag=1.2.3 \
-     --set images.gateway.tag=1.2.3 \
-     --set images.web.tag=1.2.3 >/dev/null 2>&1; then
-  check "Workflow composition: canary renders cleanly with production values" 0
+# REGRESSION GUARD (R-07): the composition deploy.yml used to produce for canary
+# put stable and canary on the same version. The chart must refuse it.
+if helm template "$CHART_DIR" -f "$WF_ENV_FILE" "${HELM_PRODUCTION_EMAIL[@]}" \
+     --set rollout.strategy=canary --set rollout.canary.tag=1.2.3 --set rollout.canary.weight=10 \
+     --set images.api.tag=1.2.3 --set images.gateway.tag=1.2.3 --set images.web.tag=1.2.3 >/dev/null 2>&1; then
+  check "Fail-closed: a canary on the stable track's own tag (the old 100% composition) is rejected" 1
 else
-  check "Workflow composition: canary renders cleanly with production values" 1
+  check "Fail-closed: a canary on the stable track's own tag (the old 100% composition) is rejected" 0
 fi
 
 echo ""
