@@ -725,7 +725,7 @@ compose() {
 # errexit does not apply, so an unchecked yq failure would leave stale values.
 deployed_values() {
   local args=() i
-  rm -f "$2"
+  rm -f "$2" || return 1
   mapfile -d '' args < "$1" || return 1
   yq -o json eval-all '. as $item ireduce ({}; . * $item)' "$CHART_DIR/values.yaml" "$WF_ENV_FILE" > "$2.tmp" || return 1
   for ((i = 0; i < ${#args[@]}; i += 2)); do
@@ -747,7 +747,7 @@ wf_step() {
     { echo "deploy.yml composition refused:"; tr '\0' ' ' < "$TMPDIR/wf-$name.args"; cat "$TMPDIR/wf-$name.args.err"; } >> "$err"
     return 1
   fi
-  mapfile -d '' args < "$TMPDIR/wf-$name.args"
+  mapfile -d '' args < "$TMPDIR/wf-$name.args" || return 1
   helm template "$CHART_DIR" -f "$WF_ENV_FILE" "${HELM_PRODUCTION_EMAIL[@]}" "${args[@]}" \
     > "$TMPDIR/wf-$name.yaml" 2>> "$err" || return 1
   deployed_values "$TMPDIR/wf-$name.args" "$TMPDIR/wf-$name.values.json" 2>> "$err" || return 1
