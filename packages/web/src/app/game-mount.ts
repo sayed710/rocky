@@ -435,6 +435,15 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   };
   resetPuzzleBlock();
 
+  const renderPuzzlePresentation = (): void => {
+    let resultNote: string | null = null;
+    if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
+      resultNote = renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
+    }
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, currentPuzzleNoteKey ? puzzleMessage(currentPuzzleNoteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
+    if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, currentPuzzleErrorKey ? puzzleMessage(currentPuzzleErrorKey, i18n) : null);
+  };
+
   /** Keep puzzle visibility and button state aligned with capabilities and the live-game rule. */
   const refreshPuzzleControls = (): void => {
     if (analysisDisposed || !puzzleAvailable) return;
@@ -459,7 +468,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('signedOut', i18n));
       return;
     }
-    const ownsControlNote = currentPuzzleNoteKey === 'idle' || currentPuzzleNoteKey === 'signedOut';
+    if (currentPuzzleNoteKey === 'signedOut') {
+      currentPuzzleNoteKey = lastPuzzleResult || currentPuzzleErrorKey ? null : 'idle';
+      renderPuzzlePresentation();
+      return;
+    }
+    const ownsControlNote = currentPuzzleNoteKey === 'idle';
     if (!ownsControlNote || lastPuzzleResult || currentPuzzleErrorKey) return;
     currentPuzzleNoteKey = 'idle';
     if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(currentPuzzleNoteKey, i18n));
@@ -807,15 +821,6 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   };
 
   let controller: GameController;
-
-  const renderPuzzlePresentation = (): void => {
-    let resultNote: string | null = null;
-    if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
-      resultNote = renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
-    }
-    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, currentPuzzleNoteKey ? puzzleMessage(currentPuzzleNoteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
-    if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, currentPuzzleErrorKey ? puzzleMessage(currentPuzzleErrorKey, i18n) : null);
-  };
 
   const puzzleController = new PuzzleController({
     client: deps.client,

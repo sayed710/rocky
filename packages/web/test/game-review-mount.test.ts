@@ -214,6 +214,33 @@ const POSITION_TOOLS = [
       depth: 16, solutionMove: 'e2e4', solutionLine: ['e2e4', 'e7e5'], difficulty: 'easy' }) },
 ] as const;
 
+for (const responseStatus of [200, 422]) {
+  test(`Find tactic restores retained ${responseStatus === 200 ? 'result' : 'error'} presentation after signing back in`, async () => {
+    const g = setup();
+    try {
+      await waitUntil(() => g.elements.get('puzzle-run')!.disabled === false);
+      const session = g.app.api.session.current!;
+      g.elements.get('puzzle-run')!.click();
+      await waitUntil(() => g.pendingPuzzles.length === 1);
+      g.pendingPuzzles[0]!.resolve(json(responseStatus, responseStatus === 200 ? POSITION_TOOLS[1].response(FEN) : {}));
+      await waitUntil(() => responseStatus === 200
+        ? g.elements.get('puzzle-rows')!.childElementCount > 0
+        : g.elements.get('puzzle-error')!.hidden === false);
+      const expectedNote = g.elements.get('puzzle-note')!.textContent;
+      const expectedError = g.elements.get('puzzle-error')!.textContent;
+      g.app.api.session.reset(false);
+      g.mounted.onSessionChange(null);
+      assert.equal(g.elements.get('puzzle-note')!.textContent, g.app.i18n.t('ai.puzzle.signedOut'));
+      g.app.api.session.adopt(session);
+      g.mounted.onSessionChange({ userId: session.user.id, handle: session.user.handle });
+      assert.equal(g.elements.get('puzzle-run')!.disabled, false);
+      assert.equal(g.elements.get('puzzle-note')!.textContent, expectedNote);
+      assert.equal(g.elements.get('puzzle-error')!.textContent, expectedError);
+      assert.equal(g.pendingPuzzles.length, 1, 'auth presentation never issues another tactic request');
+    } finally { dispose(g); }
+  });
+}
+
 for (const tool of POSITION_TOOLS) {
   test(`${tool.name} targets the displayed review FEN and clears completed results on selection`, async () => {
     const g = setup({ fen: AFTER_E4_FEN });
