@@ -105,7 +105,8 @@ import {
   resolveClientIp,
   resolveTrustProxyEnv,
 } from '@chess-platform/api';
-import type { TournamentResultReporter, LaunchInput } from '@chess-platform/api';
+import type { TournamentResultReporter } from '@chess-platform/api';
+import { createReportingLauncher } from './reporting-launcher.js';
 import type { EventStore } from '@chess-platform/persistence';
 import type { RatingOutcome } from '@chess-platform/persistence/pg';
 
@@ -289,14 +290,8 @@ async function main(): Promise<void> {
 
       // Games launched by THIS process are watched immediately; games launched
       // by API replicas are picked up by the reporter's periodic scan.
-      const reportingLauncher = {
-        launch: async (input: LaunchInput, signal?: AbortSignal): Promise<import('@chess-platform/api').LaunchResult> => {
-          const res = await durableLauncher.launch(input, signal);
-          signal?.throwIfAborted();
-          if (res.terminalOutcome === undefined) reporter?.watch(input.tournamentId, res.gameId);
-          return res;
-        },
-      };
+      const reportingLauncher = createReportingLauncher(durableLauncher,
+        (tournamentId, gameId) => reporter?.watch(tournamentId, gameId));
 
       const tournamentService = new api.TournamentService(tournamentsRepo, reportingLauncher);
       const arenaService = new api.ArenaService(tournamentsRepo, reportingLauncher, undefined, logger);
