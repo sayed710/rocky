@@ -82,14 +82,15 @@ export class DurableGameLauncher implements GameLauncher {
    * pairing holds it, or the game has already ended. A pairing's game can sit past its nominal
    * attempt, so the relaunch after an abandon can land on that same aborted game; linking it again
    * would leave the pairing waiting on a game that is over. A concurrent duplicate launch of the
-   * same round-based pairing never needs an ended game either: it loses its version CAS to the
-   * update that linked the live one. A marked Arena pairing can instead recover a terminal
-   * outcome after a game commit/link crash. An unmarked legacy ended slot cannot prove ownership.
+   * legacy round-based pairing skips ended slots. Committed round launches use a separate
+   * namespace and recover the original game even if it ended before its link was saved;
+   * the reporter consumes that ending after the link commits. A marked Arena pairing can
+   * likewise recover a terminal outcome. An unmarked legacy ended slot cannot prove ownership.
    */
   private async existing(gameId: string, input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult | null> {
     const stored = await this.events.load(gameId, signal);
     const ending = stored.find(({ event }) => event.type === 'GameEnded')?.event;
-    if (!input.committedArenaPairing && ending) return null;
+    if (!input.committedArenaPairing && !input.committedRoundPairing && ending) return null;
     const created = stored[0]?.event;
     const same = created?.type === 'GameCreated'
       && created.players.white === input.white
@@ -115,9 +116,10 @@ const MAX_SLOT_PROBES = 8;
 
 /** SHA-256 of the launch identity. Both the game id and the Chess960 start position derive from it. */
 function launchDigest(input: LaunchInput): Buffer {
-  // Keep the original three-element identity byte-compatible for legacy/round games.
-  const identity = JSON.stringify(input.arenaLaunchNamespace
-    ? [input.tournamentId, input.matchId, input.attempt, input.arenaLaunchNamespace]
+  // Keep unmarked legacy launches byte-compatible with the three-element identity.
+  const namespace = input.committedRoundPairing ? 'round-committed-v1' : input.arenaLaunchNamespace;
+  const identity = JSON.stringify(namespace
+    ? [input.tournamentId, input.matchId, input.attempt, namespace]
     : [input.tournamentId, input.matchId, input.attempt]);
   return createHash('sha256').update(identity).digest();
 }

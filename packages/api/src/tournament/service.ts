@@ -49,17 +49,18 @@ export class TournamentService {
         if (changed === false) return tournament;
         await this.repo.save(tournament.toSnapshot(), stored.version);
         return tournament;
-      } catch (e: any) {
+      } catch (e: unknown) {
         if (e instanceof VersionConflictError) {
           if (attempt === 3) throw HttpError.conflict('Concurrent update failed after retries');
           continue;
         }
         if (e instanceof HttpError) throw e;
         if (e instanceof PlayerLockUnavailableError) throw e;
-        if (e.message.includes('Unknown game ID')) {
+        const message = e instanceof Error ? e.message : String(e);
+        if (message.includes('Unknown game ID')) {
           throw HttpError.notFound('Game ID not found in this tournament');
         }
-        throw HttpError.conflict(e.message);
+        throw HttpError.conflict(message);
       }
     }
     throw HttpError.conflict('Concurrent update failed after retries');
@@ -123,35 +124,32 @@ export class TournamentService {
   }
 
   async withdraw(id: string, playerId: string): Promise<Tournament> {
-    return this.withRetry(id, (tournament) => {
+    return this.mutateAndReconcile(id, (tournament) => {
       tournament.withdraw(playerId);
     });
   }
 
   async start(id: string): Promise<Tournament> {
-    return this.withRetry(id, async (tournament) => {
+    return this.mutateAndReconcile(id, (tournament) => {
       tournament.start();
-      await this.reconcileLaunch(tournament);
     });
   }
 
   async recordResult(id: string, cmd: RecordResultCommand): Promise<Tournament> {
-    return this.withRetry(id, async (tournament) => {
+    return this.mutateAndReconcile(id, (tournament) => {
       tournament.recordResult(cmd.roundIndex, cmd.pairingIndex, cmd.result);
-      await this.reconcileLaunch(tournament);
     });
   }
 
   async recordResultByGame(id: string, gameId: string, result: GameResult): Promise<Tournament> {
-    return this.withRetry(id, async (tournament) => {
+    return this.mutateAndReconcile(id, (tournament) => {
       tournament.recordResultByGame(gameId, result);
-      await this.reconcileLaunch(tournament);
     });
   }
 
   /** Apply a committed game ending once, even when two reporters race or retry after a crash. */
   async recordCommittedOutcome(id: string, gameId: string, result: GameResult | '*'): Promise<Tournament> {
-    return this.withRetry(id, async (tournament) => {
+    return this.mutateAndReconcile(id, (tournament) => {
       const pairing = tournament.pairingForGame(gameId);
       if (!pairing) return false;
       const prior = tournament.resultFor(pairing.roundIndex, pairing.pairingIndex);
@@ -169,7 +167,6 @@ export class TournamentService {
         tournament.recordResultByGame(gameId, result);
         tournament.confirmCommittedResult(gameId, result);
       }
-      await this.reconcileLaunch(tournament);
     });
   }
 
@@ -178,13 +175,28 @@ export class TournamentService {
    * which launches a fresh game for the same pairing so the round can proceed.
    */
   async abandonGame(id: string, gameId: string): Promise<Tournament> {
-    return this.withRetry(id, async (tournament) => {
+    return this.mutateAndReconcile(id, (tournament) => {
       tournament.abandonGame(gameId);
-      await this.reconcileLaunch(tournament);
     });
   }
 
-  private async reconcileLaunch(tournament: Tournament): Promise<void> {
+  /** Commit domain decisions before any game creation, including CAS retries. */
+  private async mutateAndReconcile(
+    id: string,
+    action: (tournament: Tournament) => void | false
+  ): Promise<Tournament> {
+    await this.withRetry(id, action);
+    return this.reconcile(id);
+  }
+
+  /** Recover missing links from durable pairings; safe across replicas and restarts. */
+  async reconcile(id: string): Promise<Tournament> {
+    return this.withRetry(id, (tournament) => this.reconcileLaunch(tournament));
+  }
+
+  private async reconcileLaunch(tournament: Tournament): Promise<void | false> {
+    if (tournament.getState() !== 'running') return false;
+    let changed = false;
     const rounds = tournament.getRounds();
     for (const round of rounds) {
       for (let pIndex = 0; pIndex < round.pairings.length; pIndex++) {
@@ -199,11 +211,14 @@ export class TournamentService {
               variant: tournament.config.variant,
               timeControl: tournament.config.timeControl,
               attempt: tournament.launchAttemptFor(round.roundIndex, pIndex),
+              committedRoundPairing: true,
             });
             tournament.linkGame(round.roundIndex, pIndex, result.gameId);
+            changed = true;
           }
         }
       }
     }
+    if (!changed) return false;
   }
 }

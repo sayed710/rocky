@@ -94,8 +94,18 @@ export class TournamentResultReporter {
         return;
       }
       for (const id of ids) {
-        const stored = await this.repo.findById(id);
+        let stored = await this.repo.findById(id);
         if (!stored || stored.snapshot.state === 'registration') continue;
+        if (!isArenaSnapshot(stored.snapshot) && stored.snapshot.state === 'running') {
+          try {
+            await this.tournamentService.reconcile(id);
+            stored = await this.repo.findById(id);
+            if (!stored) continue;
+          } catch (error) {
+            console.error(`TournamentResultReporter: cannot recover launches for tournament ${id}:`, error);
+          }
+        }
+        if (!stored) continue;
         const resolved = isArenaSnapshot(stored.snapshot)
           ? new Set<string>()
           : new Set(stored.snapshot.results.map(([matchId]) => matchId));
