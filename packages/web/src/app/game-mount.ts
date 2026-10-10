@@ -227,6 +227,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let currentReviewNoteKey: 'game.review.reviewingMoves' | null = null;
   let currentReviewErrorKey: 'game.review.unavailableError' | null = null;
   let gameReviewSessionId = deps.initialSessionId ?? null;
+  /** Borrowed only by this route's current private review; never written into GameController. */
+  let selectedReviewFen: string | null = null;
   let authoritativeGameFen: string | null = null;
   let authoritativeGameTurn = false;
   let authoritativeGameStatus = '';
@@ -349,7 +351,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     isGamePlayer && isHumanGame && !gameOver;
 
   /** Whether there is actually something on the board to analyse yet. */
-  const hasPosition = (): boolean => Boolean(currentVariant) && Boolean(controller?.fen);
+  const hasPosition = (): boolean => displayedPosition() !== null;
+
+  /** Position tools follow the displayed board; move/sequence tools retain their game context. */
+  const displayedPosition = (): { fen: string; variant: string } | null => {
+    const fen = selectedReviewFen ?? controller?.fen;
+    return fen && currentVariant ? { fen, variant: currentVariant } : null;
+  };
 
   /**
    * The single place the run control's enabled state is decided.
@@ -806,11 +814,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   const puzzleController = new PuzzleController({
     client: deps.client,
-    getPosition: () => {
-      const fen = controller.fen;
-      if (!fen || !currentVariant) return null;
-      return { fen, variant: currentVariant };
-    },
+    getPosition: displayedPosition,
     callbacks: {
       onPhase: (phase) => {
         if (puzzleResultEl) setPuzzleBusy(puzzleResultEl, phase === 'loading');
@@ -1099,11 +1103,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   const analysisController = new AnalysisController({
     client: deps.client,
-    getPosition: () => {
-      const fen = controller.fen;
-      if (!fen || !currentVariant) return null;
-      return { fen, variant: currentVariant };
-    },
+    getPosition: displayedPosition,
     callbacks: {
       onPhase: (phase) => {
         if (analysisResultsEl) {
@@ -1425,6 +1425,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     callbacks: {
       onPosition: (fen: string) => {
         authoritativeGameFen = fen;
+        selectedReviewFen = null;
         board.setPosition(fen);
         analysisController.positionChanged(fen);
         if (currentVariant) puzzleController.positionChanged({ fen, variant: currentVariant });
@@ -1506,6 +1507,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   /** Remove private review output and restore the latest server-owned game presentation. */
   const invalidateGameReviewPresentation = (): void => {
+    const hadSelection = selectedReviewFen !== null;
+    selectedReviewFen = null;
+    if (hadSelection) {
+      analysisController.invalidate();
+      puzzleController.invalidate();
+    }
     clearGameReview();
     if (authoritativeGameFen === null) return;
     board.setPosition(authoritativeGameFen);
@@ -1584,6 +1591,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         }
         row.replaceChildren(moveLabel, verdict);
         row.addEventListener('click', () => {
+          if (analysisDisposed || disposed || lastReviewResult !== review
+            || !gameOver || !isGamePlayer || gameReviewSessionId === null) return;
+          selectedReviewFen = move.fenBefore;
+          analysisController.positionChanged(move.fenBefore);
+          if (currentVariant) puzzleController.positionChanged({ fen: move.fenBefore, variant: currentVariant });
           board.setPosition(move.fenBefore);
           board.setTurn(false);
           if (move.move.length >= 4) board.setLastMove(move.move.slice(0, 2), move.move.slice(2, 4));
@@ -1807,13 +1819,14 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     dispose: (): void => {
       if (analysisDisposed) return;
       analysisDisposed = true;
+      // Clear private selection and its derived panels while their view callbacks still exist.
+      gameReviewController.dispose();
       analysisController.dispose();
       explainController.dispose();
       assessController.dispose();
       puzzleController.dispose();
       openingController.dispose();
       coachController.dispose();
-      gameReviewController.dispose();
       pgnExport.dispose();
     },
   };

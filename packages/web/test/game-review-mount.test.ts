@@ -4,7 +4,7 @@ import { createApp } from '../src/app/composition.js';
 import { mountGame } from '../src/app/game-mount.js';
 import type { GameReviewMove, GameReviewResponse } from '../src/api/models.js';
 import type { HttpRequest, HttpResponse, HttpTransport } from '../src/ports/http.js';
-import { AsyncTransport, createGameDocument, makeFinishedState, makeState } from './support/analysis-fixtures.js';
+import { AsyncTransport, createGameDocument, makeFinishedState, makeState, sampleAnalysisResponse } from './support/analysis-fixtures.js';
 import type { FakeElement } from './support/analysis-fixtures.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
 import { json } from './support/fake-transport.js';
@@ -103,12 +103,23 @@ function setup(options: SetupOptions = {}) {
     fen = FEN,
   } = options;
   const pendingReviews: PendingReview[] = [];
+  const pendingAnalysis: PendingReview[] = [];
+  const pendingPuzzles: PendingReview[] = [];
   const transport: HttpTransport = new AsyncTransport((request) => {
     if (request.url.endsWith('/v1/capabilities')) {
-      return json(200, { capabilities: { gameReview: true }, gameReviewVariants });
+      return json(200, {
+        capabilities: { gameReview: true, analysis: true, puzzleGeneration: true },
+        gameReviewVariants, analysisVariants: ['standard'], puzzleVariants: ['standard'],
+      });
     }
     if (request.url.endsWith(`/v1/games/${gameId}/review`)) {
       return new Promise<HttpResponse>((resolve) => pendingReviews.push({ request, resolve }));
+    }
+    if (request.url.endsWith('/v1/analysis')) {
+      return new Promise<HttpResponse>((resolve) => pendingAnalysis.push({ request, resolve }));
+    }
+    if (request.url.endsWith('/v1/analysis/puzzle')) {
+      return new Promise<HttpResponse>((resolve) => pendingPuzzles.push({ request, resolve }));
     }
     return json(404, {});
   });
@@ -144,7 +155,7 @@ function setup(options: SetupOptions = {}) {
     state: { ...(lifecycle === 'finished' ? makeFinishedState(fen) : makeState(fen)), gameId, variant },
   });
 
-  return { app, elements, mounted, pendingReviews, socket: sockets.last };
+  return { app, elements, mounted, pendingReviews, pendingAnalysis, pendingPuzzles, socket: sockets.last };
 }
 
 /** Drain the promise turns used by controller completion callbacks. */
@@ -179,6 +190,165 @@ function dispose(setupResult: ReturnType<typeof setup>): void {
   setupResult.mounted.connectivity.dispose();
   setupResult.mounted.controller.dispose();
   setupResult.app.dispose();
+}
+
+/** Publish two selectable positions while keeping the final game position distinct. */
+async function loadSelectableReview(g: ReturnType<typeof setup>): Promise<void> {
+  await waitUntil(() => g.elements.get('game-review-run')!.disabled === false);
+  runReview(g.elements);
+  await waitUntil(() => g.pendingReviews.length === 1);
+  g.pendingReviews[0]!.resolve(json(200, {
+    ...COMPLETED_REVIEW_WITH_MOVE,
+    moves: [REVIEWED_MOVE, { ...REVIEWED_MOVE, ply: 3, san: 'Nf3', fenBefore: AFTER_E4_FEN }],
+  }));
+  await waitUntil(() => g.elements.get('game-review-moves')!.childElementCount === 2);
+}
+
+const POSITION_TOOLS = [
+  { name: 'Analyse', button: 'analysis-run', result: 'analysis-results', pending: 'pendingAnalysis',
+    response: (fen: string) => ({ ...sampleAnalysisResponse(), fen }) },
+  { name: 'Find tactic', button: 'puzzle-run', result: 'puzzle-rows', pending: 'pendingPuzzles',
+    response: (fen: string) => ({ kind: 'puzzle', fen, variant: 'standard',
+      evidence: { kind: 'centipawn_gap', gapCp: 270 }, bestMove: 'e2e4', comparisonMove: 'd2d4',
+      bestEvaluation: { type: 'cp', value: 350 }, comparisonEvaluation: { type: 'cp', value: 80 },
+      depth: 16, solutionMove: 'e2e4', solutionLine: ['e2e4', 'e7e5'], difficulty: 'easy' }) },
+] as const;
+
+for (const tool of POSITION_TOOLS) {
+  test(`${tool.name} targets the displayed review FEN and clears completed results on selection`, async () => {
+    const g = setup({ fen: AFTER_E4_FEN });
+    try {
+      await loadSelectableReview(g);
+      const finalBoard = g.elements.get('board')!.innerHTML;
+      g.elements.get('game-review-moves')!.children[0]!.click();
+      assert.notEqual(g.elements.get('board')!.innerHTML, finalBoard);
+      assert.equal(g.mounted.controller.fen, AFTER_E4_FEN, 'live controller keeps the final position');
+      g.elements.get(tool.button)!.click();
+      await waitUntil(() => g[tool.pending].length === 1);
+      assert.equal(JSON.parse(g[tool.pending][0]!.request.body!).fen, FEN);
+      g[tool.pending][0]!.resolve(json(200, tool.response(FEN)));
+      await waitUntil(() => g.elements.get(tool.result)!.childElementCount > 0);
+      g.elements.get('game-review-moves')!.children[1]!.click();
+      assert.equal(g.elements.get(tool.result)!.childElementCount, 0);
+      assert.equal(g.socket.sent.some((frame) => JSON.parse(frame).t === 'move'), false);
+    } finally { dispose(g); }
+  });
+
+  for (const staleStatus of [200, 503]) {
+    test(`${tool.name} rejects a late ${staleStatus} after A-B-A review selection`, async () => {
+      const g = setup({ fen: AFTER_E4_FEN });
+      try {
+        await loadSelectableReview(g);
+        const rows = g.elements.get('game-review-moves')!.children;
+        rows[0]!.click();
+        g.elements.get(tool.button)!.click();
+        await waitUntil(() => g[tool.pending].length === 1);
+        rows[1]!.click();
+        assert.equal(g[tool.pending][0]!.request.signal!.aborted, true);
+        rows[0]!.click();
+        g.elements.get(tool.button)!.click();
+        await waitUntil(() => g[tool.pending].length === 2);
+        const fresh = tool.response(FEN);
+        g[tool.pending][1]!.resolve(json(200, fresh));
+        await waitUntil(() => g.elements.get(tool.result)!.childElementCount > 0);
+        const freshRows = [...g.elements.get(tool.result)!.children];
+        g[tool.pending][0]!.resolve(json(staleStatus, staleStatus === 200 ? tool.response(AFTER_E4_FEN) : {}));
+        await settle();
+        await settle();
+        assert.deepEqual(g.elements.get(tool.result)!.children, freshRows);
+        assert.equal(g.elements.get(tool.button)!.disabled, false);
+      } finally { dispose(g); }
+    });
+  }
+
+  for (const boundary of ['sign-out', 'account-change', 'retry', 'navigation'] as const) {
+    test(`${tool.name} clears selected review work on ${boundary}, even at the same final FEN`, async () => {
+      const g = setup();
+      try {
+        await loadSelectableReview(g);
+        const orphan = g.elements.get('game-review-moves')!.children[0]!;
+        orphan.click();
+        g.elements.get(tool.button)!.click();
+        await waitUntil(() => g[tool.pending].length === 1);
+        if (boundary === 'sign-out') g.mounted.onSessionChange(null);
+        else if (boundary === 'account-change') g.mounted.onSessionChange({ userId: 'user-2', handle: 'bob' });
+        else if (boundary === 'retry') runReview(g.elements);
+        else g.mounted.analysis.dispose();
+        assert.equal(g[tool.pending][0]!.request.signal!.aborted, true);
+        const restoredBoard = g.elements.get('board')!.innerHTML;
+        orphan.click();
+        assert.equal(g.elements.get('board')!.innerHTML, restoredBoard, 'orphaned row cannot select');
+        g[tool.pending][0]!.resolve(json(200, tool.response(FEN)));
+        await settle();
+        await settle();
+        assert.equal(g.elements.get(tool.result)!.childElementCount, 0);
+        if (boundary === 'retry' || boundary === 'account-change') {
+          g.elements.get(tool.button)!.click();
+          await waitUntil(() => g[tool.pending].length === 2);
+          assert.equal(JSON.parse(g[tool.pending][1]!.request.body!).fen, g.mounted.controller.fen);
+        }
+      } finally { dispose(g); }
+    });
+  }
+
+  test(`${tool.name} clears completed same-FEN review results only when account identity changes`, async () => {
+    const g = setup();
+    try {
+      await loadSelectableReview(g);
+      g.elements.get('game-review-moves')!.children[0]!.click();
+      g.elements.get(tool.button)!.click();
+      await waitUntil(() => g[tool.pending].length === 1);
+      g[tool.pending][0]!.resolve(json(200, tool.response(FEN)));
+      await waitUntil(() => g.elements.get(tool.result)!.childElementCount > 0);
+      g.mounted.onSessionChange({ userId: 'user-1', handle: 'alice' });
+      assert.ok(g.elements.get(tool.result)!.childElementCount > 0, 'same account token refresh preserves review');
+      g.mounted.onSessionChange({ userId: 'user-2', handle: 'bob' });
+      assert.equal(g.elements.get(tool.result)!.childElementCount, 0);
+    } finally { dispose(g); }
+  });
+
+  test(`${tool.name} cannot publish selected-position work into the next game's reused DOM`, async () => {
+    const gameDocument = createGameDocument();
+    const first = setup({ fen: AFTER_E4_FEN, gameDocument });
+    let next: ReturnType<typeof setup> | null = null;
+    try {
+      await loadSelectableReview(first);
+      const orphan = first.elements.get('game-review-moves')!.children[0]!;
+      orphan.click();
+      first.elements.get(tool.button)!.click();
+      await waitUntil(() => first[tool.pending].length === 1);
+      dispose(first);
+      next = setup({ gameDocument, gameId: 'next-game', fen: AFTER_E4_FEN });
+      await waitUntil(() => next!.elements.get(tool.button)!.disabled === false);
+      const nextBoard = next.elements.get('board')!.innerHTML;
+      orphan.click();
+      assert.equal(next.elements.get('board')!.innerHTML, nextBoard);
+      next.elements.get(tool.button)!.click();
+      await waitUntil(() => next![tool.pending].length === 1);
+      assert.equal(JSON.parse(next[tool.pending][0]!.request.body!).fen, AFTER_E4_FEN);
+      first[tool.pending][0]!.resolve(json(200, tool.response(FEN)));
+      await settle();
+      await settle();
+      assert.equal(next.elements.get(tool.result)!.childElementCount, 0);
+      assert.equal(next.elements.get(tool.button)!.disabled, true, 'old response cannot settle the new request');
+    } finally { if (next) dispose(next); else dispose(first); }
+  });
+
+  test(`${tool.name} returns to authoritative position after a changed server snapshot`, async () => {
+    const g = setup({ fen: AFTER_E4_FEN });
+    const authoritativeFen = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
+    try {
+      await loadSelectableReview(g);
+      g.elements.get('game-review-moves')!.children[0]!.click();
+      g.elements.get(tool.button)!.click();
+      await waitUntil(() => g[tool.pending].length === 1);
+      g.socket.emit({ t: 'state', gameId: 'g-test-1', state: makeFinishedState(authoritativeFen, 2) });
+      assert.equal(g[tool.pending][0]!.request.signal!.aborted, true);
+      g.elements.get(tool.button)!.click();
+      await waitUntil(() => g[tool.pending].length === 2);
+      assert.equal(JSON.parse(g[tool.pending][1]!.request.body!).fen, authoritativeFen);
+    } finally { dispose(g); }
+  });
 }
 
 test('review pending and failure relocalize without requests and clear on retry/sign-out', async () => {
