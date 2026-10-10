@@ -721,13 +721,16 @@ compose() {
 
 # deployed_values ARGS_FILE OUT_JSON: what `helm get values --all` would return after
 # the run — chart defaults, then the environment file, then the run's flags.
+# Every step returns explicitly on failure: this runs inside `|| return 1`, where
+# errexit does not apply, so an unchecked yq failure would leave stale values.
 deployed_values() {
   local args=() i
-  mapfile -d '' args < "$1"
-  yq -o json eval-all '. as $item ireduce ({}; . * $item)' "$CHART_DIR/values.yaml" "$WF_ENV_FILE" > "$2.tmp"
+  rm -f "$2"
+  mapfile -d '' args < "$1" || return 1
+  yq -o json eval-all '. as $item ireduce ({}; . * $item)' "$CHART_DIR/values.yaml" "$WF_ENV_FILE" > "$2.tmp" || return 1
   for ((i = 0; i < ${#args[@]}; i += 2)); do
     VALUE_PATH=".${args[i+1]%%=*}" VALUE="${args[i+1]#*=}" \
-      yq -o json -i 'eval(strenv(VALUE_PATH)) = strenv(VALUE)' "$2.tmp"
+      yq -o json -i 'eval(strenv(VALUE_PATH)) = strenv(VALUE)' "$2.tmp" || return 1
   done
   mv "$2.tmp" "$2"
 }
