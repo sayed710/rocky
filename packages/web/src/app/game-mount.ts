@@ -440,8 +440,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
       resultNote = renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
     }
-    const noteKey = !isUserAuthenticated() ? 'signedOut'
-      : currentPuzzleNoteKey === 'signedOut' ? 'idle' : currentPuzzleNoteKey;
+    const noteKey = !isUserAuthenticated() ? 'signedOut' : currentPuzzleNoteKey;
     if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, noteKey ? puzzleMessage(noteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
     if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, currentPuzzleErrorKey ? puzzleMessage(currentPuzzleErrorKey, i18n) : null);
   };

@@ -121,6 +121,7 @@ function setup(options: SetupOptions = {}) {
     if (request.url.endsWith('/v1/analysis/puzzle')) {
       return new Promise<HttpResponse>((resolve) => pendingPuzzles.push({ request, resolve }));
     }
+    if (request.url.endsWith('/v1/auth/refresh')) return json(200, app.api.session.current);
     return json(404, {});
   });
   const sockets = new FakeSocketFactory();
@@ -213,6 +214,23 @@ const POSITION_TOOLS = [
       bestEvaluation: { type: 'cp', value: 350 }, comparisonEvaluation: { type: 'cp', value: 80 },
       depth: 16, solutionMove: 'e2e4', solutionLine: ['e2e4', 'e7e5'], difficulty: 'easy' }) },
 ] as const;
+
+test('Find tactic explains a second 401 after refresh while the local session remains active', async () => {
+  const g = setup();
+  try {
+    await waitUntil(() => g.elements.get('puzzle-run')!.disabled === false);
+    g.elements.get('puzzle-run')!.click();
+    await waitUntil(() => g.pendingPuzzles.length === 1);
+    g.pendingPuzzles[0]!.resolve(json(401, {}));
+    await waitUntil(() => g.pendingPuzzles.length === 2);
+    g.pendingPuzzles[1]!.resolve(json(401, {}));
+    await waitUntil(() => g.elements.get('puzzle-run')!.disabled === false);
+    await settle();
+    assert.ok(g.app.api.session.current, 'successful refresh retains the local session');
+    assert.equal(g.elements.get('puzzle-note')!.textContent, g.app.i18n.t('ai.puzzle.signedOut'));
+    assert.equal(g.pendingPuzzles.length, 2, 'existing HTTP refresh replay is unchanged');
+  } finally { dispose(g); }
+});
 
 for (const responseStatus of [200, 422]) {
   test(`Find tactic restores retained ${responseStatus === 200 ? 'result' : 'error'} presentation after signing back in`, async () => {
