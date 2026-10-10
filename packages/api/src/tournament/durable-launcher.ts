@@ -22,6 +22,16 @@ export class DurableGameLauncher implements GameLauncher {
     private readonly noShowAfterMs: number = DEFAULT_NO_SHOW_DEADLINES.tournamentMs,
   ) {}
 
+  roundAttemptForGame(input: LaunchInput, gameId: string): number | undefined {
+    for (let probe = 0; probe < MAX_SLOT_PROBES; probe += 1) {
+      const attempt = input.attempt + probe;
+      for (const committedRoundPairing of [false, true]) {
+        if (launchGameId({ ...input, attempt, committedRoundPairing }) === gameId) return attempt;
+      }
+    }
+    return undefined;
+  }
+
   /**
    * Launch this pairing's game, or return it if it already exists.
    *

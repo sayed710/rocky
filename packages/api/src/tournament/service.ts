@@ -162,7 +162,7 @@ export class TournamentService {
         if (result !== '*' && tournament.correctWithdrawalForfeit(gameId, result)) return;
         throw HttpError.conflict('Committed game outcome conflicts with tournament result');
       }
-      if (result === '*') tournament.abandonGame(gameId);
+      if (result === '*') this.abandonLinkedGame(tournament, gameId);
       else {
         tournament.recordResultByGame(gameId, result);
         tournament.confirmCommittedResult(gameId, result);
@@ -176,8 +176,29 @@ export class TournamentService {
    */
   async abandonGame(id: string, gameId: string): Promise<Tournament> {
     return this.mutateAndReconcile(id, (tournament) => {
-      tournament.abandonGame(gameId);
+      this.abandonLinkedGame(tournament, gameId);
     });
+  }
+
+  private abandonLinkedGame(tournament: Tournament, gameId: string): void {
+    const location = tournament.pairingForGame(gameId);
+    if (location && this.launcher.roundAttemptForGame) {
+      const { roundIndex, pairingIndex } = location;
+      const pairing = tournament.getRounds()[roundIndex]?.pairings[pairingIndex];
+      if (pairing?.kind === 'game') {
+        const attempt = this.launcher.roundAttemptForGame({
+          tournamentId: tournament.config.id,
+          matchId: `${roundIndex}-${pairingIndex}`,
+          white: pairing.white,
+          black: pairing.black,
+          variant: tournament.config.variant,
+          timeControl: tournament.config.timeControl,
+          attempt: tournament.launchAttemptFor(roundIndex, pairingIndex),
+        }, gameId);
+        if (attempt !== undefined) tournament.linkGame(roundIndex, pairingIndex, gameId, attempt);
+      }
+    }
+    tournament.abandonGame(gameId);
   }
 
   /** Commit domain decisions before any game creation, including CAS retries. */

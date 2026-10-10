@@ -225,6 +225,41 @@ for (const format of ['swiss', 'round_robin'] as const) {
     assert.ok(!log.some(({ event }) => event.type === 'GameEnded'));
   });
 
+  for (const slot of [0, 1]) {
+    test(`${format}: an already-linked legacy abort advances past actual slot ${slot}`, async () => {
+      const rig = await legacyRound();
+      if (slot === 1) {
+        const held = await rig.launcher.launch({ ...rig.launch, black: 'speculative-player' });
+        const log = await rig.events.load(held.gameId);
+        await rig.events.append(held.gameId, log.length - 1,
+          Game.fromEvents(log.map(({ event }) => event)).abort(1500).events);
+      }
+      const legacy = await rig.launcher.launch(rig.launch);
+      const domain = await rig.service.load(format);
+      domain.linkGame(0, 0, legacy.gameId); // Old service persisted the nominal cursor only.
+      const snapshot = await rig.repo.findById(format);
+      await rig.repo.save(domain.toSnapshot(), snapshot!.version);
+      assert.equal(domain.launchAttemptFor(0, 0), 0);
+      const log = await rig.events.load(legacy.gameId);
+      await rig.events.append(legacy.gameId, log.length - 1,
+        Game.fromEvents(log.map(({ event }) => event)).abort(2000).events);
+      const replica = new TournamentService(rig.repo, new DurableGameLauncher(rig.events, { now: () => 1234 }));
+      await Promise.all([
+        rig.service.recordCommittedOutcome(format, legacy.gameId, '*'),
+        replica.recordCommittedOutcome(format, legacy.gameId, '*'),
+      ]);
+      const reporter = new TournamentResultReporter(new InMemoryPubSub(), rig.repo, rig.service,
+        new ArenaService(rig.repo, rig.launcher, () => 1000), rig.events, { scanIntervalMs: 0 });
+      try { await reporter.start(); for (let scan = 0; scan < 10; scan++) await reporter.scan(); }
+      finally { reporter.stop(); }
+      const after = await rig.service.reconcile(format);
+      assert.equal(after.launchAttemptFor(0, 0), slot + 1);
+      assert.notEqual(after.gameIdFor(0, 0), legacy.gameId);
+      assert.ok(!(await rig.events.load(after.gameIdFor(0, 0)!)).some(({ event }) => event.type === 'GameEnded'));
+      assert.equal((await rig.events.findActiveGamesByPlayer(rig.launch.white)).length, 1);
+    });
+  }
+
   test(`${format}: upgrade recovers the ending of a first legacy launch before its link`, async () => {
     const rig = await legacyRound();
     const legacy = await rig.launcher.launch(rig.launch);

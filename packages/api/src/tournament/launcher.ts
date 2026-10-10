@@ -48,6 +48,9 @@ export interface LaunchInput {
  */
 export interface GameLauncher {
   launch(input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult>;
+  /** Pure identity lookup for an already-linked round game, including legacy
+   * probed slots whose actual attempt was not persisted before upgrade. */
+  roundAttemptForGame?(input: LaunchInput, gameId: string): number | undefined;
 }
 
 /**
