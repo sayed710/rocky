@@ -454,9 +454,14 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (puzzleRunBtn) {
       puzzleRunBtn.disabled = !authed || !hasPosition() || puzzleController.isPending;
     }
+    if (!authed) {
+      currentPuzzleNoteKey = 'signedOut';
+      if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('signedOut', i18n));
+      return;
+    }
     const ownsControlNote = currentPuzzleNoteKey === 'idle' || currentPuzzleNoteKey === 'signedOut';
     if (!ownsControlNote || lastPuzzleResult || currentPuzzleErrorKey) return;
-    currentPuzzleNoteKey = authed ? 'idle' : 'signedOut';
+    currentPuzzleNoteKey = 'idle';
     if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(currentPuzzleNoteKey, i18n));
   };
 
@@ -1177,6 +1182,14 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     },
   });
 
+  /** End borrowed review ownership even when its FEN matches the restored authoritative position. */
+  const clearReviewSelection = (): void => {
+    if (selectedReviewFen === null) return;
+    selectedReviewFen = null;
+    analysisController.invalidate();
+    puzzleController.invalidate();
+  };
+
   const gameSync = createGameSync({ gameId, ...(token !== undefined ? { token } : {}) });
   const oracle = createGameOracle(gameSync);
 
@@ -1425,7 +1438,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     callbacks: {
       onPosition: (fen: string) => {
         authoritativeGameFen = fen;
-        selectedReviewFen = null;
+        clearReviewSelection();
         board.setPosition(fen);
         analysisController.positionChanged(fen);
         if (currentVariant) puzzleController.positionChanged({ fen, variant: currentVariant });
@@ -1507,12 +1520,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   /** Remove private review output and restore the latest server-owned game presentation. */
   const invalidateGameReviewPresentation = (): void => {
-    const hadSelection = selectedReviewFen !== null;
-    selectedReviewFen = null;
-    if (hadSelection) {
-      analysisController.invalidate();
-      puzzleController.invalidate();
-    }
+    clearReviewSelection();
     clearGameReview();
     if (authoritativeGameFen === null) return;
     board.setPosition(authoritativeGameFen);

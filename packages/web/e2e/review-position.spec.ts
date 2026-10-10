@@ -69,6 +69,7 @@ for (const locale of ['en', 'ar'] as const) {
       localStorage.setItem('rookzen_locale_v1', chosenLocale);
     }, { chosenLocale: locale });
     await page.goto(`/game/${GAME_ID}`);
+    await page.evaluate(() => { document.documentElement.dataset['reviewDocument'] = 'retained'; });
     await expect(page.locator('html')).toHaveAttribute('lang', locale);
     await expect(page.locator('html')).toHaveAttribute('dir', locale === 'ar' ? 'rtl' : 'ltr');
     await expect(page.locator('#game-review-run')).toBeEnabled();
@@ -102,7 +103,11 @@ for (const locale of ['en', 'ar'] as const) {
     await expect(page).toHaveURL('/');
     await expect(page.locator('#game-review-moves button')).toHaveCount(0);
     await expect(page.locator('#analysis-results .panel-row')).toHaveCount(0);
-    await page.goto('/game/another-review-game');
+    await page.evaluate(() => {
+      history.pushState(null, '', '/game/another-review-game');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await expect(page.locator('html')).toHaveAttribute('data-review-document', 'retained');
     await expect(page.locator('#analysis-run')).toBeEnabled();
     await page.locator('#analysis-run').click();
     await expect(page.locator('#analysis-results .panel-row')).toHaveCount(3);

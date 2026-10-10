@@ -270,11 +270,23 @@ for (const tool of POSITION_TOOLS) {
         orphan.click();
         g.elements.get(tool.button)!.click();
         await waitUntil(() => g[tool.pending].length === 1);
-        if (boundary === 'sign-out') g.mounted.onSessionChange(null);
+        if (boundary === 'sign-out') {
+          g.app.api.session.reset(false);
+          g.mounted.onSessionChange(null);
+        }
         else if (boundary === 'account-change') g.mounted.onSessionChange({ userId: 'user-2', handle: 'bob' });
         else if (boundary === 'retry') runReview(g.elements);
         else g.mounted.analysis.dispose();
         assert.equal(g[tool.pending][0]!.request.signal!.aborted, true);
+        if (boundary === 'sign-out') {
+          const noteKey = tool.name === 'Analyse' ? 'game.analysis.signedOut' : 'ai.puzzle.signedOut';
+          const note = g.elements.get(tool.name === 'Analyse' ? 'analysis-note' : 'puzzle-note')!;
+          assert.equal(g.elements.get(tool.button)!.disabled, true);
+          assert.equal(note.textContent, g.app.i18n.t(noteKey));
+          g.app.i18n.registerCatalog('ar', { ...enMessages, [noteKey]: 'AR sign in for this tool' });
+          g.app.i18n.setLocale('ar');
+          assert.equal(note.textContent, 'AR sign in for this tool');
+        }
         const restoredBoard = g.elements.get('board')!.innerHTML;
         orphan.click();
         assert.equal(g.elements.get('board')!.innerHTML, restoredBoard, 'orphaned row cannot select');
@@ -349,6 +361,32 @@ for (const tool of POSITION_TOOLS) {
       assert.equal(JSON.parse(g[tool.pending][1]!.request.body!).fen, authoritativeFen);
     } finally { dispose(g); }
   });
+
+  for (const phase of ['pending', 'completed'] as const) {
+    test(`${tool.name} clears ${phase} review work when a server correction has the same selected FEN`, async () => {
+      const g = setup({ fen: AFTER_E4_FEN });
+      try {
+        await loadSelectableReview(g);
+        g.elements.get('game-review-moves')!.children[0]!.click();
+        g.elements.get(tool.button)!.click();
+        await waitUntil(() => g[tool.pending].length === 1);
+        if (phase === 'completed') {
+          g[tool.pending][0]!.resolve(json(200, tool.response(FEN)));
+          await waitUntil(() => g.elements.get(tool.result)!.childElementCount > 0);
+        }
+        g.socket.emit({ t: 'state', gameId: 'g-test-1', state: makeFinishedState(FEN) });
+        assert.equal(g.mounted.controller.fen, FEN);
+        if (phase === 'pending') assert.equal(g[tool.pending][0]!.request.signal!.aborted, true);
+        assert.equal(g.elements.get(tool.result)!.childElementCount, 0);
+        if (phase === 'pending') {
+          g[tool.pending][0]!.resolve(json(200, tool.response(FEN)));
+          await settle();
+          await settle();
+          assert.equal(g.elements.get(tool.result)!.childElementCount, 0);
+        }
+      } finally { dispose(g); }
+    });
+  }
 }
 
 test('review pending and failure relocalize without requests and clear on retry/sign-out', async () => {
