@@ -213,7 +213,7 @@ export class TournamentService {
               attempt: tournament.launchAttemptFor(round.roundIndex, pIndex),
               committedRoundPairing: true,
             });
-            tournament.linkGame(round.roundIndex, pIndex, result.gameId);
+            tournament.linkGame(round.roundIndex, pIndex, result.gameId, result.attempt);
             changed = true;
           }
         }

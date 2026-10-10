@@ -171,13 +171,21 @@ export class Tournament {
     this.tryAdvance();
   }
 
-  linkGame(roundIndex: number, pairingIndex: number, gameId: string): void {
+  /** Link the game and persist its actual slot if the launcher probed, so an
+   * abandon advances beyond that game rather than returning to an ended slot. */
+  linkGame(roundIndex: number, pairingIndex: number, gameId: string, launchAttempt?: number): void {
     const matchId = `${roundIndex}-${pairingIndex}`;
     if (!this.pairingsByMatchId.has(matchId)) {
       throw new Error('Unknown pairing');
     }
     if (this.pairingsByMatchId.get(matchId)?.p2 === null) {
       throw new Error('Cannot link game to a bye');
+    }
+    if (launchAttempt !== undefined) {
+      if (!Number.isInteger(launchAttempt) || launchAttempt < this.launchAttemptFor(roundIndex, pairingIndex)) {
+        throw new Error('Invalid launch attempt');
+      }
+      this.gameAttempts.set(matchId, launchAttempt);
     }
     // Re-linking a match to a new game must not leave the old gameId dangling in
     // the reverse map, otherwise recordResultByGame(oldGameId) would still resolve.
@@ -209,7 +217,7 @@ export class Tournament {
     this.recordResult(parseInt(roundIndexStr, 10), parseInt(pairingIndexStr, 10), result);
   }
 
-  /** How many games have been launched for this pairing (0 before the first). */
+  /** Current launch slot cursor for this pairing (0 before the first). */
   launchAttemptFor(roundIndex: number, pairingIndex: number): number {
     return this.gameAttempts.get(`${roundIndex}-${pairingIndex}`) ?? 0;
   }

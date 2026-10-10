@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { CHESS960_POSITIONS, type Variant } from '@chess-platform/core';
-import { Game, type TimeControl } from '@chess-platform/game';
+import { Game, type GameEvent, type TimeControl } from '@chess-platform/game';
 import type { EventStore } from '@chess-platform/persistence';
+import { ConcurrencyError } from '@chess-platform/persistence';
 import type { Clock } from '../ports/clock';
 import { DEFAULT_NO_SHOW_DEADLINES } from '../config';
 import type { GameLauncher, LaunchInput, LaunchResult } from './launcher';
@@ -37,12 +38,71 @@ export class DurableGameLauncher implements GameLauncher {
    * use a separate durable namespace and commit before launch (ADR-0156).
    */
   async launch(input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult> {
+    if (input.committedRoundPairing) {
+      // Prefer an already-created committed game before inspecting legacy slots.
+      for (let probe = 0; probe < MAX_SLOT_PROBES; probe += 1) {
+        const attempt = input.attempt + probe;
+        const gameId = launchGameId({ ...input, attempt });
+        if (!(await this.events.exists(gameId, signal))) break;
+        const existing = await this.existing(gameId, { ...input, attempt }, signal);
+        if (existing) return { ...existing, ...(probe > 0 ? { attempt } : {}) };
+      }
+      const legacy = await this.recoverLegacyRound(input, signal);
+      if (legacy) return legacy;
+    }
     for (let probe = 0; probe < MAX_SLOT_PROBES; probe += 1) {
       signal?.throwIfAborted();
       const launched = await this.launchAt({ ...input, attempt: input.attempt + probe }, signal);
-      if (launched) return launched;
+      if (launched) return input.committedRoundPairing && probe > 0
+        ? { ...launched, attempt: input.attempt + probe } : launched;
     }
     throw new Error(`launch slots ${input.tournamentId}/${input.matchId}#${input.attempt}+${MAX_SLOT_PROBES} all hold other pairings' games`);
+  }
+
+  /** Recover compatible legacy games and retire unlinked speculative games first.
+   * Ended nonzero legacy attempts cannot prove whether an old abandon consumed them. */
+  private async recoverLegacyRound(input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult | null> {
+    let ambiguousEnding = false;
+    for (let probe = 0; probe < MAX_SLOT_PROBES; probe += 1) {
+      const attempt = input.attempt + probe;
+      const legacyInput = { ...input, attempt, committedRoundPairing: false };
+      const gameId = launchGameId(legacyInput);
+      if (!(await this.events.exists(gameId, signal))) break;
+      for (let retry = 0; retry < 3; retry += 1) {
+        const existing = await this.existing(gameId, legacyInput, signal);
+        if (existing) return { ...existing, ...(probe > 0 ? { attempt } : {}) };
+        const stored = await this.events.load(gameId, signal);
+        if (stored.some(({ event }) => event.type === 'GameEnded')) {
+          const matching = await this.existing(gameId, { ...legacyInput, committedRoundPairing: true }, signal);
+          if (matching) {
+            // Attempt zero proves that no abandon has yet been committed for this
+            // pairing. Higher legacy attempts did not store the actual probed slot,
+            // so an ending there may already have been consumed by an old abandon.
+            if (input.attempt === 0) return { ...matching, ...(probe > 0 ? { attempt } : {}) };
+            ambiguousEnding = true;
+          }
+          break;
+        }
+        // A committed round's slot with different players/configuration is an old
+        // speculative launch. Abort only while the existing game rules allow it;
+        // games with both players' moves require operator repair, never forced scoring.
+        const game = Game.fromEvents(stored.map(({ event }) => event));
+        let events: GameEvent[];
+        try {
+          events = game.abort(Math.max(this.clock.now(), stored.at(-1)!.event.at)).events;
+        } catch (error) {
+          throw new Error('Unlinked legacy round game cannot be safely retired; operator repair required', { cause: error });
+        }
+        try {
+          await this.events.append(gameId, stored.at(-1)!.seq, events, signal);
+          break;
+        } catch (error) {
+          if (!(error instanceof ConcurrencyError) || retry === 2) throw error;
+        }
+      }
+    }
+    if (ambiguousEnding) throw new Error('Ambiguous ended legacy round launch; operator repair required');
+    return null;
   }
 
   /** Create or find this pairing's game at exactly this attempt; null when another pairing holds it. */

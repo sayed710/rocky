@@ -3,6 +3,8 @@ import type { GameResult } from '@chess-platform/tournament';
 
 export interface LaunchResult {
   readonly gameId: string;
+  /** Actual slot reached by probing, when greater than the requested attempt. */
+  readonly attempt?: number;
   /** Recovery found an already-ended committed game. Arena consumes its outcome
    * by pairing id; round services persist its link for durable reporter recovery. */
   readonly terminalOutcome?: GameResult | '*';
@@ -16,13 +18,13 @@ export interface LaunchInput {
   readonly variant: string;
   readonly timeControl: unknown;
   /**
-   * How many games have already been launched for this pairing (0 for the
-   * first). Part of the launch identity so a replayed pairing (after an abort)
+   * Launch slot cursor for this pairing (0 for the first). Part of the launch identity
+   * so a replayed pairing (after an abort)
    * gets a fresh, non-colliding game rather than resolving to the dead one.
    */
   readonly attempt: number;
-  /** Round pairing read from committed state. Uses a separate launch namespace
-   * so recovery cannot adopt a historical speculative launch. */
+  /** Round pairing read from committed state. New launches have a separate
+   * namespace; legacy slots require compatible upgrade recovery. */
   readonly committedRoundPairing?: boolean;
   /** Arena-only: reconcile an entry in the committed active pairing snapshot.
    * Terminal recovery also requires its durable namespace; legacy ended slots are ambiguous. */
