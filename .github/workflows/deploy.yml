@@ -294,7 +294,7 @@ jobs:
             fi
             # A progressive deploy must not start without a verified automatic rollback target: the
             # newest revision being the deployed one does not prove the history is sound (two deployed
-            # revisions, a pending or unknown status or a malformed entry below it all leave PREV_REV
+            # revisions, a pending-* or unrecognised status or a malformed entry below it all leave PREV_REV
             # empty), and without a target a failed post-deploy verification could not be rolled back.
             if [ -z "$PREV_REV" ]; then
               echo "::error::Refusing a $STRATEGY deploy: no automatic rollback target could be verified in the pre-upgrade history of release gambit: ${ROLLBACK_REFUSAL:-no rollback target was resolved}. A $STRATEGY deploy must not start without one. Repair the release history first: inspect 'helm history gambit', roll back manually to a healthy revision ('helm rollback gambit <revision>'), then retry the $STRATEGY deploy."
