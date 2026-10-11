@@ -401,15 +401,39 @@ the standby colour to hold, and nothing to roll back to. Install first with `str
 
 If an issue is detected during or after deployment:
 - **Automatic Rollback**: The deployment workflow passes `--atomic --wait --timeout 5m0s`. If pods fail health probes or rollouts time out, Helm automatically reverts to the previous working release revision before the workflow finishes.
+- **Automatic rollback after a failed post-deploy check**: When `helm upgrade` succeeds but the smoke
+  check fails, the workflow's rollback step acts on what it recorded *before* the upgrade:
+  - a failed **initial install** is uninstalled;
+  - otherwise it runs `helm rollback gambit <rev> --wait --timeout 5m0s` only to the revision the
+    `pre_upgrade` step verified (`scripts/resolve-rollback-revision.mjs`): the single revision with
+    status `deployed` in the pre-upgrade `helm history gambit -o json`, in a history where every entry
+    has a valid revision (positive integer, no leading zeros) and a known Helm status, no revision
+    number repeats, no revision is `pending-*`, and every revision above the deployed one is `failed`.
+    It is never simply the newest revision: `helm rollback` re-applies its target without checking its
+    status, so after a failed upgrade (`4:deployed, 5:failed`) the target is 4, not 5. The `pre_upgrade`
+    log and the rollback log both print the target and why (status, chart, app version, update time,
+    description, newest revision).
+  - if no revision could be proven safe (unreadable or malformed history, duplicate revisions, no or
+    several `deployed` revisions, a `pending-*`, `unknown`, `superseded` or `uninstall*` revision above
+    the deployed one), the step **refuses**: no rollback, no uninstall, and an `::error::` naming the
+    reason. `pre_upgrade` already warned about it, with the raw history, when the deploy started.
+    Rolling deploys are not refused in that state (fixing forward over a failed revision is still
+    allowed); canary and blue/green are, as before, unless the newest revision is the deployed one.
+
+  When the step refuses, inspect `helm history gambit`, choose the last revision that served
+  healthily (normally the one that was `deployed` before this run), and roll back to it explicitly:
+  `helm rollback gambit <revision> --wait --timeout 5m0s`.
 - **Manual Rollback (Blue/Green)**: Flip `activeColor` back to the standby color in one command:
   ```bash
   helm upgrade gambit deploy/helm/gambit -f deploy/environments/production.values.yaml \
     --set rollout.strategy=blueGreen \
     --set rollout.blueGreen.activeColor=blue
   ```
-- **Manual Rollback (Helm CLI)**:
+- **Manual Rollback (Helm CLI)**: name the revision. Without one, Helm rolls back to the revision
+  before the newest, which after a failed upgrade can itself be a failed release.
   ```bash
-  helm rollback gambit --wait --timeout 5m0s
+  helm history gambit
+  helm rollback gambit <revision> --wait --timeout 5m0s
   ```
 
 ## Search indexer and reindex CLI
