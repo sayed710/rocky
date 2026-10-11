@@ -167,6 +167,20 @@ the original server-known `readyColor`; snapshots and broadcasts reconcile that
 seat even after the client's role changes. Missing seat metadata remains unknown.
 This changes R-03 correlation only, leaving R-04 authentication to its owner.
 That review is superseded; a fresh published-head review is required.
+Qodo's real engine review of `b791e30` then found two valid client gaps that
+Gemini's zero-findings review missed: overlapping unknown requests overwrite
+each other, and retaining an older warning hides a newer definite refusal.
+Four assertions reproduced these failures (35/39 passed). Client uncertainty is
+now retained independently by request ID, with action/seat metadata per entry;
+each receipt or positive readiness state settles only the relevant entries.
+The existing UI message combines the remaining warning with the latest refusal.
+No controller/authentication change is needed. Clean compilation and **40/40**
+GameSync tests pass, including both response orders and readiness/move overlap.
+Both accepted findings and all prior sign-offs require fresh final-head reviews.
+Unresolved identities are capped at 32. Overflow retains an aggregate warning
+until terminal game state instead of silently forgetting possible executions;
+it does not fabricate an exact receipt or trigger replay. The bounded receipt
+cache likewise does not promise durable client request history.
 
 ## Validation
 
@@ -192,6 +206,11 @@ That review is superseded; a fresh published-head review is required.
   fresh full build/lint, eight guards, forwarding/tracing **25/25**, realtime
   **95/95**, and GameSync **36/36** pass. The subsequent full run and final CI
   remain tracked in PR #105; the earlier head is not substituted for final gates.
+- At `b791e30`, the full run completed: **4,091** hermetic tests across all 19
+  workspaces, including web **1,528/1,528**, with zero failures/skips. Real Redis/PG
+  gateway, persistence, engine and browser acceptance CI passed on that head.
+  These results are historical after the overlapping-outcome correction, whose
+  web build/lint and **40/40** focused GameSync tests pass; final CI is refreshed.
 - Focused forwarding/tracing: **19/19**, including original safety assertion,
   lock wait, admission cutoff, append/timeout race, retained results, lost enqueue,
   finish/response failures, duplicate/retention safety, legacy rejection, load
@@ -250,6 +269,10 @@ true` together when integrating. The test file merged cleanly. Subsequent R-03
 receipt-correlation corrections do not add authentication behavior. Neither
 combined patch was applied to a source tree; owner integration must rerun both
 suites against their final heads.
+After retaining multiple unknown outcomes, the corresponding R-03 snapshot-tail
+assignment is `lastReject: this.commandNotice()`. Integration must retain this
+derived notice together with R-04's `connected: true`; the dependency remains
+outcome handling, with no token/session/reconnect implementation in R-03.
 
 One focused implementation PR; no main push, force push, merge or deployment.
 Final readiness requires applicable CI green, Qodo bugs/rules/actionable gaps=0,
@@ -265,7 +288,7 @@ Proposed append-only integration entry:
 > under the authority lock, preserves durable outcomes, reports explicit
 > uncertainty and prohibits timeout replay. Original delayed-resignation RED
 > and focused concurrency/lost-ack controls are verified; local build/lint,
-> 4,048 hermetic tests and guards pass. Published-head distributed CI and review
+> full hermetic tests and guards pass. Published-head distributed CI and review
 > gates are tracked in the implementation PR. Requires coordinated v2 gateway/web
 > rollout; no general exactly-once or Redis rollback guarantee. R-01/R-02/R-04,
 > historical audit closure and owner merge/launch decisions remain separate.

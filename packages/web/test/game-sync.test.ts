@@ -187,7 +187,57 @@ test('a new gesture and its rejection cannot hide another request still awaiting
   assert.equal(sync.getState().pending, null);
   const notice = sync.getState().lastReject; assert.ok(notice?.t === 'outcomeUnknown');
   assert.equal(notice.requestId, 'old-live');
+  assert.match(notice.message, /Refused new move\./, 'show the new refusal alongside the older uncertainty');
   factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'old-live' });
+  assert.equal(sync.getState().lastReject?.t, 'reject');
+  assert.equal(sync.getState().lastReject?.message, 'Refused new move.');
+});
+
+for (const reversed of [false, true]) {
+  test(`overlapping unknown requests reconcile independently with reversed responses=${reversed}`, () => {
+    const { factory, sync } = setup(); sync.start(); factory.last.open();
+    factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+    const first = sync.submitMove('g1f3'); assert.ok(first);
+    factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+    const second = sync.submitMove('d2d4'); assert.ok(second);
+    const requests = [{ id: 'first', ref: first.clientSeq }, { id: 'second', ref: second.clientSeq }];
+    if (reversed) requests.reverse();
+    for (const request of requests) factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: request.ref, requestId: request.id, message: 'Unknown.' });
+    factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: requests[1]!.id });
+    const remaining = sync.getState().lastReject; assert.ok(remaining?.t === 'outcomeUnknown');
+    assert.equal(remaining.requestId, requests[0]!.id, 'confirming one request cannot hide the other');
+    factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+    assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+    factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: requests[0]!.id });
+    assert.equal(sync.getState().lastReject, null);
+    assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'move').length, 2);
+  });
+}
+
+test('bounded uncertainty history retains a conservative warning after overflow', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  for (let i = 0; i < 40; i++) factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null, requestId: `overflow-${i}`, message: 'Unknown.' });
+  for (let i = 0; i < 40; i++) factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: `overflow-${i}` });
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  assert.match(sync.getState().lastReject?.message ?? '', /Earlier command outcomes remain unknown/);
+  factory.last.emit({ t: 'ended', gameId: 'g1', result: '1-0', termination: 'resign', winner: 'w', serverTs: 1 });
+  assert.equal(sync.getState().lastReject, null);
+  assert.equal(factory.last.sent.filter((frame) => ['move', 'offerDraw', 'ready'].includes(JSON.parse(frame).t)).length, 0);
+});
+
+test('a move outcome cannot erase an earlier original-seat readiness uncertainty', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: { ...stateView(0, 'w'), ready: { w: false, b: false } } });
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null, requestId: 'ready-first', action: 'ready', readyColor: 'w', message: 'Unknown readiness.' });
+  const move = sync.submitMove('g1f3'); assert.ok(move);
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: move.clientSeq, requestId: 'move-second', message: 'Unknown move.' });
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'move-second' });
+  const notice = sync.getState().lastReject; assert.ok(notice?.t === 'outcomeUnknown');
+  assert.equal(notice.requestId, 'ready-first');
+  factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: false, b: true }, serverTs: 1 });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: true, b: true }, serverTs: 2 });
   assert.equal(sync.getState().lastReject, null);
 });
 
