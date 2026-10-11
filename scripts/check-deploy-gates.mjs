@@ -173,7 +173,9 @@ function checkDeployGates() {
  * configuration that already failed (Amendment 2026-10-11 of ADR-0076).
  *
  * The only accepted non-empty PREV_REV is exactly `$(sed -n 's/^rollback_revision=//p' "$X")`, where
- * "$X" is the file the resolver's stdout is redirected to and nothing else writes to it.
+ * "$X" is the file the resolver's stdout is redirected to and nothing else writes to it (by `>`,
+ * `>>`, or `tee`). The step output the rollback reads must be published as exactly
+ * `echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"`.
  *
  * Returns the list of problems (empty when the wiring is intact).
  */
@@ -185,8 +187,10 @@ export function checkRollbackTarget(deployText) {
     .replace(/\r/g, '')
     .split('\n')
     .filter((line) => !/^\s*#/.test(line));
-  // ...and echo lines too, except when looking for writes to the resolver's output file.
-  const code = commands.filter((line) => !/^\s*echo\b/.test(line)).join('\n');
+  // ...and echo lines too, except when looking for writes (to the resolver's output file or
+  // $GITHUB_OUTPUT) and for PREV_REV assignments chained after an echo.
+  const isEcho = (line) => /^\s*echo\b/.test(line);
+  const code = commands.filter((line) => !isEcho(line)).join('\n');
 
   const resolverOutputs = [
     ...code.matchAll(/\bnode\s+scripts\/resolve-rollback-revision\.mjs\b[^\n]*?\s>\s*"\$(\w+)"/g),
@@ -195,7 +199,11 @@ export function checkRollbackTarget(deployText) {
     fail('the rollback target is not resolved by scripts/resolve-rollback-revision.mjs (with stdout redirected to a file, `> "$FILE"`) — automatic rollback must target only the verified pre-upgrade deployed revision');
   }
   for (const file of resolverOutputs) {
-    const writes = commands.join('\n').match(new RegExp(`(?:^|[^0-9&])>>?\\s*"\\$${file}"`, 'gm')) ?? [];
+    const allCommands = commands.join('\n');
+    const redirects = allCommands.match(new RegExp(`(?:^|[^0-9&])>>?\\s*"\\$${file}"`, 'gm')) ?? [];
+    // `tee [flags] [other files] "$X"` writes "$X" too.
+    const tees = allCommands.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s"\\$${file}"`, 'g')) ?? [];
+    const writes = [...redirects, ...tees];
     if (writes.length !== 1) {
       fail(`"$${file}" must be written only by scripts/resolve-rollback-revision.mjs, found ${writes.length} write(s)`);
     }
@@ -204,11 +212,27 @@ export function checkRollbackTarget(deployText) {
     fail('selects a revision with inline JavaScript (e.g. history[history.length - 1]) — the newest revision can be a failed release that helm rollback would re-apply');
   }
   const assignments = [...code.matchAll(/\bPREV_REV=([^\n]*)/g)].map((m) => m[1].trim());
+  // Assignments chained after an echo (`echo "..."; PREV_REV=5`). Quoted text is blanked out first
+  // so messages that mention PREV_REV or prev_revision= are not mistaken for assignments.
+  for (const line of commands.filter(isEcho)) {
+    const masked = line.replace(/"[^"]*"|'[^']*'/g, (quoted) => ' '.repeat(quoted.length));
+    for (const m of masked.matchAll(/(?:;|&&|\|\|)\s*PREV_REV=/g)) {
+      assignments.push(line.slice(m.index + m[0].length).trim());
+    }
+  }
   const allowed = (value) =>
     value === '""' ||
     resolverOutputs.some((file) => value === `$(sed -n 's/^rollback_revision=//p' "$${file}")`);
   if (assignments.length === 0 || assignments.some((value) => !allowed(value))) {
     fail(`PREV_REV must be empty or the rollback_revision read from the resolver's output file, found assignments: [${assignments.join(', ')}]`);
+  }
+  // The published step output is what the rollback step reads, so it must be exactly PREV_REV.
+  const PUBLISH_PREV_REV = 'echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"';
+  const publishes = commands
+    .filter((line) => /prev_revision=/.test(line) && /"\$GITHUB_OUTPUT"/.test(line))
+    .map((line) => line.trim());
+  if (publishes.length === 0 || publishes.some((line) => line !== PUBLISH_PREV_REV)) {
+    fail(`every prev_revision output must be published exactly as \`${PUBLISH_PREV_REV}\`, found: [${publishes.join(' | ')}]`);
   }
   const rollbacks = [...code.matchAll(/\bhelm\s+rollback\b[^\n]*/g)].map((m) => m[0]);
   if (rollbacks.length === 0 || rollbacks.some((cmd) => !/^helm\s+rollback\s+gambit\s+"\$PREV_REV"\s/.test(cmd))) {
