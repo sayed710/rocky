@@ -23,7 +23,7 @@
  */
 
 import type { Color } from '@chess-platform/core';
-import { GameAuthority, AuthorityError, type Command } from './authority';
+import { GameAuthority, AuthorityError, AuthorityCommitError, CommandOutcomeUnknownError, type Command } from './authority';
 import { LocalCommandRouter, type CommandRouter } from './command-router';
 import { Room } from './room';
 import { gameChannel, type PubSub, type Unsubscribe } from './pubsub';
@@ -252,11 +252,12 @@ export class RealtimeGateway {
           await this.commandRouter.route(gameId, userId, { kind: 'ready' });
           return;
         } catch (err) {
-          const retryable = !(err instanceof AuthorityError) || err.code === 'invalid_command';
+          const retryable = !(err instanceof AuthorityCommitError)
+            && (!(err instanceof AuthorityError) || err.code === 'invalid_command' || err.code === 'command_expired');
           if (!retryable || attempt >= READINESS_ATTEMPTS) throw err;
         }
       }
-    })().catch((err: unknown) => this.reject(session, gameId, null, codeOf(err), messageOf(err)));
+    })().catch((err: unknown) => this.reject(session, gameId, null, codeOf(err), messageOf(err), requestIdOf(err), 'ready', color));
   }
 
   private onMove(session: Session, msg: MoveMessage): void {
@@ -281,7 +282,7 @@ export class RealtimeGateway {
     void this.commandRouter
       .route(msg.gameId, membership.userId, { kind: 'move', uci: msg.uci })
       .catch((err: unknown) => {
-        this.reject(session, msg.gameId, msg.clientSeq, codeOf(err), messageOf(err));
+        this.reject(session, msg.gameId, msg.clientSeq, codeOf(err), messageOf(err), requestIdOf(err));
       });
   }
 
@@ -307,7 +308,7 @@ export class RealtimeGateway {
         }
       })
       .catch((err: unknown) => {
-        this.reject(session, msg.gameId, null, codeOf(err), messageOf(err));
+        this.reject(session, msg.gameId, null, codeOf(err), messageOf(err), requestIdOf(err), msg.t);
       });
   }
 
@@ -379,18 +380,31 @@ export class RealtimeGateway {
     session: Session,
     gameId: string,
     ref: number | null,
-    code: RejectCode,
+    code: RejectCode | 'outcome_unknown',
     message: string,
+    requestId = '',
+    action?: SimpleCommandMessage['t'] | 'ready',
+    readyColor?: Color,
   ): void {
+    if (code === 'outcome_unknown') {
+      session.conn.send({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId, ref, requestId, message, ...(action ? { action } : {}), ...(readyColor ? { readyColor } : {}) });
+      return;
+    }
     session.conn.send({ t: 'reject', gameId, ref, code, message });
   }
 }
 
-function codeOf(err: unknown): RejectCode {
+function requestIdOf(err: unknown): string {
+  return err instanceof CommandOutcomeUnknownError || err instanceof AuthorityCommitError ? err.requestId : '';
+}
+
+function codeOf(err: unknown): RejectCode | 'outcome_unknown' {
+  if (err instanceof AuthorityCommitError) return 'outcome_unknown';
   if (err instanceof AuthorityError) return err.code;
   return 'invalid_command';
 }
 
 function messageOf(err: unknown): string {
+  if (err instanceof AuthorityCommitError) return new CommandOutcomeUnknownError(err.requestId).message;
   return err instanceof Error ? err.message : String(err);
 }

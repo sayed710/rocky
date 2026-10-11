@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TimeControl } from '@chess-platform/game';
-import { GameAuthority } from '../src/authority';
+import { GameAuthority, AuthorityError, CommandOutcomeUnknownError } from '../src/authority';
 import { InMemoryEventLog } from '../src/event-log';
 import { InMemoryPubSub } from '../src/pubsub';
 import { InMemoryConnection } from '../src/transport';
@@ -48,6 +48,79 @@ test('join assigns the correct role and returns current state', async () => {
   const sam = connect('s');
   sam.deliver({ t: 'join', gameId: 'g1' }); // no token → anonymous spectator
   assert.equal(sam.last('joined')!.role, 'spectator');
+});
+
+test('forwarding uncertainty sends request identity without a rejection or automatic readiness retry', async () => {
+  const pubsub = new InMemoryPubSub(); const authority = new GameAuthority(pubsub, () => 1000);
+  await authority.createGame({ gameId: 'unknown-wire', timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: false });
+  let resigns = 0;
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier().allow('alice-token', 'alice'), () => 1000, {
+    route: async (id, user, cmd) => {
+      if (cmd.kind === 'resign') { resigns += 1; throw new CommandOutcomeUnknownError('forwarded-request-1'); }
+      return authority.apply(id, user, cmd);
+    },
+  });
+  const conn = new InMemoryConnection('unknown-client'); gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId: 'unknown-wire', token: 'alice-token' }); await flush();
+  conn.deliver({ t: 'resign', gameId: 'unknown-wire' }); await flush();
+  assert.equal(conn.last('reject'), undefined);
+  assert.equal(conn.last('outcomeUnknown')?.requestId, 'forwarded-request-1');
+  assert.equal(conn.last('outcomeUnknown')?.code, 'outcome_unknown');
+  assert.equal(conn.last('outcomeUnknown')?.action, 'resign');
+  assert.equal(resigns, 1);
+  assert.equal(authority.getState('unknown-wire').status.over, false);
+});
+
+test('lost local commit acknowledgement also reports uncertainty and preserves the durable ending', async () => {
+  const pubsub = new InMemoryPubSub(); const store = new InMemoryEventLog();
+  const authority = new GameAuthority(pubsub, () => 1000, store);
+  await authority.createGame({ gameId: 'local-lost-ack', timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: false });
+  const append = store.append.bind(store); let appends = 0;
+  store.append = async (...args) => { appends += 1; await append(...args); throw new Error('commit acknowledgement lost'); };
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier().allow('alice-token', 'alice'), () => 1000);
+  const conn = new InMemoryConnection('local-client'); gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId: 'local-lost-ack', token: 'alice-token' }); await flush();
+  conn.deliver({ t: 'resign', gameId: 'local-lost-ack' }); await flush();
+  assert.equal(conn.last('reject'), undefined);
+  assert.match(conn.last('outcomeUnknown')!.requestId, /^local-/);
+  assert.equal(authority.getState('local-lost-ack').status.over, true);
+  assert.equal(appends, 1);
+  assert.equal((await store.load('local-lost-ack')).filter(({ event }) => event.type === 'GameEnded').length, 1);
+});
+
+test('an unconfirmed readiness commit is not automatically retried', async () => {
+  const pubsub = new InMemoryPubSub(); const store = new InMemoryEventLog();
+  const authority = new GameAuthority(pubsub, () => 1000, store);
+  await authority.createGame({ gameId: 'ready-lost-ack', timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: false, source: 'seek', noShowAfterMs: 60_000 });
+  const append = store.append.bind(store); let appends = 0;
+  store.append = async (...args) => { appends += 1; await append(...args); throw new Error('readiness acknowledgement lost'); };
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier().allow('alice-token', 'alice'), () => 1000);
+  const conn = new InMemoryConnection('ready-client'); gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId: 'ready-lost-ack', token: 'alice-token' }); await flush(); await flush();
+  assert.equal(appends, 1);
+  assert.equal(conn.last('reject'), undefined);
+  assert.equal(conn.last('outcomeUnknown')?.code, 'outcome_unknown');
+  assert.equal((await store.load('ready-lost-ack')).filter(({ event }) => event.type === 'PlayerReady').length, 1);
+  assert.equal(conn.last('outcomeUnknown')?.action, 'ready');
+  assert.equal(conn.last('outcomeUnknown')?.readyColor, 'w');
+});
+
+test('readiness safely retries a request confirmed expired before admission', async () => {
+  const pubsub = new InMemoryPubSub(); const store = new InMemoryEventLog();
+  const authority = new GameAuthority(pubsub, () => 1000, store);
+  await authority.createGame({ gameId: 'ready-expired', timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: false, source: 'seek', noShowAfterMs: 60_000 });
+  let attempts = 0;
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier().allow('alice-token', 'alice'), () => 1000, {
+    route: async (id, user, cmd) => {
+      if (++attempts === 1) throw new AuthorityError('command_expired', 'expired before admission');
+      return authority.apply(id, user, cmd);
+    },
+  });
+  const conn = new InMemoryConnection('ready-expired-client'); gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId: 'ready-expired', token: 'alice-token' }); await flush(); await flush();
+  assert.equal(attempts, 2);
+  assert.equal(conn.last('reject'), undefined);
+  assert.equal((await store.load('ready-expired')).filter(({ event }) => event.type === 'PlayerReady').length, 1);
 });
 
 test('valid joins and resumes wait for a stale takeover reload without disconnecting', async () => {

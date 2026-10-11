@@ -46,6 +46,8 @@ export interface EventLog {
 
 /** Raised when an append's `expectedSeq` does not match the log head. */
 export class EventLogConcurrencyError extends Error {
+  /** Atomic append refused before committing any events; safe to re-evaluate. */
+  readonly appendRejected = true;
   constructor(
     readonly gameId: string,
     readonly expectedSeq: number,

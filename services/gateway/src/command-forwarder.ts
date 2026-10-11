@@ -20,6 +20,8 @@ import type { Redis } from 'ioredis';
 import {
   GameAuthority,
   AuthorityError,
+  AuthorityCommitError,
+  CommandOutcomeUnknownError,
   FLAG_ACTOR,
   NO_SHOW_ACTOR,
   type ApplyResult,
@@ -42,6 +44,10 @@ import {
   isSampled,
 } from '@chess-platform/api';
 import { OwnershipRegistry } from './ownership.js';
+import {
+  ENQUEUE_REQUEST, START_REQUEST, FINISH_REQUEST, SETTLE_REQUEST,
+  REQUEST_RETENTION_MS, requestKey, respond,
+} from './forwarded-request.js';
 
 export interface RedisCommandRouterOptions {
   /** The local GameAuthority instance. */
@@ -72,11 +78,17 @@ export interface RedisCommandRouterOptions {
 }
 
 const DEFAULT_FORWARD_TIMEOUT_MS = 5000;
-const CMD_PREFIX = 'game:cmd';
+const CMD_PREFIX = 'game:cmd:v2';
 const RESP_PREFIX = 'game:resp';
+
+/** Another delivery already admitted this identity; it owns the response. */
+class DuplicateForwardedRequest extends Error {}
+class UnownedForwardedRequest extends Error {}
 
 /** Wire format for a forwarded command. */
 export interface ForwardedCommand {
+  /** Missing versions fail closed: a legacy envelope has no safe execution lifetime. */
+  readonly version?: 2;
   readonly requestId: string;
   readonly gameId: string;
   readonly userId: string;
@@ -103,6 +115,17 @@ export interface ForwardedFailure {
 }
 
 export type ForwardedResult = ForwardedSuccess | ForwardedFailure;
+
+/** Malformed acknowledgements can never establish a confirmed rejection. */
+function decodeResult(raw: string): ForwardedResult {
+  const result = JSON.parse(raw) as ForwardedResult;
+  if (!result || typeof result.ok !== 'boolean' || (result.ok
+    ? !Array.isArray(result.events) || !Array.isArray(result.broadcasts) || !result.state || typeof result.state !== 'object'
+    : !result.error || typeof result.error.code !== 'string' || typeof result.error.message !== 'string')) {
+    throw new Error('Malformed forwarded result');
+  }
+  return result;
+}
 
 /** Where a `gateway.command` span sits in the trace: a new root, or a child of a forwarder. */
 interface CommandSpanParent {
@@ -142,7 +165,7 @@ async function withCommandSpan<T>(
     return result;
   } catch (err) {
     span.setAttribute('cmd.outcome', 'error');
-    span.setAttribute('cmd.error_code', err instanceof AuthorityError ? err.code : 'invalid_command');
+    span.setAttribute('cmd.error_code', err instanceof AuthorityCommitError ? 'outcome_unknown' : err instanceof AuthorityError ? err.code : 'invalid_command');
     span.setStatus('error');
     throw err;
   } finally {
@@ -206,6 +229,7 @@ export class RedisCommandRouter implements CommandRouter {
     this.nodeId = opts.nodeId;
     this.forwardTimeoutMs = opts.forwardTimeoutMs ?? DEFAULT_FORWARD_TIMEOUT_MS;
     this.consumer = opts.consumer;
+    this.consumer.bindOwner(opts.nodeId);
     this.tracer = opts.tracer ?? new NullTracer();
     this.forwardedCommandsCounter = opts.forwardedCommandsCounter;
     this.forwardTimeoutsCounter = opts.forwardTimeoutsCounter;
@@ -245,10 +269,10 @@ export class RedisCommandRouter implements CommandRouter {
    * Settle the reload debt recorded by `onClaimed` before this node acts as the authority for a
    * game it has only just taken over.
    *
-   * Every path that can acquire ownership must go through here, not just the common one: the
-   * forward-timeout path claims the game too, and `ensureLoaded()` is a no-op on a cache hit, so
-   * reaching `apply()` from there without this would validate against exactly the stale copy this
-   * whole mechanism exists to discard.
+   * Every path that can acquire ownership must go through here. `ensureLoaded()` is a no-op on
+   * a cache hit, so reaching `apply()` after a new claim without this would validate against
+   * exactly the stale copy this mechanism exists to discard. Forward timeouts do not claim or
+   * reapply their request; subsequent new requests use the normal ownership path.
    *
    * Concurrent commands for the same claim share one log read rather than each issuing their own.
    * The stale mark is cleared only on success, and only by a reload started for the current claim:
@@ -372,6 +396,7 @@ export class RedisCommandRouter implements CommandRouter {
     });
 
     const envelope: ForwardedCommand = {
+      version: 2,
       requestId,
       gameId,
       userId,
@@ -384,23 +409,28 @@ export class RedisCommandRouter implements CommandRouter {
     // and a span that is never ended is never exported — the failure would be invisible in exactly
     // the case most worth seeing.
     let timedOut = false;
+    const payload = JSON.stringify(envelope);
+    const stateKey = requestKey(requestId);
+    const timeoutSec = Math.max(1, Math.ceil(this.forwardTimeoutMs / 1000));
+    let enqueueConn: Redis | undefined;
+    let dispatchStarted = false;
     try {
-    // Push the command to the owner's queue (non-blocking, shared connection).
-    await this.redis.rpush(cmdKey, JSON.stringify(envelope));
+    // A lost enqueue acknowledgement must never be resent after its tombstone
+    // expires. The shared lease client intentionally retries indefinitely; use
+    // a connected, non-buffering, non-resending client only for this dispatch.
+    enqueueConn = this.requestConnection(timeoutSec * 1000, 1000);
+    await enqueueConn.connect();
+    dispatchStarted = true;
+    await enqueueConn.eval(ENQUEUE_REQUEST, 2, stateKey, cmdKey, payload, timeoutSec * 1000, REQUEST_RETENTION_MS);
 
     // Wait for the response with a timeout (BLPOP timeout is in seconds).
     // A blocking BLPOP holds its connection until it returns, so it must run
     // on a DEDICATED connection — never the shared command/ownership one, or it
     // would stall ownership claims, lease renewals, and concurrent forwards
     // behind it (ioredis serializes commands on a single connection).
-    const timeoutSec = Math.max(1, Math.ceil(this.forwardTimeoutMs / 1000));
-    const blockingConn = this.redis.duplicate();
-    let raw: [string, string] | null;
-    try {
-      raw = await blockingConn.blpop(respKey, timeoutSec);
-    } finally {
-      blockingConn.disconnect();
-    }
+    // Reuse this isolated socket; bounded client I/O also covers a blackholed
+    // response connection where Redis's server-side BLPOP timer cannot reply.
+    const raw = await enqueueConn.blpop(respKey, timeoutSec);
 
     if (!raw) {
       timedOut = true;
@@ -408,31 +438,21 @@ export class RedisCommandRouter implements CommandRouter {
       forwardSpan.setAttribute('forward.timeout', true);
       forwardSpan.setStatus('error');
 
-      // Timeout — the owner may have crashed. Try to claim ownership.
-      // If the owner's lease has expired, SET NX EX succeeds.
-      // The forward genuinely failed even when this recovery succeeds, so the span above stays
-      // an error; the enclosing gateway.command span is what records the command's real outcome.
-      const reclaimed = await this.registry.claim(gameId);
-      if (reclaimed.owned) {
-        // This is a takeover: the previous owner stopped answering. Whatever this node has cached
-        // predates its ownership, so it must be replaced from the log before the command that
-        // triggered the takeover is applied.
-        await this.rehydrateIfStale(gameId);
-        await this.authority.ensureLoaded(gameId);
-        return this.authority.apply(gameId, userId, cmd);
-      }
-      throw new AuthorityError('invalid_command', 'command forward timeout');
+      // Never reapply on takeover: the owner may already have committed. A
+      // subsequent new command can claim/reload through the normal route path.
+      return await this.settleForward(stateKey, cmdKey, payload, requestId);
     }
 
     // blpop returns [key, value]; we only need the value.
-    const payload = Array.isArray(raw) ? raw[1] : raw;
-    const result = JSON.parse(payload) as ForwardedResult;
+    const responsePayload = Array.isArray(raw) ? raw[1] : raw;
+    const result = decodeResult(responsePayload);
 
     if (!result.ok) {
       forwardSpan.setAttribute('forward.outcome', 'error');
       forwardSpan.setAttribute('forward.timeout', false);
       forwardSpan.setStatus('error');
 
+      if (result.error.code === 'outcome_unknown') throw new CommandOutcomeUnknownError(requestId);
       throw new AuthorityError(
         result.error.code,
         result.error.message,
@@ -450,13 +470,20 @@ export class RedisCommandRouter implements CommandRouter {
       state: result.state,
     };
     } catch (err) {
+      if (err instanceof Error && err.message === 'Command timed out') timedOut = true;
       // Covers the throws the branches above do not set attributes for — a Redis failure or a
       // malformed response payload.
       forwardSpan.setAttribute('forward.outcome', 'error');
       forwardSpan.setAttribute('forward.timeout', timedOut);
       forwardSpan.setStatus('error');
-      throw err;
+      // A Redis transport failure may occur after enqueue or commit. Resolve
+      // the same identity, cancel only queued work, and fail unknown if Redis
+      // cannot confirm the outcome. Do not turn unknown into invalid_command.
+      if (err instanceof AuthorityError) throw err;
+      if (!dispatchStarted) throw new AuthorityError('invalid_command', 'Forwarded command was not dispatched.');
+      return await this.settleForward(stateKey, cmdKey, payload, requestId);
     } finally {
+      enqueueConn?.disconnect();
       const latencySec = (performance.now() - startTime) / 1000;
       this.forwardLatencyHistogram?.observe(latencySec);
       if (timedOut) {
@@ -464,6 +491,41 @@ export class RedisCommandRouter implements CommandRouter {
       }
       forwardSpan.end();
     }
+  }
+
+  private requestConnection(timeoutMs: number, blockingGraceMs = 0): Redis {
+    const conn = this.redis.duplicate({
+      lazyConnect: true, enableOfflineQueue: false, autoResendUnfulfilledCommands: false,
+      maxRetriesPerRequest: 0, retryStrategy: () => null,
+      connectTimeout: timeoutMs, commandTimeout: timeoutMs + blockingGraceMs,
+    });
+    // Promise failures are classified/traced above. Avoid ioredis's direct
+    // unstructured stderr emission for this short-lived request connection.
+    conn.on('error', () => undefined);
+    return conn;
+  }
+
+  private async settleForward(stateKey: string, cmdKey: string, payload: string, requestId: string): Promise<ApplyResult> {
+    let settled: string;
+    let conn: Redis | undefined;
+    try {
+      conn = this.requestConnection(Math.max(1000, Math.ceil(this.forwardTimeoutMs / 1000) * 1000));
+      await conn.connect();
+      settled = String(await conn.eval(SETTLE_REQUEST, 2, stateKey, cmdKey, payload));
+    } catch {
+      throw new CommandOutcomeUnknownError(requestId);
+    } finally {
+      conn?.disconnect();
+    }
+    if (settled === 'expired') throw new AuthorityError('command_expired', 'Forwarded command expired before execution.');
+    if (!settled.startsWith('{')) throw new CommandOutcomeUnknownError(requestId);
+    let result: ForwardedResult;
+    try { result = decodeResult(settled); } catch { throw new CommandOutcomeUnknownError(requestId); }
+    if (!result.ok) {
+      if (result.error.code === 'outcome_unknown') throw new CommandOutcomeUnknownError(requestId);
+      throw new AuthorityError(result.error.code, result.error.message);
+    }
+    return { events: result.events, broadcasts: result.broadcasts, state: result.state };
   }
 }
 
@@ -475,6 +537,10 @@ export class RedisCommandRouter implements CommandRouter {
  * (wired automatically by {@link RedisCommandRouter} through ownership hooks).
  */
 export class OwnerCommandConsumer {
+  private nodeId = '';
+
+  /** Installed by the router, before its claim hook can launch a consumer. */
+  bindOwner(nodeId: string): void { this.nodeId = nodeId; }
   private running = false;
   private readonly loops = new Map<string, Promise<void>>();
   /** Dedicated blocking connection per loop (BLPOP holds its connection). */
@@ -483,8 +549,6 @@ export class OwnerCommandConsumer {
   private readonly redis: Redis;
   private readonly tracer: Tracer;
   private readonly blpopTimeoutSec = 15;
-  /** Response key TTL (seconds) so abandoned responses don't leak. */
-  private readonly responseTtlSec = 30;
 
   /** Whether a player or spectator on this node is in the game's room; until wired, every game is watched. */
   private hasLocalSessions: (gameId: string) => boolean = () => true;
@@ -597,43 +661,96 @@ export class OwnerCommandConsumer {
         this.authority.evict(gameId);
       }
     };
+    let admitted = false;
+    const executor = randomUUID();
+    const stateKey = requestKey(envelope.requestId);
+    let response: ForwardedResult;
     try {
+      if (envelope.version !== 2) {
+        throw new AuthorityError('command_expired', 'Legacy forwarded command has no safe execution lifetime.');
+      }
       await this.authority.ensureLoaded(envelope.gameId);
       const result = await this.authority.apply(
         envelope.gameId,
         envelope.userId,
         envelope.cmd,
+        async () => {
+          const status = String(await this.redis.eval(START_REQUEST, 3, stateKey,
+            `game:owner:${envelope.gameId}`, `${CMD_PREFIX}:${envelope.gameId}`, raw, this.nodeId, executor, REQUEST_RETENTION_MS));
+          if (status === 'not_owner') throw new UnownedForwardedRequest();
+          if (status === 'started' || status === 'done') throw new DuplicateForwardedRequest();
+          if (status === 'expired') throw new AuthorityError('command_expired', 'Forwarded command expired before execution.');
+          if (status !== 'admitted') throw new CommandOutcomeUnknownError(envelope.requestId);
+          admitted = true;
+        },
+        envelope.requestId,
       );
 
-      commandSpan.setAttribute('cmd.outcome', 'ok');
-      commandSpan.setStatus('ok');
-
-      const response: ForwardedSuccess = {
+      response = {
         ok: true,
         events: result.events,
         broadcasts: result.broadcasts,
         state: result.state,
       };
-      releaseExpiryCopy();
-      // RPUSH then EXPIRE — do NOT DEL; the sender's BLPOP consumes the value.
-      await this.redis.rpush(envelope.responseKey, JSON.stringify(response));
-      await this.redis.expire(envelope.responseKey, this.responseTtlSec);
     } catch (err) {
-      const errorCode = err instanceof AuthorityError ? err.code : 'invalid_command';
-      commandSpan.setAttribute('cmd.outcome', 'error');
-      commandSpan.setAttribute('cmd.error_code', errorCode);
-      commandSpan.setStatus('error');
-
-      const response: ForwardedFailure = {
+      if (err instanceof UnownedForwardedRequest) {
+        this.stopConsumer(envelope.gameId);
+        commandSpan.setAttribute('cmd.outcome', 'not_owner');
+        commandSpan.setStatus('error');
+        commandSpan.end();
+        return;
+      }
+      if (err instanceof DuplicateForwardedRequest) {
+        commandSpan.setAttribute('cmd.outcome', 'duplicate');
+        commandSpan.setStatus('ok');
+        commandSpan.end();
+        releaseExpiryCopy();
+        return;
+      }
+      // Domain refusals are definitive. Persistence failures (including a lost
+      // commit acknowledgement), publication failures and uncertain admission
+      // are never represented as confirmed rejection.
+      let errorCode: AuthorityErrorCode = err instanceof AuthorityCommitError || !(err instanceof AuthorityError)
+        ? 'outcome_unknown' : err.code;
+      response = {
         ok: false,
         error: {
           code: errorCode,
-          message: err instanceof Error ? err.message : String(err),
+          message: errorCode === 'outcome_unknown'
+            ? new CommandOutcomeUnknownError(envelope.requestId).message
+            : err instanceof Error ? err.message : String(err),
         },
       };
+      if (!admitted && envelope.version === 2 && errorCode !== 'command_expired') {
+        // Loading can fail before the lock/admission hook. Revoke that queued
+        // identity before reporting a definitive failure; a competing executor
+        // may have admitted it while we were awaiting the load.
+        try {
+          const settled = String(await this.redis.eval(SETTLE_REQUEST, 2, stateKey, `${CMD_PREFIX}:${envelope.gameId}`, raw));
+          if (settled === 'expired') {
+            errorCode = 'command_expired';
+            response = { ok: false, error: { code: errorCode, message: 'Forwarded command expired before execution.' } };
+          } else if (settled.startsWith('{')) {
+            response = decodeResult(settled);
+          } else {
+            response = { ok: false, error: { code: 'outcome_unknown', message: new CommandOutcomeUnknownError(envelope.requestId).message } };
+          }
+        } catch {
+          response = { ok: false, error: { code: 'outcome_unknown', message: new CommandOutcomeUnknownError(envelope.requestId).message } };
+        }
+      }
+    }
+    try {
+      commandSpan.setAttribute('cmd.outcome', response.ok ? 'ok' : 'error');
+      commandSpan.setStatus(response.ok ? 'ok' : 'error');
+      if (!response.ok) commandSpan.setAttribute('cmd.error_code', response.error.code);
       releaseExpiryCopy();
-      await this.redis.rpush(envelope.responseKey, JSON.stringify(response));
-      await this.redis.expire(envelope.responseKey, this.responseTtlSec);
+      const encoded = JSON.stringify(response);
+      if (admitted) {
+        await this.redis.eval(FINISH_REQUEST, 1, stateKey, executor, encoded, REQUEST_RETENTION_MS);
+      }
+      // Delivery failures must not overwrite a previously recorded success.
+      await respond(this.redis, envelope.responseKey, encoded);
     } finally {
       commandSpan.end();
     }
