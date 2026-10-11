@@ -967,12 +967,20 @@ check "Rollback workflow: the rollback step reads release_exists and its target 
   "$(grep -q ' release_exists$' "$RB_ROOT/rollback.env" && grep -q ' prev_revision$' "$RB_ROOT/rollback.env" && echo 0 || echo 1)"
 
 # The stub helm: serves the scenario's fixtures from $HELM_STUB_DIR and records every call.
+# `helm status` writes the fixture stderr (status_stderr) and exits status_rc; `helm list`
+# writes list_stdout / list_stderr and exits list_rc (no fixture at all = a failing list).
 cat > "$RB_ROOT/bin/helm" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$HELM_STUB_DIR/calls.log"
 case "$1" in
   status)
+    [ -f "$HELM_STUB_DIR/status_stderr" ] && cat "$HELM_STUB_DIR/status_stderr" >&2
     exit "$(cat "$HELM_STUB_DIR/status_rc" 2>/dev/null || echo 0)" ;;
+  list)
+    if [ ! -f "$HELM_STUB_DIR/list_rc" ]; then echo "Error: helm stub: no list fixture" >&2; exit 1; fi
+    [ -f "$HELM_STUB_DIR/list_stdout" ] && cat "$HELM_STUB_DIR/list_stdout"
+    [ -f "$HELM_STUB_DIR/list_stderr" ] && cat "$HELM_STUB_DIR/list_stderr" >&2
+    exit "$(cat "$HELM_STUB_DIR/list_rc")" ;;
   history)
     if [ -f "$HELM_STUB_DIR/history.json" ]; then cat "$HELM_STUB_DIR/history.json"; exit 0; fi
     echo "Error: release: not found" >&2; exit 1 ;;
@@ -1009,14 +1017,27 @@ hist() {
 # rb_run NAME STRATEGY HISTORY [STATUS_RC]: run pre_upgrade, then (if it succeeded)
 # the rollback step with pre_upgrade's outputs. HISTORY "@missing" makes `helm
 # history` fail. Leaves pre.rc/pre.log/rb.rc/rb.log/calls.log in $RB_ROOT/NAME.
-rb_run() {
-  local name="$1" strategy="$2" history="$3" status_rc="${4:-0}"
+rb_run() { rb_run_ex "$1" "$2" "$3" "${4:-0}" "" @none 0; }
+# rb_run_ex NAME STRATEGY HISTORY STATUS_RC STATUS_STDERR LIST FORCE_ROLLBACK
+# STATUS_STDERR is what `helm status` prints on stderr. LIST is `helm list`'s stdout
+# (exit 0), "@none" (no fixture: list fails) or "@fail:STDERR" (exit 1 with STDERR).
+# FORCE_ROLLBACK=1 runs the rollback step even when pre_upgrade failed, with whatever
+# pre_upgrade had published by then: the question "could anything it published ever
+# reach `helm uninstall`?" must have the answer no.
+rb_run_ex() {
+  local name="$1" strategy="$2" history="$3" status_rc="$4" status_stderr="$5" list="$6" force="$7"
   local fx="$RB_ROOT/$name" rc envname key line k v
   local -A out=()
   local -a rbenv=()
-  mkdir -p "$fx"
+  rm -rf "$fx"; mkdir -p "$fx"
   : > "$fx/calls.log"; : > "$fx/github_output"
   printf '%s' "$status_rc" > "$fx/status_rc"
+  [ -z "$status_stderr" ] || printf '%s' "$status_stderr" > "$fx/status_stderr"
+  case "$list" in
+    @none) ;;
+    @fail:*) printf '1' > "$fx/list_rc"; printf '%s\n' "${list#@fail:}" > "$fx/list_stderr" ;;
+    *) printf '0' > "$fx/list_rc"; printf '%s\n' "$list" > "$fx/list_stdout" ;;
+  esac
   [ "$history" = "@missing" ] || printf '%s' "$history" > "$fx/history.json"
   printf '%s' "$RB_VALUES" > "$fx/values.json"
   rc=0
@@ -1025,7 +1046,7 @@ rb_run() {
     bash -e "$RB_ROOT/pre_upgrade.sh" > "$fx/pre.log" 2>&1 || rc=$?
   echo "$rc" > "$fx/pre.rc"
   : > "$fx/rb.log"; echo "skipped" > "$fx/rb.rc"
-  [ "$rc" = 0 ] || return 0
+  [ "$rc" = 0 ] || [ "$force" = 1 ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
     [ -n "$line" ] || continue
@@ -1040,11 +1061,29 @@ rb_run() {
     bash -e "$RB_ROOT/rollback.sh" > "$fx/rb.log" 2>&1 || rc=$?
   echo "$rc" > "$fx/rb.rc"
 }
-rb_mutations() { grep -E '^(rollback|uninstall)( |$)' "$RB_ROOT/$1/calls.log" || true; }
+# rb_step NAME RELEASE_EXISTS PREV_REV HISTORY: run ONLY the rollback step, with its env
+# set directly (pre.rc is recorded as "not-run"). For the values pre_upgrade should never
+# publish, and for the refusal branch pre_upgrade can no longer reach.
+rb_step() {
+  local fx="$RB_ROOT/$1" rc=0
+  rm -rf "$fx"; mkdir -p "$fx"
+  : > "$fx/calls.log"; : > "$fx/github_output"; : > "$fx/pre.log"
+  echo "not-run" > "$fx/pre.rc"
+  [ "$4" = "@missing" ] || printf '%s' "$4" > "$fx/history.json"
+  env PATH="$RB_ROOT/bin:$PATH" HELM_STUB_DIR="$fx" RELEASE_EXISTS="$2" PREV_REV="$3" \
+    ROLLBACK_EVIDENCE="" ROLLBACK_REFUSAL="" \
+    bash -e "$RB_ROOT/rollback.sh" > "$fx/rb.log" 2>&1 || rc=$?
+  echo "$rc" > "$fx/rb.rc"
+}
+rb_mutations() { grep -E '^(rollback|uninstall|upgrade)( |$)' "$RB_ROOT/$1/calls.log" || true; }
 rb_show() {
   echo "      pre_upgrade exit $(cat "$RB_ROOT/$1/pre.rc"), rollback step exit $(cat "$RB_ROOT/$1/rb.rc"); helm mutations: $(rb_mutations "$1" | tr '\n' ';')"
+  echo "      helm calls: $(tr '\n' ';' < "$RB_ROOT/$1/calls.log")"
+  echo "      published: $(grep -E '^(release_exists|prev_revision)=' "$RB_ROOT/$1/github_output" | tr '\n' ';')"
   sed 's/^/      | /' "$RB_ROOT/$1/pre.log" "$RB_ROOT/$1/rb.log" | head -n 40
 }
+# call_line NAME REGEX: line number of the first recorded helm call matching REGEX (0 = none).
+call_line() { grep -nE -- "$2" "$RB_ROOT/$1/calls.log" | head -n 1 | cut -d: -f1 | grep . || echo 0; }
 # expect_rollback NAME REV DESC: the workflow rolls back to exactly REV, and nothing else.
 expect_rollback() {
   local ok=1
@@ -1060,16 +1099,62 @@ expect_rollback_logged() {
   check "$1: the rollback step logs target revision $2 and that it was the deployed revision" "$ok"
   [ "$ok" = 0 ] || rb_show "$1"
 }
-# expect_refusal NAME REASON_ERE DESC: deploy proceeds (pre_upgrade warns), and the rollback
-# step neither rolls back nor uninstalls, failing with an actionable ::error:: naming the reason.
+# expect_refusal NAME REASON_ERE DESC: a rolling deploy over an EXISTING release whose
+# pre-upgrade history proves no rollback target fails closed in pre_upgrade (owner decision
+# 2026-10-11): non-zero exit before any upgrade, nothing published, nothing mutated, and an
+# actionable ::error:: naming the resolver's reason and the repair steps, after the raw history.
+# The old warn-and-continue wording must be gone.
 expect_refusal() {
-  local ok=1
-  [ "$(cat "$RB_ROOT/$1/pre.rc")" = 0 ] && [ "$(cat "$RB_ROOT/$1/rb.rc")" != 0 ] \
-    && [ "$(cat "$RB_ROOT/$1/rb.rc")" != skipped ] && [ -z "$(rb_mutations "$1")" ] \
-    && grep -q '::warning::' "$RB_ROOT/$1/pre.log" \
-    && grep -q '::error::' "$RB_ROOT/$1/rb.log" && grep -q 'helm history gambit' "$RB_ROOT/$1/rb.log" \
-    && grep -qiE -- "$2" "$RB_ROOT/$1/rb.log" && ok=0
+  local ok=1 f="$RB_ROOT/$1"
+  [ "$(cat "$f/pre.rc")" != 0 ] && [ -z "$(rb_mutations "$1")" ] \
+    && ! grep -q '^release_exists=' "$f/github_output" \
+    && grep -qiE -- "::error::Refusing a rolling deploy over existing release gambit: no automatic rollback target could be verified.*($2)" "$f/pre.log" \
+    && grep -qF "'helm history gambit'" "$f/pre.log" \
+    && grep -qF "'helm rollback gambit <healthy revision> --wait --timeout 5m0s'" "$f/pre.log" \
+    && grep -qi 're-run' "$f/pre.log" \
+    && grep -qF "Raw pre-upgrade 'helm history gambit -o json' output" "$f/pre.log" \
+    && ! grep -q '::warning::' "$f/pre.log" \
+    && ! grep -qi 'automated rollback will refuse to run' "$f/pre.log" && ok=0
   check "$1: $3" "$ok"
+  [ "$ok" = 0 ] || rb_show "$1"
+}
+# expect_unknown NAME STDERR_FRAGMENT DESC: release existence could not be established, so
+# pre_upgrade fails closed with an actionable ::error:: carrying the helm stderr, publishes no
+# release_exists (above all never "false"), and the rollback step, even if it were run with
+# whatever pre_upgrade published, neither uninstalls nor rolls back.
+expect_unknown() {
+  local ok=1 f="$RB_ROOT/$1"
+  [ "$(cat "$f/pre.rc")" != 0 ] && [ -z "$(rb_mutations "$1")" ] \
+    && ! grep -q '^release_exists=' "$f/github_output" \
+    && grep -qiE '::error::.*could not establish whether release gambit exists' "$f/pre.log" \
+    && grep '::error::' "$f/pre.log" | grep -qF -- "$2" \
+    && grep -qi 'nothing was changed' "$f/pre.log" \
+    && grep -qi 'connectivity' "$f/pre.log" && grep -qi 'credentials' "$f/pre.log" \
+    && grep -qi 're-run' "$f/pre.log" && ok=0
+  check "$1: $3" "$ok"
+  [ "$ok" = 0 ] || rb_show "$1"
+}
+# expect_initial_uninstall NAME DESC: absence was positively established (status not-found AND
+# an empty `helm list --all`), the install went ahead, and after the failed smoke check the
+# rollback step uninstalled only once a fresh `helm history` showed revision 1 alone.
+expect_initial_uninstall() {
+  local ok=1 f="$RB_ROOT/$1" hl ul sl ll
+  sl=$(call_line "$1" '^status gambit$'); ll=$(call_line "$1" '^list --all --filter \^gambit\$ -o json$')
+  hl=$(call_line "$1" '^history gambit -o json$'); ul=$(call_line "$1" '^uninstall ')
+  [ "$(cat "$f/pre.rc")" = 0 ] && [ "$(cat "$f/rb.rc")" = 0 ] \
+    && grep -qx 'release_exists=false' "$f/github_output" \
+    && [ "$(rb_mutations "$1")" = "uninstall gambit --wait --timeout 5m0s" ] \
+    && [ "$sl" -gt 0 ] && [ "$ll" -gt "$sl" ] && [ "$hl" -gt "$ll" ] && [ "$ul" -gt "$hl" ] && ok=0
+  check "$1: $2" "$ok"
+  [ "$ok" = 0 ] || rb_show "$1"
+}
+# expect_uninstall_refused NAME DESC: the rollback step neither uninstalls nor rolls back and
+# fails with an actionable ::error::.
+expect_uninstall_refused() {
+  local ok=1 f="$RB_ROOT/$1"
+  [ "$(cat "$f/rb.rc")" != 0 ] && [ "$(cat "$f/rb.rc")" != skipped ] && [ -z "$(rb_mutations "$1")" ] \
+    && grep -q '::error::' "$f/rb.log" && grep -qF "helm history gambit" "$f/rb.log" && ok=0
+  check "$1: $2" "$ok"
   [ "$ok" = 0 ] || rb_show "$1"
 }
 # expect_pre_refused NAME MESSAGE_ERE DESC: pre_upgrade refuses the deploy (canary/blueGreen gate).
@@ -1088,13 +1173,15 @@ expect_rollback_logged failed-tip 4
 rb_run failed-tips rolling "$(hist 2:superseded 3:deployed 4:failed 5:failed)"
 expect_rollback failed-tips 3 "rolling over 3:deployed,4:failed,5:failed rolls back to deployed 3"
 
-# 2. A pending or unknown revision on top: never an automatic rollback to it.
+# 2. A pending or unknown revision on top: no verified target, so a rolling deploy over the
+#    existing release is refused before the upgrade (owner decision 2026-10-11; it used to
+#    warn and proceed, leaving the rollback step to refuse mid-incident).
 for s in pending-upgrade pending-rollback pending-install unknown; do
   rb_run "tip-$s" rolling "$(hist 3:superseded 4:deployed "5:$s")"
-  expect_refusal "tip-$s" "${s%%-*}" "a $s revision above deployed 4: no rollback, no uninstall, actionable error"
+  expect_refusal "tip-$s" "${s%%-*}" "rolling over a $s revision above deployed 4 is refused before the upgrade, with the reason and repair steps"
 done
 rb_run pending-below rolling "$(hist 3:pending-upgrade 4:deployed)"
-expect_refusal pending-below "pending" "a pending revision anywhere in the history fails closed"
+expect_refusal pending-below "pending" "rolling over a pending revision anywhere in the history is refused before the upgrade"
 
 # 3. Healthy controls (pass on the unfixed workflow too).
 rb_run healthy rolling "$(hist 3:superseded 4:deployed)"
@@ -1107,7 +1194,8 @@ expect_rollback healthy-string 4 "canonical digit-string revisions are accepted"
 rb_run atomic-recovered rolling "[$(hist 4:superseded | tr -d '[]'),$(hist 5:failed | tr -d '[]'),{\"revision\":6,\"updated\":\"2026-10-11T10:00:00Z\",\"status\":\"deployed\",\"chart\":\"gambit-0.1.0\",\"app_version\":\"1.0.4\",\"description\":\"Rollback to 4\"}]"
 expect_rollback atomic-recovered 6 "atomic-recovered 4:superseded,5:failed,6:deployed rolls back to 6"
 
-# 5. Anything that does not prove a single safe target fails closed.
+# 5. Anything that does not prove a single safe target fails closed: a rolling deploy over
+#    the existing release is refused in pre_upgrade, before `helm upgrade`.
 rb_refuse() {  # NAME REASON_ERE DESC HISTORY
   rb_run "$1" rolling "$4"
   expect_refusal "$1" "$2" "$3"
@@ -1137,11 +1225,67 @@ rb_refuse uninstalling-above 'uninstall' "an uninstalling revision above the dep
 rb_refuse failed-only 'deployed' "a history with no deployed revision (1:failed) fails closed" "$(hist 1:failed)"
 rb_refuse no-deployed 'deployed' "a history with no deployed revision (4:superseded,5:failed) fails closed" "$(hist 4:superseded 5:failed)"
 
-# 6. Initial install: unchanged, the failed release is uninstalled.
-rb_run initial-install rolling @missing 1
-check "initial-install: a failed initial install is uninstalled (no rollback)" \
-  "$([ "$(cat "$RB_ROOT/initial-install/pre.rc")" = 0 ] && [ "$(rb_mutations initial-install)" = "uninstall gambit --wait --timeout 5m0s" ] && echo 0 || echo 1)"
-[ "$(rb_mutations initial-install)" = "uninstall gambit --wait --timeout 5m0s" ] || rb_show initial-install
+check "hist-not-json: the raw pre-upgrade history is printed with the refusal" \
+  "$(grep -qF 'Error: something went wrong' "$RB_ROOT/hist-not-json/pre.log" && echo 0 || echo 1)"
+check "two-deployed: the raw pre-upgrade history is printed with the refusal" \
+  "$(grep -qF '"description":"fixture revision 4"' "$RB_ROOT/two-deployed/pre.log" && echo 0 || echo 1)"
+
+# 6. Initial install, only when absence is POSITIVELY established: `helm status gambit` fails
+#    with exactly Helm's not-found error (driver.ErrReleaseNotFound, printed by cobra as
+#    "Error: release: not found") AND `helm list --all --filter '^gambit$' -o json` succeeds
+#    with a JSON array that has no release named gambit. Then a failed smoke check uninstalls,
+#    but only after a fresh `helm history` shows revision 1 alone (the release this run made).
+RB_NOT_FOUND='Error: release: not found'
+rb_run_ex initial-install rolling "$(hist 1:deployed)" 1 "$RB_NOT_FOUND"$'\n' '[]' 0
+expect_initial_uninstall initial-install "confirmed absence: rolling installs; a failed smoke check uninstalls after history shows only revision 1"
+rb_run_ex initial-install-crlf rolling "$(hist 1:deployed)" 1 $'\r\n  '"$RB_NOT_FOUND"$'\r\n' $'[]\r' 0
+expect_initial_uninstall initial-install-crlf "the not-found stderr and the empty list are accepted with surrounding whitespace/CRLF"
+rb_run_ex initial-install-other-name rolling "$(hist 1:deployed)" 1 "$RB_NOT_FOUND" '[{"name":"gambit-x","namespace":"default","revision":"2","status":"deployed"}]' 0
+expect_initial_uninstall initial-install-other-name "a list holding only a similarly named release (gambit-x) still confirms gambit's absence"
+# h2: absence was established before the upgrade, but at rollback time the history is not
+#     exactly "revision 1": something else happened to the release; never uninstall it.
+for c in "two-revisions|1:superseded 2:deployed" "other-revision|2:deployed" "empty|"; do
+  IFS='|' read -r cname chist <<< "$c"
+  # shellcheck disable=SC2086  # chist is a space-separated list of REV:STATUS entries
+  rb_run_ex "initial-$cname" rolling "$(hist $chist)" 1 "$RB_NOT_FOUND" '[]' 0
+  expect_uninstall_refused "initial-$cname" "confirmed absence, but history at rollback time is [$chist]: no uninstall, no rollback, actionable error"
+done
+rb_run_ex initial-history-fails rolling @missing 1 "$RB_NOT_FOUND" '[]' 0
+expect_uninstall_refused initial-history-fails "confirmed absence, but helm history fails at rollback time: no uninstall, no rollback"
+rb_run_ex initial-history-garbage rolling 'Error: boom' 1 "$RB_NOT_FOUND" '[]' 0
+expect_uninstall_refused initial-history-garbage "confirmed absence, but non-JSON history at rollback time: no uninstall, no rollback"
+
+# 6b. Existence UNKNOWN: anything other than a clean `helm status` or a positively established
+#     absence. pre_upgrade must refuse (it used to treat every `helm status` failure as "no
+#     release", so a cluster outage over a live release led to `helm uninstall`).
+RB_LIVE="$(hist 3:superseded 4:deployed)"
+RB_UNREACHABLE='Error: Kubernetes cluster unreachable: Get "https://10.0.0.1:6443/version": dial tcp 10.0.0.1:6443: connect: connection refused'
+rb_run_ex unknown-unreachable rolling "$RB_LIVE" 1 "$RB_UNREACHABLE" "@fail:$RB_UNREACHABLE" 1
+expect_unknown unknown-unreachable 'connection refused' "cluster unreachable over a live release: refused, never uninstalled"
+rb_run_ex unknown-unauthorized rolling "$RB_LIVE" 1 'Error: Unauthorized' '[]' 1
+expect_unknown unknown-unauthorized 'Unauthorized' "an auth error (Unauthorized) is not absence"
+rb_run_ex unknown-forbidden rolling "$RB_LIVE" 1 'Error: query: failed to query with labels: secrets is forbidden: User "system:serviceaccount:ci:deployer" cannot list resource "secrets" in API group "" in the namespace "default"' '[]' 1
+expect_unknown unknown-forbidden 'forbidden' "an RBAC error (forbidden) is not absence"
+rb_run_ex unknown-timeout rolling "$RB_LIVE" 1 'Error: context deadline exceeded' '[]' 1
+expect_unknown unknown-timeout 'context deadline exceeded' "a timeout is not absence"
+rb_run_ex unknown-empty-stderr rolling "$RB_LIVE" 1 '' '[]' 1
+expect_unknown unknown-empty-stderr "exited 1" "a failing helm status with empty stderr is not absence"
+rb_run_ex unknown-list-fails rolling "$RB_LIVE" 1 "$RB_NOT_FOUND" "@fail:$RB_UNREACHABLE" 1
+expect_unknown unknown-list-fails 'release: not found' "not-found, but helm list fails: not absence"
+rb_run_ex unknown-list-has-gambit rolling "$RB_LIVE" 1 "$RB_NOT_FOUND" '[{"name":"gambit","namespace":"default","revision":"4","status":"deployed"}]' 1
+expect_unknown unknown-list-has-gambit 'release: not found' "not-found, but helm list shows gambit: a contradiction, not absence"
+rb_run_ex unknown-list-not-json rolling "$RB_LIVE" 1 "$RB_NOT_FOUND" 'NAME	NAMESPACE	REVISION	UPDATED	STATUS	CHART	APP VERSION' 1
+expect_unknown unknown-list-not-json 'release: not found' "not-found, but helm list output is not JSON: not absence"
+rb_run_ex unknown-list-empty-output rolling "$RB_LIVE" 1 "$RB_NOT_FOUND" '' 1
+expect_unknown unknown-list-empty-output 'release: not found' "not-found, but helm list prints nothing: not absence"
+rb_run_ex unknown-embedded-not-found rolling "$RB_LIVE" 1 'Error: Kubernetes cluster unreachable: release: not found' '[]' 1
+expect_unknown unknown-embedded-not-found 'Kubernetes cluster unreachable' "'release: not found' inside another error is not absence"
+rb_run_ex unknown-not-found-plus-warning rolling "$RB_LIVE" 1 $'WARNING: Kubernetes configuration file is group-readable. This is insecure.\nError: release: not found' '[]' 1
+expect_unknown unknown-not-found-plus-warning 'group-readable' "not-found preceded by other stderr output is not a strict match: not absence"
+for s in canary blueGreen; do
+  rb_run_ex "$s-unknown" "$s" "$RB_LIVE" 1 "$RB_UNREACHABLE" '[]' 1
+  expect_unknown "$s-unknown" 'connection refused' "$s with unreachable cluster: refused, never treated as an initial install"
+done
 
 # 7. Canary and blue/green: the pre-upgrade gate still refuses a non-deployed tip, and now
 #    also refuses when no automatic rollback target can be verified.
@@ -1152,8 +1296,8 @@ for s in canary blueGreen; do
   expect_pre_refused "$s-pending-tip" 'is not the deployed one' "$s over a pending tip is still refused before the upgrade"
   rb_run "$s-no-history" "$s" @missing
   expect_pre_refused "$s-no-history" 'Could not determine the deployed revision' "$s without a readable history is still refused"
-  rb_run "$s-initial" "$s" @missing 1
-  expect_pre_refused "$s-initial" 'initial install' "$s initial install is still refused"
+  rb_run_ex "$s-initial" "$s" @missing 1 "$RB_NOT_FOUND" '[]' 0
+  expect_pre_refused "$s-initial" 'initial install' "$s initial install (absence confirmed) is still refused"
   # The newest revision is the deployed one, but the history proves no rollback target: a
   # progressive deploy must not start without one (before this guard these went ahead with
   # no automatic rollback at all). Refused before the tags are pinned or anything is upgraded.
@@ -1173,6 +1317,26 @@ for s in canary blueGreen; do
   expect_rollback "$s-healthy" 4 "$s over healthy history keeps its deployed-tag pinning and rolls back to deployed 4"
   check "$s-healthy: the deployed tags are read from deployed revision 4" \
     "$(grep -qx 'get values gambit --all -o json --revision 4' "$RB_ROOT/$s-healthy/calls.log" && grep -qx 'deployed_live_api_tag=1.1.0' "$RB_ROOT/$s-healthy/github_output" && echo 0 || echo 1)"
+done
+
+# 8. The rollback step on its own: only release_exists exactly "true" with a verified target
+#    may roll back, only exactly "false" may (after the history re-check) uninstall; any other
+#    value reaches neither. The "exists, no verified target" branch is no longer reachable
+#    through pre_upgrade, so it is exercised here directly.
+rb_step rbonly-exists-no-target true "" "$RB_LIVE"
+expect_uninstall_refused rbonly-exists-no-target "release_exists=true without a verified target: no rollback, no uninstall"
+rb_step rbonly-true-target true 4 "$RB_LIVE"
+check "rbonly-true-target: release_exists=true with verified target 4 rolls back to exactly 4" \
+  "$([ "$(cat "$RB_ROOT/rbonly-true-target/rb.rc")" = 0 ] && [ "$(rb_mutations rbonly-true-target)" = "rollback gambit 4 --wait --timeout 5m0s" ] && echo 0 || echo 1)"
+for c in "empty|" "unknown|unknown" "upper|TRUE" "padded| true" "yes|yes"; do
+  IFS='|' read -r cname cval <<< "$c"
+  rb_step "rbonly-$cname-target" "$cval" 4 "$(hist 1:deployed)"
+  expect_uninstall_refused "rbonly-$cname-target" "release_exists='$cval' with a target: neither rollback nor uninstall"
+done
+for c in "false-padded|false " "False|False" "empty|"; do
+  IFS='|' read -r cname cval <<< "$c"
+  rb_step "rbonly-$cname-no-target" "$cval" "" "$(hist 1:deployed)"
+  expect_uninstall_refused "rbonly-$cname-no-target" "release_exists='$cval' without a target: no uninstall"
 done
 
 echo ""
