@@ -71,6 +71,12 @@ export class PuzzleController {
 
   positionChanged(position: { readonly fen: string; readonly variant: string }): void {
     if (this.disposed || this.targetKey === null || this.targetKey === key(position)) return;
+    this.invalidate();
+  }
+
+  /** Clear position work on review/session invalidation without relying on a different FEN. */
+  invalidate(): void {
+    if (this.disposed) return;
     this.abortInFlight();
     this.targetKey = null;
     this.callbacks.onInvalidated();

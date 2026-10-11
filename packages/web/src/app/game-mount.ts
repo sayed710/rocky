@@ -227,6 +227,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let currentReviewNoteKey: 'game.review.reviewingMoves' | null = null;
   let currentReviewErrorKey: 'game.review.unavailableError' | null = null;
   let gameReviewSessionId = deps.initialSessionId ?? null;
+  /** Borrowed only by this route's current private review; never written into GameController. */
+  let selectedReviewFen: string | null = null;
   let authoritativeGameFen: string | null = null;
   let authoritativeGameTurn = false;
   let authoritativeGameStatus = '';
@@ -349,7 +351,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     isGamePlayer && isHumanGame && !gameOver;
 
   /** Whether there is actually something on the board to analyse yet. */
-  const hasPosition = (): boolean => Boolean(currentVariant) && Boolean(controller?.fen);
+  const hasPosition = (): boolean => displayedPosition() !== null;
+
+  /** Position tools follow the displayed board; move/sequence tools retain their game context. */
+  const displayedPosition = (): { fen: string; variant: string } | null => {
+    const fen = selectedReviewFen ?? controller?.fen;
+    return fen && currentVariant ? { fen, variant: currentVariant } : null;
+  };
 
   /**
    * The single place the run control's enabled state is decided.
@@ -427,6 +435,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   };
   resetPuzzleBlock();
 
+  const renderPuzzlePresentation = (): void => {
+    let resultNote: string | null = null;
+    if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
+      resultNote = renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
+    }
+    const noteKey = !isUserAuthenticated() ? 'signedOut' : currentPuzzleNoteKey;
+    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, noteKey ? puzzleMessage(noteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
+    if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, currentPuzzleErrorKey ? puzzleMessage(currentPuzzleErrorKey, i18n) : null);
+  };
+
   /** Keep puzzle visibility and button state aligned with capabilities and the live-game rule. */
   const refreshPuzzleControls = (): void => {
     if (analysisDisposed || !puzzleAvailable) return;
@@ -446,10 +464,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (puzzleRunBtn) {
       puzzleRunBtn.disabled = !authed || !hasPosition() || puzzleController.isPending;
     }
-    const ownsControlNote = currentPuzzleNoteKey === 'idle' || currentPuzzleNoteKey === 'signedOut';
-    if (!ownsControlNote || lastPuzzleResult || currentPuzzleErrorKey) return;
-    currentPuzzleNoteKey = authed ? 'idle' : 'signedOut';
-    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(currentPuzzleNoteKey, i18n));
+    renderPuzzlePresentation();
   };
 
   // Opening identification (M15 inc 19), keyed on the game's move order rather than its position.
@@ -795,22 +810,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   let controller: GameController;
 
-  const renderPuzzlePresentation = (): void => {
-    let resultNote: string | null = null;
-    if (lastPuzzleResult && puzzleRowsEl && puzzleResultEl) {
-      resultNote = renderPuzzleResult(puzzleRowsEl, puzzleResultEl, lastPuzzleResult, i18n);
-    }
-    if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, currentPuzzleNoteKey ? puzzleMessage(currentPuzzleNoteKey, i18n) : currentPuzzleErrorKey ? null : resultNote);
-    if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, currentPuzzleErrorKey ? puzzleMessage(currentPuzzleErrorKey, i18n) : null);
-  };
-
   const puzzleController = new PuzzleController({
     client: deps.client,
-    getPosition: () => {
-      const fen = controller.fen;
-      if (!fen || !currentVariant) return null;
-      return { fen, variant: currentVariant };
-    },
+    getPosition: displayedPosition,
     callbacks: {
       onPhase: (phase) => {
         if (puzzleResultEl) setPuzzleBusy(puzzleResultEl, phase === 'loading');
@@ -818,8 +820,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         if (phase === 'loading') {
           currentPuzzleNoteKey = 'running';
           currentPuzzleErrorKey = null;
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('running', i18n));
-          if (puzzleErrorEl) renderPuzzleError(puzzleErrorEl, null);
+          renderPuzzlePresentation();
         }
       },
       onResult: (result) => {
@@ -844,23 +845,16 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         const key = noteFor[failure];
         if (key) {
           currentPuzzleNoteKey = key;
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage(key, i18n));
         } else {
           currentPuzzleNoteKey = null;
           currentPuzzleErrorKey = failure === 'rejected' ? 'rejected' : 'failed';
-          if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, null);
-          if (puzzleErrorEl) {
-            renderPuzzleError(
-              puzzleErrorEl,
-              failure === 'rejected' ? puzzleMessage('rejected', i18n) : puzzleMessage('failed', i18n),
-            );
-          }
         }
+        renderPuzzlePresentation();
       },
       onInvalidated: () => {
         resetPuzzleBlock();
         currentPuzzleNoteKey = 'positionChanged';
-        if (puzzleNoteEl) renderPuzzleNote(puzzleNoteEl, puzzleMessage('positionChanged', i18n));
+        renderPuzzlePresentation();
       },
     },
   });
@@ -1099,11 +1093,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   const analysisController = new AnalysisController({
     client: deps.client,
-    getPosition: () => {
-      const fen = controller.fen;
-      if (!fen || !currentVariant) return null;
-      return { fen, variant: currentVariant };
-    },
+    getPosition: displayedPosition,
     callbacks: {
       onPhase: (phase) => {
         if (analysisResultsEl) {
@@ -1176,6 +1166,14 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
     },
   });
+
+  /** End borrowed review ownership even when its FEN matches the restored authoritative position. */
+  const clearReviewSelection = (): void => {
+    if (selectedReviewFen === null) return;
+    selectedReviewFen = null;
+    analysisController.invalidate();
+    puzzleController.invalidate();
+  };
 
   const gameSync = createGameSync({ gameId, ...(token !== undefined ? { token } : {}) });
   const oracle = createGameOracle(gameSync);
@@ -1425,6 +1423,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     callbacks: {
       onPosition: (fen: string) => {
         authoritativeGameFen = fen;
+        clearReviewSelection();
         board.setPosition(fen);
         analysisController.positionChanged(fen);
         if (currentVariant) puzzleController.positionChanged({ fen, variant: currentVariant });
@@ -1506,6 +1505,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   /** Remove private review output and restore the latest server-owned game presentation. */
   const invalidateGameReviewPresentation = (): void => {
+    clearReviewSelection();
     clearGameReview();
     if (authoritativeGameFen === null) return;
     board.setPosition(authoritativeGameFen);
@@ -1584,6 +1584,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         }
         row.replaceChildren(moveLabel, verdict);
         row.addEventListener('click', () => {
+          if (analysisDisposed || disposed || lastReviewResult !== review
+            || !gameOver || !isGamePlayer || gameReviewSessionId === null) return;
+          selectedReviewFen = move.fenBefore;
+          analysisController.positionChanged(move.fenBefore);
+          if (currentVariant) puzzleController.positionChanged({ fen: move.fenBefore, variant: currentVariant });
           board.setPosition(move.fenBefore);
           board.setTurn(false);
           if (move.move.length >= 4) board.setLastMove(move.move.slice(0, 2), move.move.slice(2, 4));
@@ -1807,13 +1812,14 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     dispose: (): void => {
       if (analysisDisposed) return;
       analysisDisposed = true;
+      // Clear private selection and its derived panels while their view callbacks still exist.
+      gameReviewController.dispose();
       analysisController.dispose();
       explainController.dispose();
       assessController.dispose();
       puzzleController.dispose();
       openingController.dispose();
       coachController.dispose();
-      gameReviewController.dispose();
       pgnExport.dispose();
     },
   };
