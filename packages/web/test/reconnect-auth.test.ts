@@ -5,6 +5,7 @@ import { GameAuthority, InMemoryPubSub, InMemoryConnection, RealtimeGateway } fr
 import { GameSync } from '../src/net/game-sync.js';
 import { WsClient } from '../src/net/ws-client.js';
 import { MemoryTokenStore, SessionManager } from '../src/net/session.js';
+import type { SessionChannel } from '../src/net/session.js';
 import type { AuthResponse } from '../src/api/models.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
 import { NetworkError, httpErrorFrom } from '../src/net/errors.js';
@@ -23,8 +24,9 @@ async function harness(anonymous = false) {
     tokens: { accessToken: tokens.issue({ userId, handle: userId, roles: ['user'] }).token,
       tokenType: 'Bearer', expiresIn: 60, refreshExpiresAt: '2030-01-01T00:00:00Z' },
   });
+  const channel: SessionChannel = { onmessage: null, postMessage: () => {}, close: () => {} };
   const session = new SessionManager({ store: new MemoryTokenStore(), now: () => now,
-    expiryLeewayMs: 5_000, channel: null,
+    expiryLeewayMs: 5_000, channel,
     refresh: async () => { refreshes++; return doRefresh ? doRefresh() : issue(); } });
   const tokenA = issue();
   if (!anonymous) session.adopt(tokenA, false);
@@ -55,6 +57,7 @@ async function harness(anonymous = false) {
   assert.equal(first.last('joined')?.role, anonymous ? 'spectator' : 'white', 'initial server-assigned role');
   return { session, sync, factory, scheduler, client, tokens, tokenA, issue, exchange, first,
     closeServer: () => serverConnection?.close(),
+    peerAdopt: (auth: AuthResponse) => channel.onmessage?.({ data: { type: 'session_adopted', auth } } as MessageEvent),
     refreshes: () => refreshes, advance: (ms: number) => { now += ms; },
     setRefresh: (callback: () => Promise<AuthResponse>) => { doRefresh = callback; },
     reconnect: async () => {
@@ -128,7 +131,7 @@ test('transient refresh failure retains identity, respects cooldown, and later r
   assert.equal(h.refreshes(), 2);
 });
 
-test('definitive refresh denial does not send an anonymous join or retain a player connection', async (t) => {
+test('definitive refresh denial requires a new anonymous server authorization', async (t) => {
   const h = await harness(); t.after(() => dispose(h));
   h.setRefresh(async () => { throw httpErrorFrom(401, { error: { code: 'unauthorized', message: 'denied', requestId: 'test' } }); });
   h.advance(60_000); await h.reconnect();
@@ -136,6 +139,10 @@ test('definitive refresh denial does not send an anonymous join or retain a play
   assert.equal(h.factory.last.sent.length, 0);
   assert.equal(h.sync.getState().connected, false);
   assert.equal(h.sync.getState().myColor, null);
+  h.factory.last.open(); await flush();
+  assert.equal(h.factory.last.sent.some((frame) => JSON.parse(frame).token !== undefined), false);
+  assert.equal(h.exchange().last('joined')?.role, 'spectator');
+  assert.equal(h.sync.resign(), false);
 });
 
 for (const boundary of ['logout', 'account adoption', 'route disposal'] as const) {
@@ -144,7 +151,7 @@ for (const boundary of ['logout', 'account adoption', 'route disposal'] as const
     let release!: (auth: AuthResponse) => void;
     h.setRefresh(() => new Promise((resolve) => { release = resolve; }));
     h.advance(60_000); await h.reconnect();
-    if (boundary === 'logout') h.session.reset(false);
+    if (boundary === 'logout') { h.sync.logoutRequested(); h.session.reset(false); }
     if (boundary === 'account adoption') h.session.adopt(h.issue('bob'), false);
     if (boundary === 'route disposal') h.sync.stop();
     release(h.issue()); await flush();
@@ -185,6 +192,15 @@ test('anonymous spectator reconnect stays anonymous without refresh', async (t) 
   assert.equal(h.refreshes(), 0);
   assert.equal(h.sync.getState().connected, true);
   assert.equal(h.sync.submitMove('e2e4'), null);
+  assert.equal(h.sync.resign(), false);
+  assert.equal(h.sync.offerDraw(), false);
+  assert.equal(h.sync.acceptDraw(), false);
+  assert.equal(h.sync.declineDraw(), false);
+  assert.equal(h.sync.claimFlag(), false);
+  assert.equal(h.sync.abort(), false);
+  const server = h.exchange();
+  server.deliver({ t: 'resign', gameId: 'g1' });
+  assert.equal(server.last('reject')?.code, 'not_a_player', 'real gateway independently denies spectator commands');
 });
 
 test('logout request suspends rejoin before the session logout refresh settles', async (t) => {
@@ -193,11 +209,56 @@ test('logout request suspends rejoin before the session logout refresh settles',
   h.setRefresh(() => new Promise((resolve) => { release = resolve; }));
   h.advance(60_000); await h.reconnect();
   const socket = h.factory.last;
-  h.sync.sessionChanged(null);
+  h.sync.logoutRequested();
   release(h.issue()); await flush(); h.sync.networkOnline();
   assert.equal(socket.sent.length, 0);
   assert.equal(h.factory.last, socket, 'online cannot resurrect a logged-out join');
   assert.equal(h.sync.getState().connected, false);
+});
+
+test('completed logout immediately revokes commands and only a fresh join grants spectator access', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  const old = h.factory.last;
+  h.sync.logoutRequested();
+  assert.equal(h.sync.submitMove('e2e4'), null);
+  assert.equal(h.sync.resign(), false);
+  assert.equal(h.sync.getState().role, null);
+  h.session.reset(false); h.sync.sessionChanged(null);
+  old.emit({ t: 'joined', gameId: 'g1', role: 'white', state: h.sync.getState().snapshot });
+  assert.equal(h.sync.getState().connected, false);
+  h.factory.last.open(); await flush();
+  assert.equal(h.factory.last.sent.some((frame) => JSON.parse(frame).token !== undefined), false);
+  assert.equal(h.sync.getState().role, null, 'transport open does not authorize spectator access');
+  assert.equal(h.exchange().last('joined')?.role, 'spectator');
+  assert.equal(h.sync.getState().myColor, null);
+  assert.equal(h.sync.submitMove('e2e4'), null);
+});
+
+test('an anonymous access rejection never restores the previous player or bypasses server restrictions', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  h.session.reset(false); h.sync.sessionChanged(null);
+  h.factory.last.open(); await flush();
+  h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'access denied' });
+  assert.equal(h.sync.getState().connected, false);
+  assert.equal(h.sync.getState().role, null);
+  assert.equal(h.sync.resign(), false);
+});
+
+test('late refresh completion after completed logout cannot restore spectator privileges to player', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  let release!: (auth: AuthResponse) => void;
+  h.setRefresh(() => new Promise((resolve) => { release = resolve; }));
+  h.advance(60_000); await h.reconnect();
+  const obsolete = h.factory.last;
+  h.sync.logoutRequested(); h.session.reset(false); h.sync.sessionChanged(null);
+  h.factory.last.open(); await flush();
+  assert.equal(h.exchange().last('joined')?.role, 'spectator');
+  release(h.issue()); await flush();
+  obsolete.emit({ t: 'joined', gameId: 'g1', role: 'white', state: h.sync.getState().snapshot });
+  assert.equal(h.session.current === null, true);
+  assert.equal(h.sync.getState().role, 'spectator');
+  assert.equal(h.sync.submitMove('e2e4'), null);
+  assert.equal(h.factory.last.sent.filter((frame) => JSON.parse(frame).t === 'join').length, 1);
 });
 
 test('account replacement requires a new socket and the server assigns the new seat', async (t) => {
@@ -208,6 +269,41 @@ test('account replacement requires a new socket and the server assigns the new s
   h.factory.last.open(); await flush();
   assert.equal(h.exchange().last('joined')?.role, 'black');
   assert.equal(h.sync.getState().myColor, 'b');
+});
+
+test('same-account peer adoption supersedes an in-flight refresh and starts a current join', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  let release!: (auth: AuthResponse) => void;
+  let adoptions = 0;
+  h.session.onAdopted(() => { adoptions++; });
+  h.setRefresh(() => new Promise((resolve) => { release = resolve; }));
+  h.advance(60_000); await h.reconnect();
+  const peer = h.issue(); h.peerAdopt(peer);
+  assert.equal(adoptions, 1, 'the actual cross-tab adoption path is exercised');
+  release(h.issue()); await flush();
+  assert.equal(h.session.current?.tokens.accessToken === peer.tokens.accessToken, true);
+  assert.equal(h.factory.last.sent.filter((frame) => JSON.parse(frame).t === 'join').length, 1);
+  assert.equal(h.exchange().last('joined')?.role, 'white');
+});
+
+test('transient gateway hydration rejection retries the pending join with a bound', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  await h.reconnect();
+  h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'invalid_command', message: 'failed to load game' });
+  assert.equal(h.scheduler.pending, 1);
+  h.advance(1_000); h.scheduler.runNext(); await flush();
+  assert.equal(h.exchange().last('joined')?.role, 'white');
+});
+
+test('explicit recovery can reopen a server-rejected join without reload or session replacement', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  await h.reconnect();
+  h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'invalid or expired token' });
+  const sockets = h.factory.sockets.length;
+  h.sync.networkOnline();
+  assert.equal(h.factory.sockets.length, sockets + 1);
+  h.factory.last.open(); await flush();
+  assert.equal(h.exchange().last('joined')?.role, 'white');
 });
 
 test('bounded retries stop during a persistent refresh outage', async (t) => {
@@ -221,6 +317,21 @@ test('bounded retries stop during a persistent refresh outage', async (t) => {
   assert.equal(h.refreshes(), 4);
   assert.equal(h.factory.last.sent.length, 0);
   assert.equal(h.session.current?.user.id, 'alice');
+  assert.equal(h.sync.getState().recoveryAvailable, true);
+  h.setRefresh(async () => h.issue()); h.advance(30_000);
+  h.sync.networkOnline(); await flush();
+  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal(h.sync.getState().recoveryAvailable, false);
+});
+
+test('unknown game rejection stays terminal without a reconnect storm', async (t) => {
+  const h = await harness(); t.after(() => dispose(h)); await h.reconnect();
+  h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unknown_game', message: 'unknown game' });
+  const sockets = h.factory.sockets.length;
+  h.sync.networkOnline();
+  assert.equal(h.factory.sockets.length, sockets);
+  assert.equal(h.scheduler.pending, 0);
+  assert.equal(h.sync.getState().recoveryAvailable, false);
 });
 
 test('bounded recovery waits for a long server cooldown before spending its next retry', async (t) => {

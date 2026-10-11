@@ -133,6 +133,7 @@ export const GAME_ELEMENT_IDS = [
   'clock-white',
   'clock-black',
   'meta-connection',
+  'game-reconnect',
   'meta-role',
   'meta-white',
   'meta-white-name',

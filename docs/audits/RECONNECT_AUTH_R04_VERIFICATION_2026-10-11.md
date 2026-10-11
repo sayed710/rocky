@@ -5,7 +5,7 @@ This newly verified issue is separate from the historical Fable/Astra remediatio
 
 ## Baseline and RED
 
-- Isolated worktree `C:/Users/hp/rocky-fix-reconnect-auth`, branch
+- Isolated worktree `rocky-fix-reconnect-auth`, branch
   `fix/p1-reconnect-auth-20261011`, clean before reproduction tests.
 - Origin is `https://github.com/sayed710/rocky.git`. Fresh origin/main and live GitHub
   main both equal `2f94dab05290eb33a8ce7c58b5790c65e37354d1`.
@@ -42,21 +42,35 @@ and cooldown. Its only addition exposes the remaining cooldown for scheduling.
 GameSync has three bounded recovery retries. They wait at least until the session
 cooldown expires, including a server Retry-After. A transient failure keeps the
 authenticated identity disconnected; it sends neither expired credentials nor an
-anonymous join. A later online/reconnect event may start another bounded recovery,
-still subject to the same session cooldown. Definitive loss suspends joining.
+anonymous join. After exhaustion, a localized Try again control starts another
+bounded recovery without requiring a browser online event or reload, still subject
+to the same session cooldown. The owner explicitly approved public-game spectator
+continuation after completed logout or definitive invalidation. Logout request
+immediately clears player role, pending commands and route privileges and suspends
+joins while AuthApi settles. Completed loss opens a fresh anonymous socket and
+requires a new gateway acknowledgment before marking the spectator connected.
+Temporary refresh/network failures never take this anonymous path.
 
 Each asynchronous join checks route and socket generations, current user, current
 token and expiry before sending. Socket callbacks are fenced by generation and
 duplicate opens are ignored. A successful gateway `joined` establishes connection
 state; unsolicited snapshots cannot establish authorization. A rejected join clears
-role/color and closes the socket without an automatic rejection loop. Moves/actions
+role/color. Hydration failures receive bounded join retries; authentication rejects
+close without an automatic rejection loop and expose explicit recovery. Unknown
+games remain terminal. Moves/actions
 require an authorized connection. Authoritative snapshots clear pending commands;
 reconnect never resubmits them and retains the existing ply/resume behavior.
 
 Logout invalidates queued joins synchronously before AuthApi can await a shared
 refresh. Account changes close the old socket and require a new server-assigned
-seat. GameController updates board ownership when that seat changes. A join frame
+seat. A newer same-account adoption surviving an older logout is mirrored again
+when that logout settles, without reusing its obsolete authentication result.
+GameController updates board ownership when that seat changes. A join frame
 also rechecks ownership after synchronously observing a persisted logout barrier.
+The current backend exposes no separate private-game visibility policy in its
+gateway/game contracts. This change neither introduces nor bypasses one: a
+server-denied anonymous join remains disconnected without the previous player
+role. The access-denial seam test is not evidence of a deployed private-game ACL.
 Tokens remain in memory and join frames; no new persistent storage, URL, log or
 telemetry token path is introduced. Backend authorization is unchanged.
 
@@ -72,11 +86,11 @@ telemetry token path is introduced. Backend authorization is unchanged.
   connected=true after synchronously clearing the route. The corrected join
   publication checks epoch/socket again; the regression passes. This is a seam
   test of reentrancy, not a new live cross-tab certification claim.
-- Focused final reconnect/socket regressions: 19/19, zero failures/skips. The
+- Initial committed-head reconnect/socket regressions: 19/19, zero failures/skips. The
   controlled gateway connection also closes on disconnect. A missed real
   authoritative move is recovered through a refreshed join and last-ply resume.
 - Corrected full build and root lint/typecheck pass. All 19 hermetic workspaces pass
-  with zero skips; the final full web suite is 1537/1537. Scripts are 333/333.
+  with zero skips; that full web suite is 1537/1537. Scripts are 333/333.
 - Test topology verifies 497 files across 21 explicit zero-skip suites, including
   the new regression files. Live-provider and database-dependent suites are separate.
 - Chromium presence/reconnect suite: 3/3, zero skips/retries, including held refresh
@@ -87,11 +101,22 @@ telemetry token path is introduced. Backend authorization is unchanged.
   retries and one hard failure in the profile portion of the Arabic journey.
   A single-worker isolated rerun of all affected suites passed 131/131 with zero
   retries/skips. The corrected full Chromium acceptance then passed 282/282
-  using one worker, zero failures, retries or skips.
-- Gateway-service build passes. The complete runtime test command fails its
-  required DATABASE_URL/REDIS_URL preflight. Docker Desktop's Linux engine remains
-  unavailable after a startup attempt; Windows denied starting its service. No
-  test skip, topology bypass, factory reset or host configuration change is used.
+  using four workers, zero failures, retries or skips. The command's worker/retry
+  flags were later found to have been consumed by npm; only the observed reporter
+  counts, not the intended invocation options, receive execution credit.
+- The Windows gateway runner initially failed its service-URL preflight, and
+  Docker Desktop's Linux engine was unavailable. That local execution blocker was
+  subsequently resolved through an isolated native Linux source snapshot of
+  `c0e51c13756bbaca385033fdc948a378f7b7ea41`, with hash-verified Node 22.23.3,
+  PostgreSQL 18 and extracted Redis 8.0.5 binaries. The unchanged complete
+  `npm test --prefix services/gateway` runner passed 88/88, zero skips, including
+  genuine Linux SIGTERM and real database/Redis tests. Both disposable services
+  stopped afterward. Snapshot archive SHA-256:
+  `dbdbc6999e25879985e3d5de87c427c05081f2253dc5b2e72606ed53ec56d0ae`.
+  No test-topology bypass or system package installation was used.
+- All applicable CI jobs passed on `c0e51c1`, including the hosted complete gateway,
+  Node 22/24 build/test, PostgreSQL integration, real-engine smoke, and browser/
+  Lighthouse jobs. This older-head CI success does not certify later repairs.
 
 ### Genuine independent review and adjudication
 
@@ -102,9 +127,11 @@ Both reviews used the installed `agy-delegate` relay, agy 1.3.3,
 | --- | --- | --- |
 | Pre-fix, HEAD `2f94dab` | `a7aad7ff-d823-4ba0-a929-714092f40285` | `02d8980deabaeec3e30b7b221aa5bfade2484a7b713e498eef4576265e0ce9c2` |
 | Initial post-fix diff against `2f94dab` | `31bce5a2-882a-4114-a326-a0adba6f4267` | `2a746dc4a3c598cc30c4431aef9318d391d7f9ecf7b24ecc6c097e4d3978a206` |
+| Initial committed head `c0e51c1`, SOURCE VERIFICATION: PASS | `58f4b4fd-ab31-4696-b0f3-51ad7d4e1af2` | `ef7abd6cec4cd0393b8e97c9621912479423d57b47e8a8f4e6fc51b2c7f1b357` |
 
-Local artifacts are under `C:/Users/hp/AppData/Local/Temp/r04-pre-review` and
-`r04-post-review`. The pre-review fingerprint reports a change because Codex added
+Artifacts were retained in task-specific temporary directories named
+`r04-pre-review`, `r04-post-review`, and `r04-final-review`. The pre-review
+fingerprint reports a change because Codex added
 tests/evidence while Gemini inspected unchanged production. Those are Codex-authored
 changes, not independently authored reproductions. The post-review fingerprint
 reports `readOnlyViolation=false`.
@@ -122,24 +149,75 @@ manager defaults to 30 seconds). Its claim that active games are private was als
 rejected: anonymous spectators remain legitimate. Snapshots/resumes cannot establish
 authorization before `joined`, despite the report's imprecise wording.
 
-A fresh independent review of the exact committed final HEAD with a clean worktree
-and no concurrent writers remains required after these corrections. CI, exact-head
+A fresh independent review of the next exact committed HEAD with a clean worktree
+and no concurrent writers is required after the review repairs below. CI, exact-head
 Qodo (bugs/rules/actionable requirement gaps), Greptile, optional CodeRabbit and
 zero unresolved threads remain publication gates. NOT READY FOR MERGE at this
 source checkpoint. Owner alone merges. PR #105 (R-03) overlaps GameSync and its
 test file; its timeout handling is not included here.
+
+### PR #106 first external review round
+
+Greptile's genuine fresh review explicitly identified `c0e51c1` and found a
+same-account peer-refresh race: the old refresh could reject with NoSessionError
+after the peer supplied fresh credentials, while AuthController suppresses
+same-user notifications. A deterministic test exercised the actual SessionManager
+channel adoption and reproduced no rejoin. The repair starts a new guarded join
+operation using only the current fresh credentials for the same user.
+
+Qodo reported five bugs and zero rule violations. Confirmed failures were
+reproduced before production repairs: Black-to-White board orientation remained
+flipped, transient hydration rejection scheduled no retry, and explicit recovery
+could not reopen an intentionally closed rejected join. They are corrected with
+orientation for each assigned player seat, bounded hydration retries, and explicit
+recovery through a new socket. Spectators keep their chosen view orientation.
+Refresh retry exhaustion now exposes a localized recovery control, with focus
+restoration and listener cleanup regressions. The stale proposed gateway blocker
+is corrected by the native Linux execution evidence above. The signed-out
+live-update finding follows the owner's explicit approval: completed logout or
+confirmed invalidation may watch a public game only after a fresh anonymous join.
+Deterministic regressions cover immediate gesture/action revocation, delayed
+refresh and obsolete player responses after spectator authorization, rejection of
+anonymous access, and retained player identity during transient refresh failures.
+A real AuthController/SessionManager logout regression also reproduced a missing
+same-account adoption notification after an older logout; the repair publishes
+only the current canonical session, never the old logout/refresh result.
+
+The pre-policy repair suite passed all 19 hermetic workspaces (web 1544/1544).
+The approved-policy suite passed all 19 hermetic workspaces (web 1549/1549),
+full build, root lint/typecheck, scripts 333/333, and topology (498 files/21 suites).
+The focused controller/route/recovery/reconnect selection passed 80/80; the
+reconnect/socket security matrix passed 26/26, and live presence passed 4/4.
+All have zero skips. The prior full Chromium repair pass was 283/283 with one
+worker and zero retries/skips. The first approved-policy full run had 282 passes
+and one `browser.newContext: Target page, context or browser has been closed`
+failure before the Arabic/light seek-focus test entered its page. The complete
+affected spec passed 7/7 in isolation with zero retries/skips. No source failure
+or underlying browser-exit cause was established. The second full run (two
+workers, zero retries) again had 282 passes and one identical context-creation
+failure, this time before the seek-acceptance page opened. No application assertion
+failed in either incident. The final committed snapshot will be verified with
+the complete native Linux browser suite; its result and final-head gateway/model/
+hosted gates are tracked on PR #106 rather than retroactively certified here.
+
+These repairs require new exact-head model/CI/Qodo/Greptile evidence. Older-head
+reviews and passing checks are historical only. No thread is resolved as fixed
+before its correction is published. NOT READY FOR MERGE.
 
 ## Proposed coordinated PROJECT_STATE append
 
 ZadLoop R-04 was independently reverified against main `2f94dab`: a mounted game
 reconnect sent its cached expired access token and the real gateway rejected it.
 The correction reuses SessionManager validity/refresh/cooldown, requires gateway
-join acknowledgment, fences obsolete sockets/async work, suspends on logout and
-reauthorizes account changes. Component expiry RED/GREEN, 19 focused regressions,
-full web 1537/1537, all 19 hermetic workspaces, lint/build, scripts 333/333 and full
-Chromium 282/282 (including three live reconnect cases) pass with zero skips.
+join acknowledgment, fences obsolete sockets/async work, suspends when logout is
+requested, and reauthorizes account changes. Owner-approved completed logout and
+definitive invalidation require a fresh anonymous server join to watch public
+games; temporary refresh failures preserve player identity and bounded recovery.
+Component expiry RED/GREEN, 26 reconnect/socket regressions, full web 1549/1549,
+all 19 hermetic workspaces, lint/build, and scripts 333/333 pass with zero skips.
 Initial genuine Gemini review
-was critically corrected; exact-head delivery gates remain separate. Gateway
-runtime is locally blocked by unavailable Docker/services. This new issue does
+was critically corrected; complete native Linux gateway runtime 88/88 also passed.
+External review repairs and their fresh exact-head delivery gates remain pending.
+This new issue does
 not reopen or rewrite the historical Fable/Astra closure. Owner integrates the
 final PR/head/gate record after verification; PROJECT_STATE is untouched here.

@@ -48,8 +48,10 @@ export interface PendingMove {
 /** Observable, authoritative client-side game state. */
 export interface GameSyncState {
   readonly gameId: string;
-  /** True while the underlying socket is open. */
+  /** True after the gateway acknowledges a join on the active socket. */
   readonly connected: boolean;
+  /** Automatic recovery exhausted, or a rejected join requires an explicit retry. */
+  readonly recoveryAvailable: boolean;
   readonly role: Role | null;
   /** Our wire color, or null when spectating / unknown. */
   readonly myColor: WsColor | null;
@@ -134,6 +136,7 @@ function initialState(gameId: string): GameSyncState {
   return {
     gameId,
     connected: false,
+    recoveryAvailable: false,
     role: null,
     myColor: null,
     snapshot: null,
@@ -166,6 +169,7 @@ export class GameSync {
   private retryHandle: unknown = null;
   private retryAttempt = 0;
   private suspended = false;
+  private terminalJoinFailure = false;
   private authorizedUserId: string | null = null;
   private state: GameSyncState;
   private clientSeq = 0;
@@ -216,27 +220,37 @@ export class GameSync {
     this.client.networkOffline();
   }
 
-  /** The browser reported it is back online — retry the connection immediately. */
+  /** Retry after network restoration or an explicit recovery action. */
   networkOnline(): void {
-    if (this.suspended) return;
+    if (!this.unsubscribe || this.suspended || this.terminalJoinFailure) return;
+    this.patch({ recoveryAvailable: false });
     if (this.client.state === 'open' && !this.state.connected) {
       this.clearAuthRetry();
       this.retryAttempt = 0;
       this.joinCurrentSocket();
       return;
     }
-    this.client.reconnectNow();
+    if (this.client.state === 'closed') this.client.connect();
+    else this.client.reconnectNow();
   }
 
-  /** Invalidate queued joins synchronously at logout or an account boundary. */
-  sessionChanged(userId: string | null): void {
+  /** Revoke player privileges before asynchronous logout can refresh credentials. */
+  logoutRequested(): void {
     if (!this.unsubscribe) return;
     this.invalidateJoin();
-    this.suspended = userId === null;
+    this.suspended = true;
+    this.terminalJoinFailure = false;
     this.authorizedUserId = null;
-    this.patch({ connected: false, role: null, myColor: null, pending: null, pendingAction: null });
+    this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null, pending: null, pendingAction: null });
     this.client.close(1000, 'session-changed');
-    if (!this.suspended) this.client.connect();
+  }
+
+  /** A completed session boundary requires a fresh server-authorized join. */
+  sessionChanged(_userId: string | null): void {
+    if (!this.unsubscribe) return;
+    this.logoutRequested();
+    this.suspended = false;
+    this.client.connect();
   }
 
   /** Wire up the client and open the connection. */
@@ -329,7 +343,8 @@ export class GameSync {
 
   private handleOpen(): void {
     this.invalidateJoin();
-    if (this.suspended) return;
+    if (this.suspended || this.terminalJoinFailure) return;
+    this.patch({ recoveryAvailable: false });
     if (this.joined) {
       this.reconnectLastPly = this.state.ply;
     }
@@ -356,6 +371,22 @@ export class GameSync {
     this.clearAuthRetry();
   }
 
+  private scheduleJoinRetry(session: SessionManager | undefined): void {
+    if (this.retryAttempt >= 3) {
+      this.patch({ recoveryAvailable: true });
+      return;
+    }
+    const epoch = this.joinEpoch;
+    const socket = this.client.generation;
+    const delay = Math.max(1_000 * 2 ** this.retryAttempt++, session?.refreshRetryDelayMs ?? 0);
+    this.clearAuthRetry();
+    this.retryHandle = this.scheduler.setTimeout(() => {
+      this.retryHandle = null;
+      if (this.unsubscribe && !this.suspended && epoch === this.joinEpoch
+        && socket === this.client.generation && this.client.state === 'open') this.joinCurrentSocket();
+    }, delay);
+  }
+
   private joinCurrentSocket(): void {
     if (!this.unsubscribe || this.suspended || this.client.state !== 'open'
       || this.resolvingToken || this.awaitingJoin || this.state.connected) return;
@@ -370,6 +401,7 @@ export class GameSync {
       this.awaitingJoin = true;
       if (!this.client.send({ t: 'join', gameId: this.gameId, ...(token !== undefined ? { token } : {}) })) {
         this.awaitingJoin = false;
+        this.patch({ recoveryAvailable: true });
       }
     };
     const session = this.session;
@@ -403,15 +435,22 @@ export class GameSync {
     }).catch((error: unknown) => {
       if (!active()) return;
       this.resolvingToken = false;
-      if (isTransientRefreshFailure(error) && this.retryAttempt < 3) {
-        const delay = Math.max(1_000 * 2 ** this.retryAttempt++, session.refreshRetryDelayMs);
-        this.retryHandle = this.scheduler.setTimeout(() => {
-          this.retryHandle = null;
-          if (active()) this.joinCurrentSocket();
-        }, delay);
-      } else if (!session.current || error instanceof NoSessionError) {
-        this.suspended = true;
-        this.patch({ connected: false, role: null, myColor: null, pending: null, pendingAction: null });
+      session.captureGeneration();
+      if (!active()) return;
+      const current = session.current;
+      if (error instanceof NoSessionError && current?.user.id === initial.user.id
+        && !session.isAccessTokenExpired(current)) {
+        // A peer replaced this refresh with fresh credentials for the same account.
+        // Start a new operation; the superseded continuation never publishes its token.
+        this.invalidateJoin();
+        this.retryAttempt = 0;
+        this.joinCurrentSocket();
+      } else if (isTransientRefreshFailure(error)) {
+        this.scheduleJoinRetry(session);
+      } else if (!current) {
+        this.sessionChanged(null);
+      } else if (error instanceof NoSessionError) {
+        this.sessionChanged(current.user.id);
       }
     });
   }
@@ -494,6 +533,7 @@ export class GameSync {
       pendingAction: null,
       lastReject: null,
       connected: true,
+      recoveryAvailable: false,
     });
   }
 
@@ -534,9 +574,18 @@ export class GameSync {
 
   private applyReject(msg: RejectMessage): void {
     if (this.awaitingJoin) {
-      this.invalidateJoin();
-      this.patch({ connected: false, role: null, myColor: null, pending: null, pendingAction: null, lastReject: msg });
-      this.client.close(1000, 'join-rejected');
+      this.awaitingJoin = false;
+      this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null,
+        pending: null, pendingAction: null, lastReject: msg });
+      if (msg.code === 'invalid_command') {
+        // Gateway hydration may fail transiently before any authorization is granted.
+        this.scheduleJoinRetry(this.session);
+      } else {
+        this.invalidateJoin();
+        this.terminalJoinFailure = msg.code === 'unknown_game';
+        this.patch({ recoveryAvailable: !this.terminalJoinFailure });
+        this.client.close(1000, 'join-rejected');
+      }
       return;
     }
     const pending = this.state.pending;

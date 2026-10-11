@@ -109,6 +109,31 @@ test('logout notifies the game boundary before awaiting logout authentication', 
   assert.equal(notified, true); release(); await pending; controller.dispose();
 });
 
+test('same-account adoption during an older logout resumes the current session notification', async (t) => {
+  const auth = (token: string): AuthResponse => ({
+    user: { id: 'u1', handle: 'alice', country: null, createdAt: '2020-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: token, tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  });
+  let release!: () => void;
+  const client = new GambitClient({ baseUrl: 'https://api.test', tokenStore: new MemoryTokenStore(),
+    transport: { send: async (request) => request.url.endsWith('/v1/auth/logout')
+      ? new Promise((resolve) => { release = () => resolve(json(200, {})); })
+      : json(200, auth('initial-token')) } });
+  const notifications: (string | null)[] = [];
+  const controller = new AuthController({ client, storage: makeFakeStorage(), callbacks: {
+    onSessionChange: (session) => { notifications.push(session?.userId ?? null); },
+    onLogoutRequested: () => { notifications.push('ending'); }, onPending: () => {}, onError: () => {},
+  } });
+  t.after(() => controller.dispose());
+  await controller.login('alice', 'password');
+  const logout = controller.logout(); await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(typeof release, 'function');
+  client.session.adopt(auth('newer-token'), false);
+  release(); await logout;
+  assert.equal(client.session.current?.tokens.accessToken === 'newer-token', true);
+  assert.deepEqual(notifications, ['u1', 'ending', 'u1']);
+});
+
 test('login creates a session with correct fields from AuthResponse', async () => {
   const client = makeFakeClient() as any;
   let sessions: (AuthSession | null)[] = [];

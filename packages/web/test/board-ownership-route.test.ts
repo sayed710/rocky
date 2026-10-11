@@ -25,7 +25,7 @@ function live(fen: string, turn: 'w' | 'b', legalMoves: StateView['legalMoves'])
   return { ...makeState(fen, turn === 'w' ? 0 : 1, turn), legalMoves };
 }
 
-function setup(options: { open?: boolean } = {}) {
+function setup(options: { open?: boolean; userId?: string } = {}) {
   const sockets = new FakeSocketFactory();
   const app = createApp({
     config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
@@ -33,7 +33,7 @@ function setup(options: { open?: boolean } = {}) {
     httpTransport: new FakeTransport(() => json(404, {})),
   });
   const { doc, elements } = createGameDocument();
-  adoptGameSession(app.api.session);
+  adoptGameSession(app.api.session, 'token', options.userId ?? 'u1');
   const boardEl = elements.get('board')!;
   Object.assign(boardEl, { getBoundingClientRect: () => ({ left: 0, top: 0, width: BOARD_PX, height: BOARD_PX }) });
   // The fake document has no text nodes; without one the board writes its status as plain text.
@@ -44,7 +44,7 @@ function setup(options: { open?: boolean } = {}) {
     gameId: 'g-test-1',
     createGameSync: app.createGameSync,
     createGameOracle: app.createGameOracle,
-    getAccessToken: () => 'token',
+    getAccessToken: () => app.api.session.current?.tokens.accessToken,
     client: app.api,
     token: 'token',
     initialSessionId: 'u1',
@@ -93,6 +93,16 @@ function setup(options: { open?: boolean } = {}) {
     sockets.last.emit({ t: 'state', gameId: 'g-test-1', state });
   };
   return {
+    logout: () => {
+      mounted.onLogoutRequested();
+      app.api.session.reset(false);
+      mounted.onSessionChange(null);
+    },
+    changeAccount: (userId: string) => {
+      adoptGameSession(app.api.session, 'token', userId);
+      mounted.onSessionChange({ handle: userId, userId });
+      sockets.last.open();
+    },
     open: () => sockets.last.open(),
     elements, mounted, submitted, enabled, click, cellAttr, selected, premoves, moveFrames, join, sync, orientation,
     feedback: () => elements.get('move-feedback')?.innerHTML ?? '',
@@ -105,6 +115,41 @@ function setup(options: { open?: boolean } = {}) {
     },
   };
 }
+
+test('route: logout immediately disables gestures and a fresh spectator join remains read-only', () => {
+  const r = setup();
+  try {
+    r.join('white', live(START, 'w', { e2: ['e4'] }));
+    r.logout();
+    r.click('e2'); r.click('e4');
+    assert.deepEqual(r.submitted, []);
+    assert.deepEqual(r.selected(), []);
+    r.open(); r.join('spectator', live(START, 'w', { e2: ['e4'] }));
+    r.click('e2'); r.click('e4');
+    assert.deepEqual(r.submitted, []);
+    assert.equal(r.enabled.at(-1), false);
+  } finally { r.dispose(); }
+});
+
+test('route: black-to-white account adoption restores white orientation', () => {
+  const r = setup({ userId: 'u2' });
+  try {
+    r.join('black', live(START, 'w', {}));
+    assert.equal(r.orientation(), 'black');
+    r.changeAccount('u1');
+    r.join('white', live(START, 'w', {}));
+    assert.equal(r.orientation(), 'white');
+  } finally { r.dispose(); }
+});
+
+test('route: spectator resolution preserves a manually chosen orientation', () => {
+  const r = setup();
+  try {
+    r.mounted.board.setOrientation('black');
+    r.join('spectator', live(START, 'w', {}));
+    assert.equal(r.orientation(), 'black');
+  } finally { r.dispose(); }
+});
 
 test('route: before the role is known the board takes no gesture and is never enabled', () => {
   const r = setup();

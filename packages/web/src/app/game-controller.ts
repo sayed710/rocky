@@ -46,6 +46,7 @@ export interface GameActionState {
 
 export interface GameMetadataState {
   readonly connected: boolean;
+  readonly recoveryAvailable: boolean;
   readonly role: Role | null;
   readonly myColor: WsColor | null;
   readonly players: { readonly white: string; readonly black: string } | null;
@@ -509,6 +510,7 @@ export class GameController {
 
     const metadataChanged = this.currentMetadataState === undefined
       || this.currentMetadataState.connected !== state.connected
+      || this.currentMetadataState.recoveryAvailable !== state.recoveryAvailable
       || this.currentMetadataState.role !== state.role
       || this.currentMetadataState.myColor !== state.myColor
       || this.currentMetadataState.players?.white !== state.snapshot?.players.white
@@ -523,6 +525,7 @@ export class GameController {
     if (metadataChanged) {
       this.currentMetadataState = {
         connected: state.connected,
+        recoveryAvailable: state.recoveryAvailable,
         role: state.role,
         myColor: state.myColor,
         players: state.snapshot?.players ?? null,

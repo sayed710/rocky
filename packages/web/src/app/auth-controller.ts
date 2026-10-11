@@ -368,6 +368,7 @@ export class AuthController {
   /** Log out and clear the persisted session. */
   async logout(): Promise<void> {
     if (this.disposed) return;
+    const originalSession = this.session;
     this.callbacks.onLogoutRequested?.();
     const generation = this.sessionGeneration;
     this.beginPendingOperation();
@@ -380,8 +381,16 @@ export class AuthController {
         // `AuthApi.logout()` clears the token manager before awaiting the server. If another tab
         // signs in after that boundary, its adoption is the newer state and must remain mirrored
         // here when the older logout request eventually settles.
+        this.client.session.captureGeneration();
         if (generation === this.sessionGeneration && !this.client.session.isAuthenticated) {
           this.clearControllerSession();
+        } else if (generation === this.sessionGeneration && this.session === originalSession) {
+          const current = this.client.session.current;
+          if (current) {
+            const mirrored = this.adoptSession(current.user);
+            // Same-account adoption is normally deduplicated, but logout suspended the game.
+            if (mirrored === originalSession) this.callbacks.onSessionChange(mirrored);
+          }
         }
       }
       this.finishPendingOperation();
