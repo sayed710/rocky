@@ -865,6 +865,11 @@ export class SessionManager {
     return refreshed.tokens.accessToken;
   }
 
+  /** Remaining refresh cooldown, so bounded callers need not spend retries inside it. */
+  get refreshRetryDelayMs(): number {
+    return this.refreshCooldown ? Math.max(0, this.refreshCooldown.retryAt - this.now()) : 0;
+  }
+
   /**
    * Restore from the httpOnly cookie, including when no in-memory session exists.
    * Discard the response before saving or broadcasting if a reset, adoption, or

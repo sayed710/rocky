@@ -1175,7 +1175,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     puzzleController.invalidate();
   };
 
-  const gameSync = createGameSync({ gameId, ...(token !== undefined ? { token } : {}) });
+  const gameSync = createGameSync({ gameId, session: deps.client.session, ...(token !== undefined ? { token } : {}) });
   const oracle = createGameOracle(gameSync);
 
   const board = mountBoard(
@@ -1857,6 +1857,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     analysis,
     onSessionChange: (session) => {
       if (analysisDisposed) return;
+      gameSync.sessionChanged(session?.userId ?? null);
       gameReviewSessionId = session?.userId ?? null;
       gameReviewController.sessionChanged(gameReviewSessionId);
       refreshAnalysisControls();

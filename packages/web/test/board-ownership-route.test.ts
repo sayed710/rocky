@@ -6,6 +6,7 @@ import type { StateView } from '../src/net/ws-protocol.js';
 import { createGameDocument, makeFinishedState, makeState } from './support/analysis-fixtures.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
 import { FakeTransport, json } from './support/fake-transport.js';
+import { adoptGameSession } from './support/game-session.js';
 
 /**
  * The game route's board ownership: who may move which pieces, driven only by the authoritative
@@ -32,6 +33,7 @@ function setup(options: { open?: boolean } = {}) {
     httpTransport: new FakeTransport(() => json(404, {})),
   });
   const { doc, elements } = createGameDocument();
+  adoptGameSession(app.api.session);
   const boardEl = elements.get('board')!;
   Object.assign(boardEl, { getBoundingClientRect: () => ({ left: 0, top: 0, width: BOARD_PX, height: BOARD_PX }) });
   // The fake document has no text nodes; without one the board writes its status as plain text.

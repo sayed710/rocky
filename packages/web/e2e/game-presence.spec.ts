@@ -4,6 +4,95 @@ import { randomUUID } from 'node:crypto';
 test.skip(!process.env['GAMBIT_E2E_BACKEND'], 'requires running backend');
 
 test.describe('Game presence flow', () => {
+  test('Logout during reconnect refresh cannot send another authenticated join', async ({ browser, request }) => {
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const handle = `e2e-logout-${suffix}`;
+    const registration = await request.post('/v1/auth/register', {
+      data: { handle, password: 'test-password-123', email: `${handle}@example.test` },
+    });
+    expect(registration.ok()).toBeTruthy();
+    const auth = await registration.json();
+    const game = await request.post('/e2e/games', { data: { whiteId: auth.user.id, blackId: `opponent-${suffix}` } });
+    expect(game.ok()).toBeTruthy();
+    const { gameId } = await game.json();
+    const context = await browser.newContext();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      await context.addCookies([{ name: 'gambit_refresh', value: auth.tokens.refreshToken,
+        domain: 'localhost', path: '/v1/auth', httpOnly: true, secure: false, sameSite: 'Strict' }]);
+      const page = await context.newPage();
+      await page.clock.install();
+      await page.addInitScript(({ handle, uid }) => {
+        localStorage.setItem('gambit-session', JSON.stringify({ handle, userId: uid }));
+      }, { handle, uid: auth.user.id });
+      let joins = 0;
+      page.on('websocket', (socket) => socket.on('framesent', ({ payload }) => {
+        if (JSON.parse(String(payload)).t === 'join') joins++;
+      }));
+      await page.goto(`/game/${gameId}`);
+      await expect(page.locator('#meta-connection')).toHaveText('Connected');
+      await page.route('**/v1/auth/refresh', async (route) => { await held; await route.continue(); });
+      await page.clock.setSystemTime(new Date(Date.now() + (auth.tokens.expiresIn + 5) * 1_000));
+      await context.setOffline(true);
+      const refresh = page.waitForRequest('**/v1/auth/refresh');
+      await context.setOffline(false); await refresh;
+      await page.locator('#auth-logout').click();
+      release();
+      await expect(page.locator('#auth-status')).toHaveText('Not signed in');
+      await expect(page.locator('#meta-connection')).not.toHaveText('Connected');
+      await expect(page.locator('#meta-role')).not.toHaveText(/Playing as/);
+      expect(joins).toBe(1);
+    } finally { release(); await context.close(); }
+  });
+
+  test('Mounted player reconnect proactively refreshes its access token', async ({ browser, request }) => {
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const handle = `e2e-refresh-${suffix}`;
+    const registration = await request.post('/v1/auth/register', {
+      data: { handle, password: 'test-password-123', email: `${handle}@example.test` },
+    });
+    expect(registration.ok()).toBeTruthy();
+    const auth = await registration.json();
+    const game = await request.post('/e2e/games', { data: { whiteId: auth.user.id, blackId: `opponent-${suffix}` } });
+    expect(game.ok()).toBeTruthy();
+    const { gameId } = await game.json();
+    const context = await browser.newContext();
+    try {
+      await context.addCookies([{ name: 'gambit_refresh', value: auth.tokens.refreshToken,
+        domain: 'localhost', path: '/v1/auth', httpOnly: true, secure: false, sameSite: 'Strict' }]);
+      const page = await context.newPage();
+      await page.clock.install();
+      await page.addInitScript(({ handle, uid }) => {
+        localStorage.setItem('gambit-session', JSON.stringify({ handle, userId: uid }));
+      }, { handle, uid: auth.user.id });
+      let refreshes = 0;
+      const joinTokens: string[] = [];
+      page.on('request', (req) => { if (req.url().endsWith('/v1/auth/refresh')) refreshes++; });
+      page.on('websocket', (socket) => socket.on('framesent', ({ payload }) => {
+        const frame = JSON.parse(String(payload));
+        if (frame.t === 'join') joinTokens.push(frame.token);
+      }));
+      await page.goto(`/game/${gameId}`);
+      await expect(page.locator('#meta-connection')).toHaveText('Connected');
+      await expect(page.locator('#meta-role')).toHaveText('Playing as White');
+      expect(refreshes).toBe(1);
+      // Advance the browser's expiry clock only. The component integration regression
+      // separately advances the actual verifier clock to prove server expiry rejection.
+      await page.clock.setSystemTime(new Date(Date.now() + (auth.tokens.expiresIn + 5) * 1_000));
+      await context.setOffline(true);
+      await expect(page.locator('#meta-connection')).toHaveText('Reconnecting…');
+      await context.setOffline(false);
+      await expect(page.locator('#meta-connection')).toHaveText('Connected');
+      await expect(page.locator('#meta-role')).toHaveText('Playing as White');
+      expect(refreshes).toBe(2);
+      expect(joinTokens.length).toBe(2);
+      expect(Boolean(joinTokens[0]) && Boolean(joinTokens[1]) && joinTokens[0] !== joinTokens[1]).toBe(true);
+      const persisted = await page.evaluate(() => localStorage.getItem('gambit-session'));
+      expect(Object.keys(JSON.parse(persisted!)).sort()).toEqual(['handle', 'userId']);
+    } finally { await context.close(); }
+  });
+
   test('Presence updates for players and spectators with reconnect recovery', async ({ browser, request }) => {
     // 1. Setup 2 users and create a game
     const suffix = randomUUID().replaceAll('-', '').slice(0, 10);

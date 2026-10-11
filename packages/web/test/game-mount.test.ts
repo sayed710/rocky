@@ -6,6 +6,7 @@ import { FakeSocketFactory } from './support/fake-socket.js';
 import { FakeTransport, json } from './support/fake-transport.js';
 import type { AuthSession } from '../src/app/auth-controller.js';
 import type { AuthResponse } from '../src/api/models.js';
+import { adoptGameSession } from './support/game-session.js';
 
 class FakeElement {
   textContent = '';
@@ -287,6 +288,7 @@ test('withdrawn draw controls return focus to game status only when they contain
 test('mountGame opens WebSocket immediately when token is provided', () => {
   const sockets = new FakeSocketFactory();
   const app = createTestApp(sockets);
+  adoptGameSession(app.api.session, 'test-token');
   const { doc, elements } = createGameDocument();
   const boardEl = elements.get('board')! as unknown as HTMLElement;
 

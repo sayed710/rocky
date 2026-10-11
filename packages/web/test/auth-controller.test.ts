@@ -93,6 +93,22 @@ test('initial session is null and isAuthenticated is false', () => {
   assert.equal(ctrl.isAuthenticated(), false);
 });
 
+test('logout notifies the game boundary before awaiting logout authentication', async () => {
+  let notified = false;
+  let release!: () => void;
+  const response = new Promise<void>((resolve) => { release = resolve; });
+  const client = makeFakeClient({ logout: async () => {
+    assert.equal(notified, true, 'pending rejoin is invalidated before the auth operation');
+    await response;
+  } }) as any;
+  const controller = new AuthController({ client, storage: makeFakeStorage(), callbacks: {
+    onSessionChange: () => {}, onPending: () => {}, onError: () => {},
+    onLogoutRequested: () => { notified = true; },
+  } });
+  const pending = controller.logout();
+  assert.equal(notified, true); release(); await pending; controller.dispose();
+});
+
 test('login creates a session with correct fields from AuthResponse', async () => {
   const client = makeFakeClient() as any;
   let sessions: (AuthSession | null)[] = [];

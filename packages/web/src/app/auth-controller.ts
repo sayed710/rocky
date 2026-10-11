@@ -51,6 +51,8 @@ export interface AuthErrorInfo {
 export interface AuthCallbacks {
   /** Called when the session state changes (login, logout, restore). */
   onSessionChange: (session: AuthSession | null) => void;
+  /** Synchronous boundary before logout can await a shared token refresh. */
+  onLogoutRequested?: () => void;
   /** Called when an auth action is pending (for UI spinner/disabled state). */
   onPending: (pending: boolean) => void;
   /** Called when an error occurs (for UI error display). */
@@ -366,6 +368,7 @@ export class AuthController {
   /** Log out and clear the persisted session. */
   async logout(): Promise<void> {
     if (this.disposed) return;
+    this.callbacks.onLogoutRequested?.();
     const generation = this.sessionGeneration;
     this.beginPendingOperation();
     try {

@@ -89,9 +89,8 @@ export interface GameControllerCallbacks {
    */
   onExplainableChange?: () => void;
   /**
-   * Called when the controller's color is first resolved from the server's
-   * `joined` message (via `GameSyncState.myColor`). The bootstrap uses this
-   * to set board orientation. Called once, with `null` for spectators.
+   * Called when server-authorized board ownership changes, including `null`
+   * for spectators or a cleared session. Bootstrap also sets orientation here.
    */
   onColor?: (color: WsColor | null) => void;
   /**
@@ -152,7 +151,7 @@ export class GameController {
   private lastEmittedSec: { w: number; b: number } | undefined = undefined;
   private currentActionState: GameActionState | undefined = undefined;
   private currentMetadataState: GameMetadataState | undefined = undefined;
-  private colorEmitted = false;
+  private currentColor: WsColor | null | undefined;
 
   constructor(options: GameControllerOptions) {
     this.gameSync = options.gameSync;
@@ -401,14 +400,10 @@ export class GameController {
       }
     }
 
-    // --- Color (emit once when resolved from server join) ---
-    if (!this.colorEmitted && state.myColor !== null) {
-      this.colorEmitted = true;
+    // Account changes clear ownership before the next server-authorized seat is known.
+    if ((state.role !== null || this.currentColor !== undefined) && this.currentColor !== state.myColor) {
+      this.currentColor = state.myColor;
       this.callbacks.onColor?.(state.myColor);
-    } else if (!this.colorEmitted && state.role !== null) {
-      // Spectator: role is resolved but myColor is null.
-      this.colorEmitted = true;
-      this.callbacks.onColor?.(null);
     }
 
     // --- Turn ---
@@ -419,6 +414,7 @@ export class GameController {
     // changes, not just when state.turn changes, because pending toggles
     // while turn stays constant.
     const myTurn = state.turn !== null
+      && state.connected
       && state.myColor !== null
       && state.turn === state.myColor
       && state.pending === null

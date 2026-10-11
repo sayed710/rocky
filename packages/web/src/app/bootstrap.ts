@@ -323,6 +323,7 @@ export function bootstrap(
     i18n: app.i18n,
     ...(deps?.webauthnAdapter !== undefined ? { webauthnAdapter: deps.webauthnAdapter } : {}),
     callbacks: {
+      onLogoutRequested: () => gameSessionHandler?.(null),
       onSessionChange: (session) => {
         currentAuthSession = session;
         if (session !== null) {

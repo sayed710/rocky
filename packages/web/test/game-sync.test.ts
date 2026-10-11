@@ -52,7 +52,7 @@ test('start joins on open', () => {
   sync.start();
   factory.last.open();
   assert.deepEqual(JSON.parse(factory.last.sent[0]!), { t: 'join', gameId: 'g1', token: 'token-u1' });
-  assert.equal(sync.getState().connected, true);
+  assert.equal(sync.getState().connected, false, 'transport open awaits gateway authorization');
 });
 
 test('joined populates role, color and snapshot', () => {
@@ -188,6 +188,7 @@ test('M5: stop unsubscribes but does NOT close the shared connection', () => {
   const { factory, sync } = setup();
   sync.start();
   factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
   assert.equal(sync.getState().connected, true);
   sync.stop();
   // M5: GameSync.stop() no longer closes the WsClient — the composition root
@@ -336,6 +337,8 @@ test('M5: two GameSyncs on one client; stopping one leaves the other receiving',
   factory.last.open();
 
   // Both should be connected and receiving.
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  factory.last.emit({ t: 'joined', gameId: 'g2', role: 'white', state: { ...stateView(0, 'w'), gameId: 'g2' } });
   assert.equal(sync1.getState().connected, true);
   assert.equal(sync2.getState().connected, true);
 

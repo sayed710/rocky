@@ -17,6 +17,7 @@ import type { GambitClient } from '../src/api/client.js';
 import type { AttemptResultView, StepView } from '../src/api/models.js';
 import { FakeTransport, json } from './support/fake-transport.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
+import { adoptGameSession } from './support/game-session.js';
 import { makeState, sampleAnalysisResponse } from './support/analysis-fixtures.js';
 import { STARTING_FEN } from '../src/core/position.js';
 import { RateLimitError, ServiceUnavailableError } from '../src/net/errors.js';
@@ -265,7 +266,8 @@ async function gameSetup(analysis: Record<string, unknown> = {}) {
   const i18n = locale();
   const sockets = new FakeSocketFactory();
   const app = createApp({ config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' }, wsFactory: sockets.factory, i18n });
-  const client = { session: { current: null }, predictMistake: analysis['predictMistake'], capabilities: async () => CAPABILITIES, analysis } as unknown as GambitClient;
+  adoptGameSession(app.api.session);
+  const client = { session: app.api.session, predictMistake: analysis['predictMistake'], capabilities: async () => CAPABILITIES, analysis } as unknown as GambitClient;
   const mounted = mountGame({ doc, boardEl: elements.get('board')! as unknown as HTMLElement, gameId: 'g-test-1', createGameSync: app.createGameSync, createGameOracle: app.createGameOracle, getAccessToken: () => 'token', client, token: 'token', restorePromise: Promise.resolve(null), i18n });
   sockets.last.open();
   sockets.last.emit({ t: 'joined', gameId: 'g-test-1', role: 'white', state: makeState(STARTING_FEN) });
