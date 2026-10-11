@@ -156,7 +156,11 @@ export class AuthController {
    */
   private sessionGeneration = 0;
   private pendingOperations = 0;
-  private logoutInFlight: Promise<void> | null = null;
+  private logoutInFlight: {
+    readonly promise: Promise<void>;
+    readonly userId: string | null;
+    readonly accessToken: string | undefined;
+  } | null = null;
   private disposed = false;
 
   constructor(opts: AuthControllerOptions) {
@@ -369,26 +373,30 @@ export class AuthController {
   /** Log out and clear the persisted session. */
   logout(): Promise<void> {
     if (this.disposed) return Promise.resolve();
-    if (this.logoutInFlight) return this.logoutInFlight;
+    const current = this.client.session.current;
+    const userId = current?.user.id ?? this.session?.userId ?? null;
+    const existing = this.logoutInFlight;
+    if (existing && existing.userId === userId
+      && (!current || existing.accessToken === current.tokens.accessToken)) return existing.promise;
     let resolve!: () => void;
     let reject!: (error: unknown) => void;
     const pending = new Promise<void>((success, failure) => { resolve = success; reject = failure; });
     // Publish the lock before synchronous callbacks, including a reentrant logout request.
-    this.logoutInFlight = pending;
-    void this.performLogout().then(() => {
-      this.logoutInFlight = null;
+    this.logoutInFlight = { promise: pending, userId, accessToken: current?.tokens.accessToken };
+    const generation = ++this.sessionGeneration;
+    void this.performLogout(generation).then(() => {
+      if (this.logoutInFlight?.promise === pending) this.logoutInFlight = null;
       resolve();
     }, (error: unknown) => {
-      this.logoutInFlight = null;
+      if (this.logoutInFlight?.promise === pending) this.logoutInFlight = null;
       reject(error);
     });
     return pending;
   }
 
-  private async performLogout(): Promise<void> {
+  private async performLogout(generation: number): Promise<void> {
     const originalSession = this.session;
     this.callbacks.onLogoutRequested?.();
-    const generation = this.sessionGeneration;
     this.beginPendingOperation();
     try {
       await this.client.auth.logout();

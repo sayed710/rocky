@@ -227,6 +227,28 @@ test('a login adopted while logout waits on its refresh survives that refresh fa
   assert.equal(c.session.current?.tokens.accessToken, 'newer', 'logout must not clear the newer session');
 });
 
+test('an older logout cannot revoke a fresh different account adopted during its failed refresh', async (context) => {
+  let failRefresh!: (error: Error) => void;
+  let logoutRequests = 0;
+  const t = new FakeTransport(() => json(200, auth('expired', 'r', 0))).onEach((request) => {
+    if (request.url.endsWith('/v1/auth/logout')) logoutRequests++;
+    return json(200, {});
+  });
+  const c = make(t);
+  context.after(() => c.session.dispose());
+  await c.auth.login({ handle: 'alice', password: 'pw' });
+  const pending = new Promise<never>((_resolve, reject) => { failRefresh = reject; });
+  const send = t.send.bind(t);
+  t.send = (request) => request.url.endsWith('/v1/auth/refresh') ? pending : send(request);
+  const logout = c.auth.logout(); await Promise.resolve();
+  const newer = auth('newer-account', 'newer-refresh', 900);
+  c.session.adopt({ ...newer, user: { ...newer.user, id: 'u2', handle: 'bob' } }, false);
+  failRefresh(new TypeError('fetch failed'));
+  await assert.rejects(logout, NoSessionError);
+  assert.equal(c.session.current?.user.id, 'u2');
+  assert.equal(logoutRequests, 0);
+});
+
 test('an optional-auth request still fails when the session is definitively rejected', async () => {
   const t = new FakeTransport(
     () => json(200, auth('expired', 'r', 0)),

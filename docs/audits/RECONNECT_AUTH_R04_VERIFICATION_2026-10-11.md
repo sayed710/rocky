@@ -245,6 +245,37 @@ Fresh native Linux runtime/browser checks and a clean exact-final-head
 model/CI/Qodo/Greptile review are required for publication certification.
 No prior exact-head approval is reused. NOT READY FOR MERGE at this checkpoint.
 
+## Subsequent account-boundary verification
+
+The exact `14ffd0f` archive (SHA-256
+`8c57f74a0bd8a3d2bfb2aab6a24649021e51abedf73ce19600ceebcc34ef7134`)
+passed native Linux gateway 88/88 and full Chromium 284/284 with no retries/skips;
+owned services stopped. Genuine Gemini high-effort read-only review completed
+with source PASS, conversation `058ed8c5-6fe8-4f0f-a789-9ac3a1cfe559`, result hash
+`058723fb0898ffc1268853131c419d5549db23b50c507daa574a98b3e6178176`,
+`readOnlyViolation=false`, no touched files. This is superseded by later repairs.
+The report's broad resource-leak assurance receives no heap-profiling credit.
+
+Codex challenged that PASS with executed observer/API regressions. A newer
+canonical credential set (same or different account) could have its explicit
+logout absorbed by the old global pending lock. Both cases failed before repair.
+Coalescing now matches the targeted user/credentials (or their already-cleared
+store), and the existing controller generation fences older UI completions.
+An older promise cannot clear the newer pending operation or resume watching.
+The peer observer is deliberately injected; these are real manager/AuthApi tests
+with controlled HTTP, not live cross-tab server integration claims.
+
+A separate real AuthApi RED proved that a failed proactive refresh could return
+a fresh different peer account through established manager recovery, then send
+logout for that different account. A minimal frontend API guard checks the
+original logout user after refreshing and observing the manager generation; it
+cancels the obsolete operation without resetting or revoking the newer account.
+SessionManager's existing refresh contract and backend authorization are unchanged.
+Full build/root lint and all 19 hermetic workspaces pass again (web 1556/1556),
+alongside focused controller/API/route/recovery 146/146 and live presence 5/5,
+all with zero skips. Fresh native checks and exact-final-head
+model/CI/Qodo/Greptile certification remain required and are tracked on PR #106.
+
 ## Proposed coordinated PROJECT_STATE append
 
 ZadLoop R-04 was independently reverified against main `2f94dab`: a mounted game
@@ -255,8 +286,10 @@ requested, and reauthorizes account changes. Owner-approved completed logout and
 definitive invalidation require a fresh anonymous server join to watch public
 games; temporary refresh failures preserve player identity and bounded recovery.
 Server-rejected credentials use the same manager refresh recovery as HTTP 401,
-and repeated logout requests share one pending operation until it settles.
-Component expiry RED/GREEN, 29 reconnect/socket regressions, full web 1553/1553,
+and repeated logout requests coalesce by target credentials until settlement.
+Controller generation and an original-user API guard protect newer account
+adoption and newer explicit logout from older completions.
+Component expiry RED/GREEN, 29 reconnect/socket regressions, full web 1556/1556,
 all 19 hermetic workspaces, lint/build, and scripts 333/333 pass with zero skips.
 Initial genuine Gemini review
 was critically corrected; complete native Linux gateway runtime 88/88 also passed.

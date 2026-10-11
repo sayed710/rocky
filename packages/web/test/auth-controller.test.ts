@@ -166,6 +166,48 @@ test('two logout requests share the held operation and cannot resume watching ea
   assert.deepEqual(notifications, ['u1', 'ending', null]);
 });
 
+for (const userId of ['u1', 'u2']) {
+  test(`explicit logout of newer ${userId} credentials is not absorbed by an older logout`, async (t) => {
+    const auth = (id: string, token: string): AuthResponse => ({
+      user: { id, handle: id, country: null, createdAt: '2020-01-01T00:00:00Z', roles: ['user'] },
+      tokens: { accessToken: token, tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+    });
+    const releases: (() => void)[] = [];
+    const client = new GambitClient({ baseUrl: 'https://api.test', tokenStore: new MemoryTokenStore(),
+      transport: { send: async (request) => request.url.endsWith('/v1/auth/logout')
+        ? new Promise((resolve) => { releases.push(() => resolve(json(200, {}))); })
+        : json(200, auth('u1', 'initial-token')) } });
+    let adopted!: (session: StoredSession) => void;
+    const register = client.session.onAdopted.bind(client.session);
+    client.session.onAdopted = (handler) => { adopted = handler; register(handler); };
+    const notifications: (string | null)[] = [];
+    const controller = new AuthController({ client, callbacks: {
+      onSessionChange: (session) => { notifications.push(session?.userId ?? null); },
+      onLogoutRequested: () => { notifications.push('ending'); }, onPending: () => {}, onError: () => {},
+    } });
+    t.after(() => controller.dispose());
+    const flush = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    await controller.login('u1', 'password');
+    const first = controller.logout(); await flush();
+    // Drive the registered peer-adoption observer with real canonical manager state.
+    // This is an observer seam, not a live cross-tab or server integration claim.
+    client.session.adopt(auth(userId, 'newer-token'), false);
+    adopted(client.session.current!);
+    const second = controller.logout();
+    try {
+      assert.equal(notifications.filter((value) => value === 'ending').length, 2);
+      releases[0]!(); await first; await flush();
+      assert.equal(releases.length, 2, 'the newer credentials have their own real AuthApi request');
+      assert.equal(notifications.includes(null), false, 'older completion cannot release the newer logout suspension');
+      releases[1]!(); await second;
+      assert.equal(client.session.current === null, true);
+      assert.equal(notifications.filter((value) => value === null).length, 1);
+    } finally {
+      releases[0]?.(); await first; await flush(); releases[1]?.(); await second;
+    }
+  });
+}
+
 test('login creates a session with correct fields from AuthResponse', async () => {
   const client = makeFakeClient() as any;
   let sessions: (AuthSession | null)[] = [];
