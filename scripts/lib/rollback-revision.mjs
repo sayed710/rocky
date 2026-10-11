@@ -14,10 +14,12 @@
  *
  * The only target this accepts is therefore the last configuration Helm recorded as successful: the
  * single `deployed` revision of a history that is entirely well formed, with nothing above it but
- * `failed` revisions and no `pending-*` revision anywhere (an operation that never finished). A
- * `failed` revision is never Helm's recorded current release (an upgrade proceeds from the deployed
- * one), and its stored chart and values are the configuration that failed, so it is never a safe
- * target. This says nothing about the live cluster: a failed non-atomic upgrade can leave Kubernetes
+ * `failed` revisions and no `pending-*` revision anywhere (an operation that never finished). While a
+ * `deployed` revision exists, a `failed` one is not Helm's recorded current release (Helm's
+ * prepareUpgrade upgrades from the deployed revision when one exists; only when none exists does it
+ * upgrade from the latest revision, which may then be `failed` or `superseded` — a history this
+ * refuses, as it has no `deployed` revision). A `failed` revision's stored chart and values are the
+ * configuration that failed, so it is never a safe target. This says nothing about the live cluster: a failed non-atomic upgrade can leave Kubernetes
  * resources partially applied. Anything else is refused, and the caller must leave the rollback to an
  * operator.
  */

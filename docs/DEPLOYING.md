@@ -417,8 +417,9 @@ If an issue is detected during or after deployment:
     several `deployed` revisions, a `pending-*`, `unknown`, `superseded` or `uninstall*` revision above
     the deployed one), the step **refuses**: no rollback, no uninstall, and an `::error::` naming the
     reason. `pre_upgrade` already warned about it, with the raw history, when the deploy started.
-    Rolling deploys are not refused in that state (fixing forward over a failed revision is still
-    allowed); canary and blue/green are, as before, unless the newest revision is the deployed one.
+    Rolling deploys are never refused for lacking a verifiable rollback target (fixing forward is
+    still allowed); canary and blue/green are, as before, unless the newest revision is the deployed
+    one. A failed tip alone is not that state: `4:deployed, 5:failed` still resolves to 4.
 
   When the step refuses, inspect `helm history gambit`, choose the last revision that served
   healthily (normally the one that was `deployed` before this run), and roll back to it explicitly:
