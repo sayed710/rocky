@@ -158,6 +158,7 @@ export class GameSync {
   /** Bounded exact receipts also cover a confirmation arriving before the unknown notice. */
   private readonly confirmedRequests = new Set<string>();
   private uncertainAction: SimpleCommand | 'ready' | null = null;
+  private uncertainReadyColor: WsColor | null = null;
   private joined = false;
   private readonly listeners = new Set<GameSyncListener>();
   private unsubscribe: (() => void) | null = null;
@@ -322,8 +323,9 @@ export class GameSync {
       case 'ready':
         // Readiness only grows, so merging keeps a late or reordered broadcast from undoing a seat.
         if (msg.gameId !== this.gameId) break;
-        if (this.uncertainAction === 'ready' && this.state.myColor !== null && msg.ready[this.state.myColor]) {
+        if (this.uncertainAction === 'ready' && this.uncertainReadyColor !== null && msg.ready[this.uncertainReadyColor]) {
           this.uncertainAction = null;
+          this.uncertainReadyColor = null;
           this.patch({ ready: mergeReady(this.state.ready, readyView(msg.ready)), lastReject: null });
         } else this.patch({ ready: mergeReady(this.state.ready, readyView(msg.ready)) });
         break;
@@ -336,6 +338,7 @@ export class GameSync {
         if (msg.gameId === this.gameId && (msg.ref === null || msg.ref <= this.clientSeq)) {
           if (!this.confirmedRequests.has(msg.requestId)) {
             this.uncertainAction = msg.ref === null ? msg.action ?? null : null;
+            this.uncertainReadyColor = this.uncertainAction === 'ready' ? msg.readyColor ?? null : null;
             this.patch({ lastReject: msg });
           }
           this.client.send({ t: 'resume', gameId: this.gameId, lastPly: this.state.ply });
@@ -347,6 +350,7 @@ export class GameSync {
         if (this.confirmedRequests.size > 32) this.confirmedRequests.delete(this.confirmedRequests.values().next().value!);
         if (this.state.lastReject?.t === 'outcomeUnknown' && this.state.lastReject.requestId === msg.requestId) {
           this.uncertainAction = null;
+          this.uncertainReadyColor = null;
           this.patch({ lastReject: null });
           this.client.send({ t: 'resume', gameId: this.gameId, lastPly: this.state.ply });
         }
@@ -364,9 +368,12 @@ export class GameSync {
     // A position/draw state cannot identify which request produced it. Only
     // terminal state or monotonic durable readiness safely settles the intent.
     const resolved = view.status.over
-      || (action === 'ready' && myColor !== null && view.ready?.[myColor] === true);
+      || (action === 'ready' && this.uncertainReadyColor !== null && view.ready?.[this.uncertainReadyColor] === true);
     const unresolved = unknown && !resolved;
-    if (!unresolved) this.uncertainAction = null;
+    if (!unresolved) {
+      this.uncertainAction = null;
+      this.uncertainReadyColor = null;
+    }
     this.patch({
       role: role ?? this.state.role,
       myColor,

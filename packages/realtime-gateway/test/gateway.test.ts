@@ -102,6 +102,7 @@ test('an unconfirmed readiness commit is not automatically retried', async () =>
   assert.equal(conn.last('outcomeUnknown')?.code, 'outcome_unknown');
   assert.equal((await store.load('ready-lost-ack')).filter(({ event }) => event.type === 'PlayerReady').length, 1);
   assert.equal(conn.last('outcomeUnknown')?.action, 'ready');
+  assert.equal(conn.last('outcomeUnknown')?.readyColor, 'w');
 });
 
 test('readiness safely retries a request confirmed expired before admission', async () => {

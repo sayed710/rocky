@@ -269,6 +269,7 @@ export interface OutcomeUnknownMessage {
   readonly ref: number | null;
   readonly requestId: string;
   readonly action?: SimpleCommand | 'ready';
+  readonly readyColor?: WsColor;
   readonly message: string;
 }
 

@@ -257,7 +257,7 @@ export class RealtimeGateway {
           if (!retryable || attempt >= READINESS_ATTEMPTS) throw err;
         }
       }
-    })().catch((err: unknown) => this.reject(session, gameId, null, codeOf(err), messageOf(err), requestIdOf(err), 'ready'));
+    })().catch((err: unknown) => this.reject(session, gameId, null, codeOf(err), messageOf(err), requestIdOf(err), 'ready', color));
   }
 
   private onMove(session: Session, msg: MoveMessage): void {
@@ -384,9 +384,10 @@ export class RealtimeGateway {
     message: string,
     requestId = '',
     action?: SimpleCommandMessage['t'] | 'ready',
+    readyColor?: Color,
   ): void {
     if (code === 'outcome_unknown') {
-      session.conn.send({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId, ref, requestId, message, ...(action ? { action } : {}) });
+      session.conn.send({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId, ref, requestId, message, ...(action ? { action } : {}), ...(readyColor ? { readyColor } : {}) });
       return;
     }
     session.conn.send({ t: 'reject', gameId, ref, code, message });

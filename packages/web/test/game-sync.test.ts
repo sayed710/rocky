@@ -144,6 +144,19 @@ test('actionless readiness uncertainty never inherits a pending draw offer', () 
   assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
 });
 
+test('readiness reconciliation must follow the original seat across a changed join role', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: { ...stateView(0, 'w'), ready: { w: false, b: true } } });
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null, requestId: 'original-white', action: 'ready', readyColor: 'w', message: 'Unknown.' });
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'black', state: { ...stateView(0, 'w'), ready: { w: false, b: true } } });
+  assert.equal(sync.getState().myColor, 'b');
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown', 'the new seat cannot confirm the old readiness request');
+  factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: false, b: true }, serverTs: 1 });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: true, b: true }, serverTs: 2 });
+  assert.equal(sync.getState().lastReject, null, 'the original seat can reconcile even after the role changes');
+});
+
 test('receipt ordering and unrelated confirmations cannot hide an unknown request', () => {
   const { factory, sync } = setup(); sync.start(); factory.last.open();
   factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
@@ -182,7 +195,7 @@ for (const confirmation of ['snapshot', 'broadcast'] as const) {
   test(`explicit readiness uncertainty reconciles only this seat's ${confirmation}`, () => {
     const { factory, sync } = setup(); sync.start(); factory.last.open();
     factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: { ...stateView(0, 'w'), ready: { w: false, b: false } } });
-    factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null, requestId: 'ready-result', action: 'ready', message: 'Unknown.' });
+    factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null, requestId: 'ready-result', action: 'ready', readyColor: 'w', message: 'Unknown.' });
     factory.last.emit({ t: 'ready', gameId: 'other-game', ready: { w: true, b: true }, serverTs: 1 });
     factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: false, b: true }, serverTs: 1 });
     assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');

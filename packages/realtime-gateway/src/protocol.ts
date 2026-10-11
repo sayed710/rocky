@@ -305,6 +305,7 @@ export interface OutcomeUnknownMessage {
   readonly ref: number | null;
   readonly requestId: string;
   readonly action?: SimpleCommandMessage['t'] | 'ready';
+  readonly readyColor?: Color;
   readonly message: string;
 }
 

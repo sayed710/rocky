@@ -160,6 +160,13 @@ sign-offs and zero-count chat responses are superseded, not final acceptance.
 New test validation also caught a wrong event-kind assertion (`MoveMade` rather
 than `MovePlayed`) and an unnarrowed TypeScript union; both test mistakes were
 corrected before clean compilation and green regressions, not treated as flakes.
+The independent code-only review of `d3a779f` reported zero findings; a subsequent
+Codex regression nevertheless exposed readiness correlation using the current
+role after a changed join (35 passed, one failed). The notification now carries
+the original server-known `readyColor`; snapshots and broadcasts reconcile that
+seat even after the client's role changes. Missing seat metadata remains unknown.
+This changes R-03 correlation only, leaving R-04 authentication to its owner.
+That review is superseded; a fresh published-head review is required.
 
 ## Validation
 
@@ -180,6 +187,11 @@ corrected before clean compilation and green regressions, not treated as flakes.
   PR #105; no prior head is substituted for final readiness.
 - Latest receipt/readiness/dispatch regressions pass forwarding/tracing
   **25/25**, realtime **95/95**, GameSync **35/35** after clean compilation.
+- At `d3a779f`, full build/lint and **4,090** hermetic tests across all 19
+  workspaces passed with zero failures/skips. After the original-seat correction,
+  fresh full build/lint, eight guards, forwarding/tracing **25/25**, realtime
+  **95/95**, and GameSync **36/36** pass. The subsequent full run and final CI
+  remain tracked in PR #105; the earlier head is not substituted for final gates.
 - Focused forwarding/tracing: **19/19**, including original safety assertion,
   lock wait, admission cutoff, append/timeout race, retained results, lost enqueue,
   finish/response failures, duplicate/retention safety, legacy rejection, load
