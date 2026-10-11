@@ -402,10 +402,28 @@ the standby colour to hold, and nothing to roll back to. Install first with `str
 
 If an issue is detected during or after deployment:
 - **Automatic Rollback**: The deployment workflow passes `--atomic --wait --timeout 5m0s`. If pods fail health probes or rollouts time out, Helm automatically reverts to the previous working release revision before the workflow finishes.
+- **Pre-flight: does the release exist?** Before anything is changed, `pre_upgrade` establishes
+  whether release `gambit` exists (`scripts/release-existence.mjs`). It *exists* when
+  `helm status gambit` exits 0. It is *absent* only when `helm status gambit` fails with exactly
+  `Error: release: not found` as its whole stderr **and** `helm list --all --filter '^gambit$' -o json`
+  returns a JSON array with no release named `gambit` (`--all` covers every status). Anything else —
+  cluster unreachable, `Unauthorized`, `forbidden`, a timeout, empty stderr, a failing or non-JSON
+  list, or a list that does show `gambit` — is *unknown*: the deploy fails with an `::error::`
+  carrying the helm error, and **nothing was changed**. Check cluster connectivity and credentials
+  (the `KUBECONFIG` secret, API server reachability, RBAC on the Helm release Secrets), then re-run.
+- **Pre-flight: is there a rollback target?** A deploy over an existing release does not start
+  without a verified automatic rollback target (owner decision, 2026-10-11; see below for what
+  "verified" means). A `rolling` deploy whose pre-upgrade history proves none fails in `pre_upgrade`
+  with the raw `helm history` output, the reason, and the repair steps: inspect `helm history gambit`,
+  run `helm rollback gambit <healthy revision> --wait --timeout 5m0s`, then re-run the deploy.
+  Fixing forward over a failed revision is still allowed: `4:deployed, 5:failed` resolves to 4.
 - **Automatic rollback after a failed post-deploy check**: When `helm upgrade` succeeds but the smoke
   check fails, the workflow's rollback step acts on what it recorded *before* the upgrade:
-  - a failed **initial install** is uninstalled;
-  - otherwise it runs `helm rollback gambit <rev> --wait --timeout 5m0s` only to the revision the
+  - a failed **initial install** (absence positively established, `release_exists` exactly `false`)
+    is uninstalled, but only after a fresh `helm history gambit -o json` shows exactly one revision,
+    revision 1 — the release this run created. Otherwise the step refuses: no uninstall, no rollback;
+    inspect `helm history gambit` and remove or roll back manually;
+  - otherwise (`release_exists` exactly `true`) it runs `helm rollback gambit <rev> --wait --timeout 5m0s` only to the revision the
     `pre_upgrade` step verified (`scripts/resolve-rollback-revision.mjs`): the single revision with
     status `deployed` in the pre-upgrade `helm history gambit -o json`, in a history where every entry
     has a valid revision (positive integer, no leading zeros) and a known Helm status, no revision
@@ -416,18 +434,16 @@ If an issue is detected during or after deployment:
     description, newest revision).
   - if no revision could be proven safe (unreadable or malformed history, duplicate revisions, no or
     several `deployed` revisions, a `pending-*`, `unknown`, `superseded` or `uninstall*` revision above
-    the deployed one), the step **refuses**: no rollback, no uninstall, and an `::error::` naming the
-    reason. `pre_upgrade` already warned about it, with the raw history, when the deploy started.
-    Rolling deploys are never refused for lacking a verifiable rollback target (fixing forward is
-    still allowed; `pre_upgrade` only warns, and whether rolling should refuse too is an owner
-    decision still pending). Canary and blue/green are refused, as before, unless the newest revision
-    is the deployed one, and now also whenever no rollback target can be verified (for example
-    `3:deployed, 4:deployed`, or `3:pending-upgrade, 4:deployed`): a progressive deploy must not start
-    without one. `pre_upgrade` fails with an `::error::` naming the reason before anything is upgraded;
-    repair the release history first (inspect `helm history gambit` and roll back manually to a
-    healthy revision, as below), then retry. A failed tip alone is not that state:
-    `4:deployed, 5:failed` still resolves to 4 (and canary/blue-green still refuse it because the
-    newest revision is not the deployed one).
+    the deployed one), no deploy over the release starts in the first place: `pre_upgrade` fails
+    with an `::error::` naming the reason before anything is upgraded, for `rolling` (with the raw
+    history and the repair steps above) as for canary and blue/green (for example
+    `3:deployed, 4:deployed`, or `3:pending-upgrade, 4:deployed`). Canary and blue/green are also
+    refused, as before, unless the newest revision is the deployed one. Repair the release history
+    first (inspect `helm history gambit` and roll back manually to a healthy revision, as below),
+    then retry. A failed tip alone is not that state: `4:deployed, 5:failed` still resolves to 4
+    (and canary/blue-green still refuse it because the newest revision is not the deployed one).
+    Should the rollback step still find no verified target, or a `release_exists` other than exactly
+    `true`/`false`, it **refuses**: no rollback, no uninstall, and an `::error::` naming the reason.
 
   When the step refuses, inspect `helm history gambit`, choose the last revision that served
   healthily (normally the one that was `deployed` before this run), and roll back to it explicitly:
