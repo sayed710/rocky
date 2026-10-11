@@ -23,12 +23,14 @@
  *   8. deploy.yml includes a "helm template" pre-flight check before "helm upgrade".
  *   9. deploy.yml strategy composition ("case $STRATEGY in") appears exactly once (no argument drift).
  *  10. The automatic rollback targets only the revision scripts/resolve-rollback-revision.mjs verified
- *      (no inline revision selection such as history[history.length - 1]).
+ *      (no inline revision selection such as history[history.length - 1]); PREV_REV is read only from
+ *      the file the resolver writes its output to.
  *
  * Run: node scripts/check-deploy-gates.mjs
  */
 
 import { readFileSync, existsSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
 const RELEASE_WORKFLOW = '.github/workflows/release.yml';
@@ -160,7 +162,7 @@ function checkDeployGates() {
     );
   }
 
-  checkRollbackTarget(deployText);
+  problems.push(...checkRollbackTarget(deployText));
 }
 
 /**
@@ -169,26 +171,44 @@ function checkDeployGates() {
  * `helm rollback` re-applies its target with no status check, so a target taken from anywhere else
  * — classically the newest `helm history` entry, which can be a failed release — re-applies a
  * configuration that already failed (Amendment 2026-10-11 of ADR-0076).
+ *
+ * The only accepted non-empty PREV_REV is exactly `$(sed -n 's/^rollback_revision=//p' "$X")`, where
+ * "$X" is the file the resolver's stdout is redirected to and nothing else writes to it.
+ *
+ * Returns the list of problems (empty when the wiring is intact).
  */
-function checkRollbackTarget(deployText) {
-  const fail = (why) => problems.push(`${DEPLOY_WORKFLOW}: ${why}`);
-  // Commands only: comment and echo lines may name `helm rollback` in operator guidance.
-  const code = deployText
+export function checkRollbackTarget(deployText) {
+  const found = [];
+  const fail = (why) => found.push(`${DEPLOY_WORKFLOW}: ${why}`);
+  // Commands only: comment lines may name `helm rollback` in operator guidance.
+  const commands = deployText
     .replace(/\r/g, '')
     .split('\n')
-    .filter((line) => !/^\s*#/.test(line) && !/^\s*echo\b/.test(line))
-    .join('\n');
+    .filter((line) => !/^\s*#/.test(line));
+  // ...and echo lines too, except when looking for writes to the resolver's output file.
+  const code = commands.filter((line) => !/^\s*echo\b/.test(line)).join('\n');
 
-  if (!/\bnode\s+scripts\/resolve-rollback-revision\.mjs\b/.test(code)) {
-    fail('the rollback target is not resolved by scripts/resolve-rollback-revision.mjs — automatic rollback must target only the verified pre-upgrade deployed revision');
+  const resolverOutputs = [
+    ...code.matchAll(/\bnode\s+scripts\/resolve-rollback-revision\.mjs\b[^\n]*?\s>\s*"\$(\w+)"/g),
+  ].map((m) => m[1]);
+  if (resolverOutputs.length === 0) {
+    fail('the rollback target is not resolved by scripts/resolve-rollback-revision.mjs (with stdout redirected to a file, `> "$FILE"`) — automatic rollback must target only the verified pre-upgrade deployed revision');
+  }
+  for (const file of resolverOutputs) {
+    const writes = commands.join('\n').match(new RegExp(`(?:^|[^0-9&])>>?\\s*"\\$${file}"`, 'gm')) ?? [];
+    if (writes.length !== 1) {
+      fail(`"$${file}" must be written only by scripts/resolve-rollback-revision.mjs, found ${writes.length} write(s)`);
+    }
   }
   if (/history\s*\[\s*history\.length\s*-\s*1\s*\]|\bnode\s+-e\b/.test(code)) {
     fail('selects a revision with inline JavaScript (e.g. history[history.length - 1]) — the newest revision can be a failed release that helm rollback would re-apply');
   }
-  const assignments = [...code.matchAll(/\bPREV_REV=([^\n]*)/g)].map((m) => m[1]);
-  const allowed = (value) => value === '""' || /^\$\(sed -n 's\/\^rollback_revision=\/\/p'/.test(value);
+  const assignments = [...code.matchAll(/\bPREV_REV=([^\n]*)/g)].map((m) => m[1].trim());
+  const allowed = (value) =>
+    value === '""' ||
+    resolverOutputs.some((file) => value === `$(sed -n 's/^rollback_revision=//p' "$${file}")`);
   if (assignments.length === 0 || assignments.some((value) => !allowed(value))) {
-    fail(`PREV_REV must be empty or the resolver's rollback_revision, found assignments: [${assignments.join(', ')}]`);
+    fail(`PREV_REV must be empty or the rollback_revision read from the resolver's output file, found assignments: [${assignments.join(', ')}]`);
   }
   const rollbacks = [...code.matchAll(/\bhelm\s+rollback\b[^\n]*/g)].map((m) => m[0]);
   if (rollbacks.length === 0 || rollbacks.some((cmd) => !/^helm\s+rollback\s+gambit\s+"\$PREV_REV"\s/.test(cmd))) {
@@ -197,6 +217,7 @@ function checkRollbackTarget(deployText) {
   if (!/^\s*PREV_REV:\s*\$\{\{\s*steps\.pre_upgrade\.outputs\.prev_revision\s*\}\}\s*$/m.test(code)) {
     fail('the rollback step must read PREV_REV from steps.pre_upgrade.outputs.prev_revision');
   }
+  return found;
 }
 
 function checkReleaseGates() {
@@ -289,4 +310,6 @@ function main() {
   console.log('=== Results: all deployment gates verified ===');
 }
 
-main();
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

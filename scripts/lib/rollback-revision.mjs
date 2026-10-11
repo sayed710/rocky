@@ -158,4 +158,3 @@ export function formatRollbackOutput(target) {
     `rollback_evidence=${singleLine(evidence)}`,
   ].join('\n') + '\n';
 }
-
