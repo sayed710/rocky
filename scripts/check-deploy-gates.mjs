@@ -29,7 +29,7 @@
  * Run: node scripts/check-deploy-gates.mjs
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
@@ -334,6 +334,25 @@ function main() {
   console.log('=== Results: all deployment gates verified ===');
 }
 
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+/**
+ * Whether the module at metaUrl is the entry point named by argv1. Node resolves the main module
+ * through realpath, but process.argv[1] keeps the path as invoked, so under a symlinked or junctioned
+ * checkout a plain comparison would never match and every gate would be skipped with exit 0.
+ *
+ * @param {string} metaUrl The module's import.meta.url.
+ * @param {string | undefined} argv1 process.argv[1].
+ * @returns {boolean}
+ */
+export function isMainModule(metaUrl, argv1) {
+  if (argv1 === undefined) return false;
+  if (metaUrl === pathToFileURL(argv1).href) return true;
+  try {
+    return metaUrl === pathToFileURL(realpathSync(argv1)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
   main();
 }
