@@ -25,6 +25,10 @@
  *  10. The automatic rollback targets only the revision scripts/resolve-rollback-revision.mjs verified
  *      (no inline revision selection such as history[history.length - 1]); PREV_REV is read only from
  *      the file the resolver writes its output to.
+ *  11. Release existence is never derived from a bare `helm status` exit code: RELEASE_EXISTS=false is
+ *      set only by the confirmed-absence arm of scripts/release-existence.mjs's classification (status
+ *      not-found AND an empty `helm list --all`), and the rollback step uninstalls only behind a fresh
+ *      `helm history` re-check showing exactly revision 1; rollback requires RELEASE_EXISTS = "true".
  *
  * Run: node scripts/check-deploy-gates.mjs
  */
@@ -163,6 +167,7 @@ function checkDeployGates() {
   }
 
   problems.push(...checkRollbackTarget(deployText));
+  problems.push(...checkReleaseExistence(deployText));
 }
 
 /**
@@ -240,6 +245,108 @@ export function checkRollbackTarget(deployText) {
   }
   if (!/^\s*PREV_REV:\s*\$\{\{\s*steps\.pre_upgrade\.outputs\.prev_revision\s*\}\}\s*$/m.test(code)) {
     fail('the rollback step must read PREV_REV from steps.pre_upgrade.outputs.prev_revision');
+  }
+  return found;
+}
+
+/**
+ * 11. Release existence is established from evidence, and only confirmed absence can lead to an uninstall.
+ *
+ * A failed initial install is uninstalled, so treating any `helm status` failure (unreachable cluster,
+ * expired credentials, RBAC, timeout) as "no release" uninstalls a live release (owner decision
+ * 2026-10-11, ADR-0076). Asserted on the command lines (comments and echo lines excluded):
+ * - the only `helm status` is the evidence-capturing STATUS_CMD (no `>/dev/null 2>&1`, no `if helm status`);
+ * - the list corroboration LIST_CMD and the scripts/release-existence.mjs classifier are both present;
+ * - RELEASE_EXISTS is assigned exactly three times: `RELEASE_EXISTS=""`, the `exists)` arm and the
+ *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from the classifier's output;
+ * - the one `helm uninstall` sits in the `if [ "$RELEASE_EXISTS" = "false" ]` branch of the rollback step,
+ *   after a `helm history` re-check and the only-initial-revision check, each failing with `exit 1`;
+ * - the one `helm rollback` sits in a branch that requires RELEASE_EXISTS = "true".
+ *
+ * Returns the list of problems (empty when the wiring is intact).
+ */
+export function checkReleaseExistence(deployText) {
+  const found = [];
+  const fail = (why) => found.push(`${DEPLOY_WORKFLOW}: ${why}`);
+  const lines = deployText.replace(/\r/g, '').split('\n');
+  const isCode = (line) => !/^\s*#/.test(line) && !/^\s*echo\b/.test(line);
+  const code = lines.filter(isCode).map((line) => line.trim());
+  const codeText = code.join('\n');
+
+  const STATUS_CMD = 'helm status gambit > /dev/null 2> "$STATUS_ERR" || STATUS_RC=$?';
+  const LIST_CMD = `helm list --all --filter '^gambit$' -o json > "$LIST_OUT" 2> "$LIST_ERR" || LIST_RC=$?`;
+  const statusCmds = code.filter((line) => /\bhelm\s+status\b/.test(line));
+  if (statusCmds.length !== 1 || statusCmds[0] !== STATUS_CMD) {
+    fail(`release existence must not be derived from a bare \`helm status\` exit code; the only helm status must be exactly \`${STATUS_CMD}\`, found: [${statusCmds.join(' | ')}]`);
+  }
+  if (!code.includes(LIST_CMD)) {
+    fail(`release absence must be corroborated by exactly \`${LIST_CMD}\` (--all lists every status, Helm v3.16.3 pkg/action/list.go)`);
+  }
+  if (!/^if node scripts\/release-existence\.mjs classify --release gambit --status-exit "\$STATUS_RC" \\$/m.test(codeText)) {
+    fail('release existence must be classified by `node scripts/release-existence.mjs classify` from the helm status/list evidence');
+  }
+
+  // Assignments, including any chained after an echo (quoted text blanked out first).
+  const assignments = code.filter((line) => /(?:^|[\s;(&|])RELEASE_EXISTS=/.test(line));
+  for (const line of lines.filter((l) => /^\s*echo\b/.test(l))) {
+    const masked = line.replace(/"[^"]*"|'[^']*'/g, (quoted) => ' '.repeat(quoted.length));
+    if (/(?:;|&&|\|\|)\s*RELEASE_EXISTS=/.test(masked)) assignments.push(line.trim());
+  }
+  const ALLOWED_ASSIGNMENTS = ['RELEASE_EXISTS=""', 'exists) RELEASE_EXISTS=true ;;', 'absent) RELEASE_EXISTS=false ;;'];
+  if (assignments.length !== ALLOWED_ASSIGNMENTS.length ||
+      !ALLOWED_ASSIGNMENTS.every((allowed) => assignments.filter((a) => a === allowed).length === 1)) {
+    fail(`RELEASE_EXISTS must be assigned exactly as [${ALLOWED_ASSIGNMENTS.join(' | ')}] (RELEASE_EXISTS=false only on confirmed absence), found: [${assignments.join(' | ')}]`);
+  }
+  const caseIdx = code.indexOf('case "$RELEASE_EXISTENCE" in');
+  const absentIdx = code.indexOf('absent) RELEASE_EXISTS=false ;;');
+  if (caseIdx === -1 || absentIdx <= caseIdx || code.slice(caseIdx, absentIdx).includes('esac')) {
+    fail('RELEASE_EXISTS=false must be set only in the `absent)` arm of `case "$RELEASE_EXISTENCE" in`');
+  }
+  const existenceAssignments = code.filter((line) => /(?:^|[\s;])RELEASE_EXISTENCE=/.test(line));
+  const ALLOWED_EXISTENCE = ['RELEASE_EXISTENCE=unknown', `RELEASE_EXISTENCE=$(sed -n 's/^release_existence=//p' "$EXISTENCE_FILE")`];
+  if (existenceAssignments.length !== 2 || !ALLOWED_EXISTENCE.every((a) => existenceAssignments.includes(a))) {
+    fail(`RELEASE_EXISTENCE must be "unknown" or read from the classifier's output, found: [${existenceAssignments.join(' | ')}]`);
+  }
+
+  // The rollback step: from its `- name:` line to the next step (or end of file).
+  const start = lines.findIndex((line) => /^\s*-\s+name:\s*Rollback on post-deploy verification failure\s*$/.test(line));
+  if (start === -1) {
+    fail('the "Rollback on post-deploy verification failure" step is missing');
+    return found;
+  }
+  const next = lines.findIndex((line, i) => i > start && /^\s*-\s+(?:name|uses|run):/.test(line));
+  const step = lines.slice(start, next === -1 ? undefined : next).filter(isCode).map((line) => line.trim());
+
+  const uninstalls = code.filter((line) => /\bhelm\s+uninstall\b/.test(line));
+  const UNINSTALL_CMD = 'helm uninstall gambit --wait --timeout 5m0s';
+  if (uninstalls.length !== 1 || uninstalls[0] !== UNINSTALL_CMD || !step.includes(UNINSTALL_CMD)) {
+    fail(`deploy.yml must contain exactly one \`${UNINSTALL_CMD}\`, in the rollback step, found: [${uninstalls.join(' | ')}]`);
+    return found;
+  }
+  const BRANCH = 'if [ "$RELEASE_EXISTS" = "false" ]; then';
+  const HISTORY_CHECK = 'if ! helm history gambit -o json > "$RB_HISTORY" 2> "$RB_HISTORY_ERR"; then';
+  const REVISION_CHECK = 'if ! node scripts/release-existence.mjs only-initial-revision < "$RB_HISTORY" 2> "$RB_HISTORY_ERR" > /dev/null; then';
+  const at = (text) => step.indexOf(text);
+  const iUninstall = at(UNINSTALL_CMD);
+  const guards = [BRANCH, HISTORY_CHECK, REVISION_CHECK].map(at);
+  const ordered = guards.every((i) => i !== -1) && guards[0] < guards[1] && guards[1] < guards[2] && guards[2] < iUninstall;
+  const branchBody = ordered ? step.slice(guards[0] + 1, iUninstall) : [];
+  if (!ordered || branchBody.some((line) => /^(?:elif|else)\b/.test(line))) {
+    fail(`the uninstall must be guarded, in order, by \`${BRANCH}\`, \`${HISTORY_CHECK}\` and \`${REVISION_CHECK}\`, within the same branch`);
+  } else {
+    for (const i of guards.slice(1)) {
+      const body = step.slice(i + 1, step.indexOf('fi', i + 1));
+      if (!body.includes('exit 1')) {
+        fail(`the uninstall guard \`${step[i]}\` must end its branch with \`exit 1\` before \`fi\``);
+      }
+    }
+  }
+  const ROLLBACK_BRANCH = 'elif [ "$RELEASE_EXISTS" = "true" ] && [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then';
+  const iRollbackBranch = at(ROLLBACK_BRANCH);
+  const iRollback = step.findIndex((line) => /\bhelm\s+rollback\b/.test(line));
+  if (iRollbackBranch === -1 || iRollback <= iRollbackBranch ||
+      step.slice(iRollbackBranch + 1, iRollback).some((line) => /^(?:elif|else|fi)\b/.test(line))) {
+    fail(`the helm rollback must sit directly in the \`${ROLLBACK_BRANCH}\` branch (rollback requires release_exists exactly "true")`);
   }
   return found;
 }
@@ -330,6 +437,7 @@ function main() {
   console.log('  ✓ deploy.yml includes a helm template pre-flight check before helm upgrade');
   console.log('  ✓ deploy.yml strategy composition appears exactly once (single-source)');
   console.log('  ✓ deploy.yml rolls back only to the revision resolve-rollback-revision.mjs verified');
+  console.log('  ✓ deploy.yml uninstalls only on confirmed absence, behind a fresh helm history re-check');
   console.log('');
   console.log('=== Results: all deployment gates verified ===');
 }
