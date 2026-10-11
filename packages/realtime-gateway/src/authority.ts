@@ -16,7 +16,7 @@
  * command arrived over WebSocket, HTTP, or a test harness.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Game, type GameEvent } from '@chess-platform/game';
 import type { Color, Position } from '@chess-platform/core';
 import type { CreateGameParams } from '@chess-platform/game';
@@ -59,6 +59,8 @@ export type AuthorityErrorCode =
   | 'not_a_player'
   | 'unknown_game'
   | 'invalid_command'
+  | 'command_expired'
+  | 'outcome_unknown'
   | 'not_ready';
 
 /** A refused command. `code` maps directly onto a protocol `RejectCode`. */
@@ -66,6 +68,19 @@ export class AuthorityError extends Error {
   constructor(readonly code: AuthorityErrorCode, message: string) {
     super(message);
     this.name = 'AuthorityError';
+  }
+}
+
+/** Persistence may have committed even when its acknowledgement failed. */
+export class AuthorityCommitError extends AuthorityError {
+  /** Correlation for a local execution whose persistence acknowledgement failed. */
+  readonly requestId = `local-${randomUUID()}`;
+}
+
+/** An uncertainty notification, never a confirmed command rejection. */
+export class CommandOutcomeUnknownError extends AuthorityError {
+  constructor(readonly requestId: string) {
+    super('outcome_unknown', 'Command outcome unknown; it may still complete. Check game state before submitting another command.');
   }
 }
 
@@ -343,9 +358,9 @@ export class GameAuthority {
    * resolves only after any in-flight command for the same game completes, so
    * two moves can never race. Rejections surface as {@link AuthorityError}.
    */
-  apply(gameId: string, userId: string, cmd: Command): Promise<ApplyResult> {
+  apply(gameId: string, userId: string, cmd: Command, beforeExecute?: () => Promise<void>): Promise<ApplyResult> {
     const rec = this.require(gameId);
-    const run = rec.lock.then(() => this.applyNow(gameId, rec, userId, cmd));
+    const run = rec.lock.then(() => this.applyNow(gameId, rec, userId, cmd, beforeExecute));
     // Keep the chain alive regardless of this command's success/failure.
     rec.lock = run.then(
       () => undefined,
@@ -354,10 +369,13 @@ export class GameAuthority {
     return run;
   }
 
-  private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command): Promise<ApplyResult> {
+  private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command, beforeExecute?: () => Promise<void>): Promise<ApplyResult> {
     if (rec.stale && !(await this.refreshRecord(gameId, rec))) {
       throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
     }
+    // Forwarded admission occurs after the lock and stale reload, before any
+    // command/domain mutation or durable append. Local commands need no hook.
+    if (beforeExecute) await beforeExecute();
     const at = this.now();
     if (cmd.kind === 'expireNoShow') {
       // Checked before anything else so a player can never issue it, and the worker never as a seat.
@@ -472,7 +490,13 @@ export class GameAuthority {
       } catch {
         // A later command must retry the durable reload before using this cache entry.
       }
-      throw new AuthorityError('invalid_command', `failed to persist events for ${gameId}: ${(err as Error).message}`);
+      const message = `failed to persist events for ${gameId}: ${(err as Error).message}`;
+      // Both EventLog and persistence's structural implementation mark known
+      // optimistic conflicts. An opaque I/O error can hide a successful COMMIT.
+      if (err !== null && typeof err === 'object' && 'appendRejected' in err && err.appendRejected === true) {
+        throw new AuthorityError('invalid_command', message);
+      }
+      throw new AuthorityCommitError('invalid_command', message);
     }
 
     // Commit to the hot record only after the durable append succeeded.

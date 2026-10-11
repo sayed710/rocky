@@ -29,8 +29,7 @@ function setupTestEnvironment() {
   const authority = new GameAuthority(pubsub, () => Date.now(), store);
 
   const fakeRedis = {
-    rpush: async () => 1,
-    expire: async () => 1,
+    eval: async (script: string) => script.startsWith('-- r03-start') ? 'admitted' : 1,
   } as unknown as Redis;
 
   return { recorder, tracer, authority, fakeRedis };
@@ -98,6 +97,7 @@ test('Forwarded command with valid traceparent produces child span on receiving 
   });
 
   const envelope = {
+    version: 2,
     requestId: 'req-1',
     gameId,
     userId: 'alice',
@@ -136,6 +136,7 @@ test('Forwarded command with NO traceparent starts a new root span', async () =>
   const consumer = new OwnerCommandConsumer(authority, fakeRedis, tracer);
 
   const envelope = {
+    version: 2,
     requestId: 'req-2',
     gameId,
     userId: 'alice',
@@ -172,6 +173,7 @@ test('Forwarded command with malformed traceparent is ignored and does not throw
   const consumer = new OwnerCommandConsumer(authority, fakeRedis, tracer);
 
   const envelope = {
+    version: 2,
     requestId: 'req-3',
     gameId,
     userId: 'alice',
@@ -207,6 +209,7 @@ test('Span attributes never contain PII or unbounded fields', async () => {
   const consumer = new OwnerCommandConsumer(authority, fakeRedis, tracer);
 
   const envelope = {
+    version: 2,
     requestId: 'req-4',
     gameId,
     userId: 'secret-user-123',

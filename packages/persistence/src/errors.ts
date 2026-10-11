@@ -39,6 +39,8 @@ export class DuplicateUserError extends PersistenceError {
  * the log and retry from the new head.
  */
 export class ConcurrencyError extends PersistenceError {
+  /** The atomic append/compare failed; this attempt committed no events. */
+  readonly appendRejected = true;
   constructor(
     readonly gameId: string,
     readonly expectedSeq: number,

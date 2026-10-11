@@ -297,6 +297,16 @@ export interface RejectMessage {
   readonly message: string;
 }
 
+/** Execution may have committed. Clients must reconcile and must not replay automatically. */
+export interface OutcomeUnknownMessage {
+  readonly t: 'outcomeUnknown';
+  readonly code: 'outcome_unknown';
+  readonly gameId: string;
+  readonly ref: number | null;
+  readonly requestId: string;
+  readonly message: string;
+}
+
 /** Machine-readable rejection reasons. */
 export type RejectCode =
   | 'illegal_move'
@@ -306,6 +316,8 @@ export type RejectCode =
   | 'unknown_game'
   | 'not_joined'
   | 'invalid_command'
+  | 'command_expired'
+  | 'outcome_unknown'
   | 'unauthorized'
   /** The first move of a game with a pregame lifecycle, before both seats are durably ready. */
   | 'not_ready';
@@ -319,6 +331,7 @@ export interface PongMessage {
 
 /** The discriminated union of everything the server may send. */
 export type ServerMessage =
+  | OutcomeUnknownMessage
   | JoinedMessage
   | StateMessage
   | MoveBroadcast

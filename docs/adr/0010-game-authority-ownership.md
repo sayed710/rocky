@@ -5,6 +5,19 @@
 **Supersedes:** None  
 **Related:** [ADR-0008](0008-redis-pubsub.md) (Redis pub/sub fanout), [ADR-0009](0009-kubernetes-helm.md) (Kubernetes Helm chart, §3 single-gateway-replica constraint)
 
+**2026-10-11 R-03 timeout-contract update:** The baseline queue/timeout/retry
+details below are historical. Current forwarding uses an isolated
+`game:cmd:v2:{gameId}` queue and Redis-time request admission inside the
+authority's command lock. Queued expiry is a confirmed `command_expired`
+refusal; an admitted command with an unconfirmed durable result produces a
+separate `outcomeUnknown` notification and is never automatically replayed.
+Completed results have bounded Redis retention for acknowledgement recovery;
+durable game events remain authoritative. New ownership can process still-live,
+unstarted envelopes under their original identity/deadline, but timeout no longer
+reapplies the command locally. Known atomic append conflicts retain safe
+readiness re-evaluation; lost acknowledgements do not. See
+[R-03 verification and rollout limits](../audits/FORWARD_TIMEOUT_R03_VERIFICATION_2026-10-11.md).
+
 ## Context
 
 M14 increments 1–4 delivered a local Docker Compose stack, durable Postgres-backed

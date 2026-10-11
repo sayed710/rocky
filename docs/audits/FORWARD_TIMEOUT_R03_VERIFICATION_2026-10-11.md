@@ -1,0 +1,186 @@
+# R-03: forwarded command expiry and uncertain acknowledgements
+
+This is a separate correctness audit against main
+`c4462c1725b108e18d6bd35a4e9306dc11be8f02` (merged PR #103). It does not reopen
+historical Fable + Astra closure or deferred findings. The owner approved option
+1: unstarted queued commands expire; admitted execution with an unconfirmed
+durable outcome is **unknown**, never a confirmed rejection/cancellation, and
+is never automatically replayed. Only the owner may merge.
+
+## Original failure and correction
+
+The [preflight record](FORWARD_TIMEOUT_R03_PREFLIGHT_2026-10-11.md) preserves the
+original deterministic RED. On original production router/consumer/authority,
+simulated Redis response timeout left a resignation queued; delayed consumption
+appended seq=1 `GameEnded` for Black's win by resignation. One original test
+failed at the unchanged-event-log assertion; the committed/lost-ack replay
+control passed. This was simulated Redis and InMemoryEventLog evidence, not
+PostgreSQL or real Redis evidence. The transport helper was subsequently updated
+for the new wire lifecycle; original RED belongs to the initial regression
+version, not the modern helper reverted in isolation.
+
+The old envelope had no lifetime, consumer checked no expiry, and timeout
+takeover reapplied the same intent independently of the original envelope.
+Request UUIDs identified reply queues but did not deduplicate execution.
+
+Current implementation:
+
+- `services/gateway/src/forwarded-request.ts` contains atomic Lua transitions.
+  Enqueue records the exact server-generated envelope and a deadline using
+  **Redis TIME**; gateway wall-clock skew is irrelevant. The effective duration
+  retains the prior BLPOP rounding (at least one second, rounded up to seconds).
+- `GameAuthority.apply` has an optional admission guard. It runs inside the
+  existing per-game lock, after stale-log refresh and before domain decisions or
+  append. Local commands do not perform a Redis admission round trip.
+- Admission verifies the exact payload, request status, deadline and current
+  Redis owner. Only `queued` before its deadline can become `started`.
+  Cancellation atomically expires only queued work and removes its envelope.
+  Whichever transition wins determines the timeout contract.
+- An obsolete consumer requeues only still-unstarted, unexpired work under the
+  same identity/deadline and stops itself. Admitted execution is never requeued.
+  Timeout no longer performs local takeover execution. A subsequent new request
+  can claim/reload via the normal ownership path.
+- An executor records its result only under its admission token. A lost response
+  can be reconciled from that retained result. Failed response publication
+  cannot overwrite a successful result with a failure. Atomic response push/TTL
+  prevents abandoned response keys from losing their expiry.
+- `started`, missing or unreconcilable state reports unknown. Opaque persistence
+  failures are distinct from proven atomic append rejection. The latter is
+  marked by EventLog/persistence concurrency errors and retains the existing
+  readiness retry; unknown readiness commits are not retried automatically.
+- Public `outcomeUnknown` is a separate message with request/correlation ID and
+  move reference, not a `reject` frame. The browser never resends its pending
+  intent. A snapshot releases its optimistic input gate, while an unchanged
+  snapshot retains the uncertainty notice; a new explicit gesture is a new
+  request, not automatic replay or proof of cancellation.
+
+## In-flight and lost-acknowledgement contract
+
+Admission, not durable COMMIT completion, is the execution boundary. A request
+waiting on loading or the game lock remains unstarted and can expire. Once
+admitted it can finish after the response deadline: reporting unknown never
+rolls back, cancels or replaces an authoritative durable outcome. PostgreSQL
+sequence checks and event replay remain unchanged.
+
+Redis results are retained for 30 seconds after admission/completion; queued
+records retain their deadline plus 30 seconds. Missing state never authorizes
+execution and is never recreated from a delivered envelope, including after
+retention expiry. This preserves admission safety while limiting reconciliation
+history. Idle queues have bounded TTL, new requests never shorten a live queue's
+retention, and each enqueue prunes up to 128 abandoned/expired head entries.
+Active forwarding cancellations also remove their own envelopes.
+
+Forwarded identity is stable across dequeue, handoff, duplicates and settlement.
+It is not a durable client idempotency token. Local uncertainty IDs correlate
+the notification; they do not introduce local request deduplication. Existing
+move `clientSeq` protects the session, not cross-session retries. No general
+exactly-once guarantee across new request IDs or destructive Redis rollback is
+claimed. Autonomous expiry passes retain their existing durable-log/domain
+re-evaluation; they do not recover/replay a timed-out envelope.
+
+## Independent review and corrections
+
+All runs used the genuine installed agy-delegate relay, agy 1.3.3,
+`gemini-3.8-flash-high`, high effort, read-only. No model fallback occurred.
+
+- Pre-fix conversation `e6778f70-34de-4228-b0d8-07b838f8960c` confirmed the defect.
+  Codex challenged evidence overclaims, duplicate-attempt versus commit claims,
+  session `clientSeq`, unsafe legacy fallback, lease-margin limits and dequeue-only
+  deadlines. Gemini accepted all six corrections. Its first fingerprint was
+  contaminated by concurrent Codex additions; resumed discussion proved no
+  working-tree changes. Details are preserved in the preflight note.
+- First post-fix attempt failed with a real network connection error and yielded
+  no usable review. It was not counted as acceptance or model quota failure.
+- Post-fix conversation `58382fa4-c39f-4b38-879c-9c9bfd380449` found the permanent
+  UI gate and local false-rejection path. Both were corrected and regressed.
+  The resumed discussion verified these and the ownership handoff correction,
+  and reported no remaining R-03 blocker/requirement gap. It accepted Codex's
+  scope challenges: unsupported Redis Cluster migration and general R-01 resume
+  freshness are not part of this fix. Both completed snapshots were unchanged
+  (`readOnlyViolation=false`).
+- Subsequent validation caught an introduced readiness regression: 92/93 passed,
+  the concurrent-seats readiness test failed because a definite sequence conflict
+  had been classified as unknown. The explicit append-rejection marker restored
+  safe retries; 94/94 passed, including lost readiness/local commit acknowledgement
+  and separate uncertainty-wire regressions. This later correction requires the
+  fresh final committed-head review; earlier sign-off is not evidence for it.
+
+Raw relay artifacts are under `C:/Users/hp/AppData/Local/Temp/rocky-r03-*`.
+Exact final-commit review and subsequent CI/bot evidence are recorded against the
+published PR head, without rewriting historical review claims here.
+
+## Validation
+
+- Full build and lint passed. Fresh hermetic run: **4,048 tests**, 19 workspace
+  summaries, zero failures/skips/cancellations; counts anchored to complete
+  `ℹ tests` lines, not substrings in test names.
+- Focused forwarding/tracing: **19/19**, including original safety assertion,
+  lock wait, admission cutoff, append/timeout race, retained results, lost enqueue,
+  finish/response failures, duplicate/retention safety, legacy rejection, load
+  failure cancellation and ownership handoff. Client synchronization: **25/25**.
+  Realtime package: **94/94**, including existing readiness, no-show and flag races.
+- Eight repository guards and **324/324** script tests passed before the final
+  documentation update; documentation guards are rechecked before publication.
+- Added real-Redis tests cover delayed resignation, append/timeout race and
+  duplicate delivery, queue retention/pruning and obsolete-owner handoff.
+  Added actual PostgreSQL/Redis regression proves expired resignation leaves
+  the event log unchanged; existing two-replica no-show/flag integration workflows
+  exercise the production path. All compile locally, but local execution is
+  unavailable because Docker Desktop's Linux engine is unavailable. **The complete
+  zero-skip gateway CI and PostgreSQL CI must pass; mocks do not replace them.**
+
+## Rollout and operational limits
+
+The deployed client uses standalone `ioredis.Redis` against one authoritative
+Redis endpoint; Redis Cluster is not supported by these scripts. Admission
+requires Redis availability; opaque transport failures report unknown. Do not
+restore an older Redis snapshot while gateways are active: lease/request-state
+rollback is outside the existing coordination guarantees. Missing/evicted state
+fails closed; restored stale queued state is not equivalent to missing state.
+
+Deploy the web build that recognizes `outcomeUnknown`, refresh existing clients,
+and coordinate replacement/drain of all old gateway owners. New traffic uses
+`game:cmd:v2:{gameId}`, so old consumers cannot ignore new metadata and execute
+it. New consumers reject unversioned envelopes and never import old queue
+backlogs. Mixed releases can refuse commands while an old lease remains; there
+is no transparent mixed-release availability guarantee. Once every old process
+has stopped, quarantine/expire abandoned legacy queues; never replay them as
+new requests. Old binaries cannot retroactively gain this safety contract.
+
+General non-owner state freshness (R-01), cache eviction (R-02) and client token
+rejoin (R-04) remain separate. An unchanged/stale resume snapshot is not a
+negative command receipt. The uncertainty notice never says the request was
+cancelled. Redis result retention is bounded; subsequent game events/replay are
+authoritative even when a per-request acknowledgement can no longer be recovered.
+
+## Delivery and coordinated state entry
+
+Concurrent R-04 work owns reconnect authentication. R-03's minimal shared
+`game-sync.ts` edits handle the new uncertainty message, preserve its notice
+during inconclusive snapshot/move reconciliation, and release pending input
+without replay. Its `game-sync.test.ts` addition exercises only that contract.
+No token, join or reconnect authentication logic is changed. Read-only inspection
+of the R-04 worktree found no current diff in either shared file; future edits
+around joined/resumed snapshot handling remain an integration risk. Preserve
+these R-03 semantics when combining the PRs and rerun both regression suites.
+The attempted authorized thread coordination message was rejected because the
+R-04 thread already had an active writer; no changes were made to its worktree.
+
+One focused implementation PR; no main push, force push, merge or deployment.
+Final readiness requires applicable CI green, Qodo bugs/rules/actionable gaps=0,
+Greptile review of the exact final head with no actionable findings, fresh
+independent final-commit review, and unresolved review threads=0. Any missing
+gate means **NOT READY FOR MERGE**. Inspect valid CodeRabbit feedback if available;
+rate limitation does not substitute for the mandatory reviewers.
+
+`docs/PROJECT_STATE.md` is intentionally unchanged while concurrent PRs are open.
+Proposed append-only integration entry:
+
+> 2026-10-11: Separate R-03 forwarding fix uses Redis-time admission/cancellation
+> under the authority lock, preserves durable outcomes, reports explicit
+> uncertainty and prohibits timeout replay. Original delayed-resignation RED
+> and focused concurrency/lost-ack controls are verified; local build/lint,
+> 4,048 hermetic tests and guards pass. Published-head distributed CI and review
+> gates are tracked in the implementation PR. Requires coordinated v2 gateway/web
+> rollout; no general exactly-once or Redis rollback guarantee. R-01/R-02/R-04,
+> historical audit closure and owner merge/launch decisions remain separate.

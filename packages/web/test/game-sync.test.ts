@@ -55,6 +55,26 @@ test('start joins on open', () => {
   assert.equal(sync.getState().connected, true);
 });
 
+test('unknown outcome preserves pending move and only requests state, never replays', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  const pending = sync.submitMove('e2e4'); assert.ok(pending);
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: pending.clientSeq, requestId: 'req-1', message: 'Command outcome unknown.' });
+  assert.deepEqual(sync.getState().pending, pending);
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  assert.equal(JSON.parse(factory.last.sent.at(-1)!).t, 'resume');
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  assert.equal(sync.getState().pending, null, 'snapshot releases input without claiming the old command was cancelled');
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown', 'unchanged snapshot cannot establish rejection');
+  assert.equal(factory.last.sent.map((frame) => JSON.parse(frame) as { t: string }).filter((msg) => msg.t === 'move').length, 1);
+  assert.ok(sync.submitMove('d2d4'), 'a new explicit gesture is allowed after reconciliation');
+  const movesSent = factory.last.sent.map((frame) => JSON.parse(frame) as { t: string; uci?: string }).filter((msg) => msg.t === 'move');
+  assert.deepEqual(movesSent.map((msg) => msg.uci), ['e2e4', 'd2d4'], 'the old intent is never replayed automatically');
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(1, 'b', [{ ply: 1, uci: 'e2e4', san: 'e4', by: 'w' }]) });
+  assert.equal(sync.getState().pending, null);
+  assert.ok(sync.submitMove('e7e5') === null, 'authoritative turn still gates new manual input');
+});
+
 test('joined populates role, color and snapshot', () => {
   const { factory, sync } = setup();
   sync.start();

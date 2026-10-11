@@ -24,6 +24,7 @@ import type {
   MoveView,
   ReadyView,
   RejectMessage,
+  OutcomeUnknownMessage,
   Role,
   ServerMessage,
   SimpleCommand,
@@ -80,7 +81,7 @@ export interface GameSyncState {
   /** Our un-acknowledged optimistic move, if any. */
   readonly pending: PendingMove | null;
   /** The most recent rejection (e.g. for surfacing a rollback reason). */
-  readonly lastReject: RejectMessage | null;
+  readonly lastReject: RejectMessage | OutcomeUnknownMessage | null;
   /** The action currently awaiting server acknowledgment. */
   readonly pendingAction: SimpleCommand | null;
 }
@@ -322,6 +323,14 @@ export class GameSync {
       case 'reject':
         this.applyReject(msg);
         break;
+      case 'outcomeUnknown':
+        // Retain the pending intent. Uncertainty is not rollback and never
+        // resends the command. Resume asks only for authoritative state.
+        if (msg.ref === null || msg.ref === this.state.pending?.clientSeq) {
+          this.patch({ lastReject: msg });
+          this.client.send({ t: 'resume', gameId: this.gameId, lastPly: this.state.ply });
+        }
+        break;
       case 'pong':
         // Latency is tracked by WsClient; nothing to synchronize here.
         break;
@@ -330,6 +339,14 @@ export class GameSync {
 
   private applySnapshot(view: StateView, role: Role | null): void {
     const myColor = role ? colorForRole(role) : this.state.myColor;
+    const unknown = this.state.lastReject?.t === 'outcomeUnknown';
+    const pending = this.state.pending;
+    const action = this.state.pendingAction;
+    const resolved = view.status.over || (pending !== null && view.moves.some(
+      (move) => move.ply > this.state.ply && move.by === myColor && move.uci === pending.uci,
+    )) || (action === 'offerDraw' && view.drawOffer === myColor)
+      || (action === 'declineDraw' && view.drawOffer === null);
+    const unresolved = unknown && !resolved;
     this.patch({
       role: role ?? this.state.role,
       myColor,
@@ -346,10 +363,12 @@ export class GameSync {
       // than reopening the board. An explicit `null` means the game has no readiness.
       ready: view.ready === undefined ? this.state.ready : readyView(view.ready),
       legalMoves: view.legalMoves,
-      // A full authoritative snapshot supersedes any optimistic pending move.
+      // Reconcile the displayed position and release the optimistic input gate.
+      // An unchanged snapshot cannot prove cancellation: retain the uncertainty
+      // notice, and never resend the old intent. A new gesture is a new request.
       pending: null,
       pendingAction: null,
-      lastReject: null,
+      lastReject: unresolved ? this.state.lastReject : null,
     });
   }
 
@@ -375,7 +394,7 @@ export class GameSync {
       legalMoves: msg.legalMoves,
       pending: confirmsPending ? null : pending,
       pendingAction: null,
-      lastReject: null,
+      lastReject: this.state.lastReject?.t === 'outcomeUnknown' && !confirmsPending ? this.state.lastReject : null,
     });
   }
 
