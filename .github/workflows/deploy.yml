@@ -255,12 +255,57 @@ jobs:
             echo "::error::Refusing a blue/green initial install: there is no live release, so the standby colour would be pinned to the baseline images.*.tag from deploy/environments/${ENVIRONMENT}.values.yaml — a version that has probably never been published, and that cannot serve as a rollback target. Perform the first install with strategy=rolling, then deploy subsequent versions with blueGreen."
             exit 1
           fi
+          # Canary has the same need: its stable track is the version live today, and with no live
+          # release that would be the environment file's baseline tag.
+          if [ "$STRATEGY" = "canary" ] && [ "$RELEASE_EXISTS" = "false" ]; then
+            echo "::error::Refusing a canary initial install: there is no live release, so the stable track would be pinned to the baseline images.*.tag from deploy/environments/${ENVIRONMENT}.values.yaml rather than to a version that is serving traffic. Perform the first install with strategy=rolling, then deploy subsequent versions with canary."
+            exit 1
+          fi
+
+          # helm upgrade below does not reuse the live release's values, so anything this run does
+          # not set falls back to deploy/environments/<env>.values.yaml. Canary and blue/green change
+          # one track only; everything else (the stable track, the other colour, the gateway and the
+          # trust worker) must stay on what the DEPLOYED revision runs, so read those tags here and
+          # pin them below. Refuse to deploy if they cannot be read exactly: a guess is a silent
+          # rollback of live traffic.
+          if [ "$STRATEGY" = "canary" ] || [ "$STRATEGY" = "blueGreen" ]; then
+            set -o pipefail
+            if ! DEPLOYED_REV=$(helm history gambit -o json | node scripts/resolve-deployed-image-tags.mjs --deployed-revision); then
+              echo "::error::Could not determine the deployed revision of release gambit; refusing a $STRATEGY deploy that could not keep the live versions in place."
+              exit 1
+            fi
+            # The tags kept below come from the deployed revision, while a failed post-deploy check
+            # rolls back to the newest one (prev_revision). If those differ (a failed or pending
+            # revision sits on top), the release is not in a state to build on: resolve it first.
+            if [ "$DEPLOYED_REV" != "$PREV_REV" ]; then
+              echo "::error::The newest revision of release gambit (${PREV_REV:-<unparsed>}) is not the deployed one ($DEPLOYED_REV). Refusing a $STRATEGY deploy until the release is back on a deployed revision (inspect 'helm history gambit')."
+              exit 1
+            fi
+            if ! DEPLOYED_TAGS=$(helm get values gambit --all -o json --revision "$DEPLOYED_REV" | node scripts/resolve-deployed-image-tags.mjs); then
+              echo "::error::Could not read the image tags of deployed revision $DEPLOYED_REV; refusing a $STRATEGY deploy that could not keep the live versions in place."
+              exit 1
+            fi
+            printf '%s\n' "$DEPLOYED_TAGS" >> "$GITHUB_OUTPUT"
+            echo "Deployed revision $DEPLOYED_REV runs:"
+            printf '%s\n' "$DEPLOYED_TAGS"
+          fi
 
           echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"
           echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"
           echo "Pre-upgrade release state: release_exists=$RELEASE_EXISTS, prev_revision=${PREV_REV:-<unparsed>}"
 
       - name: Pre-flight template validation and Helm upgrade
+        env:
+          # What the deployed revision runs (resolved in pre_upgrade; set for canary and blueGreen only).
+          DEPLOYED_API_TAG: ${{ steps.pre_upgrade.outputs.deployed_api_tag }}
+          DEPLOYED_WEB_TAG: ${{ steps.pre_upgrade.outputs.deployed_web_tag }}
+          DEPLOYED_GATEWAY_TAG: ${{ steps.pre_upgrade.outputs.deployed_gateway_tag }}
+          DEPLOYED_LIVE_API_TAG: ${{ steps.pre_upgrade.outputs.deployed_live_api_tag }}
+          DEPLOYED_LIVE_WEB_TAG: ${{ steps.pre_upgrade.outputs.deployed_live_web_tag }}
+          DEPLOYED_BLUE_TAG: ${{ steps.pre_upgrade.outputs.deployed_blue_tag }}
+          DEPLOYED_GREEN_TAG: ${{ steps.pre_upgrade.outputs.deployed_green_tag }}
+          DEPLOYED_STRATEGY: ${{ steps.pre_upgrade.outputs.deployed_strategy }}
+          DEPLOYED_ACTIVE_COLOR: ${{ steps.pre_upgrade.outputs.deployed_active_color }}
         run: |
           if [ -z "$EMAIL_FROM" ] || [ -z "$PUBLIC_WEB_ORIGIN" ]; then
             echo "::error::EMAIL_FROM and PUBLIC_WEB_ORIGIN GitHub Environment variables are required."
@@ -277,31 +322,67 @@ jobs:
           EXTRA_ARGS=()
           case "$STRATEGY" in
             blueGreen)
-              # Per ADR-0075 the incoming colour carries the new tag while the other one keeps
-              # falling back to images.<component>.tag from the environment values file — which is
-              # the version this deploy can roll back to. Overriding images.api.tag/web.tag here
-              # would make both colours resolve to the same image and the chart would refuse to
-              # render at all.
+              if [ -z "$DEPLOYED_API_TAG" ] || [ -z "$DEPLOYED_WEB_TAG" ] || [ -z "$DEPLOYED_GATEWAY_TAG" ]; then
+                echo "::error::The deployed image tags were not resolved; refusing to compose a blue/green deploy that would fall back to the environment file's baseline tags."
+                exit 1
+              fi
+              # A stage must leave the colour serving traffic serving it. Staging onto the colour that
+              # is live now while naming the other one active would switch production to whatever the
+              # standby holds (often an older version) in the same run. Roll back with a cutover
+              # (target_color = active_color) instead.
+              if [ "$TARGET_COLOR" != "$ACTIVE_COLOR" ] && [ "$DEPLOYED_STRATEGY" = "blueGreen" ] \
+                 && [ "$ACTIVE_COLOR" != "$DEPLOYED_ACTIVE_COLOR" ]; then
+                echo "::error::This is a stage (target_color=$TARGET_COLOR, active_color=$ACTIVE_COLOR), but $DEPLOYED_ACTIVE_COLOR is serving traffic now. A stage must keep active_color=$DEPLOYED_ACTIVE_COLOR and target the standby; to change the serving colour, run a cutover (target_color = active_color)."
+                exit 1
+              fi
+              # Per ADR-0075 the incoming colour carries the new tag. Everything else stays exactly
+              # where the deployed revision has it: the other colour keeps its own tag (empty means it
+              # runs images.<component>.tag, which is kept too), so on a stage it keeps serving the
+              # live version and on a cutover to the standby it holds the version just replaced, the
+              # rollback target. Leaving any of these unset would let them fall back to the
+              # environment file's baseline tag, rolling live traffic or the rollback target back.
+              if [ "$TARGET_COLOR" = "blue" ]; then
+                OTHER_COLOR=green
+                OTHER_COLOR_TAG="$DEPLOYED_GREEN_TAG"
+              else
+                OTHER_COLOR=blue
+                OTHER_COLOR_TAG="$DEPLOYED_BLUE_TAG"
+              fi
               EXTRA_ARGS+=(
                 "--set" "rollout.strategy=blueGreen"
                 "--set" "rollout.blueGreen.activeColor=${ACTIVE_COLOR}"
                 "--set" "rollout.blueGreen.colors.${TARGET_COLOR}.tag=${VERSION}"
+                "--set-string" "rollout.blueGreen.colors.${OTHER_COLOR}.tag=${OTHER_COLOR_TAG}"
+                "--set-string" "images.api.tag=${DEPLOYED_API_TAG}"
+                "--set-string" "images.web.tag=${DEPLOYED_WEB_TAG}"
               )
-              # The gateway is not colour-versioned, so moving it is what actually exposes the new
-              # version to live traffic. Do that only on a cutover; a stage run leaves the gateway
-              # where it is, so the standby is previewed against exactly what is serving today.
+              # The gateway (and the trust worker, from the same image) is not colour-versioned, so
+              # moving it is what actually exposes the new version to live traffic. Do that only on
+              # a cutover; a stage run keeps it on the deployed version, so the standby is previewed
+              # against exactly what is serving today.
               if [ "$TARGET_COLOR" = "$ACTIVE_COLOR" ]; then
                 EXTRA_ARGS+=("--set" "images.gateway.tag=${VERSION}")
+              else
+                EXTRA_ARGS+=("--set-string" "images.gateway.tag=${DEPLOYED_GATEWAY_TAG}")
               fi
               ;;
             canary)
+              if [ -z "$DEPLOYED_LIVE_API_TAG" ] || [ -z "$DEPLOYED_LIVE_WEB_TAG" ] || [ -z "$DEPLOYED_GATEWAY_TAG" ]; then
+                echo "::error::The deployed image tags were not resolved; refusing to compose a canary deploy that would fall back to the environment file's baseline tags."
+                exit 1
+              fi
+              # The stable track is images.<component>.tag, so it must be the version serving
+              # traffic now, never the incoming one: setting it to ${VERSION} makes both tracks the
+              # new version and the weight meaningless (a 100% rollout). The gateway and trust worker
+              # are not tracked at all, so they stay on the deployed version too; they move when the
+              # canary is promoted (a rolling deploy of the version).
               EXTRA_ARGS+=(
                 "--set" "rollout.strategy=canary"
                 "--set" "rollout.canary.tag=${VERSION}"
                 "--set" "rollout.canary.weight=${CANARY_WEIGHT}"
-                "--set" "images.api.tag=${VERSION}"
-                "--set" "images.gateway.tag=${VERSION}"
-                "--set" "images.web.tag=${VERSION}"
+                "--set-string" "images.api.tag=${DEPLOYED_LIVE_API_TAG}"
+                "--set-string" "images.web.tag=${DEPLOYED_LIVE_WEB_TAG}"
+                "--set-string" "images.gateway.tag=${DEPLOYED_GATEWAY_TAG}"
               )
               ;;
             rolling|*)

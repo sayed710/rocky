@@ -181,7 +181,12 @@ export class AnalysisController {
   positionChanged(fen: string): void {
     if (this.disposed) return;
     if (this.analysedFen === null || fen === this.analysedFen) return;
+    this.invalidate();
+  }
 
+  /** Abandon position work across an ownership boundary, even when the FEN is unchanged. */
+  invalidate(): void {
+    if (this.disposed) return;
     this.abortInFlight();
     this.analysedFen = null;
     this.callbacks.onInvalidated();

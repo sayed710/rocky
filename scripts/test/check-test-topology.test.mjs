@@ -450,7 +450,8 @@ test('topology: extractPlaywrightPatterns fails closed on non-literal static exp
 
 test('topology: getPlaywrightDiscoveredFiles derives reachable files directly from Playwright CLI', () => {
   const discovered = getPlaywrightDiscoveredFiles('packages/web');
-  assert.equal(discovered.size, 35);
+  assert.equal(discovered.size, 36);
+  assert.ok(discovered.has('packages/web/e2e/review-position.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/service-worker-update.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/arabic-shell.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/arabic-live-game.spec.ts'));
@@ -463,10 +464,11 @@ test('topology: getPlaywrightDiscoveredFiles derives reachable files directly fr
   assert.ok(discovered.has('packages/web/e2e/public-documents.spec.ts'));
 });
 
-test('topology: backend-free Playwright discovers only the thirteen offline specs', () => {
+test('topology: backend-free Playwright discovers only the fourteen offline specs', () => {
   const offline = getPlaywrightDiscoveredFiles('packages/web', { backend: false });
   const full = getPlaywrightDiscoveredFiles('packages/web');
-  assert.equal(offline.size, 13);
+  assert.equal(offline.size, 14);
+  assert.ok(offline.has('packages/web/e2e/review-position.spec.ts'));
   assert.ok(offline.has('packages/web/e2e/service-worker-update.spec.ts'));
   assert.ok(offline.has('packages/web/e2e/arabic-shell.spec.ts'));
   assert.ok(!offline.has('packages/web/e2e/arabic-live-game.spec.ts'));
@@ -478,7 +480,7 @@ test('topology: backend-free Playwright discovers only the thirteen offline spec
   assert.ok(!offline.has('packages/web/e2e/game-actions.spec.ts'));
   assert.ok(!offline.has('packages/web/e2e/illegal-move-feedback.spec.ts'));
   assert.ok(!offline.has('packages/web/e2e/board-ownership.spec.ts'));
-  assert.equal(full.size, 35);
+  assert.equal(full.size, 36);
 });
 
 test('topology: falsification regression proves validation flags ignored test files unreachable', () => {

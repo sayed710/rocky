@@ -154,6 +154,13 @@ gets the canary frontend AND the canary API, never a mixed pair.
   primary: false
 {{ end -}}
 {{- else if eq $r.strategy "canary" -}}
+{{/* A canary on the stable track's own tag is not a canary: both tracks run the
+     same image, so the weight routes nothing new and the release is in effect a
+     100% rollout of that version. Rejected per component, like the blue/green
+     same-image check above. */}}
+{{- if eq (toString $r.canary.tag) (toString $baseTag) -}}
+{{- fail (printf "rollout.canary: the canary and stable tracks of `%s` both resolve to tag %q, so the canary would be a copy of the stable track and its weight would change nothing. Keep images.%s.tag at the version serving traffic now and give the new version to rollout.canary.tag only." $component $baseTag $component) -}}
+{{- end -}}
 {{/* The stable track is named "-stable" rather than reusing the unsuffixed
      name, so that adopting canary on a live release REPLACES the Deployment
      instead of trying to add gambit.dev/track to its selector. A Deployment's
