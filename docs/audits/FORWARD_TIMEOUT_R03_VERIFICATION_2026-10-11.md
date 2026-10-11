@@ -44,15 +44,24 @@ Current implementation:
   can be reconciled from that retained result. Failed response publication
   cannot overwrite a successful result with a failure. Atomic response push/TTL
   prevents abandoned response keys from losing their expiry.
+- Enqueue alone uses a dedicated connected client with offline queuing,
+  automatic unfulfilled-command resend, reconnect retries and per-request retries
+  disabled. The shared ownership client's indefinite recovery must never resend
+  an enqueue after its request tombstone expires and recreate its deadline.
 - `started`, missing or unreconcilable state reports unknown. Opaque persistence
   failures are distinct from proven atomic append rejection. The latter is
   marked by EventLog/persistence concurrency errors and retains the existing
   readiness retry; unknown readiness commits are not retried automatically.
+  Confirmed pre-admission expiry also permits a bounded new readiness attempt;
+  the expired identity itself is never replayed.
 - Public `outcomeUnknown` is a separate message with request/correlation ID and
   move reference, not a `reject` frame. The browser never resends its pending
   intent. A snapshot releases its optimistic input gate, while an unchanged
   snapshot retains the uncertainty notice; a new explicit gesture is a new
   request, not automatic replay or proof of cancellation.
+  A bounded 32-move correlation history and separate uncertain-move reference
+  survive snapshot input release: late uncertainty is displayed, and a matching
+  authoritative ply/move clears it. This history is not a replay queue.
 
 ## In-flight and lost-acknowledgement contract
 
@@ -109,11 +118,28 @@ Raw relay artifacts are under `C:/Users/hp/AppData/Local/Temp/rocky-r03-*`.
 Exact final-commit review and subsequent CI/bot evidence are recorded against the
 published PR head, without rewriting historical review claims here.
 
+PR #105's first head `362e363` received genuine Gemini final review, but its
+validation table mixed earlier counts with a failed reviewer loopback run.
+Codex challenged those unsupported claims; none are adopted as executed
+evidence. The head is superseded by later corrections. Qodo's initial explicit
+zero-count response was also superseded by its line-level findings: retain move
+correlation beyond snapshot release, display late uncertainty, and retry only
+definitely expired readiness. Greptile independently found the stale notice and
+a P1 automatic ioredis enqueue resend after metadata retention. All were accepted
+and corrected with regressions; exact-head reviews and CI must be refreshed.
+
 ## Validation
 
 - Full build and lint passed. Fresh hermetic run: **4,048 tests**, 19 workspace
   summaries, zero failures/skips/cancellations; counts anchored to complete
   `ℹ tests` lines, not substrings in test names.
+- After incorporating merged main PRs #102/#104, the committed first PR head
+  passed full build/lint, **4,079** hermetic tests, **333** script tests, and all
+  eight guards, with zero failures/skips/cancellations. Its real-Redis/PG gateway,
+  persistence integration and browser acceptance CI jobs passed. Those results
+  do not substitute for fresh CI on the subsequent corrective head.
+- Corrective focused regressions: forwarding/tracing **20/20**, realtime
+  **95/95**, client GameSync **28/28**. Final-head evidence is tracked in PR #105.
 - Focused forwarding/tracing: **19/19**, including original safety assertion,
   lock wait, admission cutoff, append/timeout race, retained results, lost enqueue,
   finish/response failures, duplicate/retention safety, legacy rejection, load
@@ -165,6 +191,13 @@ around joined/resumed snapshot handling remain an integration risk. Preserve
 these R-03 semantics when combining the PRs and rerun both regression suites.
 The attempted authorized thread coordination message was rejected because the
 R-04 thread already had an active writer; no changes were made to its worktree.
+Later R-04 source edits produced one concrete conflict in a normalized temporary
+three-way merge: R-03's conditional `lastReject` versus R-04's `lastReject: null`
+and `connected: true`. Keep the conditional uncertainty notice and `connected:
+true` together when integrating. The test file merged cleanly. Subsequent R-03
+receipt-correlation corrections do not add authentication behavior. Neither
+combined patch was applied to a source tree; owner integration must rerun both
+suites against their final heads.
 
 One focused implementation PR; no main push, force push, merge or deployment.
 Final readiness requires applicable CI green, Qodo bugs/rules/actionable gaps=0,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { TimeControl } from '@chess-platform/game';
-import { GameAuthority, CommandOutcomeUnknownError } from '../src/authority';
+import { GameAuthority, AuthorityError, CommandOutcomeUnknownError } from '../src/authority';
 import { InMemoryEventLog } from '../src/event-log';
 import { InMemoryPubSub } from '../src/pubsub';
 import { InMemoryConnection } from '../src/transport';
@@ -100,6 +100,24 @@ test('an unconfirmed readiness commit is not automatically retried', async () =>
   assert.equal(conn.last('reject'), undefined);
   assert.equal(conn.last('outcomeUnknown')?.code, 'outcome_unknown');
   assert.equal((await store.load('ready-lost-ack')).filter(({ event }) => event.type === 'PlayerReady').length, 1);
+});
+
+test('readiness safely retries a request confirmed expired before admission', async () => {
+  const pubsub = new InMemoryPubSub(); const store = new InMemoryEventLog();
+  const authority = new GameAuthority(pubsub, () => 1000, store);
+  await authority.createGame({ gameId: 'ready-expired', timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: false, source: 'seek', noShowAfterMs: 60_000 });
+  let attempts = 0;
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier().allow('alice-token', 'alice'), () => 1000, {
+    route: async (id, user, cmd) => {
+      if (++attempts === 1) throw new AuthorityError('command_expired', 'expired before admission');
+      return authority.apply(id, user, cmd);
+    },
+  });
+  const conn = new InMemoryConnection('ready-expired-client'); gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId: 'ready-expired', token: 'alice-token' }); await flush(); await flush();
+  assert.equal(attempts, 2);
+  assert.equal(conn.last('reject'), undefined);
+  assert.equal((await store.load('ready-expired')).filter(({ event }) => event.type === 'PlayerReady').length, 1);
 });
 
 test('valid joins and resumes wait for a stale takeover reload without disconnecting', async () => {

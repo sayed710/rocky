@@ -12,6 +12,8 @@ export class ForwardRedis {
   failSettle = false;
   failResponse = false;
   enqueueReplyLost = false;
+  reconnectAfterLostEnqueue = false;
+  enqueueAttempts = 0;
   onWait: (() => Promise<void>) | undefined;
   readonly records = new Map<string, Record>();
   readonly lists = new Map<string, string[]>();
@@ -28,6 +30,7 @@ export class ForwardRedis {
     const key = keys[0]!;
     const rec = this.record(key);
     if (script === ENQUEUE_REQUEST) {
+      this.enqueueAttempts++;
       if (rec) return 0;
       this.records.set(key, { status: 'queued', payload: args[0]!, deadline: this.now + Number(args[1]), expiry: this.now + Number(args[1]) + Number(args[2]) });
       const list = this.lists.get(keys[1]!) ?? [];
@@ -67,7 +70,24 @@ export class ForwardRedis {
     }
     throw new Error('unexpected Lua script');
   }
-  duplicate() {
+  duplicate(options?: { autoResendUnfulfilledCommands?: boolean; enableOfflineQueue?: boolean }) {
+    if (options) return {
+      connect: async () => undefined,
+      eval: async (script: string, n: number, ...input: (string | number)[]) => {
+        try { return await this.eval(script, n, ...input); } catch (err) {
+          if (this.reconnectAfterLostEnqueue) {
+            this.now = 31_001;
+            // Model the client's unfulfilled-command resend after retention.
+            if (options.autoResendUnfulfilledCommands !== false) {
+              this.enqueueReplyLost = false;
+              return this.eval(script, n, ...input);
+            }
+          }
+          throw err;
+        }
+      },
+      disconnect: () => undefined,
+    };
     return {
       blpop: async (key: string) => {
         await this.onWait?.();

@@ -252,7 +252,8 @@ export class RealtimeGateway {
           await this.commandRouter.route(gameId, userId, { kind: 'ready' });
           return;
         } catch (err) {
-          const retryable = !(err instanceof AuthorityCommitError) && (!(err instanceof AuthorityError) || err.code === 'invalid_command');
+          const retryable = !(err instanceof AuthorityCommitError)
+            && (!(err instanceof AuthorityError) || err.code === 'invalid_command' || err.code === 'command_expired');
           if (!retryable || attempt >= READINESS_ATTEMPTS) throw err;
         }
       }

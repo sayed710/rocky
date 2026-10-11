@@ -75,6 +75,37 @@ test('unknown outcome preserves pending move and only requests state, never repl
   assert.ok(sync.submitMove('e7e5') === null, 'authoritative turn still gates new manual input');
 });
 
+for (const confirmation of ['broadcast', 'snapshot'] as const) {
+  test(`late ${confirmation} resolves uncertainty after unchanged snapshot releases input`, () => {
+    const { factory, sync } = setup(); sync.start(); factory.last.open();
+    factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+    const pending = sync.submitMove('e2e4'); assert.ok(pending);
+    factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: pending.clientSeq, requestId: 'late', message: 'Unknown.' });
+    factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+    assert.equal(sync.getState().pending, null);
+    assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+    if (confirmation === 'snapshot') {
+      factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(1, 'b', [{ ply: 1, uci: 'e2e4', san: 'e4', by: 'w' }]) });
+    } else {
+      factory.last.emit({ t: 'move', gameId: 'g1', ply: 1, uci: 'e2e4', san: 'e4', by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 1, legalMoves: {} });
+    }
+    assert.equal(sync.getState().lastReject, null);
+    assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'move').length, 1);
+  });
+}
+
+test('a snapshot before the unknown response cannot hide the uncertainty notice', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  const pending = sync.submitMove('e2e4'); assert.ok(pending);
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  assert.equal(sync.getState().pending, null);
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: pending.clientSeq, requestId: 'late-notice', message: 'Unknown.' });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  assert.equal(JSON.parse(factory.last.sent.at(-1)!).t, 'resume');
+  assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'move').length, 1);
+});
+
 test('joined populates role, color and snapshot', () => {
   const { factory, sync } = setup();
   sync.start();

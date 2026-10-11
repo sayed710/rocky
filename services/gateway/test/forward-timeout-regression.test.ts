@@ -156,6 +156,17 @@ test('R-03: uncertain enqueue response cancels queued work without applying it',
   assert.equal(f.transport.lists.get(`game:cmd:v2:${id}`)?.length, 0);
 });
 
+test('R-03: lost enqueue acknowledgement cannot recreate its identity after reconnect beyond retention', async () => {
+  const id = 'forward-enqueue-reconnect'; const f = fixture(id); await f.create();
+  f.transport.enqueueReplyLost = true; f.transport.reconnectAfterLostEnqueue = true;
+  await assert.rejects(f.router.route(id, 'alice', { kind: 'resign' }), CommandOutcomeUnknownError);
+  assert.equal(f.transport.enqueueAttempts, 1, 'unfulfilled enqueue is never automatically resent');
+  const copy = f.transport.lists.get(`game:cmd:v2:${id}`)![0]!;
+  await f.consume(copy);
+  assert.equal(f.owner.getState(id).status.over, false);
+  assert.equal((await f.store.load(id)).filter(({ event }) => event.type === 'GameEnded').length, 0);
+});
+
 test('R-03: legacy envelopes fail closed without appending events', async () => {
   const id = 'forward-legacy'; const f = fixture(id); await f.create();
   const before = await f.store.load(id);

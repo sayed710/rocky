@@ -413,8 +413,22 @@ export class RedisCommandRouter implements CommandRouter {
     const stateKey = requestKey(requestId);
     const timeoutSec = Math.max(1, Math.ceil(this.forwardTimeoutMs / 1000));
     try {
-    // Push the command to the owner's queue (non-blocking, shared connection).
-    await this.redis.eval(ENQUEUE_REQUEST, 2, stateKey, cmdKey, payload, timeoutSec * 1000, REQUEST_RETENTION_MS);
+    // A lost enqueue acknowledgement must never be resent after its tombstone
+    // expires. The shared lease client intentionally retries indefinitely; use
+    // a connected, non-buffering, non-resending client only for this dispatch.
+    const enqueueConn = this.redis.duplicate({
+      lazyConnect: true,
+      enableOfflineQueue: false,
+      autoResendUnfulfilledCommands: false,
+      maxRetriesPerRequest: 0,
+      retryStrategy: () => null,
+    });
+    try {
+      await enqueueConn.connect();
+      await enqueueConn.eval(ENQUEUE_REQUEST, 2, stateKey, cmdKey, payload, timeoutSec * 1000, REQUEST_RETENTION_MS);
+    } finally {
+      enqueueConn.disconnect();
+    }
 
     // Wait for the response with a timeout (BLPOP timeout is in seconds).
     // A blocking BLPOP holds its connection until it returns, so it must run
