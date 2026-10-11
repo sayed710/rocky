@@ -892,6 +892,273 @@ else
   check "Fail-closed: a canary on the stable track's own tag (the old 100% composition) is rejected" 0
 fi
 
+# --- Workflow post-deploy rollback target (.github/workflows/deploy.yml) -----
+# These EXECUTE the `run:` bodies of the workflow's `pre_upgrade` step and its
+# "Rollback on post-deploy verification failure" step, extracted from deploy.yml,
+# with a stub `helm` first on PATH. The stub serves a fixture `helm history -o
+# json` / `helm status` / `helm get values` and records every invocation, so the
+# assertions are on the `helm rollback` / `helm uninstall` the workflow would
+# really issue. The rollback step gets its env exactly as deploy.yml wires it
+# from the pre_upgrade outputs. The scenario modelled is: the upgrade succeeded
+# and the smoke check failed, which is the only time the rollback step runs.
+#
+# Helm semantics relied on (v3.16.3): a failed non-atomic upgrade leaves
+# `N:deployed, N+1:failed`; a later rolling upgrade over that succeeds; and
+# `helm rollback <rev>` re-applies <rev>'s chart and values without checking its
+# status, so rolling back to the newest revision can re-apply a FAILED release.
+echo ""
+echo "Workflow post-deploy rollback target (deploy.yml, executed):"
+
+WF_FILE=.github/workflows/deploy.yml
+RB_ROOT="$TMPDIR/rollback"
+mkdir -p "$RB_ROOT/bin"
+
+# step_body MARKER_REGEX: the dedented `run: |` block of the first step at or after
+# the line matching MARKER_REGEX.
+step_body() {
+  awk -v marker="$1" '
+    { sub(/\r$/, "") }
+    !found && $0 ~ marker { found = 1; next }
+    found && !inrun && /^[[:space:]]*run:[[:space:]]*\|[[:space:]]*$/ {
+      inrun = 1; match($0, /^[[:space:]]*/); runind = RLENGTH; next
+    }
+    inrun {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      match($0, /^[[:space:]]*/)
+      if (RLENGTH <= runind) exit
+      if (!bodyind) bodyind = RLENGTH
+      print substr($0, bodyind + 1)
+    }
+  ' "$WF_FILE"
+}
+# step_output_env MARKER_REGEX: "NAME KEY" for every `NAME: ${{ steps.pre_upgrade.outputs.KEY }}`
+# in that step's env block, i.e. how deploy.yml feeds pre_upgrade's outputs to it.
+step_output_env() {
+  awk -v marker="$1" '
+    { sub(/\r$/, "") }
+    !found && $0 ~ marker { found = 1; next }
+    found && /^[[:space:]]*run:/ { exit }
+    found && /^[[:space:]]*-[[:space:]]+name:/ { exit }
+    found && match($0, /^[[:space:]]*[A-Z_][A-Z0-9_]*:[[:space:]]*\$\{\{[[:space:]]*steps\.pre_upgrade\.outputs\.[a-z_]+[[:space:]]*\}\}/) {
+      line = $0
+      gsub(/[${}:]/, " ", line)
+      n = split(line, f, /[[:space:]]+/)
+      name = ""; key = ""
+      for (i = 1; i <= n; i++) {
+        if (f[i] == "") continue
+        if (name == "") { name = f[i]; continue }
+        if (f[i] ~ /^steps\.pre_upgrade\.outputs\./) { key = f[i]; sub(/^steps\.pre_upgrade\.outputs\./, "", key) }
+      }
+      print name, key
+    }
+  ' "$WF_FILE"
+}
+
+PRE_MARKER='^[[:space:]]*id:[[:space:]]*pre_upgrade[[:space:]]*$'
+RB_MARKER='^[[:space:]]*-[[:space:]]+name:[[:space:]]*Rollback on post-deploy verification failure[[:space:]]*$'
+step_body "$PRE_MARKER" > "$RB_ROOT/pre_upgrade.sh"
+step_body "$RB_MARKER" > "$RB_ROOT/rollback.sh"
+step_output_env "$RB_MARKER" > "$RB_ROOT/rollback.env"
+check "Rollback workflow: the pre_upgrade run body is extracted from deploy.yml" \
+  "$(grep -q 'helm status gambit' "$RB_ROOT/pre_upgrade.sh" && grep -q 'prev_revision=' "$RB_ROOT/pre_upgrade.sh" && echo 0 || echo 1)"
+check "Rollback workflow: the rollback run body is extracted from deploy.yml" \
+  "$(grep -q 'helm rollback gambit' "$RB_ROOT/rollback.sh" && grep -q 'helm uninstall gambit' "$RB_ROOT/rollback.sh" && echo 0 || echo 1)"
+check "Rollback workflow: the rollback step reads release_exists and its target from pre_upgrade outputs" \
+  "$(grep -q ' release_exists$' "$RB_ROOT/rollback.env" && grep -q ' prev_revision$' "$RB_ROOT/rollback.env" && echo 0 || echo 1)"
+
+# The stub helm: serves the scenario's fixtures from $HELM_STUB_DIR and records every call.
+cat > "$RB_ROOT/bin/helm" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HELM_STUB_DIR/calls.log"
+case "$1" in
+  status)
+    exit "$(cat "$HELM_STUB_DIR/status_rc" 2>/dev/null || echo 0)" ;;
+  history)
+    if [ -f "$HELM_STUB_DIR/history.json" ]; then cat "$HELM_STUB_DIR/history.json"; exit 0; fi
+    echo "Error: release: not found" >&2; exit 1 ;;
+  get)
+    [ "${2:-}" = values ] && [ -f "$HELM_STUB_DIR/values.json" ] && { cat "$HELM_STUB_DIR/values.json"; exit 0; }
+    echo "Error: values not available" >&2; exit 1 ;;
+  rollback|uninstall)
+    exit 0 ;;
+  *)
+    echo "helm stub: unexpected invocation: $*" >&2; exit 64 ;;
+esac
+STUB
+cat > "$RB_ROOT/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+printf 'kubectl %s\n' "$*" >> "$HELM_STUB_DIR/calls.log"
+echo "kubectl stub: the rollback path must not call kubectl" >&2
+exit 64
+STUB
+chmod +x "$RB_ROOT/bin/helm" "$RB_ROOT/bin/kubectl"
+RB_VALUES='{"images":{"api":{"tag":"1.1.0"},"web":{"tag":"1.1.0"},"gateway":{"tag":"1.1.0"}},"rollout":{"strategy":"rolling"}}'
+
+# hist REV:STATUS...: a `helm history -o json` array. REV is inserted raw, so malformed
+# revisions ("05", 4.5, -1, ...) can be expressed.
+hist() {
+  local out="" sep="" e r s d
+  for e in "$@"; do
+    r="${e%%:*}"; s="${e#*:}"; d="${r//\"/}"
+    out+="$sep{\"revision\":$r,\"updated\":\"2026-10-11T10:00:00Z\",\"status\":\"$s\",\"chart\":\"gambit-0.1.0\",\"app_version\":\"1.0.$d\",\"description\":\"fixture revision $d\"}"
+    sep=","
+  done
+  printf '[%s]' "$out"
+}
+
+# rb_run NAME STRATEGY HISTORY [STATUS_RC]: run pre_upgrade, then (if it succeeded)
+# the rollback step with pre_upgrade's outputs. HISTORY "@missing" makes `helm
+# history` fail. Leaves pre.rc/pre.log/rb.rc/rb.log/calls.log in $RB_ROOT/NAME.
+rb_run() {
+  local name="$1" strategy="$2" history="$3" status_rc="${4:-0}"
+  local fx="$RB_ROOT/$name" rc envname key line k v
+  local -A out=()
+  local -a rbenv=()
+  mkdir -p "$fx"
+  : > "$fx/calls.log"; : > "$fx/github_output"
+  printf '%s' "$status_rc" > "$fx/status_rc"
+  [ "$history" = "@missing" ] || printf '%s' "$history" > "$fx/history.json"
+  printf '%s' "$RB_VALUES" > "$fx/values.json"
+  rc=0
+  env PATH="$RB_ROOT/bin:$PATH" HELM_STUB_DIR="$fx" GITHUB_OUTPUT="$fx/github_output" \
+    STRATEGY="$strategy" ENVIRONMENT=production VERSION=1.2.3 \
+    bash -e "$RB_ROOT/pre_upgrade.sh" > "$fx/pre.log" 2>&1 || rc=$?
+  echo "$rc" > "$fx/pre.rc"
+  : > "$fx/rb.log"; echo "skipped" > "$fx/rb.rc"
+  [ "$rc" = 0 ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    [ -n "$line" ] || continue
+    k="${line%%=*}"; v="${line#*=}"
+    out["$k"]="$v"
+  done < "$fx/github_output"
+  while read -r envname key; do
+    [ -n "$envname" ] && rbenv+=("$envname=${out[$key]:-}")
+  done < "$RB_ROOT/rollback.env"
+  rc=0
+  env PATH="$RB_ROOT/bin:$PATH" HELM_STUB_DIR="$fx" "${rbenv[@]}" \
+    bash -e "$RB_ROOT/rollback.sh" > "$fx/rb.log" 2>&1 || rc=$?
+  echo "$rc" > "$fx/rb.rc"
+}
+rb_mutations() { grep -E '^(rollback|uninstall)( |$)' "$RB_ROOT/$1/calls.log" || true; }
+rb_show() {
+  echo "      pre_upgrade exit $(cat "$RB_ROOT/$1/pre.rc"), rollback step exit $(cat "$RB_ROOT/$1/rb.rc"); helm mutations: $(rb_mutations "$1" | tr '\n' ';')"
+  sed 's/^/      | /' "$RB_ROOT/$1/pre.log" "$RB_ROOT/$1/rb.log" | head -n 40
+}
+# expect_rollback NAME REV DESC: the workflow rolls back to exactly REV, and nothing else.
+expect_rollback() {
+  local ok=1
+  [ "$(cat "$RB_ROOT/$1/pre.rc")" = 0 ] && [ "$(cat "$RB_ROOT/$1/rb.rc")" = 0 ] \
+    && [ "$(rb_mutations "$1")" = "rollback gambit $2 --wait --timeout 5m0s" ] && ok=0
+  check "$1: $3" "$ok"
+  [ "$ok" = 0 ] || rb_show "$1"
+}
+# expect_rollback_logged NAME REV: the rollback step says which revision and why (its status).
+expect_rollback_logged() {
+  local ok=1
+  grep -q "revision $2" "$RB_ROOT/$1/rb.log" && grep -qi 'deployed' "$RB_ROOT/$1/rb.log" && ok=0
+  check "$1: the rollback step logs target revision $2 and that it was the deployed revision" "$ok"
+  [ "$ok" = 0 ] || rb_show "$1"
+}
+# expect_refusal NAME REASON_ERE DESC: deploy proceeds (pre_upgrade warns), and the rollback
+# step neither rolls back nor uninstalls, failing with an actionable ::error:: naming the reason.
+expect_refusal() {
+  local ok=1
+  [ "$(cat "$RB_ROOT/$1/pre.rc")" = 0 ] && [ "$(cat "$RB_ROOT/$1/rb.rc")" != 0 ] \
+    && [ "$(cat "$RB_ROOT/$1/rb.rc")" != skipped ] && [ -z "$(rb_mutations "$1")" ] \
+    && grep -q '::warning::' "$RB_ROOT/$1/pre.log" \
+    && grep -q '::error::' "$RB_ROOT/$1/rb.log" && grep -q 'helm history gambit' "$RB_ROOT/$1/rb.log" \
+    && grep -qiE -- "$2" "$RB_ROOT/$1/rb.log" && ok=0
+  check "$1: $3" "$ok"
+  [ "$ok" = 0 ] || rb_show "$1"
+}
+# expect_pre_refused NAME MESSAGE_ERE DESC: pre_upgrade refuses the deploy (canary/blueGreen gate).
+expect_pre_refused() {
+  local ok=1
+  [ "$(cat "$RB_ROOT/$1/pre.rc")" != 0 ] && [ -z "$(rb_mutations "$1")" ] \
+    && grep -qE -- "$2" "$RB_ROOT/$1/pre.log" && ok=0
+  check "$1: $3" "$ok"
+  [ "$ok" = 0 ] || rb_show "$1"
+}
+
+# 1. The defect: a later failed revision sits on top of the deployed one.
+rb_run failed-tip rolling "$(hist 3:superseded 4:deployed 5:failed)"
+expect_rollback failed-tip 4 "rolling over 4:deployed,5:failed rolls back to deployed 4, not failed 5"
+expect_rollback_logged failed-tip 4
+rb_run failed-tips rolling "$(hist 2:superseded 3:deployed 4:failed 5:failed)"
+expect_rollback failed-tips 3 "rolling over 3:deployed,4:failed,5:failed rolls back to deployed 3"
+
+# 2. A pending or unknown revision on top: never an automatic rollback to it.
+for s in pending-upgrade pending-rollback pending-install unknown; do
+  rb_run "tip-$s" rolling "$(hist 3:superseded 4:deployed "5:$s")"
+  expect_refusal "tip-$s" "${s%%-*}" "a $s revision above deployed 4: no rollback, no uninstall, actionable error"
+done
+rb_run pending-below rolling "$(hist 3:pending-upgrade 4:deployed)"
+expect_refusal pending-below "pending" "a pending revision anywhere in the history fails closed"
+
+# 3. Healthy controls (pass on the unfixed workflow too).
+rb_run healthy rolling "$(hist 3:superseded 4:deployed)"
+expect_rollback healthy 4 "healthy 3:superseded,4:deployed rolls back to 4"
+expect_rollback_logged healthy 4
+rb_run healthy-string rolling '[{"revision":"3","status":"superseded"},{"revision":"4","status":"deployed"}]'
+expect_rollback healthy-string 4 "canonical digit-string revisions are accepted"
+
+# 4. Atomic recovery created a new deployed revision on top of the failed one.
+rb_run atomic-recovered rolling "[$(hist 4:superseded | tr -d '[]'),$(hist 5:failed | tr -d '[]'),{\"revision\":6,\"updated\":\"2026-10-11T10:00:00Z\",\"status\":\"deployed\",\"chart\":\"gambit-0.1.0\",\"app_version\":\"1.0.4\",\"description\":\"Rollback to 4\"}]"
+expect_rollback atomic-recovered 6 "atomic-recovered 4:superseded,5:failed,6:deployed rolls back to 6"
+
+# 5. Anything that does not prove a single safe target fails closed.
+rb_refuse() {  # NAME REASON_ERE DESC HISTORY
+  rb_run "$1" rolling "$4"
+  expect_refusal "$1" "$2" "$3"
+}
+rb_refuse hist-missing 'history' "helm history fails: no rollback, no uninstall" @missing
+rb_refuse hist-empty-output 'JSON|history' "empty helm history output fails closed" ''
+rb_refuse hist-empty-array 'empty|deployed' "an empty history array fails closed" '[]'
+rb_refuse hist-not-json 'JSON' "non-JSON helm history fails closed" 'Error: something went wrong'
+rb_refuse hist-object 'array' "a non-array helm history fails closed" '{"revision":4,"status":"deployed"}'
+rb_refuse entry-null 'entry|object' "a null history entry fails closed" "[null,$(hist 4:deployed | tr -d '[]')]"
+rb_refuse rev-zero 'revision' "revision 0 fails closed" "$(hist 0:deployed)"
+rb_refuse rev-zero-tip 'revision' "a revision 0 above the deployed one fails closed" "$(hist 4:deployed 0:failed)"
+rb_refuse rev-negative 'revision' "a negative revision fails closed" "$(hist 3:superseded -4:deployed)"
+rb_refuse rev-fraction 'revision' "a fractional revision fails closed" "$(hist 3:superseded 4.5:deployed)"
+rb_refuse rev-unsafe 'revision' "an unsafe-integer revision fails closed" "$(hist 3:superseded 9007199254740993:deployed)"
+rb_refuse rev-leading-zero 'revision' "a revision with a leading zero (\"05\") fails closed" "$(hist 4:superseded '"05"':deployed)"
+rb_refuse rev-non-numeric 'revision' "a non-numeric revision fails closed" "$(hist 3:superseded '"x"':deployed)"
+rb_refuse rev-malformed-below 'revision' "a malformed revision anywhere in the history fails closed" "$(hist '"x"':superseded 4:deployed)"
+rb_refuse rev-missing 'revision' "an entry without a revision fails closed" '[{"status":"superseded"},{"revision":4,"status":"deployed"}]'
+rb_refuse status-bogus 'status' "an unknown status string fails closed" "$(hist 3:superseded 4:deployed 5:exploded)"
+rb_refuse status-number 'status' "a non-string status fails closed" '[{"revision":4,"status":"deployed"},{"revision":5,"status":1}]'
+rb_refuse dup-revision 'duplicate' "duplicated revision numbers fail closed" "$(hist 3:superseded 4:deployed 4:failed)"
+rb_refuse two-deployed 'deployed' "two deployed revisions fail closed" "$(hist 3:deployed 4:deployed)"
+rb_refuse superseded-above 'superseded' "a superseded revision above the deployed one fails closed" "$(hist 3:deployed 4:superseded)"
+rb_refuse uninstalled-above 'uninstall' "an uninstalled revision above the deployed one fails closed" "$(hist 3:deployed 4:uninstalled)"
+rb_refuse uninstalling-above 'uninstall' "an uninstalling revision above the deployed one fails closed" "$(hist 3:deployed 4:uninstalling)"
+rb_refuse failed-only 'deployed' "a history with no deployed revision (1:failed) fails closed" "$(hist 1:failed)"
+rb_refuse no-deployed 'deployed' "a history with no deployed revision (4:superseded,5:failed) fails closed" "$(hist 4:superseded 5:failed)"
+
+# 6. Initial install: unchanged, the failed release is uninstalled.
+rb_run initial-install rolling @missing 1
+check "initial-install: a failed initial install is uninstalled (no rollback)" \
+  "$([ "$(cat "$RB_ROOT/initial-install/pre.rc")" = 0 ] && [ "$(rb_mutations initial-install)" = "uninstall gambit --wait --timeout 5m0s" ] && echo 0 || echo 1)"
+[ "$(rb_mutations initial-install)" = "uninstall gambit --wait --timeout 5m0s" ] || rb_show initial-install
+
+# 7. Canary and blue/green: the pre-upgrade gate is unchanged.
+for s in canary blueGreen; do
+  rb_run "$s-failed-tip" "$s" "$(hist 3:superseded 4:deployed 5:failed)"
+  expect_pre_refused "$s-failed-tip" 'is not the deployed one' "$s over a failed tip is still refused before the upgrade"
+  rb_run "$s-pending-tip" "$s" "$(hist 3:superseded 4:deployed 5:pending-upgrade)"
+  expect_pre_refused "$s-pending-tip" 'is not the deployed one' "$s over a pending tip is still refused before the upgrade"
+  rb_run "$s-no-history" "$s" @missing
+  expect_pre_refused "$s-no-history" 'Could not determine the deployed revision' "$s without a readable history is still refused"
+  rb_run "$s-initial" "$s" @missing 1
+  expect_pre_refused "$s-initial" 'initial install' "$s initial install is still refused"
+  rb_run "$s-healthy" "$s" "$(hist 3:superseded 4:deployed)"
+  expect_rollback "$s-healthy" 4 "$s over healthy history keeps its deployed-tag pinning and rolls back to deployed 4"
+  check "$s-healthy: the deployed tags are read from deployed revision 4" \
+    "$(grep -qx 'get values gambit --all -o json --revision 4' "$RB_ROOT/$s-healthy/calls.log" && grep -qx 'deployed_live_api_tag=1.1.0' "$RB_ROOT/$s-healthy/github_output" && echo 0 || echo 1)"
+done
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
