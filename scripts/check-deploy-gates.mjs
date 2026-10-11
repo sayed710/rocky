@@ -22,6 +22,8 @@
  *   7. deploy.yml does not refer to Deployments by hardcoded names (names vary by strategy, ADR-0075).
  *   8. deploy.yml includes a "helm template" pre-flight check before "helm upgrade".
  *   9. deploy.yml strategy composition ("case $STRATEGY in") appears exactly once (no argument drift).
+ *  10. The automatic rollback targets only the revision scripts/resolve-rollback-revision.mjs verified
+ *      (no inline revision selection such as history[history.length - 1]).
  *
  * Run: node scripts/check-deploy-gates.mjs
  */
@@ -157,6 +159,44 @@ function checkDeployGates() {
       `${DEPLOY_WORKFLOW}: strategy composition ("case \"$STRATEGY\" in") appears ${strategyCaseMatches.length} times — argument composition must appear exactly once so pre-flight validation and helm upgrade cannot drift`,
     );
   }
+
+  checkRollbackTarget(deployText);
+}
+
+/**
+ * 10. The automatic rollback targets only the revision scripts/resolve-rollback-revision.mjs verified.
+ *
+ * `helm rollback` re-applies its target with no status check, so a target taken from anywhere else
+ * — classically the newest `helm history` entry, which can be a failed release — re-applies a
+ * configuration that already failed (Amendment 2026-10-11 of ADR-0076).
+ */
+function checkRollbackTarget(deployText) {
+  const fail = (why) => problems.push(`${DEPLOY_WORKFLOW}: ${why}`);
+  // Commands only: comment and echo lines may name `helm rollback` in operator guidance.
+  const code = deployText
+    .replace(/\r/g, '')
+    .split('\n')
+    .filter((line) => !/^\s*#/.test(line) && !/^\s*echo\b/.test(line))
+    .join('\n');
+
+  if (!/\bnode\s+scripts\/resolve-rollback-revision\.mjs\b/.test(code)) {
+    fail('the rollback target is not resolved by scripts/resolve-rollback-revision.mjs — automatic rollback must target only the verified pre-upgrade deployed revision');
+  }
+  if (/history\s*\[\s*history\.length\s*-\s*1\s*\]|\bnode\s+-e\b/.test(code)) {
+    fail('selects a revision with inline JavaScript (e.g. history[history.length - 1]) — the newest revision can be a failed release that helm rollback would re-apply');
+  }
+  const assignments = [...code.matchAll(/\bPREV_REV=([^\n]*)/g)].map((m) => m[1]);
+  const allowed = (value) => value === '""' || /^\$\(sed -n 's\/\^rollback_revision=\/\/p'/.test(value);
+  if (assignments.length === 0 || assignments.some((value) => !allowed(value))) {
+    fail(`PREV_REV must be empty or the resolver's rollback_revision, found assignments: [${assignments.join(', ')}]`);
+  }
+  const rollbacks = [...code.matchAll(/\bhelm\s+rollback\b[^\n]*/g)].map((m) => m[0]);
+  if (rollbacks.length === 0 || rollbacks.some((cmd) => !/^helm\s+rollback\s+gambit\s+"\$PREV_REV"\s/.test(cmd))) {
+    fail(`every helm rollback must target "$PREV_REV" (the verified revision), found: [${rollbacks.join(' | ')}]`);
+  }
+  if (!/^\s*PREV_REV:\s*\$\{\{\s*steps\.pre_upgrade\.outputs\.prev_revision\s*\}\}\s*$/m.test(code)) {
+    fail('the rollback step must read PREV_REV from steps.pre_upgrade.outputs.prev_revision');
+  }
 }
 
 function checkReleaseGates() {
@@ -244,6 +284,7 @@ function main() {
   console.log('  ✓ deploy.yml avoids hardcoded Deployment names (strategy-independent)');
   console.log('  ✓ deploy.yml includes a helm template pre-flight check before helm upgrade');
   console.log('  ✓ deploy.yml strategy composition appears exactly once (single-source)');
+  console.log('  ✓ deploy.yml rolls back only to the revision resolve-rollback-revision.mjs verified');
   console.log('');
   console.log('=== Results: all deployment gates verified ===');
 }

@@ -222,28 +222,37 @@ jobs:
             RELEASE_EXISTS=true
           fi
           
+          # The automatic rollback target (prev_revision) is decided HERE, from this single pre-upgrade
+          # `helm history` snapshot: after the upgrade the revision that was serving is `superseded`
+          # and can no longer be told apart. It is the unique `deployed` revision of a fully valid
+          # history with only `failed` revisions above it (scripts/lib/rollback-revision.mjs) — never
+          # simply the newest revision, which may be a failed release that `helm rollback` would
+          # re-apply without checking its status. The same snapshot feeds the canary/blueGreen gate.
           PREV_REV=""
+          ROLLBACK_REFUSAL=""
+          HISTORY_FILE=$(mktemp)
           if [ "$RELEASE_EXISTS" = "true" ]; then
-            # Parse pre-upgrade revision using machine-readable JSON format (-o json) via Node with explicit module import.
-            PREV_REV=$(helm history gambit -o json 2>/dev/null | node -e "
-              const fs = require('node:fs');
-              try {
-                const history = JSON.parse(fs.readFileSync(0, 'utf8'));
-                if (Array.isArray(history) && history.length > 0) {
-                  const last = history[history.length - 1];
-                  const rev = last.revision;
-                  if (typeof rev === 'number') console.log(rev);
-                  else if (typeof rev === 'string' && /^[0-9]+$/.test(rev)) console.log(rev);
-                }
-              } catch (_) {}
-            " 2>/dev/null || true)
+            HISTORY_ERR=$(mktemp)
+            RESOLVED=$(mktemp)
+            if ! helm history gambit -o json > "$HISTORY_FILE" 2> "$HISTORY_ERR"; then
+              ROLLBACK_REFUSAL="'helm history gambit -o json' failed: $(head -c 500 "$HISTORY_ERR" | tr '\r\n' '  ' | sed 's/[[:space:]]*$//')"
+              : > "$HISTORY_FILE"
+            elif node scripts/resolve-rollback-revision.mjs < "$HISTORY_FILE" > "$RESOLVED" 2> "$HISTORY_ERR"; then
+              PREV_REV=$(sed -n 's/^rollback_revision=//p' "$RESOLVED")
+              cat "$RESOLVED" >> "$GITHUB_OUTPUT"
+              echo "Automatic rollback target: revision $PREV_REV, $(sed -n 's/^rollback_evidence=//p' "$RESOLVED")."
+            else
+              ROLLBACK_REFUSAL=$(head -c 500 "$HISTORY_ERR" | tr '\r\n' '  ' | sed -e 's/^resolve-rollback-revision: //' -e 's/[[:space:]]*$//')
+            fi
 
             if [ -z "$PREV_REV" ]; then
-              # The rollback step refuses to act without this number, so an operator who hits a
-              # failed verification needs to know NOW why it could not be read — not to discover
-              # the refusal in the middle of an incident.
-              echo "::warning::Could not parse a pre-upgrade revision from 'helm history gambit -o json' even though the release exists. Automated rollback will refuse to run for this deploy. Raw output follows."
-              helm history gambit -o json 2>&1 | head -c 2000 || true
+              # Rolling deploys still proceed (fixing forward over a failed revision is allowed), but
+              # the rollback step will refuse to act, so an operator who hits a failed verification
+              # needs to know NOW why — not to discover the refusal in the middle of an incident.
+              [ -n "$ROLLBACK_REFUSAL" ] || ROLLBACK_REFUSAL="no rollback target was resolved"
+              echo "::warning::No safe automatic rollback target in the pre-upgrade history of release gambit: $ROLLBACK_REFUSAL. If post-deploy verification fails, automated rollback will refuse to run for this deploy. Raw 'helm history gambit -o json' output follows."
+              head -c 2000 "$HISTORY_FILE" || true
+              echo
             fi
           fi
 
@@ -270,15 +279,16 @@ jobs:
           # rollback of live traffic.
           if [ "$STRATEGY" = "canary" ] || [ "$STRATEGY" = "blueGreen" ]; then
             set -o pipefail
-            if ! DEPLOYED_REV=$(helm history gambit -o json | node scripts/resolve-deployed-image-tags.mjs --deployed-revision); then
+            if ! DEPLOYED_REV=$(node scripts/resolve-deployed-image-tags.mjs --deployed-revision < "$HISTORY_FILE"); then
               echo "::error::Could not determine the deployed revision of release gambit; refusing a $STRATEGY deploy that could not keep the live versions in place."
               exit 1
             fi
-            # The tags kept below come from the deployed revision, while a failed post-deploy check
-            # rolls back to the newest one (prev_revision). If those differ (a failed or pending
-            # revision sits on top), the release is not in a state to build on: resolve it first.
-            if [ "$DEPLOYED_REV" != "$PREV_REV" ]; then
-              echo "::error::The newest revision of release gambit (${PREV_REV:-<unparsed>}) is not the deployed one ($DEPLOYED_REV). Refusing a $STRATEGY deploy until the release is back on a deployed revision (inspect 'helm history gambit')."
+            # The tags kept below come from the deployed revision. If the newest revision is not that
+            # one (a failed or pending revision sits on top), the release is not in a state to build
+            # on: resolve it first.
+            NEWEST_REV=$(node scripts/resolve-deployed-image-tags.mjs --newest-revision < "$HISTORY_FILE" 2>/dev/null || true)
+            if [ "$DEPLOYED_REV" != "$NEWEST_REV" ]; then
+              echo "::error::The newest revision of release gambit (${NEWEST_REV:-<unparsed>}) is not the deployed one ($DEPLOYED_REV). Refusing a $STRATEGY deploy until the release is back on a deployed revision (inspect 'helm history gambit')."
               exit 1
             fi
             if ! DEPLOYED_TAGS=$(helm get values gambit --all -o json --revision "$DEPLOYED_REV" | node scripts/resolve-deployed-image-tags.mjs); then
@@ -291,8 +301,10 @@ jobs:
           fi
 
           echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"
+          # prev_revision is the VERIFIED rollback target (empty when none could be proven safe).
           echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"
-          echo "Pre-upgrade release state: release_exists=$RELEASE_EXISTS, prev_revision=${PREV_REV:-<unparsed>}"
+          echo "rollback_refusal=$ROLLBACK_REFUSAL" >> "$GITHUB_OUTPUT"
+          echo "Pre-upgrade release state: release_exists=$RELEASE_EXISTS, prev_revision=${PREV_REV:-<none>}"
 
       - name: Pre-flight template validation and Helm upgrade
         env:
@@ -440,22 +452,25 @@ jobs:
         env:
           RELEASE_EXISTS: ${{ steps.pre_upgrade.outputs.release_exists }}
           PREV_REV: ${{ steps.pre_upgrade.outputs.prev_revision }}
+          ROLLBACK_EVIDENCE: ${{ steps.pre_upgrade.outputs.rollback_evidence }}
+          ROLLBACK_REFUSAL: ${{ steps.pre_upgrade.outputs.rollback_refusal }}
         run: |
           # Executed ONLY when post-deploy verification fails after a successful helm upgrade.
           # Helm --atomic already handles upgrade failure.
           #
           # Three-way branch:
           #   1. Release did not exist before this deploy -> initial install failed post-deploy check -> uninstall.
-          #   2. Release existed and pre-upgrade revision was determined -> roll back to that explicit revision.
-          #   3. Release existed but pre-upgrade revision could NOT be parsed -> fail loudly without guessing or uninstalling.
+          #   2. Release existed and pre_upgrade verified a target (the unique `deployed` revision of the
+          #      pre-upgrade history, with only failed revisions above it) -> roll back to exactly that.
+          #   3. Release existed but no target could be verified -> fail loudly without guessing or uninstalling.
           if [ "$RELEASE_EXISTS" = "false" ]; then
             echo "Post-deploy smoke check failed after initial install! Uninstalling failed initial release..."
             helm uninstall gambit --wait --timeout 5m0s
-          elif [ -n "$PREV_REV" ] && [[ "$PREV_REV" =~ ^[0-9]+$ ]] && [ "$PREV_REV" -gt 0 ]; then
-            echo "Post-deploy smoke check failed after upgrade! Rolling back to explicit pre-upgrade revision $PREV_REV..."
+          elif [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Post-deploy smoke check failed after upgrade! Rolling back to verified pre-upgrade revision $PREV_REV: it was the release's only deployed revision before this upgrade (${ROLLBACK_EVIDENCE:-no evidence recorded})."
             helm rollback gambit "$PREV_REV" --wait --timeout 5m0s
           else
-            echo "::error::Post-deploy smoke check failed, but pre-upgrade revision could not be safely determined despite release existing prior to deployment."
-            echo "::error::Refusing to execute automated rollback or uninstall. Operator intervention required to prevent accidental release deletion. Inspect 'helm history gambit' and roll back manually."
+            echo "::error::Post-deploy smoke check failed, but no safe automatic rollback target was verified before the upgrade: ${ROLLBACK_REFUSAL:-pre-upgrade state unavailable}."
+            echo "::error::Refusing to execute automated rollback or uninstall. Operator intervention required: inspect 'helm history gambit', pick the last revision that served healthily, and roll back manually with 'helm rollback gambit <revision> --wait --timeout 5m0s'."
             exit 1
           fi
