@@ -182,6 +182,7 @@ export class GameSync {
   /** At capacity, retain a conservative aggregate warning rather than silently forgetting outcomes. */
   private uncertaintyOverflow = false;
   private latestCommandReject: RejectMessage | null = null;
+  private joinReject: RejectMessage | null = null;
   private rejectDuringUncertainty = false;
   private joined = false;
   private readonly listeners = new Set<GameSyncListener>();
@@ -253,7 +254,9 @@ export class GameSync {
     this.authorizedUserId = null;
     this.joiningAccessToken = undefined;
     this.rejectedAccessToken = undefined;
-    this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null, pending: null, pendingAction: null });
+    this.joinReject = null;
+    this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null, pending: null,
+      pendingAction: null, lastReject: this.commandNotice() });
     this.client.close(1000, 'session-changed');
   }
 
@@ -504,6 +507,7 @@ export class GameSync {
         }
         this.awaitingJoin = false;
         this.rejectedAccessToken = undefined;
+        this.joinReject = null;
         const reconnectPly = this.reconnectLastPly;
         this.reconnectLastPly = null;
         this.joined = true;
@@ -650,8 +654,7 @@ export class GameSync {
       this.awaitingJoin = false;
       // A refused rejoin cannot settle commands admitted on the previous socket.
       // Keep their exact uncertainty visible alongside the authorization refusal.
-      this.latestCommandReject = msg;
-      this.rejectDuringUncertainty = this.uncertainRequests.size > 0 || this.uncertaintyOverflow;
+      this.joinReject = msg;
       this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null,
         pending: null, pendingAction: null, lastReject: this.commandNotice() });
       if (msg.code === 'invalid_command') {
@@ -692,7 +695,7 @@ export class GameSync {
   /** The existing UI displays message; retain both uncertainty and the latest definite refusal. */
   private commandNotice(): RejectMessage | OutcomeUnknownMessage | null {
     const latest = [...this.uncertainRequests.values()].at(-1);
-    if (!latest && !this.uncertaintyOverflow) return this.latestCommandReject;
+    if (!latest && !this.uncertaintyOverflow) return this.joinReject ?? this.latestCommandReject;
     const notice: OutcomeUnknownMessage = latest ?? {
       t: 'outcomeUnknown', code: 'outcome_unknown', gameId: this.gameId, ref: null,
       requestId: '', message: 'Earlier command outcomes remain unknown.',
@@ -701,6 +704,7 @@ export class GameSync {
     if (this.uncertainRequests.size > 1) messages.push(`${this.uncertainRequests.size} command outcomes remain unknown.`);
     if (latest && this.uncertaintyOverflow) messages.push('Additional earlier command outcomes remain unknown.');
     if (this.latestCommandReject) messages.push(`Latest command rejected: ${this.latestCommandReject.message}`);
+    if (this.joinReject) messages.push(`Join rejected: ${this.joinReject.message}`);
     return { ...notice, message: messages.join(' ') };
   }
 

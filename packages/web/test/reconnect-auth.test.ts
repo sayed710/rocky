@@ -195,16 +195,36 @@ test('R-03 + R-04: fresh reconnect preserves multiple unknown outcomes and refus
 test('R-03 + R-04: rejected reconnect retains uncertainty alongside authentication refusal', async (t) => {
   const h = await harness(); t.after(() => dispose(h));
   unknownMove(h);
+  h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'illegal_move', message: 'Earlier gesture refused.' });
   h.expireOnServerOnly(); await h.reconnect();
   assert.equal(h.exchange().last('reject')?.code, 'unauthorized');
   assert.equal(h.sync.getState().connected, false);
   assert.equal(h.sync.getState().myColor, null);
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
-  assert.match(h.sync.getState().lastReject?.message ?? '', /Latest command rejected/);
+  assert.match(h.sync.getState().lastReject?.message ?? '', /Earlier gesture refused/);
+  assert.match(h.sync.getState().lastReject?.message ?? '', /Join rejected/);
   assert.equal(h.sync.submitMove('d2d4'), null);
   h.closeServer(); h.sync.networkOnline(); h.factory.last.open(); await flush();
   assert.equal(h.exchange().last('joined')?.role, 'white');
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  assert.match(h.sync.getState().lastReject?.message ?? '', /Earlier gesture refused/);
+  assert.doesNotMatch(h.sync.getState().lastReject?.message ?? '', /Join rejected/);
+  h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'original-move' });
+  assert.equal(h.sync.getState().lastReject?.t, 'reject');
+  assert.equal(h.sync.getState().lastReject?.message, 'Earlier gesture refused.');
+  assertNoReplay(h);
+});
+
+test('R-03 + R-04: successful reauthorization clears only the join refusal, then an exact receipt clears uncertainty', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  unknownMove(h);
+  h.expireOnServerOnly(); await h.reconnect(); h.exchange();
+  h.closeServer(); h.sync.networkOnline(); h.factory.last.open(); await flush(); h.exchange();
+  assert.equal(h.sync.getState().connected, true);
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  assert.doesNotMatch(h.sync.getState().lastReject?.message ?? '', /rejected/i);
+  h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'original-move' });
+  assert.equal(h.sync.getState().lastReject, null, 'successful join refusal cannot survive its uncertainty');
   assertNoReplay(h);
 });
 
