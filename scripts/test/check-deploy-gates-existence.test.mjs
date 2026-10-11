@@ -24,6 +24,8 @@ const REVISION_CHECK = 'if ! node scripts/release-existence.mjs only-initial-rev
 const UNINSTALL_CMD = 'helm uninstall gambit --wait --timeout 5m0s';
 const ROLLBACK_BRANCH = 'elif [ "$RELEASE_EXISTS" = "true" ] && [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then';
 const UNINSTALL_BRANCH = 'if [ "$RELEASE_EXISTS" = "false" ]; then';
+const PUBLISH_RELEASE_EXISTS = 'echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"';
+const ENV_BINDING = 'RELEASE_EXISTS: ${{ steps.pre_upgrade.outputs.release_exists }}';
 
 /** Replaces one exact snippet of the real workflow, failing loudly if it is no longer there. */
 function mutate(from, to, text = deployYml) {
@@ -129,4 +131,20 @@ test('rejects a second helm uninstall elsewhere', () => {
 test('rejects a rollback that does not require release_exists exactly "true"', () => {
   const text = mutate(ROLLBACK_BRANCH, 'elif [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then');
   assertRejected(text, /rollback requires release_exists exactly "true"/);
+});
+
+test('rejects an unknown-existence arm that does not stop the deploy', () => {
+  const refusal = '              exit 1\n              ;;\n          esac\n';
+  const text = mutate(refusal, refusal.replace('exit 1', ':'));
+  assertRejected(text, /the `\*\)` arm \(unknown existence\) must end with `exit 1`/);
+});
+
+test('rejects a hardcoded release_exists=false publication', () => {
+  const text = mutate(PUBLISH_RELEASE_EXISTS, 'echo "release_exists=false" >> "$GITHUB_OUTPUT"');
+  assertRejected(text, /every release_exists output must be published exactly as/);
+});
+
+test('rejects a rollback step without the release_exists env binding', () => {
+  const text = mutate(`          ${ENV_BINDING}\n`, '');
+  assertRejected(text, /the rollback step must bind exactly `RELEASE_EXISTS:/);
 });

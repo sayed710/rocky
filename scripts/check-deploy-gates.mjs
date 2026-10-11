@@ -259,6 +259,10 @@ export function checkRollbackTarget(deployText) {
  * - the list corroboration LIST_CMD and the scripts/release-existence.mjs classifier are both present;
  * - RELEASE_EXISTS is assigned exactly three times: `RELEASE_EXISTS=""`, the `exists)` arm and the
  *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from the classifier's output;
+ * - that case has only the `exists)`, `absent)` and `*)` arms, and the `*)` arm (unknown existence) ends
+ *   with `exit 1` before `;;`;
+ * - release_exists is published only as `echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"`, and the
+ *   rollback step binds exactly `RELEASE_EXISTS: ${{ steps.pre_upgrade.outputs.release_exists }}`;
  * - the one `helm uninstall` sits in the `if [ "$RELEASE_EXISTS" = "false" ]` branch of the rollback step,
  *   after a `helm history` re-check and the only-initial-revision check, each failing with `exit 1`;
  * - the one `helm rollback` sits in a branch that requires RELEASE_EXISTS = "true".
@@ -302,6 +306,28 @@ export function checkReleaseExistence(deployText) {
   if (caseIdx === -1 || absentIdx <= caseIdx || code.slice(caseIdx, absentIdx).includes('esac')) {
     fail('RELEASE_EXISTS=false must be set only in the `absent)` arm of `case "$RELEASE_EXISTENCE" in`');
   }
+  // The case arms are exactly `exists)` and `absent)` (setting the literals) and `*)`, which refuses
+  // every other verdict: its arm must end with `exit 1` before `;;` and must not touch RELEASE_EXISTS.
+  const EXPECTED_ARMS = ['exists) RELEASE_EXISTS=true ;;', 'absent) RELEASE_EXISTS=false ;;', '*)'];
+  const esacIdx = caseIdx === -1 ? -1 : code.indexOf('esac', caseIdx);
+  const caseBody = esacIdx === -1 ? [] : code.slice(caseIdx + 1, esacIdx);
+  const arms = caseBody.filter((line) => /^\(?[^\s()=$"']+\)/.test(line));
+  const unknownArm = caseBody.slice(caseBody.indexOf('*)') + 1);
+  const unknownArmBody = unknownArm.slice(0, unknownArm.indexOf(';;'));
+  if (arms.join('\n') !== EXPECTED_ARMS.join('\n') ||
+      !unknownArm.includes(';;') ||
+      unknownArmBody.at(-1) !== 'exit 1' ||
+      unknownArmBody.some((line) => /\bRELEASE_EXISTS\b/.test(line))) {
+    fail(`\`case "$RELEASE_EXISTENCE" in\` must have exactly the arms [${EXPECTED_ARMS.join(' | ')}], and the \`*)\` arm (unknown existence) must end with \`exit 1\` before \`;;\`, found arms: [${arms.join(' | ')}]`);
+  }
+  // The step output the rollback reads must be exactly RELEASE_EXISTS (as gate 10 does for prev_revision).
+  const PUBLISH_RELEASE_EXISTS = 'echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"';
+  const publishes = lines
+    .filter((line) => !/^\s*#/.test(line) && /release_exists=/.test(line) && /"\$GITHUB_OUTPUT"/.test(line))
+    .map((line) => line.trim());
+  if (publishes.length === 0 || publishes.some((line) => line !== PUBLISH_RELEASE_EXISTS)) {
+    fail(`every release_exists output must be published exactly as \`${PUBLISH_RELEASE_EXISTS}\`, found: [${publishes.join(' | ')}]`);
+  }
   const existenceAssignments = code.filter((line) => /(?:^|[\s;])RELEASE_EXISTENCE=/.test(line));
   const ALLOWED_EXISTENCE = ['RELEASE_EXISTENCE=unknown', `RELEASE_EXISTENCE=$(sed -n 's/^release_existence=//p' "$EXISTENCE_FILE")`];
   if (existenceAssignments.length !== 2 || !ALLOWED_EXISTENCE.every((a) => existenceAssignments.includes(a))) {
@@ -316,6 +342,12 @@ export function checkReleaseExistence(deployText) {
   }
   const next = lines.findIndex((line, i) => i > start && /^\s*-\s+(?:name|uses|run):/.test(line));
   const step = lines.slice(start, next === -1 ? undefined : next).filter(isCode).map((line) => line.trim());
+
+  const ENV_BINDING = 'RELEASE_EXISTS: ${{ steps.pre_upgrade.outputs.release_exists }}';
+  const bindings = step.filter((line) => /^RELEASE_EXISTS\s*:/.test(line));
+  if (bindings.length !== 1 || bindings[0] !== ENV_BINDING) {
+    fail(`the rollback step must bind exactly \`${ENV_BINDING}\`, found: [${bindings.join(' | ')}]`);
+  }
 
   const uninstalls = code.filter((line) => /\bhelm\s+uninstall\b/.test(line));
   const UNINSTALL_CMD = 'helm uninstall gambit --wait --timeout 5m0s';
