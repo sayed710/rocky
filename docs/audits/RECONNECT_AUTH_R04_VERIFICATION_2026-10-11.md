@@ -204,6 +204,47 @@ These repairs require new exact-head model/CI/Qodo/Greptile evidence. Older-head
 reviews and passing checks are historical only. No thread is resolved as fixed
 before its correction is published. NOT READY FOR MERGE.
 
+## Further independent review repairs (publication checkpoint)
+
+All applicable hosted CI jobs passed on `9e1a2c7` in run `38138159529`.
+Its exact git archive (SHA-256
+`59ce376dafdf173209abe854cd300f2ada96a74bb0dc8d1eb4b21647e5544705`)
+passed the unchanged native Linux gateway runner 88/88 and full Chromium 283/283
+(two workers, zero retries/skips). Owned PostgreSQL and Redis services stopped.
+These earlier-head checks do not certify the subsequent repairs.
+
+Genuine installed agy-delegate Gemini 3.8 Flash High/high/read-only inspection of
+clean `9e1a2c7` completed in conversation `8fe52eaf-e71a-4ded-8177-2cd33e8bd3a8`;
+result SHA-256 `1155cde9474b1dd3c031a91b255cd702006ec1d3e75541c5c0c121b61477c68b`,
+`readOnlyViolation=false`, no touched files. Its architecture PASS was challenged:
+fresh Qodo and Greptile reviews found two functional gaps, both executed RED before
+production repair. Gemini's requested new fixture cast cleanup was also accepted.
+
+- Qodo: a locally fresh token rejected by the gateway was resent on Try again.
+  Separate deterministic server/browser clocks reproduce real verifier expiry,
+  real gateway unauthorized rejection and zero refresh attempts on recovery.
+  The repair remembers the rejected join credential only in memory and uses the
+  existing `SessionManager.refreshNow()` HTTP-401 recovery contract before reuse.
+  Normal expiry still uses `validAccessToken()`. Both paths share manager refresh,
+  generation protection and cooldown, without bypassing backoff. Repeated rejected
+  credentials cannot be resent or create an unbounded refresh loop. Temporary
+  recovery failure retains player identity and never anonymously downgrades it.
+- Greptile: a second logout returned before the first held real AuthApi HTTP
+  logout, causing early spectator continuation. The executed controller RED
+  confirms the second operation settled early; logout now shares one pending
+  operation, including synchronous callback reentrancy, until it settles. A held
+  HTTP browser regression verifies two actual clicks cannot authorize watching
+  early. Newer canonical adoptions and disposal still fence older completions.
+- Qodo's low-priority browser assertion-message issue was valid: its message now
+  belongs to `expect(actual, message)`, rather than an ignored `toBe` argument.
+
+The repairs pass full build, root lint/typecheck, all 19 hermetic workspaces
+(web 1553/1553), focused controller/route/recovery 84/84, reconnect/socket matrix
+29/29, live presence 5/5, and topology (498 files/21 suites), with zero skips.
+Fresh native Linux runtime/browser checks and a clean exact-final-head
+model/CI/Qodo/Greptile review are required for publication certification.
+No prior exact-head approval is reused. NOT READY FOR MERGE at this checkpoint.
+
 ## Proposed coordinated PROJECT_STATE append
 
 ZadLoop R-04 was independently reverified against main `2f94dab`: a mounted game
@@ -213,7 +254,9 @@ join acknowledgment, fences obsolete sockets/async work, suspends when logout is
 requested, and reauthorizes account changes. Owner-approved completed logout and
 definitive invalidation require a fresh anonymous server join to watch public
 games; temporary refresh failures preserve player identity and bounded recovery.
-Component expiry RED/GREEN, 26 reconnect/socket regressions, full web 1549/1549,
+Server-rejected credentials use the same manager refresh recovery as HTTP 401,
+and repeated logout requests share one pending operation until it settles.
+Component expiry RED/GREEN, 29 reconnect/socket regressions, full web 1553/1553,
 all 19 hermetic workspaces, lint/build, and scripts 333/333 pass with zero skips.
 Initial genuine Gemini review
 was critically corrected; complete native Linux gateway runtime 88/88 also passed.

@@ -156,6 +156,7 @@ export class AuthController {
    */
   private sessionGeneration = 0;
   private pendingOperations = 0;
+  private logoutInFlight: Promise<void> | null = null;
   private disposed = false;
 
   constructor(opts: AuthControllerOptions) {
@@ -366,8 +367,25 @@ export class AuthController {
   }
 
   /** Log out and clear the persisted session. */
-  async logout(): Promise<void> {
-    if (this.disposed) return;
+  logout(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    if (this.logoutInFlight) return this.logoutInFlight;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const pending = new Promise<void>((success, failure) => { resolve = success; reject = failure; });
+    // Publish the lock before synchronous callbacks, including a reentrant logout request.
+    this.logoutInFlight = pending;
+    void this.performLogout().then(() => {
+      this.logoutInFlight = null;
+      resolve();
+    }, (error: unknown) => {
+      this.logoutInFlight = null;
+      reject(error);
+    });
+    return pending;
+  }
+
+  private async performLogout(): Promise<void> {
     const originalSession = this.session;
     this.callbacks.onLogoutRequested?.();
     const generation = this.sessionGeneration;

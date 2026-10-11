@@ -14,11 +14,12 @@ const flush = async (): Promise<void> => { await new Promise<void>((resolve) => 
 
 async function harness(anonymous = false) {
   let now = 1_000;
+  let serverNow: number | null = null;
   let sequence = 0;
   let refreshes = 0;
   let doRefresh: (() => Promise<AuthResponse>) | undefined;
   const tokens = new AccessTokenService({ secret: 'test-only-secret-with-at-least-32-bytes', ttlSec: 60,
-    clock: { now: () => now }, ids: { next: () => String(++sequence) } });
+    clock: { now: () => serverNow ?? now }, ids: { next: () => String(++sequence) } });
   const issue = (userId = 'alice'): AuthResponse => ({
     user: { id: userId, handle: userId, country: null, createdAt: '2020-01-01T00:00:00Z', roles: ['user'] },
     tokens: { accessToken: tokens.issue({ userId, handle: userId, roles: ['user'] }).token,
@@ -59,6 +60,7 @@ async function harness(anonymous = false) {
     closeServer: () => serverConnection?.close(),
     peerAdopt: (auth: AuthResponse) => channel.onmessage?.({ data: { type: 'session_adopted', auth } } as MessageEvent),
     refreshes: () => refreshes, advance: (ms: number) => { now += ms; },
+    expireOnServerOnly: () => { serverNow = now + 60_000; },
     setRefresh: (callback: () => Promise<AuthResponse>) => { doRefresh = callback; },
     reconnect: async () => {
       serverConnection?.close(); serverConnection = null;
@@ -73,6 +75,47 @@ test('R-04 control: reconnect before token expiry restores the player without re
     assert.equal(h.exchange().last('joined')?.role, 'white');
     assert.equal(h.refreshes(), 0);
   } finally { dispose(h); }
+});
+
+test('server-expired but locally fresh token is refreshed before explicit recovery rejoin', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  h.expireOnServerOnly();
+  assert.equal(h.session.isAccessTokenExpired(), false, 'browser still considers the token fresh');
+  await h.reconnect();
+  assert.equal(h.exchange().last('reject')?.code, 'unauthorized', 'real verifier rejects server-expired token');
+  h.closeServer(); h.sync.networkOnline(); h.factory.last.open(); await flush();
+  assert.equal(h.refreshes(), 1);
+  assert.equal(h.exchange().last('joined')?.role, 'white');
+});
+
+test('server-rejected fresh credentials retain identity during refresh backoff without resending the token', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  await h.reconnect();
+  h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'rejected' });
+  h.setRefresh(async () => { throw new NetworkError(); });
+  h.sync.networkOnline(); h.factory.last.open(); await flush();
+  assert.equal(h.refreshes(), 1);
+  assert.equal(h.factory.last.sent.length, 0);
+  assert.equal(h.session.current?.user.id, 'alice');
+  h.sync.networkOnline(); await flush();
+  assert.equal(h.refreshes(), 1, 'explicit retry cannot bypass manager cooldown');
+  h.advance(10_000); h.setRefresh(async () => h.issue());
+  h.scheduler.runNext(); await flush();
+  assert.equal(h.exchange().last('joined')?.role, 'white');
+});
+
+test('refresh returning a previously rejected token cannot resend it or create an unbounded loop', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  await h.reconnect();
+  h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'rejected' });
+  h.setRefresh(async () => h.tokenA);
+  h.sync.networkOnline(); h.factory.last.open(); await flush();
+  for (let attempt = 0; attempt < 3; attempt++) { h.advance(4_000); h.scheduler.runNext(); await flush(); }
+  assert.equal(h.refreshes(), 4);
+  assert.equal(h.scheduler.pending, 0);
+  assert.equal(h.factory.last.sent.length, 0);
+  assert.equal(h.sync.getState().recoveryAvailable, true);
+  assert.equal(h.session.current?.user.id, 'alice');
 });
 
 test('R-04: mounted game reconnect after expiry obtains a current token and restores the player', async () => {

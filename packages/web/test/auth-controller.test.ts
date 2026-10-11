@@ -100,7 +100,7 @@ test('logout notifies the game boundary before awaiting logout authentication', 
   const client = makeFakeClient({ logout: async () => {
     assert.equal(notified, true, 'pending rejoin is invalidated before the auth operation');
     await response;
-  } }) as any;
+  } }) as unknown as GambitClient;
   const controller = new AuthController({ client, storage: makeFakeStorage(), callbacks: {
     onSessionChange: () => {}, onPending: () => {}, onError: () => {},
     onLogoutRequested: () => { notified = true; },
@@ -132,6 +132,38 @@ test('same-account adoption during an older logout resumes the current session n
   release(); await logout;
   assert.equal(client.session.current?.tokens.accessToken === 'newer-token', true);
   assert.deepEqual(notifications, ['u1', 'ending', 'u1']);
+});
+
+test('two logout requests share the held operation and cannot resume watching early', async (t) => {
+  const auth: AuthResponse = {
+    user: { id: 'u1', handle: 'alice', country: null, createdAt: '2020-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: 'initial-token', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  };
+  let release!: () => void;
+  let logoutRequests = 0;
+  const client = new GambitClient({ baseUrl: 'https://api.test', tokenStore: new MemoryTokenStore(),
+    transport: { send: async (request) => {
+      if (!request.url.endsWith('/v1/auth/logout')) return json(200, auth);
+      logoutRequests++;
+      return new Promise((resolve) => { release = () => resolve(json(200, {})); });
+    } } });
+  const notifications: (string | null)[] = [];
+  const controller = new AuthController({ client, callbacks: {
+    onSessionChange: (session) => { notifications.push(session?.userId ?? null); },
+    onLogoutRequested: () => { notifications.push('ending'); }, onPending: () => {}, onError: () => {},
+  } });
+  t.after(() => controller.dispose());
+  await controller.login('alice', 'password');
+  const first = controller.logout(); await new Promise<void>((resolve) => setImmediate(resolve));
+  let secondSettled = false;
+  const second = controller.logout().then(() => { secondSettled = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  try {
+    assert.equal(logoutRequests, 1);
+    assert.equal(secondSettled, false);
+    assert.deepEqual(notifications, ['u1', 'ending']);
+  } finally { release(); await Promise.all([first, second]); }
+  assert.deepEqual(notifications, ['u1', 'ending', null]);
 });
 
 test('login creates a session with correct fields from AuthResponse', async () => {
@@ -646,7 +678,7 @@ test('overlapping auth operations keep the UI pending until every operation sett
   });
 
   const first = controller.logout();
-  const second = controller.logout();
+  const second = controller.login('alice', 'pw');
   await second;
 
   assert.deepEqual(pendingStates, [true], 'the first operation is still pending');

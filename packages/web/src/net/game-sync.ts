@@ -171,6 +171,8 @@ export class GameSync {
   private suspended = false;
   private terminalJoinFailure = false;
   private authorizedUserId: string | null = null;
+  private joiningAccessToken: string | undefined;
+  private rejectedAccessToken: string | undefined;
   private state: GameSyncState;
   private clientSeq = 0;
   private joined = false;
@@ -241,6 +243,8 @@ export class GameSync {
     this.suspended = true;
     this.terminalJoinFailure = false;
     this.authorizedUserId = null;
+    this.joiningAccessToken = undefined;
+    this.rejectedAccessToken = undefined;
     this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null, pending: null, pendingAction: null });
     this.client.close(1000, 'session-changed');
   }
@@ -398,6 +402,7 @@ export class GameSync {
       if (!active()) return;
       this.resolvingToken = false;
       this.authorizedUserId = userId;
+      this.joiningAccessToken = token;
       this.awaitingJoin = true;
       if (!this.client.send({ t: 'join', gameId: this.gameId, ...(token !== undefined ? { token } : {}) })) {
         this.awaitingJoin = false;
@@ -406,12 +411,17 @@ export class GameSync {
     };
     const session = this.session;
     if (!session) {
+      if (this.token !== undefined && this.token === this.rejectedAccessToken) {
+        this.patch({ recoveryAvailable: true });
+        return;
+      }
       sendJoin(this.token, null);
       return;
     }
     session.captureGeneration();
     const initial = session.current;
-    const needsRefresh = session.isAccessTokenExpired(initial);
+    const serverRejected = initial !== null && initial.tokens.accessToken === this.rejectedAccessToken;
+    const needsRefresh = serverRejected || session.isAccessTokenExpired(initial);
     // A fresh in-memory session is validated in this same turn by the manager's
     // expiry contract. Only the refresh path needs an asynchronous continuation.
     if (initial && !needsRefresh) {
@@ -423,12 +433,18 @@ export class GameSync {
       return;
     }
     this.resolvingToken = true;
-    void session.validAccessToken().then((token) => {
+    // Gateway unauthorized is the same credential-recovery boundary as an HTTP 401.
+    // refreshNow retains the manager's single flight, cooldown and reset barriers.
+    const tokenRequest = serverRejected
+      ? session.refreshNow().then((current) => current.tokens.accessToken)
+      : session.validAccessToken();
+    void tokenRequest.then((token) => {
       if (!active()) return;
       session.captureGeneration();
       const current = session.current;
       if (!token || !current || current.user.id !== initial.user.id
-        || current.tokens.accessToken !== token || session.isAccessTokenExpired(current)) {
+        || current.tokens.accessToken !== token || token === this.rejectedAccessToken
+        || session.isAccessTokenExpired(current)) {
         throw new NoSessionError();
       }
       sendJoin(token, current?.user.id ?? null);
@@ -438,13 +454,15 @@ export class GameSync {
       session.captureGeneration();
       if (!active()) return;
       const current = session.current;
-      if (error instanceof NoSessionError && current?.user.id === initial.user.id
-        && !session.isAccessTokenExpired(current)) {
-        // A peer replaced this refresh with fresh credentials for the same account.
-        // Start a new operation; the superseded continuation never publishes its token.
-        this.invalidateJoin();
-        this.retryAttempt = 0;
-        this.joinCurrentSocket();
+      if (error instanceof NoSessionError && current?.user.id === initial.user.id) {
+        if (!session.isAccessTokenExpired(current) && current.tokens.accessToken !== this.rejectedAccessToken) {
+          // A peer supplied fresh credentials; the superseded result never publishes its token.
+          this.invalidateJoin();
+          this.retryAttempt = 0;
+          this.joinCurrentSocket();
+        } else {
+          this.scheduleJoinRetry(session);
+        }
       } else if (isTransientRefreshFailure(error)) {
         this.scheduleJoinRetry(session);
       } else if (!current) {
@@ -471,6 +489,7 @@ export class GameSync {
             || this.client.state !== 'open' || (this.session.current?.user.id ?? null) !== userId) return;
         }
         this.awaitingJoin = false;
+        this.rejectedAccessToken = undefined;
         const reconnectPly = this.reconnectLastPly;
         this.reconnectLastPly = null;
         this.joined = true;
@@ -574,6 +593,7 @@ export class GameSync {
 
   private applyReject(msg: RejectMessage): void {
     if (this.awaitingJoin) {
+      if (msg.code === 'unauthorized') this.rejectedAccessToken = this.joiningAccessToken;
       this.awaitingJoin = false;
       this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null,
         pending: null, pendingAction: null, lastReject: msg });
