@@ -97,6 +97,26 @@ test('rejects RELEASE_EXISTENCE taken from anywhere but the classifier output', 
   assertRejected(text, /RELEASE_EXISTENCE must be "unknown" or read from the classifier's output/);
 });
 
+test('rejects a forged verdict written to the classifier output file before it is read', () => {
+  const text = mutate(EXISTENCE_READ, `printf 'release_existence=absent\\n' > "$EXISTENCE_FILE"\n            ${EXISTENCE_READ}`);
+  assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
+});
+
+test('rejects a forged verdict appended to the classifier output file by an echo', () => {
+  const text = mutate(EXISTENCE_READ, `echo release_existence=absent >> "$EXISTENCE_FILE"\n            ${EXISTENCE_READ}`);
+  assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
+});
+
+test('rejects a forged verdict written to the classifier output file by tee', () => {
+  const text = mutate(EXISTENCE_READ, `printf 'release_existence=absent\\n' | tee "$EXISTENCE_FILE" > /dev/null\n            ${EXISTENCE_READ}`);
+  assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
+});
+
+test('rejects the classifier stdout redirected to a file other than the one RELEASE_EXISTENCE is read from', () => {
+  const text = mutate(`"\${LIST_ARGS[@]}" > "$EXISTENCE_FILE"`, `"\${LIST_ARGS[@]}" > "$LIST_OUT"`);
+  assertRejected(text, /the classifier's stdout must be redirected exactly once, as `> "\$EXISTENCE_FILE"`/);
+});
+
 test('rejects an uninstall without the helm history re-check', () => {
   const text = mutate(HISTORY_CHECK, 'if false; then');
   assertRejected(text, /the uninstall must be guarded/);

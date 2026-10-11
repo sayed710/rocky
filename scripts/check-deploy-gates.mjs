@@ -171,6 +171,28 @@ function checkDeployGates() {
 }
 
 /**
+ * The writes to "$file" in `shellText` (gates 10 and 11): `>` and `>>` redirections onto it, and
+ * `tee [flags] [other files] "$file"`. Pass every non-comment line, echo lines included.
+ */
+function writesTo(shellText, file) {
+  const redirects = shellText.match(new RegExp(`(?:^|[^0-9&])>>?\\s*"\\$${file}"`, 'gm')) ?? [];
+  const tees = shellText.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s"\\$${file}"`, 'g')) ?? [];
+  return [...redirects, ...tees];
+}
+
+/**
+ * The stdout redirections (`>`, `>>`, `>|`, `>&N`, `1>`, `&>`) of the simple command that starts
+ * `command`, i.e. up to the first unquoted `|`, `||`, `&&` or `;`, whitespace-normalised.
+ */
+function stdoutRedirects(command) {
+  const masked = command.replace(/"[^"]*"|'[^']*'/g, (quoted) => '_'.repeat(quoted.length));
+  const end = masked.search(/(?<!>)\||;|&&/);
+  const simple = end === -1 ? command : command.slice(0, end);
+  return [...simple.matchAll(/(?<![0-9&>])(?:1|&)?>[>|&]?\s*(?:"[^"]*"|[^\s;&|<>]+)/g)]
+    .map((m) => m[0].replace(/\s+/g, ' '));
+}
+
+/**
  * 10. The automatic rollback targets only the revision scripts/resolve-rollback-revision.mjs verified.
  *
  * `helm rollback` re-applies its target with no status check, so a target taken from anywhere else
@@ -204,11 +226,7 @@ export function checkRollbackTarget(deployText) {
     fail('the rollback target is not resolved by scripts/resolve-rollback-revision.mjs (with stdout redirected to a file, `> "$FILE"`) — automatic rollback must target only the verified pre-upgrade deployed revision');
   }
   for (const file of resolverOutputs) {
-    const allCommands = commands.join('\n');
-    const redirects = allCommands.match(new RegExp(`(?:^|[^0-9&])>>?\\s*"\\$${file}"`, 'gm')) ?? [];
-    // `tee [flags] [other files] "$X"` writes "$X" too.
-    const tees = allCommands.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s"\\$${file}"`, 'g')) ?? [];
-    const writes = [...redirects, ...tees];
+    const writes = writesTo(commands.join('\n'), file);
     if (writes.length !== 1) {
       fail(`"$${file}" must be written only by scripts/resolve-rollback-revision.mjs, found ${writes.length} write(s)`);
     }
@@ -258,7 +276,9 @@ export function checkRollbackTarget(deployText) {
  * - the only `helm status` is the evidence-capturing STATUS_CMD (no `>/dev/null 2>&1`, no `if helm status`);
  * - the list corroboration LIST_CMD and the scripts/release-existence.mjs classifier are both present;
  * - RELEASE_EXISTS is assigned exactly three times: `RELEASE_EXISTS=""`, the `exists)` arm and the
- *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from the classifier's output;
+ *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from "$EXISTENCE_FILE", the
+ *   file the classifier's stdout is redirected to (`> "$EXISTENCE_FILE"`) and that nothing else writes
+ *   (by `>`, `>>` or `tee`, echo lines included);
  * - that case has only the `exists)`, `absent)` and `*)` arms, and the `*)` arm (unknown existence) ends
  *   with `exit 1` before `;;`;
  * - release_exists is published only as `echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"`, and the
@@ -332,6 +352,22 @@ export function checkReleaseExistence(deployText) {
   const ALLOWED_EXISTENCE = ['RELEASE_EXISTENCE=unknown', `RELEASE_EXISTENCE=$(sed -n 's/^release_existence=//p' "$EXISTENCE_FILE")`];
   if (existenceAssignments.length !== 2 || !ALLOWED_EXISTENCE.every((a) => existenceAssignments.includes(a))) {
     fail(`RELEASE_EXISTENCE must be "unknown" or read from the classifier's output, found: [${existenceAssignments.join(' | ')}]`);
+  }
+  // ...and that file holds only the classifier's verdict (as gate 10 does for the resolver's file):
+  // every classifier invocation sends its stdout to "$EXISTENCE_FILE", and nothing else writes it.
+  const classifierStdouts = code
+    .join('\n')
+    .replace(/\\\n/g, ' ')
+    .split('\n')
+    .filter((line) => /\bnode\s+scripts\/release-existence\.mjs\s+classify\b/.test(line))
+    .map((line) => stdoutRedirects(line.slice(line.search(/\bnode\s+scripts\/release-existence\.mjs\s+classify\b/))));
+  if (classifierStdouts.length === 0 ||
+      classifierStdouts.some((redirects) => redirects.length !== 1 || redirects[0] !== '> "$EXISTENCE_FILE"')) {
+    fail(`the classifier's stdout must be redirected exactly once, as \`> "$EXISTENCE_FILE"\`, found: [${classifierStdouts.map((r) => r.join(' ')).join(' | ')}]`);
+  }
+  const existenceWrites = writesTo(lines.filter((line) => !/^\s*#/.test(line)).join('\n'), 'EXISTENCE_FILE');
+  if (existenceWrites.length !== 1) {
+    fail(`"$EXISTENCE_FILE" must be written only by scripts/release-existence.mjs classify, found ${existenceWrites.length} write(s): [${existenceWrites.map((w) => w.trim()).join(' | ')}]`);
   }
 
   // The rollback step: from its `- name:` line to the next step (or end of file).
