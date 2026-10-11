@@ -197,6 +197,26 @@ test('a new gesture and its rejection cannot hide another request still awaiting
   assert.equal(sync.getState().lastReject?.message, 'Refused new move.', 'a late older move cannot erase the new refusal');
 });
 
+test('a delayed older unknown preserves a newer refusal while ordinary errors still clear', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  const old = sync.submitMove('g1f3'); assert.ok(old);
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  const newer = sync.submitMove('d2d4'); assert.ok(newer);
+  factory.last.emit({ t: 'reject', gameId: 'g1', ref: newer.clientSeq, code: 'illegal_move', message: 'New move refused.' });
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: old.clientSeq, requestId: 'delayed-old', message: 'Old outcome unknown.' });
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  assert.match(sync.getState().lastReject?.message ?? '', /New move refused/);
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'delayed-old' });
+  factory.last.emit({ t: 'resumed', gameId: 'g1', missed: [], state: stateView(0, 'w') });
+  assert.equal(sync.getState().lastReject?.message, 'New move refused.');
+  const next = sync.submitMove('e2e4'); assert.ok(next);
+  assert.equal(sync.getState().lastReject, null);
+  factory.last.emit({ t: 'reject', gameId: 'g1', ref: next.clientSeq, code: 'illegal_move', message: 'Ordinary refusal.' });
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  assert.equal(sync.getState().lastReject, null, 'a new gesture restores ordinary stale-error clearing');
+});
+
 for (const reversed of [false, true]) {
   test(`overlapping unknown requests reconcile independently with reversed responses=${reversed}`, () => {
     const { factory, sync } = setup(); sync.start(); factory.last.open();

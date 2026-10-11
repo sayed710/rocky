@@ -161,6 +161,7 @@ export class GameSync {
   /** At capacity, retain a conservative aggregate warning rather than silently forgetting outcomes. */
   private uncertaintyOverflow = false;
   private latestCommandReject: RejectMessage | null = null;
+  private rejectDuringUncertainty = false;
   private joined = false;
   private readonly listeners = new Set<GameSyncListener>();
   private unsubscribe: (() => void) | null = null;
@@ -252,6 +253,7 @@ export class GameSync {
     this.clientSeq = clientSeq;
     const pending: PendingMove = { uci, clientSeq };
     this.latestCommandReject = null;
+    this.rejectDuringUncertainty = false;
     this.patch({ pending, lastReject: this.commandNotice() });
     return pending;
   }
@@ -285,6 +287,7 @@ export class GameSync {
     const sent = this.client.send({ t: action, gameId: this.gameId });
     if (sent) {
       this.latestCommandReject = null;
+      this.rejectDuringUncertainty = false;
       this.patch({ pendingAction: action, lastReject: this.commandNotice() });
     }
     return sent;
@@ -340,6 +343,7 @@ export class GameSync {
         // resends the command. Resume asks only for authoritative state.
         if (msg.gameId === this.gameId && (msg.ref === null || msg.ref <= this.clientSeq)) {
           if (!this.confirmedRequests.has(msg.requestId)) {
+            if (this.latestCommandReject) this.rejectDuringUncertainty = true;
             this.uncertainRequests.set(msg.requestId, msg);
             if (this.uncertainRequests.size > 32) {
               const oldest = this.uncertainRequests.keys().next().value!;
@@ -371,7 +375,8 @@ export class GameSync {
     // A position/draw state cannot identify which request produced it. Only
     // terminal state or monotonic durable readiness safely settles the intent.
     this.reconcileUncertainty(view.ready, view.status.over);
-    if (view.status.over) this.latestCommandReject = null;
+    if (view.status.over || !this.rejectDuringUncertainty) this.latestCommandReject = null;
+    if (view.status.over) this.rejectDuringUncertainty = false;
     this.patch({
       role: role ?? this.state.role,
       myColor,
@@ -406,6 +411,7 @@ export class GameSync {
     const move: MoveView = { ply: msg.ply, uci: msg.uci, san: msg.san, by: msg.by };
     const pending = this.state.pending;
     const confirmsPending = pending !== null && this.state.myColor === msg.by && pending.uci === msg.uci;
+    if (!this.rejectDuringUncertainty) this.latestCommandReject = null;
     this.patch({
       moves: [...this.state.moves, move],
       ply: msg.ply,
@@ -426,6 +432,7 @@ export class GameSync {
   private applyEnded(msg: EndedBroadcast): void {
     this.reconcileUncertainty(null, true);
     this.latestCommandReject = null;
+    this.rejectDuringUncertainty = false;
     this.patch({
       status: { over: true, result: msg.result, termination: msg.termination, winner: msg.winner },
       legalMoves: {},
@@ -438,6 +445,7 @@ export class GameSync {
     const pending = this.state.pending;
     const rollsBack = pending !== null && (msg.ref === null || msg.ref === pending.clientSeq);
     this.latestCommandReject = msg;
+    this.rejectDuringUncertainty = this.uncertainRequests.size > 0 || this.uncertaintyOverflow;
     this.patch({
       lastReject: this.commandNotice(),
       pending: rollsBack ? null : pending,

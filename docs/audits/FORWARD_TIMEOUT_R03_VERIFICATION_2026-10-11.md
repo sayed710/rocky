@@ -187,6 +187,17 @@ refusal. The extended correct-wire regression failed (39/40 passed). Snapshot
 and late move reconciliation now retain the refusal until a new user command
 or terminal state, while each unknown identity remains independent. The extended
 GameSync suite passes **40/40**. Earlier exact-head reviews are superseded.
+The full `b4438c1` run then caught a compatibility regression: web passed
+1,531/1,532, failing the existing controller's ordinary stale-error clearing
+test. This is a valid introduced failure, not a flake. Retention is now limited
+to refusals associated with unresolved R-03 requests, including an older unknown
+notification arriving after the newer rejection. Ordinary stale errors still
+clear on snapshot/move transitions; a new gesture resets the retention marker.
+Clean compiled GameSync/controller **78/78** and web build/lint pass. The fresh
+Gemini source review of `b4438c1` missed this regression and is superseded; no
+interruption or reviewer writes occurred before its natural completion.
+The entire narrowed web suite also passes **1,533/1,533**, with zero failures,
+skips or cancellations, before publication of the replacement head.
 
 ## Validation
 
@@ -221,6 +232,9 @@ GameSync suite passes **40/40**. Earlier exact-head reviews are superseded.
   including web **1,532/1,532**, with zero failures/skips. The final refusal-text
   retention correction preserves these test counts; fresh execution and final
   CI/reviews are recorded in PR #105 rather than substituted from this head.
+- The failed `b4438c1` full run is not reported as passing. The narrowed
+  compatibility correction adds one ordering regression (GameSync **41/41**,
+  controller **37/37**). Full current-head counts and gates remain in PR #105.
 - Focused forwarding/tracing: **19/19**, including original safety assertion,
   lock wait, admission cutoff, append/timeout race, retained results, lost enqueue,
   finish/response failures, duplicate/retention safety, legacy rejection, load
