@@ -304,8 +304,15 @@ export interface OutcomeUnknownMessage {
   readonly gameId: string;
   readonly ref: number | null;
   readonly requestId: string;
-  readonly action?: SimpleCommandMessage['t'];
+  readonly action?: SimpleCommandMessage['t'] | 'ready';
   readonly message: string;
+}
+
+/** Exact forwarded identity completed successfully; never an instruction to replay. */
+export interface CommandConfirmedMessage {
+  readonly t: 'commandConfirmed';
+  readonly gameId: string;
+  readonly requestId: string;
 }
 
 /** Machine-readable rejection reasons. */
@@ -318,7 +325,6 @@ export type RejectCode =
   | 'not_joined'
   | 'invalid_command'
   | 'command_expired'
-  | 'outcome_unknown'
   | 'unauthorized'
   /** The first move of a game with a pregame lifecycle, before both seats are durably ready. */
   | 'not_ready';
@@ -332,6 +338,7 @@ export interface PongMessage {
 
 /** The discriminated union of everything the server may send. */
 export type ServerMessage =
+  | CommandConfirmedMessage
   | OutcomeUnknownMessage
   | JoinedMessage
   | StateMessage
@@ -345,7 +352,7 @@ export type ServerMessage =
   | ReadyBroadcast;
 
 /** What the authority publishes for one game's committed events. */
-export type GameBroadcast = MoveBroadcast | EndedBroadcast | ReadyBroadcast;
+export type GameBroadcast = MoveBroadcast | EndedBroadcast | ReadyBroadcast | CommandConfirmedMessage;
 
 /** Broadcasts fanned out to a whole room (as opposed to point-to-point replies). */
 export type Broadcast = GameBroadcast | TournamentUpdateBroadcast;

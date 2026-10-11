@@ -413,12 +413,14 @@ export class RedisCommandRouter implements CommandRouter {
     const stateKey = requestKey(requestId);
     const timeoutSec = Math.max(1, Math.ceil(this.forwardTimeoutMs / 1000));
     let enqueueConn: Redis | undefined;
+    let dispatchStarted = false;
     try {
     // A lost enqueue acknowledgement must never be resent after its tombstone
     // expires. The shared lease client intentionally retries indefinitely; use
     // a connected, non-buffering, non-resending client only for this dispatch.
-    enqueueConn = this.requestConnection(timeoutSec * 1000);
+    enqueueConn = this.requestConnection(timeoutSec * 1000, 1000);
     await enqueueConn.connect();
+    dispatchStarted = true;
     await enqueueConn.eval(ENQUEUE_REQUEST, 2, stateKey, cmdKey, payload, timeoutSec * 1000, REQUEST_RETENTION_MS);
 
     // Wait for the response with a timeout (BLPOP timeout is in seconds).
@@ -478,6 +480,7 @@ export class RedisCommandRouter implements CommandRouter {
       // the same identity, cancel only queued work, and fail unknown if Redis
       // cannot confirm the outcome. Do not turn unknown into invalid_command.
       if (err instanceof AuthorityError) throw err;
+      if (!dispatchStarted) throw new AuthorityError('invalid_command', 'Forwarded command was not dispatched.');
       return await this.settleForward(stateKey, cmdKey, payload, requestId);
     } finally {
       enqueueConn?.disconnect();
@@ -490,11 +493,11 @@ export class RedisCommandRouter implements CommandRouter {
     }
   }
 
-  private requestConnection(timeoutMs: number): Redis {
+  private requestConnection(timeoutMs: number, blockingGraceMs = 0): Redis {
     const conn = this.redis.duplicate({
       lazyConnect: true, enableOfflineQueue: false, autoResendUnfulfilledCommands: false,
       maxRetriesPerRequest: 0, retryStrategy: () => null,
-      connectTimeout: timeoutMs, commandTimeout: timeoutMs,
+      connectTimeout: timeoutMs, commandTimeout: timeoutMs + blockingGraceMs,
     });
     // Promise failures are classified/traced above. Avoid ioredis's direct
     // unstructured stderr emission for this short-lived request connection.
@@ -680,6 +683,7 @@ export class OwnerCommandConsumer {
           if (status !== 'admitted') throw new CommandOutcomeUnknownError(envelope.requestId);
           admitted = true;
         },
+        envelope.requestId,
       );
 
       response = {

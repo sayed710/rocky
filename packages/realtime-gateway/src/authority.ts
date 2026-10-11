@@ -358,9 +358,15 @@ export class GameAuthority {
    * resolves only after any in-flight command for the same game completes, so
    * two moves can never race. Rejections surface as {@link AuthorityError}.
    */
-  apply(gameId: string, userId: string, cmd: Command, beforeExecute?: () => Promise<void>): Promise<ApplyResult> {
+  apply(gameId: string, userId: string, cmd: Command, beforeExecute?: () => Promise<void>, requestId?: string): Promise<ApplyResult> {
     const rec = this.require(gameId);
-    const run = rec.lock.then(() => this.applyNow(gameId, rec, userId, cmd, beforeExecute));
+    const run = rec.lock.then(async () => {
+      const result = await this.applyNow(gameId, rec, userId, cmd, beforeExecute);
+      // Only a successful authoritative execution confirms this exact identity.
+      // Position similarity, including a different request's same move, cannot.
+      if (requestId) this.pubsub.publish(gameChannel(gameId), { t: 'commandConfirmed', gameId, requestId });
+      return result;
+    });
     // Keep the chain alive regardless of this command's success/failure.
     rec.lock = run.then(
       () => undefined,

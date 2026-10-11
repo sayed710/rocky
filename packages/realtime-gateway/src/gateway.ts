@@ -257,7 +257,7 @@ export class RealtimeGateway {
           if (!retryable || attempt >= READINESS_ATTEMPTS) throw err;
         }
       }
-    })().catch((err: unknown) => this.reject(session, gameId, null, codeOf(err), messageOf(err), requestIdOf(err)));
+    })().catch((err: unknown) => this.reject(session, gameId, null, codeOf(err), messageOf(err), requestIdOf(err), 'ready'));
   }
 
   private onMove(session: Session, msg: MoveMessage): void {
@@ -380,10 +380,10 @@ export class RealtimeGateway {
     session: Session,
     gameId: string,
     ref: number | null,
-    code: RejectCode,
+    code: RejectCode | 'outcome_unknown',
     message: string,
     requestId = '',
-    action?: SimpleCommandMessage['t'],
+    action?: SimpleCommandMessage['t'] | 'ready',
   ): void {
     if (code === 'outcome_unknown') {
       session.conn.send({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId, ref, requestId, message, ...(action ? { action } : {}) });
@@ -397,7 +397,7 @@ function requestIdOf(err: unknown): string {
   return err instanceof CommandOutcomeUnknownError || err instanceof AuthorityCommitError ? err.requestId : '';
 }
 
-function codeOf(err: unknown): RejectCode {
+function codeOf(err: unknown): RejectCode | 'outcome_unknown' {
   if (err instanceof AuthorityCommitError) return 'outcome_unknown';
   if (err instanceof AuthorityError) return err.code;
   return 'invalid_command';

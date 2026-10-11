@@ -5,6 +5,8 @@ import {
   InMemoryEventLog,
   InMemoryPubSub,
   CommandOutcomeUnknownError,
+  AuthorityError,
+  gameChannel,
 } from '@chess-platform/realtime-gateway';
 import { OwnerCommandConsumer, RedisCommandRouter } from '../src/command-forwarder.js';
 import type { OwnershipRegistry } from '../src/ownership.js';
@@ -14,7 +16,8 @@ import { ForwardRedis } from './support/forward-redis.js';
 // router/consumer/authority and share the real in-memory event-log implementation.
 function fixture(gameId: string) {
   const store = new InMemoryEventLog();
-  const owner = new GameAuthority(new InMemoryPubSub(), () => 1000, store);
+  const ownerPubSub = new InMemoryPubSub();
+  const owner = new GameAuthority(ownerPubSub, () => 1000, store);
   const other = new GameAuthority(new InMemoryPubSub(), () => 1000, store);
   const transport = new ForwardRedis();
   const redis = transport.client;
@@ -38,7 +41,7 @@ function fixture(gameId: string) {
     await consumer.processCommand(payload);
   };
   return {
-    store, owner, router, transport, consume, claims: () => claims,
+    store, owner, ownerPubSub, router, transport, consume, claims: () => claims,
     onTimeout: (work: () => Promise<void>) => { transport.onWait = work; },
     create: () => owner.createGame({
       gameId, players: { white: 'alice', black: 'bob' }, rated: false,
@@ -74,6 +77,19 @@ test('R-03: committed resignation survives a lost acknowledgement and durable re
   const replay = new GameAuthority(new InMemoryPubSub(), () => 1000, f.store);
   await replay.ensureLoaded(gameId);
   assert.equal(replay.getState(gameId).status.over, true, 'authoritative committed result survives replay');
+});
+
+test('R-03: lost persistence acknowledgement preserves commit without claiming an exact confirmation', async () => {
+  const id = 'forward-commit-ack-lost'; const f = fixture(id); await f.create();
+  const receipts: string[] = [];
+  f.ownerPubSub.subscribe(gameChannel(id), (msg) => { if (msg.t === 'commandConfirmed') receipts.push(msg.requestId); });
+  const append = f.store.append.bind(f.store);
+  f.store.append = async (...args) => { await append(...args); throw new Error('commit acknowledgement lost'); };
+  f.onTimeout(f.consume);
+  await assert.rejects(f.router.route(id, 'alice', { kind: 'resign' }), CommandOutcomeUnknownError);
+  assert.equal((await f.store.load(id)).filter(({ event }) => event.type === 'GameEnded').length, 1);
+  assert.equal(f.owner.getState(id).status.over, true);
+  assert.deepEqual(receipts, [], 'unconfirmed persistence never fabricates a successful receipt');
 });
 
 function latch() {
@@ -169,6 +185,35 @@ test('R-03: uncertain enqueue response cancels queued work without applying it',
   await assert.rejects(f.router.route(id, 'alice', { kind: 'resign' }), /expired before execution/);
   assert.equal(f.owner.getState(id).status.over, false);
   assert.equal(f.transport.lists.get(`game:cmd:v2:${id}`)?.length, 0);
+});
+
+test('R-03: a failed pre-dispatch connection is a confirmed failure, not an unknown execution', async () => {
+  const id = 'forward-connect-refused'; const f = fixture(id); await f.create();
+  f.transport.connectionRefused = true;
+  await assert.rejects(f.router.route(id, 'alice', { kind: 'resign' }), (err: unknown) => {
+    assert.ok(err instanceof AuthorityError); assert.equal(err.code, 'invalid_command');
+    assert.match(err.message, /not dispatched/); return true;
+  });
+  assert.equal(f.transport.enqueueAttempts, 0);
+  assert.equal(f.transport.records.size, 0);
+  assert.equal(f.owner.getState(id).status.over, false);
+});
+
+test('R-03: an uncertain live queued move can execute on a later turn before its original deadline', async () => {
+  const id = 'forward-live-later-turn'; const f = fixture(id); await f.create();
+  f.transport.enqueueReplyLost = true; f.transport.failSettle = true;
+  const receipts: string[] = [];
+  f.ownerPubSub.subscribe(gameChannel(id), (msg) => { if (msg.t === 'commandConfirmed') receipts.push(msg.requestId); });
+  await assert.rejects(f.router.route(id, 'alice', { kind: 'move', uci: 'g1f3' }), CommandOutcomeUnknownError);
+  const payload = f.transport.lists.get(`game:cmd:v2:${id}`)!.shift()!;
+  await f.owner.apply(id, 'alice', { kind: 'move', uci: 'd2d4' });
+  await f.owner.apply(id, 'bob', { kind: 'move', uci: 'd7d5' });
+  assert.equal(f.owner.getState(id).ply, 2, 'other requests do not cancel this live identity');
+  f.transport.now = 999; await f.consume(payload);
+  assert.equal(f.owner.getState(id).ply, 3);
+  assert.equal((await f.store.load(id)).filter(({ event }) => event.type === 'MovePlayed').length, 3);
+  assert.equal(f.transport.enqueueAttempts, 1, 'this is first execution, never automatic replay');
+  assert.deepEqual(receipts, [JSON.parse(payload).requestId], 'durable success confirms the exact original identity');
 });
 
 test('R-03: lost enqueue acknowledgement cannot recreate its identity after reconnect beyond retention', async () => {

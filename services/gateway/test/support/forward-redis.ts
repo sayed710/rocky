@@ -15,6 +15,7 @@ export class ForwardRedis {
   reconnectAfterLostEnqueue = false;
   enqueueAttempts = 0;
   responseConnectionLost = false;
+  connectionRefused = false;
   onWait: (() => Promise<void>) | undefined;
   readonly records = new Map<string, Record>();
   readonly lists = new Map<string, string[]>();
@@ -74,7 +75,7 @@ export class ForwardRedis {
   duplicate(options?: { autoResendUnfulfilledCommands?: boolean; enableOfflineQueue?: boolean }) {
     if (options) return {
       on: () => undefined,
-      connect: async () => undefined,
+      connect: async () => { if (this.connectionRefused) throw new Error('connection refused'); },
       blpop: async (key: string) => {
         await this.onWait?.();
         if (this.responseConnectionLost) throw new Error('Command timed out');

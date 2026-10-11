@@ -76,7 +76,7 @@ test('unknown outcome preserves pending move and only requests state, never repl
 });
 
 for (const confirmation of ['broadcast', 'snapshot'] as const) {
-  test(`late ${confirmation} resolves uncertainty after unchanged snapshot releases input`, () => {
+  test(`late ${confirmation} needs the exact request receipt to resolve uncertainty`, () => {
     const { factory, sync } = setup(); sync.start(); factory.last.open();
     factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
     const pending = sync.submitMove('e2e4'); assert.ok(pending);
@@ -89,6 +89,8 @@ for (const confirmation of ['broadcast', 'snapshot'] as const) {
     } else {
       factory.last.emit({ t: 'move', gameId: 'g1', ply: 1, uci: 'e2e4', san: 'e4', by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 1, legalMoves: {} });
     }
+    assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown', 'position alone is not a request receipt');
+    factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'late' });
     assert.equal(sync.getState().lastReject, null);
     assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'move').length, 1);
   });
@@ -116,20 +118,80 @@ test('a late draw state resolves action uncertainty after input has been release
   assert.equal(sync.getState().pendingAction, null);
   assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
   factory.last.emit({ t: 'state', gameId: 'g1', state: { ...stateView(0, 'w'), drawOffer: 'w' } });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'draw-late' });
   assert.equal(sync.getState().lastReject, null);
   assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'offerDraw').length, 1);
 });
 
-test('a different durable move at the disputed ply settles the old uncertainty', () => {
+test('a different move at the disputed ply cannot settle a still-live delayed request', () => {
   const { factory, sync } = setup(); sync.start(); factory.last.open();
   factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
-  const pending = sync.submitMove('e2e4'); assert.ok(pending);
+  const pending = sync.submitMove('g1f3'); assert.ok(pending);
   factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: pending.clientSeq, requestId: 'other-device', message: 'Unknown.' });
   factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(1, 'b', [{ ply: 1, uci: 'd2d4', san: 'd4', by: 'w' }]) });
-  assert.equal(sync.getState().lastReject, null);
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
   assert.equal(sync.getState().pending, null);
   assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'move').length, 1);
 });
+
+test('actionless readiness uncertainty never inherits a pending draw offer', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: { ...stateView(0, 'w'), ready: { w: false, b: false } } });
+  assert.equal(sync.offerDraw(), true);
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null, requestId: 'readiness', message: 'Unknown.' });
+  factory.last.emit({ t: 'state', gameId: 'g1', state: { ...stateView(0, 'w'), drawOffer: 'w', ready: { w: false, b: false } } });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+});
+
+test('receipt ordering and unrelated confirmations cannot hide an unknown request', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  const pending = sync.submitMove('g1f3'); assert.ok(pending);
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'already-confirmed' });
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: pending.clientSeq, requestId: 'live', message: 'Unknown.' });
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'other-game', requestId: 'live' });
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'unrelated' });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: pending.clientSeq, requestId: 'already-confirmed', message: 'Unknown.' });
+  const notice = sync.getState().lastReject; assert.ok(notice?.t === 'outcomeUnknown');
+  assert.equal(notice.requestId, 'live', 'a late notice for a confirmed request cannot replace another uncertainty');
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'live' });
+  assert.equal(sync.getState().lastReject, null);
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: pending.clientSeq, requestId: 'live', message: 'Unknown.' });
+  assert.equal(sync.getState().lastReject, null, 'a late unknown frame cannot undo an exact confirmation');
+});
+
+test('a new gesture and its rejection cannot hide another request still awaiting its receipt', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  const old = sync.submitMove('g1f3'); assert.ok(old);
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: old.clientSeq, requestId: 'old-live', message: 'Unknown.' });
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  const next = sync.submitMove('d2d4'); assert.ok(next);
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  factory.last.emit({ t: 'reject', gameId: 'g1', ref: next.clientSeq, code: 'illegal_move', message: 'Refused new move.' });
+  assert.equal(sync.getState().pending, null);
+  const notice = sync.getState().lastReject; assert.ok(notice?.t === 'outcomeUnknown');
+  assert.equal(notice.requestId, 'old-live');
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'old-live' });
+  assert.equal(sync.getState().lastReject, null);
+});
+
+for (const confirmation of ['snapshot', 'broadcast'] as const) {
+  test(`explicit readiness uncertainty reconciles only this seat's ${confirmation}`, () => {
+    const { factory, sync } = setup(); sync.start(); factory.last.open();
+    factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: { ...stateView(0, 'w'), ready: { w: false, b: false } } });
+    factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null, requestId: 'ready-result', action: 'ready', message: 'Unknown.' });
+    factory.last.emit({ t: 'ready', gameId: 'other-game', ready: { w: true, b: true }, serverTs: 1 });
+    factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: false, b: true }, serverTs: 1 });
+    assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+    if (confirmation === 'snapshot') factory.last.emit({ t: 'state', gameId: 'g1', state: { ...stateView(0, 'w'), ready: { w: true, b: true } } });
+    else factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: true, b: true }, serverTs: 2 });
+    assert.equal(sync.getState().lastReject, null);
+    assert.equal(factory.last.sent.filter((frame) => ['move', 'offerDraw', 'ready'].includes(JSON.parse(frame).t)).length, 0);
+  });
+}
 
 test('joined populates role, color and snapshot', () => {
   const { factory, sync } = setup();

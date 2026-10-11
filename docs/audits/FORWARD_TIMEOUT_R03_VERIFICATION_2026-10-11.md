@@ -52,6 +52,10 @@ Current implementation:
   Connection/command I/O and the separate settlement connection have bounded
   effective-timeout budgets; failed reconciliation reports unknown. Request
   failures retain tracing/counters instead of unstructured ioredis stderr.
+  The response client has one second of I/O grace beyond Redis's BLPOP timeout;
+  it does not extend the Redis execution deadline. Failure before enqueue is
+  even invoked is a definite undispatched refusal, preserving safe readiness
+  retry. Once dispatch begins, missing metadata still means unknown.
 - `started`, missing or unreconcilable state reports unknown. Opaque persistence
   failures are distinct from proven atomic append rejection. The latter is
   marked by EventLog/persistence concurrency errors and retains the existing
@@ -63,13 +67,14 @@ Current implementation:
   intent. A snapshot releases its optimistic input gate, while an unchanged
   snapshot retains the uncertainty notice; a new explicit gesture is a new
   request, not automatic replay or proof of cancellation.
-  A bounded 32-move correlation history and separate uncertain-move reference
-  survive snapshot input release: late uncertainty is displayed, and a matching
-  authoritative ply/move clears it. This history is not a replay queue.
-  A different durable move at that same ply also settles the original intent;
-  log sequencing precludes a second move there. Action kind in the uncertainty
-  frame retains draw-action correlation beyond inconclusive snapshots, without
-  treating an unchanged snapshot as cancellation.
+  Successful forwarded execution publishes `commandConfirmed` through existing
+  per-game pub/sub with the exact request ID. A bounded 32-ID receipt history
+  handles reordered confirmation/unknown frames without replay. Similar moves
+  or draw state cannot identify a request; they never clear its notice. A new
+  gesture also retains it. Explicit readiness correlation can additionally
+  resolve from the player's monotonic durable ready seat; terminal game state
+  safely ends further gameplay. Missing/lost receipts leave uncertainty visible
+  while the snapshot releases input. This adds no durable client ledger.
 
 ## In-flight and lost-acknowledgement contract
 
@@ -141,6 +146,20 @@ unstructured error emission edge cases. These were addressed with retained
 action correlation, positive durable-ply reconciliation, bounded isolated I/O,
 socket reuse and request error handling. The code-only review makes no execution
 claims; its head is superseded and final recheck/CI must be refreshed again.
+The later real Qodo engine review (requested with `/agentic_review`, rather than
+chatting with `@qodo`) found actionless readiness miscorrelation, unresolved
+readiness, definite pre-dispatch failure classified unknown and the client timer
+racing Redis's empty BLPOP reply. All were corrected and regressed. Greptile
+overturned Gemini's disputed-ply suggestion: an unstarted queued UCI can remain
+live and execute on a later turn after owner-local moves. A deterministic
+production-path regression proves `g1f3` executes at ply 3 after `d2d4,d7d5`,
+before the original deadline, following lost enqueue acknowledgement/failed
+settlement. Consequently even position similarity is not request confirmation;
+the final client uses an exact successful request receipt. Earlier Gemini
+sign-offs and zero-count chat responses are superseded, not final acceptance.
+New test validation also caught a wrong event-kind assertion (`MoveMade` rather
+than `MovePlayed`) and an unnarrowed TypeScript union; both test mistakes were
+corrected before clean compilation and green regressions, not treated as flakes.
 
 ## Validation
 
@@ -159,6 +178,8 @@ claims; its head is superseded and final recheck/CI must be refreshed again.
   forwarding/tracing **22/22**, realtime **95/95**, and GameSync **30/30**.
   Current-head full affected-suite, build/lint and CI evidence is tracked in
   PR #105; no prior head is substituted for final readiness.
+- Latest receipt/readiness/dispatch regressions pass forwarding/tracing
+  **25/25**, realtime **95/95**, GameSync **35/35** after clean compilation.
 - Focused forwarding/tracing: **19/19**, including original safety assertion,
   lock wait, admission cutoff, append/timeout race, retained results, lost enqueue,
   finish/response failures, duplicate/retention safety, legacy rejection, load
@@ -183,7 +204,7 @@ restore an older Redis snapshot while gateways are active: lease/request-state
 rollback is outside the existing coordination guarantees. Missing/evicted state
 fails closed; restored stale queued state is not equivalent to missing state.
 
-Deploy the web build that recognizes `outcomeUnknown`, refresh existing clients,
+Deploy the web build that recognizes `outcomeUnknown` and `commandConfirmed`, refresh existing clients,
 and coordinate replacement/drain of all old gateway owners. New traffic uses
 `game:cmd:v2:{gameId}`, so old consumers cannot ignore new metadata and execute
 it. New consumers reject unversioned envelopes and never import old queue
