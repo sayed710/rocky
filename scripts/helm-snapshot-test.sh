@@ -1143,7 +1143,8 @@ check "initial-install: a failed initial install is uninstalled (no rollback)" \
   "$([ "$(cat "$RB_ROOT/initial-install/pre.rc")" = 0 ] && [ "$(rb_mutations initial-install)" = "uninstall gambit --wait --timeout 5m0s" ] && echo 0 || echo 1)"
 [ "$(rb_mutations initial-install)" = "uninstall gambit --wait --timeout 5m0s" ] || rb_show initial-install
 
-# 7. Canary and blue/green: the pre-upgrade gate is unchanged.
+# 7. Canary and blue/green: the pre-upgrade gate still refuses a non-deployed tip, and now
+#    also refuses when no automatic rollback target can be verified.
 for s in canary blueGreen; do
   rb_run "$s-failed-tip" "$s" "$(hist 3:superseded 4:deployed 5:failed)"
   expect_pre_refused "$s-failed-tip" 'is not the deployed one' "$s over a failed tip is still refused before the upgrade"
@@ -1153,6 +1154,21 @@ for s in canary blueGreen; do
   expect_pre_refused "$s-no-history" 'Could not determine the deployed revision' "$s without a readable history is still refused"
   rb_run "$s-initial" "$s" @missing 1
   expect_pre_refused "$s-initial" 'initial install' "$s initial install is still refused"
+  # The newest revision is the deployed one, but the history proves no rollback target: a
+  # progressive deploy must not start without one (before this guard these went ahead with
+  # no automatic rollback at all). Refused before the tags are pinned or anything is upgraded.
+  for c in "two-deployed|deployed|3:deployed 4:deployed" \
+           "pending-below|pending|3:pending-upgrade 4:deployed" \
+           "status-bogus-below|unknown status|3:exploded 4:deployed" \
+           "rev-malformed-below|revision|\"x\":superseded 4:deployed"; do
+    IFS='|' read -r cname creason chist <<< "$c"
+    # shellcheck disable=SC2086  # chist is a space-separated list of REV:STATUS entries
+    rb_run "$s-$cname" "$s" "$(hist $chist)"
+    expect_pre_refused "$s-$cname" "::error::Refusing a $s deploy: no automatic rollback target could be verified.*$creason.*helm history gambit.*roll back manually" \
+      "$s over $chist (newest is deployed, no verified rollback target) is refused before the upgrade"
+    check "$s-$cname: refused before the deployed tags are pinned" \
+      "$(! grep -q '^get values' "$RB_ROOT/$s-$cname/calls.log" && ! grep -q '^deployed_' "$RB_ROOT/$s-$cname/github_output" && echo 0 || echo 1)"
+  done
   rb_run "$s-healthy" "$s" "$(hist 3:superseded 4:deployed)"
   expect_rollback "$s-healthy" 4 "$s over healthy history keeps its deployed-tag pinning and rolls back to deployed 4"
   check "$s-healthy: the deployed tags are read from deployed revision 4" \

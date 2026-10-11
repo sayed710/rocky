@@ -246,9 +246,10 @@ jobs:
             fi
 
             if [ -z "$PREV_REV" ]; then
-              # Rolling deploys still proceed (fixing forward over a failed revision is allowed), but
-              # the rollback step will refuse to act, so an operator who hits a failed verification
-              # needs to know NOW why — not to discover the refusal in the middle of an incident.
+              # Rolling deploys still proceed (fixing forward over a failed revision is allowed; canary
+              # and blueGreen refuse below), but the rollback step will refuse to act, so an operator
+              # who hits a failed verification needs to know NOW why — not to discover the refusal in
+              # the middle of an incident.
               [ -n "$ROLLBACK_REFUSAL" ] || ROLLBACK_REFUSAL="no rollback target was resolved"
               echo "::warning::No safe automatic rollback target in the pre-upgrade history of release gambit: $ROLLBACK_REFUSAL. If post-deploy verification fails, automated rollback will refuse to run for this deploy. Raw 'helm history gambit -o json' output follows."
               head -c 2000 "$HISTORY_FILE" || true
@@ -289,6 +290,19 @@ jobs:
             NEWEST_REV=$(node scripts/resolve-deployed-image-tags.mjs --newest-revision < "$HISTORY_FILE" 2>/dev/null || true)
             if [ "$DEPLOYED_REV" != "$NEWEST_REV" ]; then
               echo "::error::The newest revision of release gambit (${NEWEST_REV:-<unparsed>}) is not the deployed one ($DEPLOYED_REV). Refusing a $STRATEGY deploy until the release is back on a deployed revision (inspect 'helm history gambit')."
+              exit 1
+            fi
+            # A progressive deploy must not start without a verified automatic rollback target: the
+            # newest revision being the deployed one does not prove the history is sound (two deployed
+            # revisions, a pending or unknown status or a malformed entry below it all leave PREV_REV
+            # empty), and without a target a failed post-deploy verification could not be rolled back.
+            if [ -z "$PREV_REV" ]; then
+              echo "::error::Refusing a $STRATEGY deploy: no automatic rollback target could be verified in the pre-upgrade history of release gambit: ${ROLLBACK_REFUSAL:-no rollback target was resolved}. A $STRATEGY deploy must not start without one. Repair the release history first: inspect 'helm history gambit', roll back manually to a healthy revision ('helm rollback gambit <revision>'), then retry the $STRATEGY deploy."
+              exit 1
+            fi
+            # With the newest revision deployed, the verified target can only be that revision.
+            if [ "$PREV_REV" != "$DEPLOYED_REV" ]; then
+              echo "::error::The verified rollback target (revision $PREV_REV) is not the deployed revision ($DEPLOYED_REV) of release gambit. Refusing a $STRATEGY deploy; inspect 'helm history gambit'."
               exit 1
             fi
             if ! DEPLOYED_TAGS=$(helm get values gambit --all -o json --revision "$DEPLOYED_REV" | node scripts/resolve-deployed-image-tags.mjs); then

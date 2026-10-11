@@ -383,8 +383,9 @@ assignment. That is the version just replaced only when you cut over to the stan
 normal stage-then-flip); cutting over onto the colour already live replaces that version, so to keep
 it as the rollback target, always target the standby. Without this, `helm upgrade` (which does not reuse the
 release's values) would fall back to the baseline `images.*.tag` in the environment values file. If
-the deployed tags cannot be read exactly, or the newest release revision is not the deployed one,
-the deploy is refused. A stage must also keep `active_color` on the colour serving traffic now; to
+the deployed tags cannot be read exactly, the newest release revision is not the deployed one, or
+no automatic rollback target can be verified (see the rollback procedure below), the deploy is
+refused. A stage must also keep `active_color` on the colour serving traffic now; to
 change the serving colour, run a cutover. What is kept is the image *version*: a strategy switch or a
 new chart version can still restart the gateway and trust worker (their `wait-for-api` init image
 follows `images.api.tag`, and their pod labels carry the chart version).
@@ -418,8 +419,15 @@ If an issue is detected during or after deployment:
     the deployed one), the step **refuses**: no rollback, no uninstall, and an `::error::` naming the
     reason. `pre_upgrade` already warned about it, with the raw history, when the deploy started.
     Rolling deploys are never refused for lacking a verifiable rollback target (fixing forward is
-    still allowed); canary and blue/green are, as before, unless the newest revision is the deployed
-    one. A failed tip alone is not that state: `4:deployed, 5:failed` still resolves to 4.
+    still allowed; `pre_upgrade` only warns, and whether rolling should refuse too is an owner
+    decision still pending). Canary and blue/green are refused, as before, unless the newest revision
+    is the deployed one, and now also whenever no rollback target can be verified (for example
+    `3:deployed, 4:deployed`, or `3:pending-upgrade, 4:deployed`): a progressive deploy must not start
+    without one. `pre_upgrade` fails with an `::error::` naming the reason before anything is upgraded;
+    repair the release history first (inspect `helm history gambit` and roll back manually to a
+    healthy revision, as below), then retry. A failed tip alone is not that state:
+    `4:deployed, 5:failed` still resolves to 4 (and canary/blue-green still refuse it because the
+    newest revision is not the deployed one).
 
   When the step refuses, inspect `helm history gambit`, choose the last revision that served
   healthily (normally the one that was `deployed` before this run), and roll back to it explicitly:
