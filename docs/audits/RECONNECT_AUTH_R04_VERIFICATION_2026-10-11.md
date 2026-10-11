@@ -297,3 +297,13 @@ External review repairs and their fresh exact-head delivery gates remain pending
 This new issue does
 not reopen or rewrite the historical Fable/Astra closure. Owner integrates the
 final PR/head/gate record after verification; PROJECT_STATE is untouched here.
+
+## R-03 integration checkpoint — 2026-10-11
+
+Owner merged PR #105 into main 84b3d9d253dffcedab601967d2814600f6234cf5. R-04 integrates freshly fetched origin/main by a normal merge, preserving published history. The sole source conflict was the applySnapshot tail: retain lastReject: this.commandNotice(), connected: true, and recoveryAvailable: false. Surrounding message gates allow snapshot application to authorize only through a current joined acknowledgment; state/resumed frames require an already authorized connection.
+
+Seven additional deterministic regressions combine real SessionManager/token verifier/gateway joins with controlled command receipt events. They cover unknown outcomes during expiry refresh, command gating, obsolete-socket receipts, exact late confirmations, multiple outstanding outcomes and refusal ordering, rejected rejoin, logout/account adoption during held refresh, transient recovery without anonymous fallback, original-seat readiness after account switching, and no automatic replay. Controlled receipt injection is not live Redis integration evidence.
+
+Executed RED: with the conflict resolved but before the integration correction, a gateway unauthorized rejoin replaced the visible unknown-outcome warning with a rejection (33/34 tests passed, one failed). The correction records the join refusal in the existing refusal/uncertainty state and publishes commandNotice(), keeping prior uncertainty visible while revoking role and connection. Existing request identity, bounded retention, committed-state/readiness reconciliation and no-replay semantics remain unchanged.
+
+The prior exact-head CI/review certification of 2187a14 is historical after this integration. Fresh combined full-repository, native Redis/PostgreSQL, browser, Gemini and hosted final-head gates are required before delivery readiness. docs/PROJECT_STATE.md remains untouched. This checkpoint is not a passing certification of pending gates or an owner merge.

@@ -242,6 +242,7 @@ export interface ResumedMessage {
 }
 
 export type RejectCode =
+  | 'command_expired'
   | 'illegal_move'
   | 'not_your_turn'
   | 'not_a_player'
@@ -260,6 +261,24 @@ export interface RejectMessage {
   readonly message: string;
 }
 
+/** Acknowledgement uncertainty, never a confirmed rejection or cancellation. */
+export interface OutcomeUnknownMessage {
+  readonly t: 'outcomeUnknown';
+  readonly code: 'outcome_unknown';
+  readonly gameId: string;
+  readonly ref: number | null;
+  readonly requestId: string;
+  readonly action?: SimpleCommand | 'ready';
+  readonly readyColor?: WsColor;
+  readonly message: string;
+}
+
+export interface CommandConfirmedMessage {
+  readonly t: 'commandConfirmed';
+  readonly gameId: string;
+  readonly requestId: string;
+}
+
 export interface PongMessage {
   readonly t: 'pong';
   readonly ts: number;
@@ -267,6 +286,8 @@ export interface PongMessage {
 }
 
 export type ServerMessage =
+  | CommandConfirmedMessage
+  | OutcomeUnknownMessage
   | JoinedMessage
   | StateMessage
   | MoveBroadcast
@@ -287,6 +308,8 @@ const SERVER_TYPES: ReadonlySet<string> = new Set([
   'presence',
   'resumed',
   'reject',
+  'outcomeUnknown',
+  'commandConfirmed',
   'pong',
   'ready',
 ]);

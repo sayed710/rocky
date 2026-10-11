@@ -32,6 +32,7 @@ import { withTestDatabase, type TestDatabase } from '@chess-platform/persistence
 import { ArenaService, DurableGameLauncher, TournamentResultReporter, TournamentService } from '@chess-platform/api';
 import { OwnershipRegistry, ownerKey } from '../src/ownership.js';
 import { OwnerCommandConsumer, RedisCommandRouter } from '../src/command-forwarder.js';
+import { ENQUEUE_REQUEST, REQUEST_RETENTION_MS, requestKey } from '../src/forwarded-request.js';
 import { createRedisPubSub } from '../src/redis-pubsub.js';
 import { FlagExpiryWorker, routedFlagExpiry } from '../src/flag-expiry.js';
 
@@ -332,7 +333,9 @@ stackTest('an owner lets go of a copy it loaded only to answer a late forwarded 
       s.a.authority.evict(gameId); // as after an unwatched expiry
       s.a.consumer.startConsumer(gameId);
       const responseKey = `game:resp:test-${randomUUID()}`;
-      await s.redis.rpush(`game:cmd:${gameId}`, JSON.stringify({ requestId: randomUUID(), gameId, userId, cmd: { kind: 'expireFlag' }, responseKey }));
+      const requestId = randomUUID();
+      await s.redis.eval(ENQUEUE_REQUEST, 2, requestKey(requestId), `game:cmd:v2:${gameId}`,
+        JSON.stringify({ version: 2, requestId, gameId, userId, cmd: { kind: 'expireFlag' }, responseKey }), 5000, REQUEST_RETENTION_MS);
       const blocking = s.redis.duplicate();
       let reply: [string, string] | null;
       try {
@@ -354,5 +357,26 @@ stackTest('an owner lets go of a copy it loaded only to answer a late forwarded 
     await waitFor('the watcher to join', () => watcher.last('joined') !== undefined);
     await forward(FLAG_ACTOR_ID);
     assert.equal(s.a.authority.has(gameId), true, 'a watched game is never evicted');
+  });
+});
+
+stackTest('R-03: expired forwarded resignation leaves the actual PostgreSQL event log unchanged', async () => {
+  await withStack(async (s) => {
+    const { gameId } = await seekGameUnderway(s);
+    assert.equal((await s.a.registry.claim(gameId)).owned, true);
+    s.a.consumer.stopConsumer(gameId);
+    const before = await s.store.load(gameId); let payload: string | null = null;
+    const routed = assert.rejects(s.b.router.route(gameId, 'alice', { kind: 'resign' }), /expired before execution/);
+    await waitFor('the forwarded resignation in Redis', async () => {
+      payload = await s.redis.lindex(`game:cmd:v2:${gameId}`, 0); return payload !== null;
+    });
+    await routed;
+    assert.ok(payload);
+    // @ts-expect-error production receiver handles the delayed original envelope
+    await s.a.consumer.processCommand(payload);
+    assert.deepEqual(await s.store.load(gameId), before);
+    assert.equal(s.a.authority.getState(gameId).status.over, false);
+    const envelope = JSON.parse(payload) as { requestId: string; responseKey: string };
+    await s.redis.del(requestKey(envelope.requestId), envelope.responseKey, `game:cmd:v2:${gameId}`);
   });
 });

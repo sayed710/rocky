@@ -1,5 +1,7 @@
 # Rookzen audit sources
 
+- [Separate R-03 forwarding timeout verification — 2026-10-11](FORWARD_TIMEOUT_R03_VERIFICATION_2026-10-11.md) records the original delayed-resignation RED, owner-approved unknown-outcome semantics, atomic admission/cancellation, independent review corrections, validation and coordinated v2 rollout limits. Historical Fable + Astra closure remains separate; published-head CI and owner merge gates are tracked in the implementation PR.
+
 - [Launch Preparation A07 — mobile, Firefox and Safari verification — 2026-10-06](LAUNCH_A07_MOBILE_CROSS_BROWSER_VERIFICATION_2026-10-06.md) records release Firefox 157.0 English/Arabic/RTL evidence, the promotion-chooser correction and retests, supporting Playwright WebKit results (not Safari), and why **A07 REMAINS OPEN**: physical mobile/orientation and real Safari evidence were unavailable. O06 remains separate and last.
 - [Launch Preparation A06 — genuine manual accessibility verification — 2026-10-06](LAUNCH_A06_ACCESSIBILITY_VERIFICATION_2026-10-06.md) records bounded A06 closure with actual NVDA/EN/AR/RTL/mixed-direction/Chrome 200%/low-vision evidence and retested corrections. [Selected actual NVDA excerpts](LAUNCH_A06_NVDA_EXCERPTS_2026-10-06.md) preserve sanitized provenance. Final-head implementation delivery gates and owner integration are separate; A07/O06/public-launch approval remain separate.
 

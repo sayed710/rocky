@@ -135,6 +135,137 @@ function dispose(h: Awaited<ReturnType<typeof harness>>): void {
   h.closeServer(); h.sync.stop(); h.client.close(); h.session.dispose();
 }
 
+function unknownMove(h: Awaited<ReturnType<typeof harness>>, requestId = 'original-move'): void {
+  const pending = h.sync.submitMove('e2e4');
+  assert.ok(pending);
+  h.factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1',
+    ref: pending.clientSeq, requestId, message: `Unknown ${requestId}.` });
+}
+
+function assertNoReplay(h: Awaited<ReturnType<typeof harness>>): void {
+  const commands = h.factory.sockets.flatMap((socket) => socket.sent.map((frame) => JSON.parse(frame)))
+    .filter((frame) => frame.t === 'move' || frame.t === 'offerDraw');
+  assert.equal(commands.length, 1, 'only the original gesture may send a command');
+}
+
+test('R-03 + R-04: expiry refresh retains uncertainty, gates commands and accepts exact late confirmation', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  unknownMove(h);
+  const obsolete = h.factory.last;
+  let release!: (auth: AuthResponse) => void;
+  h.setRefresh(() => new Promise((resolve) => { release = resolve; }));
+  h.advance(60_000); await h.reconnect();
+  assert.equal(h.sync.getState().connected, false);
+  assert.equal(h.sync.submitMove('d2d4'), null);
+  assert.equal(h.sync.offerDraw(), false);
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  obsolete.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'original-move' });
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown', 'obsolete socket cannot settle the request');
+  release(h.issue()); await flush();
+  assert.equal(h.sync.getState().connected, false, 'refresh alone does not authorize');
+  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal(h.sync.getState().connected, true);
+  assert.equal(h.sync.getState().pending, null);
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown', 'unchanged authorized snapshot is not a receipt');
+  h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'unrelated' });
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'original-move' });
+  assert.equal(h.sync.getState().lastReject, null);
+  assert.equal(h.refreshes(), 1);
+  assertNoReplay(h);
+});
+
+test('R-03 + R-04: fresh reconnect preserves multiple unknown outcomes and refusal ordering', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  assert.equal(h.sync.offerDraw(), true);
+  for (const requestId of ['draw-first', 'draw-second']) h.factory.last.emit({ t: 'outcomeUnknown',
+    code: 'outcome_unknown', gameId: 'g1', ref: null, requestId, action: 'offerDraw', message: 'Unknown draw.' });
+  h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'invalid_command', message: 'New gesture refused.' });
+  h.advance(10_000); await h.reconnect(); h.exchange();
+  assert.match(h.sync.getState().lastReject?.message ?? '', /2 command outcomes remain unknown/);
+  assert.match(h.sync.getState().lastReject?.message ?? '', /New gesture refused/);
+  h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'draw-second' });
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'draw-first' });
+  assert.equal(h.sync.getState().lastReject?.t, 'reject');
+  assert.equal(h.refreshes(), 0);
+  assertNoReplay(h);
+});
+
+test('R-03 + R-04: rejected reconnect retains uncertainty alongside authentication refusal', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  unknownMove(h);
+  h.expireOnServerOnly(); await h.reconnect();
+  assert.equal(h.exchange().last('reject')?.code, 'unauthorized');
+  assert.equal(h.sync.getState().connected, false);
+  assert.equal(h.sync.getState().myColor, null);
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  assert.match(h.sync.getState().lastReject?.message ?? '', /Latest command rejected/);
+  assert.equal(h.sync.submitMove('d2d4'), null);
+  h.closeServer(); h.sync.networkOnline(); h.factory.last.open(); await flush();
+  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  assertNoReplay(h);
+});
+
+for (const boundary of ['logout', 'account switch'] as const) {
+  test(`R-03 + R-04: ${boundary} during uncertain-command refresh cannot restore old privileges or replay`, async (t) => {
+    const h = await harness(); t.after(() => dispose(h));
+    unknownMove(h);
+    let release!: (auth: AuthResponse) => void;
+    h.setRefresh(() => new Promise((resolve) => { release = resolve; }));
+    h.advance(60_000); await h.reconnect();
+    const obsolete = h.factory.last;
+    h.sync.logoutRequested();
+    assert.equal(h.sync.submitMove('d2d4'), null);
+    assert.equal(h.sync.getState().myColor, null);
+    if (boundary === 'logout') h.session.reset();
+    else h.session.adopt(h.issue('bob'), false);
+    h.sync.sessionChanged(boundary === 'logout' ? null : 'bob');
+    h.factory.last.open(); await flush();
+    release(h.issue()); await flush();
+    obsolete.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'original-move' });
+    assert.equal(h.sync.getState().connected, false, 'old completion does not authorize');
+    assert.equal(h.exchange().last('joined')?.role, boundary === 'logout' ? 'spectator' : 'black');
+    assert.equal(h.sync.getState().myColor, boundary === 'logout' ? null : 'b');
+    assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+    h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'original-move' });
+    assert.equal(h.sync.getState().lastReject, null);
+    assertNoReplay(h);
+  });
+}
+
+test('R-03 + R-04: transient refresh retains unknown outcomes until recovery without anonymous fallback', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  unknownMove(h);
+  h.setRefresh(async () => { throw new NetworkError(); });
+  h.advance(60_000); await h.reconnect();
+  assert.equal(h.factory.last.sent.length, 0);
+  assert.equal(h.session.current?.user.id, 'alice');
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  h.advance(10_000); h.setRefresh(async () => h.issue());
+  h.scheduler.runNext(); await flush(); h.exchange();
+  assert.equal(h.sync.getState().role, 'white');
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  assertNoReplay(h);
+});
+
+test('R-03 + R-04: switched seat readiness cannot reconcile the original seat request', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  h.factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null,
+    requestId: 'original-white-ready', action: 'ready', readyColor: 'w', message: 'Unknown readiness.' });
+  h.session.adopt(h.issue('bob'), false); h.sync.sessionChanged('bob');
+  h.closeServer(); h.factory.last.open(); await flush();
+  assert.equal(h.exchange().last('joined')?.role, 'black');
+  h.factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: false, b: true }, serverTs: 1 });
+  assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
+  h.factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: true, b: true }, serverTs: 2 });
+  assert.equal(h.sync.getState().lastReject, null);
+  const commands = h.factory.sockets.flatMap((socket) => socket.sent.map((frame) => JSON.parse(frame)))
+    .filter((frame) => ['move', 'offerDraw', 'ready'].includes(frame.t));
+  assert.equal(commands.length, 0, 'reconciliation never manufactures a command');
+});
+
 test('near-expiry reconnect uses proactive session leeway', async (t) => {
   const h = await harness(); t.after(() => dispose(h));
   h.advance(55_000); await h.reconnect();
