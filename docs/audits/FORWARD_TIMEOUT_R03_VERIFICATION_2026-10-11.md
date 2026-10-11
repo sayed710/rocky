@@ -181,6 +181,12 @@ Unresolved identities are capped at 32. Overflow retains an aggregate warning
 until terminal game state instead of silently forgetting possible executions;
 it does not fabricate an exact receipt or trigger replay. The bounded receipt
 cache likewise does not promise durable client request history.
+Greptile's exact `648b6cb` review identified another valid follow-through gap:
+the `resume` response after confirming an older request erased the newer
+refusal. The extended correct-wire regression failed (39/40 passed). Snapshot
+and late move reconciliation now retain the refusal until a new user command
+or terminal state, while each unknown identity remains independent. The extended
+GameSync suite passes **40/40**. Earlier exact-head reviews are superseded.
 
 ## Validation
 
@@ -211,6 +217,10 @@ cache likewise does not promise durable client request history.
   gateway, persistence, engine and browser acceptance CI passed on that head.
   These results are historical after the overlapping-outcome correction, whose
   web build/lint and **40/40** focused GameSync tests pass; final CI is refreshed.
+- At `648b6cb`, **4,095** hermetic tests across all 19 workspaces passed,
+  including web **1,532/1,532**, with zero failures/skips. The final refusal-text
+  retention correction preserves these test counts; fresh execution and final
+  CI/reviews are recorded in PR #105 rather than substituted from this head.
 - Focused forwarding/tracing: **19/19**, including original safety assertion,
   lock wait, admission cutoff, append/timeout race, retained results, lost enqueue,
   finish/response failures, duplicate/retention safety, legacy rejection, load

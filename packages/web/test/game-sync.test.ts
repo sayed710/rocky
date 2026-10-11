@@ -191,6 +191,10 @@ test('a new gesture and its rejection cannot hide another request still awaiting
   factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'old-live' });
   assert.equal(sync.getState().lastReject?.t, 'reject');
   assert.equal(sync.getState().lastReject?.message, 'Refused new move.');
+  factory.last.emit({ t: 'resumed', gameId: 'g1', missed: [], state: stateView(0, 'w') });
+  assert.equal(sync.getState().lastReject?.message, 'Refused new move.', 'the older request resume cannot erase the new refusal');
+  factory.last.emit({ t: 'move', gameId: 'g1', ply: 1, uci: 'g1f3', san: 'Nf3', by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 1, legalMoves: {} });
+  assert.equal(sync.getState().lastReject?.message, 'Refused new move.', 'a late older move cannot erase the new refusal');
 });
 
 for (const reversed of [false, true]) {

@@ -371,7 +371,7 @@ export class GameSync {
     // A position/draw state cannot identify which request produced it. Only
     // terminal state or monotonic durable readiness safely settles the intent.
     this.reconcileUncertainty(view.ready, view.status.over);
-    this.latestCommandReject = null;
+    if (view.status.over) this.latestCommandReject = null;
     this.patch({
       role: role ?? this.state.role,
       myColor,
@@ -406,7 +406,6 @@ export class GameSync {
     const move: MoveView = { ply: msg.ply, uci: msg.uci, san: msg.san, by: msg.by };
     const pending = this.state.pending;
     const confirmsPending = pending !== null && this.state.myColor === msg.by && pending.uci === msg.uci;
-    this.latestCommandReject = null;
     this.patch({
       moves: [...this.state.moves, move],
       ply: msg.ply,
