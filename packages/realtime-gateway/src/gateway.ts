@@ -308,7 +308,7 @@ export class RealtimeGateway {
         }
       })
       .catch((err: unknown) => {
-        this.reject(session, msg.gameId, null, codeOf(err), messageOf(err), requestIdOf(err));
+        this.reject(session, msg.gameId, null, codeOf(err), messageOf(err), requestIdOf(err), msg.t);
       });
   }
 
@@ -383,9 +383,10 @@ export class RealtimeGateway {
     code: RejectCode,
     message: string,
     requestId = '',
+    action?: SimpleCommandMessage['t'],
   ): void {
     if (code === 'outcome_unknown') {
-      session.conn.send({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId, ref, requestId, message });
+      session.conn.send({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId, ref, requestId, message, ...(action ? { action } : {}) });
       return;
     }
     session.conn.send({ t: 'reject', gameId, ref, code, message });

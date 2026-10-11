@@ -148,6 +148,21 @@ test('R-03: response transport failure does not overwrite retained successful re
   assert.equal((await f.router.route(id, 'alice', { kind: 'resign' })).state.status.over, true);
 });
 
+test('R-03: response connection timeout settles queued work without late execution', async () => {
+  const id = 'forward-response-timeout'; const f = fixture(id); await f.create();
+  f.transport.responseConnectionLost = true;
+  await assert.rejects(f.router.route(id, 'alice', { kind: 'resign' }), /expired before execution/);
+  assert.equal(f.owner.getState(id).status.over, false);
+  assert.equal(f.transport.lists.get(`game:cmd:v2:${id}`)?.length, 0);
+});
+
+test('R-03: response connection timeout recovers a retained durable result', async () => {
+  const id = 'forward-response-timeout-committed'; const f = fixture(id); await f.create();
+  f.transport.responseConnectionLost = true; f.onTimeout(f.consume);
+  assert.equal((await f.router.route(id, 'alice', { kind: 'resign' })).state.status.over, true);
+  assert.equal((await f.store.load(id)).filter(({ event }) => event.type === 'GameEnded').length, 1);
+});
+
 test('R-03: uncertain enqueue response cancels queued work without applying it', async () => {
   const id = 'forward-enqueue-lost'; const f = fixture(id); await f.create();
   f.transport.enqueueReplyLost = true;

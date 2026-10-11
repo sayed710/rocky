@@ -66,6 +66,7 @@ test('forwarding uncertainty sends request identity without a rejection or autom
   assert.equal(conn.last('reject'), undefined);
   assert.equal(conn.last('outcomeUnknown')?.requestId, 'forwarded-request-1');
   assert.equal(conn.last('outcomeUnknown')?.code, 'outcome_unknown');
+  assert.equal(conn.last('outcomeUnknown')?.action, 'resign');
   assert.equal(resigns, 1);
   assert.equal(authority.getState('unknown-wire').status.over, false);
 });

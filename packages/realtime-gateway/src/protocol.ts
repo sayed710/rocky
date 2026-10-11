@@ -304,6 +304,7 @@ export interface OutcomeUnknownMessage {
   readonly gameId: string;
   readonly ref: number | null;
   readonly requestId: string;
+  readonly action?: SimpleCommandMessage['t'];
   readonly message: string;
 }
 

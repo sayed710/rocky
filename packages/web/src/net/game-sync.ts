@@ -158,6 +158,7 @@ export class GameSync {
   /** Bounded correlation survives snapshots releasing the optimistic input gate. */
   private readonly sentMoves = new Map<number, PendingMove & { readonly ply: number }>();
   private uncertainMove: (PendingMove & { readonly ply: number }) | null = null;
+  private uncertainAction: SimpleCommand | null = null;
   private joined = false;
   private readonly listeners = new Set<GameSyncListener>();
   private unsubscribe: (() => void) | null = null;
@@ -333,6 +334,7 @@ export class GameSync {
         // resends the command. Resume asks only for authoritative state.
         if (msg.gameId === this.gameId && (msg.ref === null || msg.ref <= this.clientSeq)) {
           this.uncertainMove = msg.ref === null ? null : this.sentMoves.get(msg.ref) ?? null;
+          this.uncertainAction = msg.ref === null ? msg.action ?? this.state.pendingAction : null;
           this.patch({ lastReject: msg });
           this.client.send({ t: 'resume', gameId: this.gameId, lastPly: this.state.ply });
         }
@@ -347,13 +349,15 @@ export class GameSync {
     const myColor = role ? colorForRole(role) : this.state.myColor;
     const unknown = this.state.lastReject?.t === 'outcomeUnknown';
     const pending = this.uncertainMove;
-    const action = this.state.pendingAction;
+    const action = this.uncertainAction;
     const resolved = view.status.over || (pending !== null && view.moves.some(
-      (move) => move.ply === pending.ply && move.by === myColor && move.uci === pending.uci,
+      // A different durable move at the same ply also settles the old intent:
+      // the event-log sequence cannot subsequently commit a second move there.
+      (move) => move.ply === pending.ply && move.by === myColor,
     )) || (action === 'offerDraw' && view.drawOffer === myColor)
       || (action === 'declineDraw' && view.drawOffer === null);
     const unresolved = unknown && !resolved;
-    if (!unresolved) this.uncertainMove = null;
+    if (!unresolved) { this.uncertainMove = null; this.uncertainAction = null; }
     this.patch({
       role: role ?? this.state.role,
       myColor,
@@ -402,7 +406,7 @@ export class GameSync {
       pending: confirmsPending ? null : pending,
       pendingAction: null,
       lastReject: this.state.lastReject?.t === 'outcomeUnknown'
-        && !(this.uncertainMove?.ply === msg.ply && this.uncertainMove.uci === msg.uci && msg.by === this.state.myColor)
+        && !(this.uncertainMove?.ply === msg.ply && msg.by === this.state.myColor)
         ? this.state.lastReject : null,
     });
   }

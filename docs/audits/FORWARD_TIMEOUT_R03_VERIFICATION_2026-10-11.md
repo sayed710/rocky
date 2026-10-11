@@ -48,6 +48,10 @@ Current implementation:
   automatic unfulfilled-command resend, reconnect retries and per-request retries
   disabled. The shared ownership client's indefinite recovery must never resend
   an enqueue after its request tombstone expires and recreate its deadline.
+  This same socket waits for the response, keeping one socket per normal forward.
+  Connection/command I/O and the separate settlement connection have bounded
+  effective-timeout budgets; failed reconciliation reports unknown. Request
+  failures retain tracing/counters instead of unstructured ioredis stderr.
 - `started`, missing or unreconcilable state reports unknown. Opaque persistence
   failures are distinct from proven atomic append rejection. The latter is
   marked by EventLog/persistence concurrency errors and retains the existing
@@ -62,6 +66,10 @@ Current implementation:
   A bounded 32-move correlation history and separate uncertain-move reference
   survive snapshot input release: late uncertainty is displayed, and a matching
   authoritative ply/move clears it. This history is not a replay queue.
+  A different durable move at that same ply also settles the original intent;
+  log sequencing precludes a second move there. Action kind in the uncertainty
+  frame retains draw-action correlation beyond inconclusive snapshots, without
+  treating an unchanged snapshot as cancellation.
 
 ## In-flight and lost-acknowledgement contract
 
@@ -127,6 +135,12 @@ correlation beyond snapshot release, display late uncertainty, and retry only
 definitely expired readiness. Greptile independently found the stale notice and
 a P1 automatic ioredis enqueue resend after metadata retention. All were accepted
 and corrected with regressions; exact-head reviews and CI must be refreshed.
+Gemini's subsequent code-only review of `6ad3cb6` found draw-action correlation,
+disputed-ply notice, unbounded response I/O, extra normal-path socket churn and
+unstructured error emission edge cases. These were addressed with retained
+action correlation, positive durable-ply reconciliation, bounded isolated I/O,
+socket reuse and request error handling. The code-only review makes no execution
+claims; its head is superseded and final recheck/CI must be refreshed again.
 
 ## Validation
 
@@ -140,6 +154,11 @@ and corrected with regressions; exact-head reviews and CI must be refreshed.
   do not substitute for fresh CI on the subsequent corrective head.
 - Corrective focused regressions: forwarding/tracing **20/20**, realtime
   **95/95**, client GameSync **28/28**. Final-head evidence is tracked in PR #105.
+- That corrective committed head passed **4,083** local hermetic tests with zero
+  failures/skips/cancellations. Subsequent edge-case regressions pass
+  forwarding/tracing **22/22**, realtime **95/95**, and GameSync **30/30**.
+  Current-head full affected-suite, build/lint and CI evidence is tracked in
+  PR #105; no prior head is substituted for final readiness.
 - Focused forwarding/tracing: **19/19**, including original safety assertion,
   lock wait, admission cutoff, append/timeout race, retained results, lost enqueue,
   finish/response failures, duplicate/retention safety, legacy rejection, load

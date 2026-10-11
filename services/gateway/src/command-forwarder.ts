@@ -412,36 +412,23 @@ export class RedisCommandRouter implements CommandRouter {
     const payload = JSON.stringify(envelope);
     const stateKey = requestKey(requestId);
     const timeoutSec = Math.max(1, Math.ceil(this.forwardTimeoutMs / 1000));
+    let enqueueConn: Redis | undefined;
     try {
     // A lost enqueue acknowledgement must never be resent after its tombstone
     // expires. The shared lease client intentionally retries indefinitely; use
     // a connected, non-buffering, non-resending client only for this dispatch.
-    const enqueueConn = this.redis.duplicate({
-      lazyConnect: true,
-      enableOfflineQueue: false,
-      autoResendUnfulfilledCommands: false,
-      maxRetriesPerRequest: 0,
-      retryStrategy: () => null,
-    });
-    try {
-      await enqueueConn.connect();
-      await enqueueConn.eval(ENQUEUE_REQUEST, 2, stateKey, cmdKey, payload, timeoutSec * 1000, REQUEST_RETENTION_MS);
-    } finally {
-      enqueueConn.disconnect();
-    }
+    enqueueConn = this.requestConnection(timeoutSec * 1000);
+    await enqueueConn.connect();
+    await enqueueConn.eval(ENQUEUE_REQUEST, 2, stateKey, cmdKey, payload, timeoutSec * 1000, REQUEST_RETENTION_MS);
 
     // Wait for the response with a timeout (BLPOP timeout is in seconds).
     // A blocking BLPOP holds its connection until it returns, so it must run
     // on a DEDICATED connection — never the shared command/ownership one, or it
     // would stall ownership claims, lease renewals, and concurrent forwards
     // behind it (ioredis serializes commands on a single connection).
-    const blockingConn = this.redis.duplicate();
-    let raw: [string, string] | null;
-    try {
-      raw = await blockingConn.blpop(respKey, timeoutSec);
-    } finally {
-      blockingConn.disconnect();
-    }
+    // Reuse this isolated socket; bounded client I/O also covers a blackholed
+    // response connection where Redis's server-side BLPOP timer cannot reply.
+    const raw = await enqueueConn.blpop(respKey, timeoutSec);
 
     if (!raw) {
       timedOut = true;
@@ -481,6 +468,7 @@ export class RedisCommandRouter implements CommandRouter {
       state: result.state,
     };
     } catch (err) {
+      if (err instanceof Error && err.message === 'Command timed out') timedOut = true;
       // Covers the throws the branches above do not set attributes for — a Redis failure or a
       // malformed response payload.
       forwardSpan.setAttribute('forward.outcome', 'error');
@@ -492,6 +480,7 @@ export class RedisCommandRouter implements CommandRouter {
       if (err instanceof AuthorityError) throw err;
       return await this.settleForward(stateKey, cmdKey, payload, requestId);
     } finally {
+      enqueueConn?.disconnect();
       const latencySec = (performance.now() - startTime) / 1000;
       this.forwardLatencyHistogram?.observe(latencySec);
       if (timedOut) {
@@ -501,12 +490,29 @@ export class RedisCommandRouter implements CommandRouter {
     }
   }
 
+  private requestConnection(timeoutMs: number): Redis {
+    const conn = this.redis.duplicate({
+      lazyConnect: true, enableOfflineQueue: false, autoResendUnfulfilledCommands: false,
+      maxRetriesPerRequest: 0, retryStrategy: () => null,
+      connectTimeout: timeoutMs, commandTimeout: timeoutMs,
+    });
+    // Promise failures are classified/traced above. Avoid ioredis's direct
+    // unstructured stderr emission for this short-lived request connection.
+    conn.on('error', () => undefined);
+    return conn;
+  }
+
   private async settleForward(stateKey: string, cmdKey: string, payload: string, requestId: string): Promise<ApplyResult> {
     let settled: string;
+    let conn: Redis | undefined;
     try {
-      settled = String(await this.redis.eval(SETTLE_REQUEST, 2, stateKey, cmdKey, payload));
+      conn = this.requestConnection(Math.max(1000, Math.ceil(this.forwardTimeoutMs / 1000) * 1000));
+      await conn.connect();
+      settled = String(await conn.eval(SETTLE_REQUEST, 2, stateKey, cmdKey, payload));
     } catch {
       throw new CommandOutcomeUnknownError(requestId);
+    } finally {
+      conn?.disconnect();
     }
     if (settled === 'expired') throw new AuthorityError('command_expired', 'Forwarded command expired before execution.');
     if (!settled.startsWith('{')) throw new CommandOutcomeUnknownError(requestId);

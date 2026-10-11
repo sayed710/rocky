@@ -106,6 +106,31 @@ test('a snapshot before the unknown response cannot hide the uncertainty notice'
   assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'move').length, 1);
 });
 
+test('a late draw state resolves action uncertainty after input has been released', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  assert.equal(sync.offerDraw(), true);
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: null, requestId: 'draw-late', action: 'offerDraw', message: 'Unknown.' });
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(0, 'w') });
+  assert.equal(sync.getState().pendingAction, null);
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  factory.last.emit({ t: 'state', gameId: 'g1', state: { ...stateView(0, 'w'), drawOffer: 'w' } });
+  assert.equal(sync.getState().lastReject, null);
+  assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'offerDraw').length, 1);
+});
+
+test('a different durable move at the disputed ply settles the old uncertainty', () => {
+  const { factory, sync } = setup(); sync.start(); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w') });
+  const pending = sync.submitMove('e2e4'); assert.ok(pending);
+  factory.last.emit({ t: 'outcomeUnknown', code: 'outcome_unknown', gameId: 'g1', ref: pending.clientSeq, requestId: 'other-device', message: 'Unknown.' });
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(1, 'b', [{ ply: 1, uci: 'd2d4', san: 'd4', by: 'w' }]) });
+  assert.equal(sync.getState().lastReject, null);
+  assert.equal(sync.getState().pending, null);
+  assert.equal(factory.last.sent.filter((frame) => JSON.parse(frame).t === 'move').length, 1);
+});
+
 test('joined populates role, color and snapshot', () => {
   const { factory, sync } = setup();
   sync.start();
