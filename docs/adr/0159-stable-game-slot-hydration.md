@@ -22,8 +22,9 @@ Application selects the current record inside the queue.
 Ordinary cold loads share a generation-specific promise. A forced takeover
 reload always queues its own later read, never reuses an older cold snapshot.
 Pending reloads prevent `hasFresh` from authorizing synchronous edge reads.
-Failed reads remain retryable; missing durable history clears the resident and
-never creates a new empty game.
+Failed reads propagate to overlapping callers through a separate reload-result
+promise and remain retryable; missing durable history clears the resident and
+never creates a new empty game. The serialization tail remains rejection-neutral.
 
 Eviction increments the lifecycle generation and requests disposal. Delayed reads
 must match both generation and slot identity before installation. Busy slots stay
@@ -39,8 +40,11 @@ or persistence. Only successful authoritative execution publishes the exact
 ## Consequences and limits
 
 The second cold join waits rather than advancing through a competing load.
-Generation invalidation returns false to obsolete load callers; a current caller
-can retry. Commands already queued can drain before deferred eviction completes.
+Generation invalidation makes ordinary load callers retry the current lifecycle;
+false means an actual missing durable log. An obsolete explicit forced reload can
+return false. Successful creation restores residency even if eviction occurred
+while its initial append was pending. Commands already queued can drain before
+deferred eviction completes.
 This is process-local serialization, not ownership fencing or a cache redesign.
 R-01 D3 admission policy, revisions, recovery, draw propagation and PostgreSQL
 ownership fencing remain separately authorized work.

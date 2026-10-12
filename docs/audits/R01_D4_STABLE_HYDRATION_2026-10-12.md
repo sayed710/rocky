@@ -86,3 +86,26 @@ provides a separate clean dependency installation. Original fixture cleanup rema
 outside scope. Required external review gates, publication and HEAD equality are
 reported separately against the eventual final committed head; this document does
 not claim they have completed.
+
+## Qodo lifecycle corrections after initial publication
+
+At published head a70043c, Qodo identified three valid D4 edge cases: a failed
+forced read became missing for overlapping joiners because the queue tail swallowed
+its rejection; eviction during creation discarded successful residency; and
+ordinary load invalidation returned false, which joins interpreted as missing.
+Four new schedules first failed (resident/cold failed-reload waiters, creation
+eviction and forced-reload/eviction join). The corrections retain a separate
+fallible forced-read result, distinguish loaded/missing/invalidated outcomes,
+retry ordinary invalidation inside the existing queue, and revive successful
+creation after its durable initial append. An additional cold-then-forced-failure
+schedule verifies the cold continuation also propagates read errors and retries.
+There is no change to the forwarded admission hook, exact receipt, routing or
+later ownership policy. Earlier head CI/reviewer results are superseded and the
+corrected head must complete renewed validation and external reviews.
+
+Greptile independently confirmed the read-error issue and identified a valid test
+quality gap: the real-service takeover scenario released the cold snapshot before
+proving the asynchronous Redis claim had requested its forced reload. The takeover
+and reclaim tests now signal after the actual production reload call queues its
+read and await that signal before releasing the earlier snapshot. Product routing
+and ownership behavior are unchanged by the scheduling instrumentation.

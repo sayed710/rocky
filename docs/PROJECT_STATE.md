@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-12 — R-01 PR1 D4: stable game-slot implementation and baseline RED/focused GREEN verified; final-head validation, external review gates and owner manual merge pending; later R-01 work remains separate._
+_Last updated: 2026-10-12 — R-01 PR1 D4: Qodo/Greptile lifecycle findings reproduced and corrected; authority 110/110; corrected-head full validation and renewed external gates pending; manual merge and later PRs remain owner decisions._
+
+Prior: _Last updated: 2026-10-12 — R-01 PR1 D4: stable game-slot implementation and baseline RED/focused GREEN verified; final-head validation, external review gates and owner manual merge pending; later R-01 work remains separate._
 
 Prior: _Last updated: 2026-10-06 — Launch Preparation A07: REMAINS OPEN — release Firefox 157.0 EN/AR journeys pass after one promotion-chooser correction; physical mobile/orientation and real Safari evidence unavailable on this host (external dependencies); Playwright WebKit recorded as supporting only; final-head PR gates and owner integration pending; A06 remains closed; O06 untouched and last._
 
@@ -5430,3 +5432,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Stable slot serialization, single-flight cold loading, separately queued forced reads, generation-aware delayed installation and deferred eviction implemented; existing R-03 admission and exact receipt semantics preserved through ApplyOptions.
 - See [verification and limitations](audits/R01_D4_STABLE_HYDRATION_2026-10-12.md) and [ADR-0159](adr/0159-stable-game-slot-hydration.md). Authority suite 105/105 and initial focused real-service suite 50/50; initial full gateway run had a recorded Redis connectivity/readiness failure and is not passing evidence.
 - Final-head full gates, independent review, CI/Qodo/Greptile and owner manual merge remain pending. PR #106/#107 branches and original R-01 audit fixture are unchanged. No later PR, production migration, deployment or merge authorized by this milestone.
+
+
+### 2026-10-12 — R-01 PR1 lifecycle review corrections
+
+- Qodo's three valid edge cases reproduced with four failing tests: failed forced reads swallowed for resident/cold joiners, creation evicted during initial append, and generation-invalidated joins treated as missing.
+- Forced reload errors now propagate through a separate result promise; ordinary invalidated callers retry the current lifecycle; successful durable creation restores residency. Added a cold-then-forced-failure regression. Authority suite 110/110 passes.
+- Greptile's additional valid real-service scheduling gap corrected: takeover/reclaim tests now wait for the actual forced reload request before releasing the older read. No D3 or later scope added.
+- Published-head CI/reviews from a70043c are superseded by these corrections. Renewed full gates and exact-head external reviews remain required before owner readiness; no merge or deployment.

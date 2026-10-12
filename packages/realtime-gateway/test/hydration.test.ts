@@ -4,6 +4,8 @@ import { GameAuthority, AuthorityError } from '../src/authority';
 import { InMemoryEventLog, type EventLog } from '../src/event-log';
 import { InMemoryPubSub, gameChannel } from '../src/pubsub';
 import type { Broadcast } from '../src/protocol';
+import { RealtimeGateway } from '../src/gateway';
+import { InMemoryConnection } from '../src/transport';
 
 function barrier() {
   let resolve!: () => void;
@@ -75,7 +77,7 @@ test('eviction invalidates a delayed cold result; rejoin retains the busy slot a
   await seed.apply('g', 'alice', { kind: 'move', uci: 'b1c3' });
   const rejoin = a.ensureLoaded('g');
   d.release.resolve();
-  assert.equal(await obsolete, false);
+  assert.equal(await obsolete, true, 'invalidated ordinary callers retry the current lifecycle');
   assert.equal(await rejoin, true);
   assert.equal(a.getState('g').ply, 1);
   assert.equal(d.reads(), 2);
@@ -218,4 +220,82 @@ test('admission selects the reloaded resident and only a successful exact reques
   }), /expired/);
   assert.deepEqual(frames.filter(msg => msg.t === 'commandConfirmed').map(msg => msg.requestId), ['exact-success']);
   assert.equal((await store.load('g')).length, 3);
+});
+
+for (const resident of [true, false]) {
+  test(`forced-read failures reach ${resident ? 'resident' : 'cold'} joiners as load errors`, { timeout: 5000 }, async () => {
+    const { store } = await fixture();
+    const entered = barrier(), release = barrier();
+    let fail = false;
+    const a = new GameAuthority(new InMemoryPubSub(), () => 1000, {
+      exists: id => store.exists(id), append: (...args) => store.append(...args),
+      load: async id => {
+        if (fail) { entered.resolve(); await release.done; throw Error('forced read failed'); }
+        return store.load(id);
+      },
+    });
+    if (resident) await a.ensureLoaded('g');
+    const pubsub = new InMemoryPubSub();
+    const gateway = new RealtimeGateway(a, pubsub, { verify: () => null });
+    const joiner = new InMemoryConnection(); gateway.handleConnection(joiner);
+    fail = true;
+    const reload = assert.rejects(a.reloadFromLog('g'), /forced read failed/);
+    await entered.done;
+    const waiter = assert.rejects(a.ensureLoaded('g'), /forced read failed/);
+    joiner.deliver({ t: 'join', gameId: 'g' });
+    release.resolve(); await Promise.all([reload, waiter]);
+    await new Promise<void>(r => setImmediate(r));
+    assert.equal(joiner.last('reject')?.code, 'invalid_command');
+    assert.equal(joiner.last('reject')?.message, 'failed to load game');
+    fail = false;
+    assert.equal(await a.ensureLoaded('g'), true);
+    joiner.close();
+  });
+}
+
+test('successful creation remains resident after eviction during its durable append', { timeout: 5000 }, async () => {
+  const store = new InMemoryEventLog(), entered = barrier(), release = barrier();
+  const a = new GameAuthority(new InMemoryPubSub(), () => 1000, {
+    exists: id => store.exists(id), load: id => store.load(id),
+    append: async (...args) => { entered.resolve(); await release.done; return store.append(...args); },
+  });
+  const creation = a.createGame({ gameId: 'new', players: { white: 'alice', black: 'bob' }, rated: false,
+    timeControl: { initialMs: 300000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' } });
+  await entered.done; a.evict('new'); release.resolve(); await creation;
+  assert.equal(a.hasFresh('new'), true);
+  assert.equal((await a.apply('new', 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
+});
+
+test('a joiner waiting on a forced read retries eviction instead of reporting a missing game', { timeout: 5000 }, async () => {
+  const { store } = await fixture(), d = delayedFirstRead(store), pubsub = new InMemoryPubSub();
+  const a = new GameAuthority(pubsub, () => 1000, d.log);
+  const reload = a.reloadFromLog('g'); await d.entered.done;
+  const gateway = new RealtimeGateway(a, pubsub, { verify: () => null });
+  const joiner = new InMemoryConnection(); gateway.handleConnection(joiner);
+  joiner.deliver({ t: 'join', gameId: 'g' });
+  a.evict('g'); d.release.resolve();
+  assert.equal(await reload, false);
+  await new Promise<void>(r => setImmediate(r));
+  assert.ok(joiner.last('joined'));
+  assert.equal(joiner.last('reject'), undefined);
+  assert.equal(d.reads(), 2);
+  joiner.close();
+});
+
+test('ordinary cold callers propagate a forced read failure requested during their load', { timeout: 5000 }, async () => {
+  const { store } = await fixture(), d = delayedFirstRead(store);
+  let reads = 0;
+  const a = new GameAuthority(new InMemoryPubSub(), () => 1000, {
+    ...d.log, load: async id => {
+      if (++reads === 2) throw Error('later forced read failed');
+      return d.log.load(id);
+    },
+  });
+  const cold = a.ensureLoaded('g'); await d.entered.done;
+  const coldFailure = assert.rejects(cold, /later forced read failed/);
+  const forcedFailure = assert.rejects(a.reloadFromLog('g'), /later forced read failed/);
+  d.release.resolve();
+  await Promise.all([coldFailure, forcedFailure]);
+  assert.equal(a.hasFresh('g'), false);
+  assert.equal(await a.ensureLoaded('g'), true);
 });

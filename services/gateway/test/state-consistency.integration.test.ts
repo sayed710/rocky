@@ -99,7 +99,17 @@ stackTest('D4 real stack: late ply-0 cold read cannot satisfy takeover after dur
       const ordinary = b.authority.ensureLoaded(gameId); await delay.entered.done;
       assert.equal((await a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
       await a.registry.release(gameId);
+      const forcedQueued = barrier();
+      const reload = b.authority.reloadFromLog.bind(b.authority);
+      b.authority.reloadFromLog = id => {
+        const done = reload(id); // The production method synchronously queues its own read.
+        forcedQueued.resolve();
+        return done;
+      };
       const takeover = b.router.prepareOwnership(gameId);
+      await forcedQueued.done;
+      assert.equal(delay.reads(), 1, 'forced read is queued while the cold snapshot is still held');
+      assert.equal(b.authority.hasFresh(gameId), false);
       delay.release.resolve();
       assert.equal(await ordinary, true);
       assert.equal(await takeover, true);
@@ -118,13 +128,22 @@ stackTest('D4 real stack: a reclaimed ownership generation cannot reuse an earli
     const a = node(store), delay = delayedRead(store), b = node(delay.log);
     try {
       await create(a.authority, gameId);
+      const reclaimedReloadQueued = barrier();
+      const reload = b.authority.reloadFromLog.bind(b.authority);
+      let reloads = 0;
+      b.authority.reloadFromLog = id => {
+        const done = reload(id);
+        if (++reloads === 2) reclaimedReloadQueued.resolve();
+        return done;
+      };
       const oldClaim = b.router.prepareOwnership(gameId); await delay.entered.done;
       await b.registry.release(gameId);
       await a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' });
       await a.registry.release(gameId);
       const currentClaim = b.router.prepareOwnership(gameId);
-      // Wait for the new real Redis claim before unblocking the earlier claim's snapshot.
-      await until(() => b.registry.holdsValidLease(gameId));
+      // Confirm the new claim has requested its own forced read while the old one is held.
+      await reclaimedReloadQueued.done;
+      assert.equal(b.registry.holdsValidLease(gameId), true);
       delay.release.resolve();
       assert.equal(await oldClaim, true);
       assert.equal(await currentClaim, true);

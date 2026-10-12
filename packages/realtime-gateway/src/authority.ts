@@ -109,9 +109,11 @@ interface GameSlot {
   generation: number;
   dispose: boolean;
   reloads: number;
-  reloadGeneration: number | undefined;
-  coldLoad: { generation: number; done: Promise<boolean> } | undefined;
+  reload: { generation: number; done: Promise<boolean> } | undefined;
+  coldLoad: { generation: number; done: Promise<LoadOutcome> } | undefined;
 }
+
+type LoadOutcome = 'loaded' | 'missing' | 'invalidated';
 
 /** Short, stable hash of a FEN string for cheap desync detection. */
 export function fenHash(fen: string): string {
@@ -237,6 +239,8 @@ export class GameAuthority {
         persistedSeq,
         stale: false,
       };
+      // Eviction of a not-yet-created game must not discard a successful creation.
+      slot.dispose = false;
       return this.viewOf(game);
     });
   }
@@ -247,30 +251,60 @@ export class GameAuthority {
    * game exists anywhere. Safe to call repeatedly; a cache hit is a no-op.
    */
   async ensureLoaded(gameId: string): Promise<boolean> {
-    if (this.hasFresh(gameId)) return true;
-    const slot = this.slotFor(gameId);
-    const generation = slot.generation;
-    // A takeover always owns a later read; ordinary joiners wait for it.
-    if (slot.reloads > 0 && slot.reloadGeneration === generation) {
-      while (slot.reloads > 0) await slot.tail;
-      return this.games.get(gameId) === slot && slot.generation === generation && this.hasFresh(gameId);
+    for (;;) {
+      if (this.hasFresh(gameId)) return true;
+      const slot = this.slotFor(gameId);
+      const generation = slot.generation;
+      const current = (): boolean => this.games.get(gameId) === slot && slot.generation === generation;
+      try {
+        // Await the fallible reload result, never the rejection-neutral queue tail.
+        if (slot.reloads > 0 && slot.reload?.generation === generation) {
+          const loaded = await this.awaitReload(slot, generation);
+          if (slot.generation !== generation) continue;
+          if (!loaded) return false;
+          if (!current()) continue;
+        } else {
+          let attempt = slot.coldLoad;
+          if (attempt?.generation !== generation) {
+            // A settled failed reload is retried by a new ordinary load.
+            if (slot.reloads === 0) slot.reload = undefined;
+            const done = this.enqueue<LoadOutcome>(gameId, slot, async () => {
+              if (!current()) return 'invalidated';
+              if (slot.record && !slot.record.stale && !slot.dispose) return 'loaded';
+              const loaded = await this.refreshSlot(gameId, slot, generation);
+              if (!current()) return 'invalidated';
+              return loaded ? 'loaded' : 'missing';
+            });
+            attempt = { generation, done };
+            slot.coldLoad = attempt;
+          }
+          let outcome: LoadOutcome;
+          try { outcome = await attempt.done; }
+          finally { if (slot.coldLoad === attempt) slot.coldLoad = undefined; }
+          if (outcome === 'invalidated' || slot.generation !== generation) continue;
+          if (outcome === 'missing') return false;
+          // A forced read requested during cold loading supersedes that snapshot.
+          const loaded = await this.awaitReload(slot, generation);
+          if (slot.generation !== generation) continue;
+          if (!loaded) return false;
+          if (!current()) continue;
+        }
+        if (this.hasFresh(gameId)) return true;
+      } catch (err) {
+        if (slot.generation !== generation) continue;
+        throw err;
+      }
     }
-    if (slot.coldLoad?.generation === slot.generation) return slot.coldLoad.done;
-    const loading = this.enqueue(gameId, slot, async () => {
-      if (generation !== slot.generation) return false;
-      if (slot.record && !slot.record.stale && !slot.dispose) return true;
-      return this.refreshSlot(gameId, slot, generation);
-    });
-    const done = loading.then(async (loaded) => {
-      if (!loaded) return false;
-      // A forced reload requested during this cold read supersedes its snapshot.
-      while (slot.reloads > 0) await slot.tail;
-      return this.games.get(gameId) === slot && slot.generation === generation && this.hasFresh(gameId);
-    });
-    const attempt = { generation, done };
-    slot.coldLoad = attempt;
-    try { return await done; }
-    finally { if (slot.coldLoad === attempt) slot.coldLoad = undefined; }
+  }
+
+  private async awaitReload(slot: GameSlot, generation: number): Promise<boolean> {
+    let reload = slot.reload;
+    while (reload?.generation === generation) {
+      const loaded = await reload.done;
+      if (slot.reload === reload) return loaded;
+      reload = slot.reload;
+    }
+    return true;
   }
 
   /**
@@ -289,13 +323,12 @@ export class GameAuthority {
     const generation = slot.generation;
     if (slot.record) slot.record.stale = true;
     slot.reloads++;
-    slot.reloadGeneration = generation;
-    return this.enqueue(gameId, slot, async () => {
+    const done = this.enqueue(gameId, slot, async () => {
       try { return await this.refreshSlot(gameId, slot, generation); }
-      finally {
-        if (--slot.reloads === 0) slot.reloadGeneration = undefined;
-      }
+      finally { slot.reloads--; }
     });
+    slot.reload = { generation, done };
+    return done;
   }
 
   /** Preserve the command queue while replacing its state with PostgreSQL truth. */
@@ -330,7 +363,7 @@ export class GameAuthority {
     let slot = this.games.get(gameId);
     if (!slot) {
       slot = { record: undefined, tail: Promise.resolve(), pending: 0, generation: 0,
-        dispose: false, reloads: 0, reloadGeneration: undefined, coldLoad: undefined };
+        dispose: false, reloads: 0, reload: undefined, coldLoad: undefined };
       this.games.set(gameId, slot);
     }
     return slot;
