@@ -37,6 +37,26 @@ export const HELM_STATUSES = new Set([
   'pending-rollback',
 ]);
 
+/**
+ * The `helm history --max` window the workflow asks for. cmd/helm/history.go (v3.16.3) getHistory
+ * sorts the release's records newest first and keeps only the first `--max` (default 256; `--max 0`
+ * keeps none), so a history of this many entries may be missing older records — a `pending-*` or a
+ * second `deployed` revision — that would disqualify it. Such a history is refused.
+ */
+export const HISTORY_WINDOW = 256;
+
+/**
+ * Why a `helm history --max HISTORY_WINDOW` result cannot be proven complete, or null when it can.
+ *
+ * @param {unknown[]} history
+ * @returns {string | null}
+ */
+export function saturatedHistoryReason(history) {
+  return history.length >= HISTORY_WINDOW
+    ? `helm history returned ${history.length} revisions, which fills the --max ${HISTORY_WINDOW} window: revisions older than the window cannot be checked, so the history cannot be proven complete. Review the release's records (kubectl get secrets -l owner=helm,name=<release>) and reduce the stored history below ${HISTORY_WINDOW} revisions (Helm prunes it to --history-max on upgrade) before re-running`
+    : null;
+}
+
 const CANONICAL_REVISION = /^[1-9][0-9]*$/;
 
 /** Raised when no revision can be proven safe to roll back to. */
@@ -57,7 +77,7 @@ function fail(message) {
  * @param {unknown} value
  * @returns {number | null}
  */
-function parseRevision(value) {
+export function parseRevision(value) {
   if (typeof value === 'number') {
     return Number.isSafeInteger(value) && value > 0 ? value : null;
   }
@@ -87,6 +107,10 @@ export function resolveRollbackRevision(history) {
   }
   if (history.length === 0) {
     fail('helm history is empty; there is no deployed revision to roll back to');
+  }
+  const saturated = saturatedHistoryReason(history);
+  if (saturated) {
+    fail(saturated);
   }
 
   const entries = [];

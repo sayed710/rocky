@@ -29,12 +29,20 @@
  *      set only by the confirmed-absence arm of scripts/release-existence.mjs's classification (status
  *      not-found AND an empty `helm list --all`), and the rollback step uninstalls only behind a fresh
  *      `helm history` re-check showing exactly revision 1; rollback requires RELEASE_EXISTS = "true".
+ *      Recovery safety (ADR-0076 amendment 2026-10-12): the rollback step's `if:` is exactly
+ *      `failure() && steps.smoke_check.outcome == 'failure'`; the helm upgrade records this run's
+ *      marker (`--description "$DEPLOY_MARKER"`) and both the uninstall and the rollback sit behind
+ *      a `helm history` re-read and scripts/recovery-ownership.mjs's ownership check; confirmed
+ *      absence becomes RELEASE_EXISTS=false only after the namespace inventory found nothing; and
+ *      every `helm history` asks for the explicit `--max 256` window.
  *
  * Run: node scripts/check-deploy-gates.mjs
  */
 
 import { readFileSync, existsSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+
+import { BASE_INVENTORY_KINDS, EXTERNAL_SECRET_RESOURCE } from './lib/recovery-ownership.mjs';
 
 const DEPLOY_WORKFLOW = '.github/workflows/deploy.yml';
 const RELEASE_WORKFLOW = '.github/workflows/release.yml';
@@ -316,19 +324,16 @@ export function checkReleaseExistence(deployText) {
     const masked = line.replace(/"[^"]*"|'[^']*'/g, (quoted) => ' '.repeat(quoted.length));
     if (/(?:;|&&|\|\|)\s*RELEASE_EXISTS=/.test(masked)) assignments.push(line.trim());
   }
-  const ALLOWED_ASSIGNMENTS = ['RELEASE_EXISTS=""', 'exists) RELEASE_EXISTS=true ;;', 'absent) RELEASE_EXISTS=false ;;'];
+  const ALLOWED_ASSIGNMENTS = ['RELEASE_EXISTS=""', 'exists) RELEASE_EXISTS=true ;;', 'RELEASE_EXISTS=false'];
   if (assignments.length !== ALLOWED_ASSIGNMENTS.length ||
       !ALLOWED_ASSIGNMENTS.every((allowed) => assignments.filter((a) => a === allowed).length === 1)) {
-    fail(`RELEASE_EXISTS must be assigned exactly as [${ALLOWED_ASSIGNMENTS.join(' | ')}] (RELEASE_EXISTS=false only on confirmed absence), found: [${assignments.join(' | ')}]`);
+    fail(`RELEASE_EXISTS must be assigned exactly as [${ALLOWED_ASSIGNMENTS.join(' | ')}] (RELEASE_EXISTS=false only on confirmed absence, after the namespace inventory), found: [${assignments.join(' | ')}]`);
   }
+  // The case arms are exactly `exists)` (setting the literal), `absent)` (the namespace inventory,
+  // then RELEASE_EXISTS=false) and `*)`, which refuses every other verdict: its arm must end with
+  // `exit 1` before `;;` and must not touch RELEASE_EXISTS.
   const caseIdx = code.indexOf('case "$RELEASE_EXISTENCE" in');
-  const absentIdx = code.indexOf('absent) RELEASE_EXISTS=false ;;');
-  if (caseIdx === -1 || absentIdx <= caseIdx || code.slice(caseIdx, absentIdx).includes('esac')) {
-    fail('RELEASE_EXISTS=false must be set only in the `absent)` arm of `case "$RELEASE_EXISTENCE" in`');
-  }
-  // The case arms are exactly `exists)` and `absent)` (setting the literals) and `*)`, which refuses
-  // every other verdict: its arm must end with `exit 1` before `;;` and must not touch RELEASE_EXISTS.
-  const EXPECTED_ARMS = ['exists) RELEASE_EXISTS=true ;;', 'absent) RELEASE_EXISTS=false ;;', '*)'];
+  const EXPECTED_ARMS = ['exists) RELEASE_EXISTS=true ;;', 'absent)', '*)'];
   const esacIdx = caseIdx === -1 ? -1 : code.indexOf('esac', caseIdx);
   const caseBody = esacIdx === -1 ? [] : code.slice(caseIdx + 1, esacIdx);
   const arms = caseBody.filter((line) => /^\(?[^\s()=$"']+\)/.test(line));
@@ -340,6 +345,13 @@ export function checkReleaseExistence(deployText) {
       unknownArmBody.some((line) => /\bRELEASE_EXISTS\b/.test(line))) {
     fail(`\`case "$RELEASE_EXISTENCE" in\` must have exactly the arms [${EXPECTED_ARMS.join(' | ')}], and the \`*)\` arm (unknown existence) must end with \`exit 1\` before \`;;\`, found arms: [${arms.join(' | ')}]`);
   }
+  const absentStart = caseBody.indexOf('absent)');
+  const absentEnd = absentStart === -1 ? -1 : caseBody.indexOf(';;', absentStart);
+  const absentArm = absentEnd === -1 ? [] : caseBody.slice(absentStart + 1, absentEnd);
+  if (absentArm.at(-1) !== 'RELEASE_EXISTS=false') {
+    fail('RELEASE_EXISTS=false must be the last statement of the `absent)` arm of `case "$RELEASE_EXISTENCE" in`, after the namespace inventory');
+  }
+  found.push(...checkOrphanInventory(absentArm, code, lines));
   // The step output the rollback reads must be exactly RELEASE_EXISTS (as gate 10 does for prev_revision).
   const PUBLISH_RELEASE_EXISTS = 'echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"';
   const publishes = lines
@@ -391,30 +403,207 @@ export function checkReleaseExistence(deployText) {
     fail(`deploy.yml must contain exactly one \`${UNINSTALL_CMD}\`, in the rollback step, found: [${uninstalls.join(' | ')}]`);
     return found;
   }
+  // Each recovery runs only at the top level of its branch, after its guards in order; every guard
+  // is an `if ...; then` whose body ends the step with `exit 1`. The ownership re-check
+  // (scripts/recovery-ownership.mjs check) proves the newest revision is this run's.
   const BRANCH = 'if [ "$RELEASE_EXISTS" = "false" ]; then';
-  const HISTORY_CHECK = 'if ! helm history gambit -o json > "$RB_HISTORY" 2> "$RB_HISTORY_ERR"; then';
+  const HISTORY_CHECK = 'if ! helm history gambit -o json --max 256 > "$RB_HISTORY" 2> "$RB_HISTORY_ERR"; then';
   const REVISION_CHECK = 'if ! node scripts/release-existence.mjs only-initial-revision < "$RB_HISTORY" 2> "$RB_HISTORY_ERR" > /dev/null; then';
-  const at = (text) => step.indexOf(text);
-  const iUninstall = at(UNINSTALL_CMD);
-  const guards = [BRANCH, HISTORY_CHECK, REVISION_CHECK].map(at);
-  const ordered = guards.every((i) => i !== -1) && guards[0] < guards[1] && guards[1] < guards[2] && guards[2] < iUninstall;
-  const branchBody = ordered ? step.slice(guards[0] + 1, iUninstall) : [];
-  if (!ordered || branchBody.some((line) => /^(?:elif|else)\b/.test(line))) {
-    fail(`the uninstall must be guarded, in order, by \`${BRANCH}\`, \`${HISTORY_CHECK}\` and \`${REVISION_CHECK}\`, within the same branch`);
-  } else {
-    for (const i of guards.slice(1)) {
-      const body = step.slice(i + 1, step.indexOf('fi', i + 1));
-      if (!body.includes('exit 1')) {
-        fail(`the uninstall guard \`${step[i]}\` must end its branch with \`exit 1\` before \`fi\``);
+  const OWNERSHIP_UNINSTALL = 'if ! node scripts/recovery-ownership.mjs check --action uninstall --snapshot-newest "$SNAPSHOT_NEWEST" --marker "$DEPLOY_MARKER" < "$RB_HISTORY" 2> "$RB_HISTORY_ERR" > /dev/null; then';
+  const OWNERSHIP_ROLLBACK = 'if ! node scripts/recovery-ownership.mjs check --action rollback --snapshot-newest "$SNAPSHOT_NEWEST" --marker "$DEPLOY_MARKER" --target "$PREV_REV" < "$RB_HISTORY" 2> "$RB_HISTORY_ERR" > /dev/null; then';
+  const ROLLBACK_BRANCH = 'elif [ "$RELEASE_EXISTS" = "true" ] && [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then';
+  const guardedAction = (what, branch, guards, isAction) => {
+    const start = step.indexOf(branch);
+    const top = start === -1 ? [] : branchTopLevel(step, start);
+    const positions = guards.map((guard) => top.find((t) => step[t] === guard) ?? -1);
+    const action = top.find((t) => isAction(step[t])) ?? -1;
+    const ordered = positions.every((p, k) => p !== -1 && (k === 0 || p > positions[k - 1])) && action > positions.at(-1);
+    if (!ordered) {
+      fail(`the ${what} must be guarded, in order, by \`${branch}\`, ${guards.map((g) => `\`${g}\``).join(', ')}, within the same branch`);
+      return;
+    }
+    for (const p of positions) {
+      const body = ifBody(step, p);
+      if (body.at(-1) !== 'exit 1') {
+        fail(`the ${what} guard \`${step[p]}\` must end its branch with \`exit 1\` before \`fi\``);
       }
     }
-  }
-  const ROLLBACK_BRANCH = 'elif [ "$RELEASE_EXISTS" = "true" ] && [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then';
-  const iRollbackBranch = at(ROLLBACK_BRANCH);
-  const iRollback = step.findIndex((line) => /\bhelm\s+rollback\b/.test(line));
-  if (iRollbackBranch === -1 || iRollback <= iRollbackBranch ||
-      step.slice(iRollbackBranch + 1, iRollback).some((line) => /^(?:elif|else|fi)\b/.test(line))) {
+  };
+  guardedAction('uninstall', BRANCH, [HISTORY_CHECK, REVISION_CHECK, OWNERSHIP_UNINSTALL], (line) => line === UNINSTALL_CMD);
+  const iRollbackBranch = step.indexOf(ROLLBACK_BRANCH);
+  const rollbackTop = iRollbackBranch === -1 ? [] : branchTopLevel(step, iRollbackBranch);
+  if (!rollbackTop.some((t) => /\bhelm\s+rollback\b/.test(step[t]))) {
     fail(`the helm rollback must sit directly in the \`${ROLLBACK_BRANCH}\` branch (rollback requires release_exists exactly "true")`);
+  } else {
+    guardedAction('rollback', ROLLBACK_BRANCH, [HISTORY_CHECK, OWNERSHIP_ROLLBACK], (line) => /\bhelm\s+rollback\b/.test(line));
+  }
+  found.push(...checkRecoveryWiring(deployText));
+  return found;
+}
+
+/**
+ * Indices of the statements at the top level of the shell branch opened by step[start] (an `if`
+ * or `elif` line), up to the `elif` / `else` / `fi` that closes it. Nested `if ... fi` blocks count
+ * as their opening line only.
+ */
+function branchTopLevel(step, start) {
+  const top = [];
+  let depth = 0;
+  for (let i = start + 1; i < step.length; i++) {
+    const line = step[i];
+    if (depth === 0 && /^(?:elif|else|fi)\b/.test(line)) break;
+    if (depth === 0) top.push(i);
+    if (/^if\b/.test(line)) depth++;
+    else if (/^fi\b/.test(line)) depth--;
+  }
+  return top;
+}
+
+/** The statements of the `then` part of the `if` at lines[at], up to its own elif/else/fi. */
+function ifBody(lines, at) {
+  return branchTopLevel(lines, at).map((i) => lines[i]);
+}
+
+/** The code lines (trimmed, no comments or echo lines) of the step whose `- name:` matches. */
+function stepLines(lines, name) {
+  const start = lines.findIndex((line) => new RegExp(`^\\s*-\\s+name:\\s*${name}\\s*$`).test(line));
+  if (start === -1) return null;
+  const next = lines.findIndex((line, i) => i > start && /^\s*-\s+(?:name|uses|run):/.test(line));
+  return lines.slice(start, next === -1 ? undefined : next);
+}
+
+/**
+ * Gate 11, confirmed absence: before RELEASE_EXISTS=false the `absent)` arm inventories the
+ * namespace (scripts/recovery-ownership.mjs inventory) for every kind the chart renders, by the
+ * release's instance label and by Helm's release-name annotation, and refuses (`exit 1`) unless
+ * the verdict is exactly `empty`.
+ */
+function checkOrphanInventory(absentArm, code, lines) {
+  const found = [];
+  const fail = (why) => found.push(`${DEPLOY_WORKFLOW}: ${why}`);
+  const KINDS = `INV_KINDS="${BASE_INVENTORY_KINDS.join(',')}"`;
+  const KINDS_ES = `INV_KINDS="$INV_KINDS,${EXTERNAL_SECRET_RESOURCE}"`;
+  const DISCOVERY = 'kubectl api-resources --api-group=external-secrets.io -o name > "$INV_API" 2> "$INV_ERR" || INV_API_RC=$?';
+  const LABELLED = 'kubectl get "$INV_KINDS" -l app.kubernetes.io/instance=gambit -o name > "$INV_LABELLED" 2>> "$INV_ERR" || INV_LABEL_RC=$?';
+  const ANNOTATED = `kubectl get "$INV_KINDS" -o jsonpath='{range .items[*]}{.kind}/{.metadata.name}{"\\t"}{.metadata.annotations.meta\\.helm\\.sh/release-name}{"\\n"}{end}' > "$INV_ANNOTATED" 2>> "$INV_ERR" || INV_ANNOTATION_RC=$?`;
+  const CLASSIFY = 'if node scripts/recovery-ownership.mjs inventory --release gambit --kinds "$INV_KINDS" ' +
+    '--api-exit "$INV_API_RC" --api-stdout "$INV_API" --label-exit "$INV_LABEL_RC" --label-stdout "$INV_LABELLED" ' +
+    '--annotation-exit "$INV_ANNOTATION_RC" --annotation-stdout "$INV_ANNOTATED" > "$INV_VERDICT" 2>> "$INV_ERR"; then';
+  const REFUSAL = 'if [ "$INVENTORY" != "empty" ]; then';
+  // The arm with line continuations joined, as the shell reads it.
+  const arm = absentArm.join('\n').replace(/\s*\\\n\s*/g, ' ').split('\n');
+  const steps = [KINDS, DISCOVERY, LABELLED, ANNOTATED, CLASSIFY, REFUSAL].map((s) => arm.indexOf(s));
+  const ordered = steps.every((p, k) => p !== -1 && (k === 0 || p > steps[k - 1]));
+  if (!ordered) {
+    const missing = [KINDS, DISCOVERY, LABELLED, ANNOTATED, CLASSIFY, REFUSAL].filter((s, k) => steps[k] === -1);
+    fail(`on confirmed absence the namespace inventory must run, in order, before RELEASE_EXISTS=false: \`${KINDS}\`, \`${DISCOVERY}\`, \`${LABELLED}\`, \`${ANNOTATED}\`, \`${CLASSIFY}\` and \`${REFUSAL}\`; missing or out of order: [${missing.join(' | ')}]`);
+  } else if (ifBody(arm, steps[5]).at(-1) !== 'exit 1') {
+    fail(`the namespace inventory refusal \`${REFUSAL}\` must end with \`exit 1\` before \`fi\`: an install on an occupied or unknown namespace adopts live objects`);
+  }
+  const kindAssignments = code.filter((line) => /(?:^|[\s;])INV_KINDS=/.test(line));
+  if (kindAssignments.length !== 2 || kindAssignments[0] !== KINDS || kindAssignments[1] !== KINDS_ES) {
+    fail(`INV_KINDS must be assigned exactly as [${KINDS} | ${KINDS_ES}] (every kind deploy/helm/gambit renders), found: [${kindAssignments.join(' | ')}]`);
+  }
+  const ALLOWED_INVENTORY = ['INVENTORY=unknown', `INVENTORY=$(sed -n 's/^orphan_inventory=//p' "$INV_VERDICT")`];
+  const inventoryAssignments = code.filter((line) => /(?:^|[\s;])INVENTORY=/.test(line));
+  if (inventoryAssignments.length !== 2 || !ALLOWED_INVENTORY.every((a) => inventoryAssignments.includes(a))) {
+    fail(`INVENTORY must be "unknown" or read from the inventory classifier's output, found: [${inventoryAssignments.join(' | ')}]`);
+  }
+  const verdictWrites = writesTo(lines.filter((line) => !/^\s*#/.test(line)).join('\n'), 'INV_VERDICT');
+  if (verdictWrites.length !== 1) {
+    fail(`"$INV_VERDICT" must be written only by scripts/recovery-ownership.mjs inventory, found ${verdictWrites.length} write(s)`);
+  }
+  if (!absentArm.includes('SNAPSHOT_NEWEST=0')) {
+    fail('the `absent)` arm must record the snapshot\'s newest revision as `SNAPSHOT_NEWEST=0`');
+  }
+  return found;
+}
+
+/**
+ * Gate 11, recovery wiring: the rollback step runs exactly on a failed post-deploy verification;
+ * the helm upgrade records this run's marker; the marker and the snapshot's newest revision come
+ * only from pre_upgrade's own evidence; every `helm history` asks for the --max 256 window.
+ */
+export function checkRecoveryWiring(deployText) {
+  const found = [];
+  const fail = (why) => found.push(`${DEPLOY_WORKFLOW}: ${why}`);
+  const lines = deployText.replace(/\r/g, '').split('\n');
+  const isCode = (line) => !/^\s*#/.test(line) && !/^\s*echo\b/.test(line);
+  const code = lines.filter(isCode).map((line) => line.trim());
+  const codeText = code.join('\n');
+
+  // The rollback step's condition.
+  const CONDITION = "if: failure() && steps.smoke_check.outcome == 'failure'";
+  const rbStep = stepLines(lines, 'Rollback on post-deploy verification failure');
+  const conditions = (rbStep ?? []).slice(0, (rbStep ?? []).findIndex((line) => /^\s*run:/.test(line)) >>> 0)
+    .filter((line) => /^\s*if:/.test(line)).map((line) => line.trim());
+  if (!rbStep || conditions.length !== 1 || conditions[0] !== CONDITION) {
+    fail(`the rollback step's \`if:\` must be exactly \`${CONDITION.slice(4)}\` (it must run when, and only when, post-deploy verification failed), found: [${conditions.join(' | ')}]`);
+  }
+  const smokeIds = code.filter((line) => line === 'id: smoke_check');
+  const smokeAt = lines.findIndex((line) => line.trim() === 'id: smoke_check');
+  const rbAt = lines.findIndex((line) => /^\s*-\s+name:\s*Rollback on post-deploy verification failure\s*$/.test(line));
+  if (smokeIds.length !== 1 || smokeAt === -1 || rbAt === -1 || smokeAt > rbAt) {
+    fail('exactly one step must have `id: smoke_check` (the post-deploy verification the rollback step\'s condition names), before the rollback step');
+  }
+
+  // The marker: composed only by scripts/recovery-ownership.mjs marker, published verbatim.
+  const MARKER_CMD = /^if ! node scripts\/recovery-ownership\.mjs marker --run-id "\$GITHUB_RUN_ID" --run-attempt "\$GITHUB_RUN_ATTEMPT" --version "\$VERSION" > "\$MARKER_FILE"; then$/;
+  const MARKER_READ = `DEPLOY_MARKER=$(sed -n 's/^deploy_marker=//p' "$MARKER_FILE")`;
+  const markerAssignments = code.filter((line) => /(?:^|[\s;])DEPLOY_MARKER=/.test(line));
+  if (!code.some((line) => MARKER_CMD.test(line)) || markerAssignments.length !== 1 || markerAssignments[0] !== MARKER_READ ||
+      writesTo(lines.filter((line) => !/^\s*#/.test(line)).join('\n'), 'MARKER_FILE').length !== 1) {
+    fail(`DEPLOY_MARKER must be assigned only as \`${MARKER_READ}\`, from the output of \`node scripts/recovery-ownership.mjs marker\` (the only write to "$MARKER_FILE"), found: [${markerAssignments.join(' | ')}]`);
+  }
+  const published = (key, exact) => {
+    const all = lines.filter((line) => !/^\s*#/.test(line) && line.includes(`${key}=`) && /"\$GITHUB_OUTPUT"/.test(line)).map((line) => line.trim());
+    if (all.length !== 1 || all[0] !== exact) {
+      fail(`every ${key} output must be published exactly as \`${exact}\`, found: [${all.join(' | ')}]`);
+    }
+  };
+  published('deploy_marker', 'echo "deploy_marker=$DEPLOY_MARKER" >> "$GITHUB_OUTPUT"');
+  published('snapshot_newest_revision', 'echo "snapshot_newest_revision=$SNAPSHOT_NEWEST" >> "$GITHUB_OUTPUT"');
+  const ALLOWED_SNAPSHOT = ['SNAPSHOT_NEWEST=""', 'SNAPSHOT_NEWEST=0', `SNAPSHOT_NEWEST=$(sed -n 's/^rollback_newest_revision=//p' "$RESOLVED")`];
+  const snapshotAssignments = code.filter((line) => /(?:^|[\s;])SNAPSHOT_NEWEST=/.test(line));
+  if (snapshotAssignments.length !== ALLOWED_SNAPSHOT.length || !ALLOWED_SNAPSHOT.every((a) => snapshotAssignments.filter((s) => s === a).length === 1)) {
+    fail(`SNAPSHOT_NEWEST must be assigned exactly as [${ALLOWED_SNAPSHOT.join(' | ')}] (0 on confirmed absence, else the resolver's newest revision), found: [${snapshotAssignments.join(' | ')}]`);
+  }
+
+  // The upgrade step marks its revision, and refuses without a marker.
+  const MARKER_BINDING = 'DEPLOY_MARKER: ${{ steps.pre_upgrade.outputs.deploy_marker }}';
+  const SNAPSHOT_BINDING = 'SNAPSHOT_NEWEST: ${{ steps.pre_upgrade.outputs.snapshot_newest_revision }}';
+  const binds = (stepText, binding, what) => {
+    const name = binding.slice(0, binding.indexOf(':'));
+    const all = (stepText ?? []).map((line) => line.trim()).filter((line) => line.startsWith(`${name}:`));
+    if (all.length !== 1 || all[0] !== binding) {
+      fail(`${what} must bind exactly \`${binding}\`, found: [${all.join(' | ')}]`);
+    }
+  };
+  const upStep = stepLines(lines, 'Pre-flight template validation and Helm upgrade');
+  binds(upStep, MARKER_BINDING, 'the upgrade step');
+  binds(rbStep, MARKER_BINDING, 'the rollback step');
+  binds(rbStep, SNAPSHOT_BINDING, 'the rollback step');
+  const upCode = (upStep ?? []).filter(isCode).map((line) => line.trim());
+  const upJoined = upCode.join('\n').replace(/\s*\\\n\s*/g, ' ').split('\n');
+  const upgrades = upJoined.filter((line) => /\bhelm\s+upgrade\b/.test(line));
+  const iGuard = upCode.indexOf('if [ -z "$DEPLOY_MARKER" ]; then');
+  const iUpgrade = upCode.findIndex((line) => /\bhelm\s+upgrade\b/.test(line));
+  if (iGuard === -1 || iUpgrade === -1 || iGuard > iUpgrade || ifBody(upCode, iGuard).at(-1) !== 'exit 1') {
+    fail('the upgrade step must refuse an empty DEPLOY_MARKER (`if [ -z "$DEPLOY_MARKER" ]; then ... exit 1`) before `helm upgrade`');
+  }
+  if (upgrades.length !== 1 || (upgrades[0].match(/--description\b/g) ?? []).length !== 1 || !upgrades[0].includes(' --description "$DEPLOY_MARKER" ')) {
+    fail('the helm upgrade must record this run\'s marker exactly once as `--description "$DEPLOY_MARKER"` (the rollback step acts only on a revision carrying it)');
+  }
+
+  // The history window.
+  // Command lines only: quoted text (error messages naming `helm history`) is masked first.
+  const histories = code.filter((line) => /\bhelm\s+history\b/.test(line.replace(/"[^"]*"|'[^']*'/g, (q) => ' '.repeat(q.length))));
+  const HISTORY = /^(?:if ! )?helm history gambit -o json --max 256 > "\$[A-Z_]+" 2> "\$[A-Z_]+"(?:; then)?$/;
+  if (histories.length === 0 || histories.some((line) => !HISTORY.test(line))) {
+    fail(`every \`helm history\` must ask for the explicit \`-o json --max 256\` window (Helm returns only the newest --max records; --max 0 returns none), found: [${histories.join(' | ')}]`);
+  }
+  if (!/^helm upgrade --install gambit /m.test(codeText)) {
+    fail('the helm upgrade --install gambit command is missing');
   }
   return found;
 }
@@ -506,6 +695,10 @@ function main() {
   console.log('  ✓ deploy.yml strategy composition appears exactly once (single-source)');
   console.log('  ✓ deploy.yml rolls back only to the revision resolve-rollback-revision.mjs verified');
   console.log('  ✓ deploy.yml uninstalls only on confirmed absence, behind a fresh helm history re-check');
+  console.log('  ✓ deploy.yml installs on confirmed absence only after the namespace inventory found no object of the release');
+  console.log('  ✓ deploy.yml marks its helm upgrade and re-verifies ownership before both uninstall and rollback');
+  console.log("  ✓ deploy.yml's rollback step runs exactly on failure() && steps.smoke_check.outcome == 'failure'");
+  console.log('  ✓ deploy.yml reads helm history with the explicit --max 256 window');
   console.log('');
   console.log('=== Results: all deployment gates verified ===');
 }

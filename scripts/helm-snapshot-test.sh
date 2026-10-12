@@ -1219,7 +1219,7 @@ expect_unknown() {
 expect_initial_uninstall() {
   local ok=1 f="$RB_ROOT/$1" hl ul sl ll
   sl=$(call_line "$1" '^status gambit$'); ll=$(call_line "$1" '^list --all --filter \^gambit\$ -o json$')
-  hl=$(call_line "$1" '^history gambit -o json$'); ul=$(call_line "$1" '^uninstall ')
+  hl=$(call_line "$1" '^history gambit -o json --max 256$'); ul=$(call_line "$1" '^uninstall ')
   [ "$(cat "$f/pre.rc")" = 0 ] && [ "$(cat "$f/rb.rc")" = 0 ] \
     && grep -qx 'release_exists=false' "$f/github_output" \
     && [ "$(rb_mutations "$1")" = "uninstall gambit --wait --timeout 5m0s" ] \
@@ -1605,8 +1605,11 @@ for n in 256 300; do
   rb_run "window-$n" rolling "$(long_hist "$n")"
   expect_refusal "window-$n" 'fills the --max 256 window' "a $n-entry pre-upgrade history saturates the window: refused before the upgrade"
 done
+rb_run window-254 rolling "$(long_hist 254)"
+expect_rollback window-254 254 "a 254-entry history stays below the window after this run's upgrade (255): rolls back to deployed 254"
+# 255 entries pass pre_upgrade, but this run's upgrade makes 256: the re-read applies the same rule.
 rb_run window-255 rolling "$(long_hist 255)"
-expect_rollback window-255 255 "a 255-entry history is below the window: rolls back to deployed 255"
+expect_recovery_refused window-255 'roll back' 'fills the --max 256 window' "a 255-entry snapshot whose upgrade fills the window: the re-read refuses the rollback"
 for s in canary blueGreen; do
   rb_run "$s-window-256" "$s" "$(long_hist 256)"
   expect_pre_refused "$s-window-256" 'fills the --max 256 window' "$s over a saturated history is refused before the upgrade"
