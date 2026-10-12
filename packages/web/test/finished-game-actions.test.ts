@@ -5,6 +5,7 @@ import { mountGame } from '../src/app/game-mount.js';
 import { createGameDocument, makeFinishedState, makeState } from './support/analysis-fixtures.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
 import { FakeTransport, json } from './support/fake-transport.js';
+import { adoptGameSession } from './support/game-session.js';
 
 const FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
@@ -18,6 +19,7 @@ function setup(role: 'white' | 'spectator' = 'white', finished = false) {
       : json(404, {})),
   });
   const { doc, elements } = createGameDocument();
+  if (role === 'white') adoptGameSession(app.api.session);
   const mounted = mountGame({
     doc,
     boardEl: elements.get('board')! as unknown as HTMLElement,

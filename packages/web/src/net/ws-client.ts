@@ -92,6 +92,7 @@ export class WsClient {
   private readonly rng: () => number;
 
   private conn: WebSocketConnection | null = null;
+  private socketGeneration = 0;
   private stateValue: WsConnectionState = 'idle';
   private intentionalClose = false;
   private reconnectAttempts = 0;
@@ -116,6 +117,11 @@ export class WsClient {
 
   get state(): WsConnectionState {
     return this.stateValue;
+  }
+
+  /** Identifies the active socket attempt, including its close boundary. */
+  get generation(): number {
+    return this.socketGeneration;
   }
 
   /** Last measured round-trip time (ms) from ping/pong, or null. */
@@ -191,6 +197,7 @@ export class WsClient {
 
   /** Close intentionally: cancels reconnect/heartbeat and never auto-reconnects. */
   close(code?: number, reason?: string): void {
+    this.socketGeneration++;
     this.intentionalClose = true;
     this.clearReconnect();
     this.stopHeartbeat();
@@ -207,13 +214,24 @@ export class WsClient {
   }
 
   private openSocket(): void {
+    const generation = ++this.socketGeneration;
     this.setState(this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting');
     const url = typeof this.urlSource === 'function' ? this.urlSource() : this.urlSource;
     const handlers: SocketHandlers = {
-      onOpen: () => this.handleOpen(),
-      onMessage: (data) => this.handleMessage(data),
-      onClose: (info) => this.handleClose(info),
-      onError: (error) => this.emit('error', error),
+      onOpen: () => {
+        if (generation === this.socketGeneration && this.stateValue !== 'open') this.handleOpen();
+      },
+      onMessage: (data) => {
+        if (generation === this.socketGeneration) this.handleMessage(data);
+      },
+      onClose: (info) => {
+        if (generation !== this.socketGeneration) return;
+        this.socketGeneration++;
+        this.handleClose(info);
+      },
+      onError: (error) => {
+        if (generation === this.socketGeneration) this.emit('error', error);
+      },
     };
     try {
       this.conn = this.factory(url, handlers);

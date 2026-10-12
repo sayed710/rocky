@@ -7,6 +7,8 @@ import {
   CommandOutcomeUnknownError,
   AuthorityError,
   gameChannel,
+  FLAG_ACTOR,
+  NO_SHOW_ACTOR,
 } from '@chess-platform/realtime-gateway';
 import { OwnerCommandConsumer, RedisCommandRouter } from '../src/command-forwarder.js';
 import type { OwnershipRegistry } from '../src/ownership.js';
@@ -49,6 +51,26 @@ function fixture(gameId: string) {
       timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'increment' },
     }),
   };
+}
+
+for (const [actor, command] of [[FLAG_ACTOR, { kind: 'expireFlag' }], [NO_SHOW_ACTOR, { kind: 'expireNoShow' }]] as const) {
+  for (const scenario of ['cold-ended', 'resident-ended', 'watched-ended', 'cold-active'] as const) {
+    test(`R-03: late unowned ${command.kind} cleans only its temporary unwatched ended copy (${scenario})`, async () => {
+      const id = `late-unowned-${command.kind}-${scenario}`;
+      const f = fixture(id);
+      await f.create();
+      if (scenario !== 'cold-active') await f.owner.apply(id, 'alice', { kind: 'resign' });
+      const before = await f.store.load(id);
+      if (scenario !== 'resident-ended') f.owner.evict(id);
+      f.consumer.watchLocalSessions(() => scenario === 'watched-ended');
+      f.transport.owner = 'new-owner';
+      f.onTimeout(f.consume);
+      await assert.rejects(f.router.route(id, actor, command), /expired before execution/);
+      assert.deepEqual(await f.store.load(id), before, 'unowned delivery cannot append or replay a command');
+      assert.equal(f.owner.has(id), scenario !== 'cold-ended', 'retain watched, pre-resident and unfinished copies');
+      assert.equal(f.transport.records.values().next().value?.status, 'expired', 'the exact queued request is cancelled safely');
+    });
+  }
 }
 
 test('R-03: resignation rejected by forward timeout must not execute on delayed consumption', async () => {

@@ -9,6 +9,7 @@ import { FakeTransport, json } from './support/fake-transport.js';
 import { FakeSocketFactory } from './support/fake-socket.js';
 import type { HttpResponse, HttpTransport } from '../src/ports/http.js';
 import { MemoryTokenStore } from '../src/net/session.js';
+import { adoptGameSession } from './support/game-session.js';
 import type { ServerMessage, StateView } from '../src/net/ws-protocol.js';
 import { ENGINE_BOT_USER_IDS } from '@chess-platform/game';
 import type { WebAuthnAdapter } from '../src/ports/webauthn.js';
@@ -745,6 +746,7 @@ function setupActionPanel(state: StateView = BASE_STATE, role: 'white' | 'black'
   const doc = makeDoc();
   const sockets = new FakeSocketFactory();
   const result = bootstrap(doc, { ...makeDeps(sockets), gameId: 'g1', token: 'token-u1' });
+  if (role !== 'spectator') adoptGameSession(result.app.api.session, 'token-u1');
   const socket = sockets.last;
 
   // Connect and join an ongoing game (White by default for action-panel tests).

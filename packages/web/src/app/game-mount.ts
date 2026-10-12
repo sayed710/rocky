@@ -134,6 +134,7 @@ interface GameMountDependencies {
 
 /** The result of mounting the game route. */
 interface MountedGame {
+  readonly onLogoutRequested: () => void;
   readonly board: MountedBoard;
   readonly controller: GameController;
   readonly connectivity: { dispose: () => void };
@@ -177,6 +178,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   // Game metadata
   const metaConnectionEl = doc.getElementById('meta-connection');
+  const reconnectButton = doc.getElementById('game-reconnect');
   const metaRoleEl = doc.getElementById('meta-role');
   const metaWhiteEl = doc.getElementById('meta-white');
   const metaWhiteNameEl = doc.getElementById('meta-white-name');
@@ -341,9 +343,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   resetAnalysisPanel();
 
+  let logoutPending = false;
   /** Keep mount-time control visibility aligned with the active client session. */
   const isUserAuthenticated = (): boolean => {
-    return Boolean(getAccessToken() ?? deps.client.session.current?.tokens.accessToken);
+    return !logoutPending && Boolean(getAccessToken() ?? deps.client.session.current?.tokens.accessToken);
   };
 
   /** UI-only reinforcement; the API independently enforces the account-wide boundary. */
@@ -1175,7 +1178,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     puzzleController.invalidate();
   };
 
-  const gameSync = createGameSync({ gameId, ...(token !== undefined ? { token } : {}) });
+  const gameSync = createGameSync({ gameId, session: deps.client.session, ...(token !== undefined ? { token } : {}) });
   const oracle = createGameOracle(gameSync);
 
   const board = mountBoard(
@@ -1205,13 +1208,20 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   const renderMetadata = (state: GameMetadataState): void => {
     let liveAnnouncement = '';
+    if (reconnectButton) {
+      if (!state.recoveryAvailable && !reconnectButton.hidden && doc.activeElement === reconnectButton) statusEl?.focus();
+      reconnectButton.hidden = !state.recoveryAvailable;
+      reconnectButton.textContent = i18n.t('emailVerification.retry');
+    }
 
     if (metaConnectionEl) {
       const connText = state.connected
         ? i18n.t('game.connection.connected')
-        : state.role !== null
-          ? i18n.t('game.connection.reconnecting')
-          : i18n.t('game.connection.connecting');
+        : state.recoveryAvailable
+          ? i18n.t('game.connection.unavailable')
+          : state.role !== null
+            ? i18n.t('game.connection.reconnecting')
+            : i18n.t('game.connection.connecting');
       if (metaConnectionEl.textContent !== connText) {
         metaConnectionEl.textContent = connText;
         liveAnnouncement += i18n.t('game.connection.announcement', { status: connText });
@@ -1316,6 +1326,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     refreshCoachControls();
     refreshExplainControls();
     refreshAssessControls();
+    if (actionErrorEl) {
+      actionErrorEl.hidden = state.lastReject === null;
+      actionErrorEl.textContent = state.lastReject ?? '';
+    }
     if (actionsPanelEl) {
       if (state.isOver && !actionsPanelEl.hidden && doc.activeElement && actionsPanelEl.contains(doc.activeElement)) {
         statusEl?.focus();
@@ -1372,11 +1386,6 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (btnDeclineDraw) {
       (btnDeclineDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
-    }
-
-    if (actionErrorEl) {
-      actionErrorEl.hidden = state.lastReject === null;
-      actionErrorEl.textContent = state.lastReject ?? '';
     }
   };
 
@@ -1469,7 +1478,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
         board.setLastMove(from, to);
       },
       onColor: (color) => {
-        if (color === 'b') board.setOrientation('black');
+        if (color !== null) board.setOrientation(color === 'b' ? 'black' : 'white');
         syncBoardOwnership();
       },
       onMetadata: (state) => {
@@ -1790,6 +1799,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const connectivityTarget = typeof window !== 'undefined' ? window : null;
   const onOffline = (): void => gameSync.networkOffline();
   const onOnline = (): void => gameSync.networkOnline();
+  if (reconnectButton) {
+    reconnectButton.addEventListener('click', onOnline);
+    unbinds.push(() => reconnectButton.removeEventListener('click', onOnline));
+  }
   if (connectivityTarget) {
     connectivityTarget.addEventListener('offline', onOffline);
     connectivityTarget.addEventListener('online', onOnline);
@@ -1855,8 +1868,24 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     controller,
     connectivity,
     analysis,
+    onLogoutRequested: () => {
+      if (analysisDisposed) return;
+      logoutPending = true;
+      gameSync.logoutRequested();
+      gameReviewSessionId = null;
+      gameReviewController.sessionChanged(null);
+      coachController.targetLost();
+      refreshAnalysisControls();
+      refreshExplainControls();
+      refreshAssessControls();
+      refreshPuzzleControls();
+      refreshOpeningControls();
+      refreshCoachControls();
+    },
     onSessionChange: (session) => {
       if (analysisDisposed) return;
+      logoutPending = false;
+      gameSync.sessionChanged(session?.userId ?? null);
       gameReviewSessionId = session?.userId ?? null;
       gameReviewController.sessionChanged(gameReviewSessionId);
       refreshAnalysisControls();

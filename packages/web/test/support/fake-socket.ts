@@ -77,6 +77,10 @@ export class ManualScheduler implements Scheduler {
     return this.tasks.size;
   }
 
+  get nextDelayMs(): number | undefined {
+    return [...this.tasks.values()][0]?.ms;
+  }
+
   /** Run the oldest scheduled task (FIFO). */
   runNext(): void {
     const entry = [...this.tasks.entries()][0];

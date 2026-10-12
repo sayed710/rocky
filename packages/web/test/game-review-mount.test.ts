@@ -156,7 +156,7 @@ function setup(options: SetupOptions = {}) {
     state: { ...(lifecycle === 'finished' ? makeFinishedState(fen) : makeState(fen)), gameId, variant },
   });
 
-  return { app, elements, mounted, pendingReviews, pendingAnalysis, pendingPuzzles, socket: sockets.last };
+  return { app, elements, mounted, pendingReviews, pendingAnalysis, pendingPuzzles, sockets, socket: sockets.last };
 }
 
 /** Drain the promise turns used by controller completion callbacks. */
@@ -521,6 +521,9 @@ test('mounted session changes synchronously refresh Game Review controls', async
     assert.equal(note.textContent, 'Sign in to review your game.');
 
     mountedGame.mounted.onSessionChange({ handle: 'alice', userId: 'user-1' });
+
+    mountedGame.sockets.last.open();
+    mountedGame.sockets.last.emit({ t: 'joined', gameId: 'g-test-1', role: 'white', state: makeFinishedState(FEN) });
 
     assert.equal(runButton.disabled, false);
     assert.equal(note.textContent, 'Review your moves after the game.');

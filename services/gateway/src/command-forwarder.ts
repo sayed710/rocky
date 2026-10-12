@@ -761,6 +761,10 @@ export class OwnerCommandConsumer {
       };
     } catch (err) {
       if (err instanceof UnownedForwardedRequest) {
+        // A BLPOP already in flight can deliver after the expiry owner releases
+        // its lease and evicts. The load above must not retain that temporary
+        // ended copy merely because admission correctly refuses the old owner.
+        releaseExpiryCopy();
         this.stopConsumer(envelope.gameId);
         commandSpan.setAttribute('cmd.outcome', 'not_owner');
         commandSpan.setStatus('error');
