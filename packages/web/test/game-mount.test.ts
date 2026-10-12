@@ -192,6 +192,39 @@ function gameServices(app: ReturnType<typeof createTestApp>) {
   };
 }
 
+for (const completedBeforeRestore of [false, true]) {
+  test(`logout during initial restore suspends startup until completion (completed first: ${completedBeforeRestore})`, async () => {
+    const sockets = new FakeSocketFactory();
+    const app = createTestApp(sockets);
+    const { doc, elements } = createGameDocument();
+    let finishRestore!: (value: null) => void;
+    const restorePromise = new Promise<null>((resolve) => { finishRestore = resolve; });
+    const mounted = mountGame({ doc, boardEl: elements.get('board')! as unknown as HTMLElement,
+      gameId: 'restore-logout', ...gameServices(app), restorePromise });
+    try {
+      // Canonical peer adoption allows logout while the older restore is pending.
+      adoptGameSession(app.api.session, 'peer-token');
+      mounted.onSessionChange({ userId: 'u1', handle: 'u1' });
+      mounted.onLogoutRequested();
+      app.api.session.reset(false);
+      if (completedBeforeRestore) mounted.onSessionChange(null);
+      assert.equal(sockets.sockets.length, 0, 'no early socket during route restoration');
+      finishRestore(null);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(sockets.sockets.length, completedBeforeRestore ? 1 : 0, 'restore cannot bypass an unfinished logout');
+      if (!completedBeforeRestore) mounted.onSessionChange(null);
+      assert.equal(sockets.sockets.length, 1, 'completed logout resumes exactly once');
+      sockets.last.open();
+      assert.deepEqual(sockets.last.sent.map((frame) => JSON.parse(frame)).filter((frame) => frame.t === 'join'),
+        [{ t: 'join', gameId: 'restore-logout' }], 'only a fresh anonymous authorization is requested');
+      assert.equal(elements.get('game-actions')!.hidden, true, 'no player privileges before authorization');
+    } finally {
+      finishRestore(null);
+      mounted.controller.dispose(); mounted.board.dispose(); mounted.connectivity.dispose(); mounted.analysis.dispose(); app.dispose();
+    }
+  });
+}
+
 test('mountGame clock updates preserve colour labels and update only the time spans', () => {
   for (const labels of [['White', 'Black'], ['الأبيض', 'الأسود']]) {
     const sockets = new FakeSocketFactory();

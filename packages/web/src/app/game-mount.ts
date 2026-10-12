@@ -1326,6 +1326,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     refreshCoachControls();
     refreshExplainControls();
     refreshAssessControls();
+    if (actionErrorEl) {
+      actionErrorEl.hidden = state.lastReject === null;
+      actionErrorEl.textContent = state.lastReject ?? '';
+    }
     if (actionsPanelEl) {
       if (state.isOver && !actionsPanelEl.hidden && doc.activeElement && actionsPanelEl.contains(doc.activeElement)) {
         statusEl?.focus();
@@ -1382,11 +1386,6 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (btnDeclineDraw) {
       (btnDeclineDraw as HTMLButtonElement).disabled = disabled || state.drawOffer !== 'received';
-    }
-
-    if (actionErrorEl) {
-      actionErrorEl.hidden = state.lastReject === null;
-      actionErrorEl.textContent = state.lastReject ?? '';
     }
   };
 

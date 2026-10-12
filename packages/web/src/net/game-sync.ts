@@ -247,7 +247,7 @@ export class GameSync {
 
   /** Revoke player privileges before asynchronous logout can refresh credentials. */
   logoutRequested(): void {
-    if (!this.unsubscribe) return;
+    // Initial restoration may still be pending; start() must inherit this barrier.
     this.invalidateJoin();
     this.suspended = true;
     this.terminalJoinFailure = false;
@@ -257,15 +257,14 @@ export class GameSync {
     this.joinReject = null;
     this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null, pending: null,
       pendingAction: null, lastReject: this.commandNotice() });
-    this.client.close(1000, 'session-changed');
+    if (this.unsubscribe) this.client.close(1000, 'session-changed');
   }
 
   /** A completed session boundary requires a fresh server-authorized join. */
   sessionChanged(_userId: string | null): void {
-    if (!this.unsubscribe) return;
     this.logoutRequested();
     this.suspended = false;
-    this.client.connect();
+    if (this.unsubscribe) this.client.connect();
   }
 
   /** Wire up the client and open the connection. */
@@ -281,7 +280,7 @@ export class GameSync {
         }
       },
     });
-    this.client.connect();
+    if (!this.suspended) this.client.connect();
   }
 
   /**

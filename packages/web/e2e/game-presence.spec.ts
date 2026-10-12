@@ -4,6 +4,67 @@ import { randomUUID } from 'node:crypto';
 test.skip(!process.env['GAMBIT_E2E_BACKEND'], 'requires running backend');
 
 test.describe('Game presence flow', () => {
+  test('Unknown command outcomes remain visible after logout and anonymous reauthorization', async ({ browser, request }) => {
+    const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
+    const handle = `e2e-unc-${suffix}`;
+    const registration = await request.post('/v1/auth/register', {
+      data: { handle, password: 'test-password-123', email: `${handle}@example.test` },
+    });
+    expect(registration.ok()).toBeTruthy();
+    const auth = await registration.json();
+    const game = await request.post('/e2e/games', { data: { whiteId: auth.user.id, blackId: `opponent-${suffix}` } });
+    expect(game.ok()).toBeTruthy();
+    const { gameId } = await game.json();
+    const context = await browser.newContext();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      await context.addCookies([{ name: 'gambit_refresh', value: auth.tokens.refreshToken,
+        domain: 'localhost', path: '/v1/auth', httpOnly: true, secure: false, sameSite: 'Strict' }]);
+      const page = await context.newPage();
+      await page.addInitScript(({ handle, uid }) => {
+        localStorage.setItem('gambit-session', JSON.stringify({ handle, userId: uid }));
+        const NativeSocket = window.WebSocket;
+        window.WebSocket = class extends NativeSocket {
+          constructor(url: string | URL, protocols?: string | string[]) {
+            super(url, protocols);
+            (window as unknown as { testGameSocket: WebSocket }).testGameSocket = this;
+          }
+        };
+      }, { handle, uid: auth.user.id });
+      await page.route('**/v1/auth/logout', async (route) => { await held; await route.continue(); });
+      await page.goto(`/game/${gameId}`);
+      await expect(page.locator('#meta-role')).toHaveText('Playing as White');
+      // Controlled receipt injection tests the real DOM; distributed uncertainty
+      // admission is covered separately by the Redis/PostgreSQL service suites.
+      await page.evaluate((id) => {
+        (window as unknown as { testGameSocket: WebSocket }).testGameSocket.dispatchEvent(new MessageEvent('message', {
+          data: JSON.stringify({ t: 'outcomeUnknown', gameId: id, ref: null, code: 'outcome_unknown',
+            requestId: 'visible-after-logout', action: 'resign', message: 'Command outcome unknown; it may still complete.' }),
+        }));
+      }, gameId);
+      await expect(page.locator('#action-error')).toContainText('may still complete');
+      await page.locator('#auth-logout').click();
+      await expect(page.locator('#game-actions')).toBeHidden();
+      await expect(page.locator('#action-error')).toBeVisible();
+      await expect(page.locator('#action-error')).toContainText('may still complete');
+      release();
+      await expect(page.locator('#meta-role')).toHaveText('Spectating');
+      await expect(page.locator('#action-error')).toBeVisible();
+      await expect(page.locator('#game-actions')).toBeHidden();
+      await page.evaluate((id) => {
+        (window as unknown as { testGameSocket: WebSocket }).testGameSocket.dispatchEvent(new MessageEvent('message', {
+          data: JSON.stringify({ t: 'commandConfirmed', gameId: id, requestId: 'visible-after-logout' }),
+        }));
+      }, gameId);
+      await expect(page.locator('#action-error')).toBeHidden();
+      await expect(page.locator('#game-actions')).toBeHidden();
+    } finally {
+      release();
+      await context.close();
+    }
+  });
+
   test('Repeated logout clicks cannot resume anonymous watching before logout settles', async ({ browser, request }) => {
     const suffix = randomUUID().replaceAll('-', '').slice(0, 10);
     const handle = `e2e-double-logout-${suffix}`;
