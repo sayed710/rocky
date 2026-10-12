@@ -217,3 +217,40 @@ topology, CI-parity and observability guards passed. The new metrics use four
 bounded reasons; tests assert timeout/error/mismatch counts and one duration
 sample per attempted comparison. All external exact-head approval must be
 renewed after the normal follow-up push.
+
+## Lease-operation ordering correction (876a2b0 superseded)
+
+Fresh Qodo at 876a2b0 found four additional concrete schedules: release deleting
+a concurrent same-node claim, an absent generation hiding release from a late
+renewal, older claim expiry overwriting newer renewal, and continuously valid
+concurrent claims replacing each other's identity. All four newly controlled
+tests failed before correction (Redis key missing despite completed claim;
+ownedCount 1 after release; valid lease false after newer renewal; and a valid
+queued gesture refused). A real Redis/PG schedule against a preserved 876a2b0
+Linux image also failed with ownedCount 1 after actual Redis deletion. The test
+used an injected local clock and held the real successful renewal reply; the
+complete failed TAP run is retained. This is not fabricated baseline evidence.
+
+Per-game claim/release/renewal I/O now shares a separate operation lane. A
+synchronous release epoch invalidates pending replies even when both admission
+generations are absent. A cancelled local claim is mapped to command_expired,
+without automatic forwarding. Continuous valid claims keep identity; later
+renewals cannot be overtaken by older claim acknowledgements. Dispatch timing
+is captured after lane waiting. Idle lanes are removed; renewal ticks coalesce
+the outstanding write. No authority-slot hydration is awaited from this lane.
+
+All 19 deterministic admission schedules pass, including cancellation of a
+claim gesture before hydration and shared outstanding renewals. Full local and
+fresh published-head gates are being repeated. Greptile's 876a2b0 review was
+clear (5/5); CI was green with final browser 285/285 and no reported retries,
+but both are historical, not approval for this correction. The in-progress
+second exact-head Gemini run was interrupted after Qodo's new findings and
+receives no approval credit.
+
+The corrected clean Linux full gateway suite passes 153/153, zero failures/skips,
+including the same real late-renewal/release schedule. All 19 deterministic
+admission tests pass. Renewed full root build/lint and all 19 hermetic workspaces
+complete with 4,164 tests and zero skips; standalone service build/lint, ADR,
+topology and observability checks pass. The combined diff remains 11 D3-focused
+files with no web-source delta against merged main. Fresh published-head CI and
+external reviews are required after the next normal push.

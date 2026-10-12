@@ -17,6 +17,13 @@ Ticket invalidation retains the consumer while Redis may still route to this
 node. A successful renewal after local expiry establishes a new generation and
 reload debt. Claim responses preserve continuity only for the same still-valid
 generation observed before claim I/O, including overlapping claims.
+Claim, release and renewal I/O is ordered in a separate per-game operation lane,
+independent of the authority slot. Release changes a lane epoch synchronously,
+even when admission identity is absent, so an in-flight claim or renewal cannot
+restore released ownership. A cancelled claim gesture becomes command_expired
+without forwarding. Continuous valid claims preserve identity; queued lease I/O
+starts its expiry clock only when dispatched. Idle lanes are removed and repeated
+renewal ticks share the outstanding write. Hooks never await slot hydration.
 
 After takeover reload, application enters PR1's stable slot. Admission requires
 current identity, settled reload debt, conservative local expiry and a matching

@@ -276,6 +276,37 @@ stackTest('D3 real stack: expired local ticket retains consumer; fresh renewal g
   });
 });
 
+stackTest('D3 real stack: release cancels late renewal even when ticket generation was absent', { timeout: 90000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    let localNow = 0;
+    const store = new PostgresEventStore(pool), gameId = randomUUID(), a = node(store, 30, 1000, () => localNow), b = node(store);
+    const entered = barrier(), reply = barrier();
+    try {
+      await create(a.authority, gameId); assert.equal(await a.router.prepareOwnership(gameId), true);
+      const evalRedis = a.redis.eval.bind(a.redis);
+      a.redis.eval = async (...args) => {
+        const result: unknown = await Reflect.apply(evalRedis, a.redis, args);
+        if (String(args[0]).includes("return redis.call('EXPIRE'")) { entered.resolve(); await reply.done; }
+        return result;
+      };
+      localNow = 22000; a.registry.startRenewal(); t.mock.timers.tick(15000); await entered.done;
+      assert.equal(a.registry.captureTicket(gameId), undefined);
+      const released = a.registry.release(gameId);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(a.registry.ownedCount, 0, 'release invalidates local admission immediately');
+      reply.resolve(); await released;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(a.registry.ownedCount, 0, 'the late reply must not restart the released consumer');
+      assert.equal(a.registry.captureTicket(gameId), undefined);
+      assert.equal(await b.redis.get(`game:owner:${gameId}`), null);
+      assert.equal((await b.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0, 1]);
+    } finally { reply.resolve(); await b.close(); await a.close(); await store.closePlayerLocks(); }
+  });
+});
+
 stackTest('D4 real stack: late ply-0 cold read cannot satisfy takeover after durable ply 1', { timeout: 90000 }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, migrationsDir());

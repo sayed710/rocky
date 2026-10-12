@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-01 PR2 D3: Qodo/Greptile renewal and overlapping-claim schedules reproduced and corrected; renewed local gates verified; fresh exact-head external gates pending; owner manual merge required._
+_Last updated: 2026-10-13 — R-01 PR2 D3: release/claim/renewal operations ordered with cancellation epochs; reproduced Qodo races corrected, gateway 153/153 and full local gates verified; fresh exact-head external gates pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: Qodo/Greptile renewal and overlapping-claim schedules reproduced and corrected; renewed local gates verified; fresh exact-head external gates pending; owner manual merge required._
 
 Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: normal PR #106 integration and expiry-generation correction verified; full local gates complete, fresh published-head external gates pending; owner manual merge required._
 
@@ -5471,3 +5473,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - PR #109 opened normally at 8406722. Qodo's consumer availability issue reproduced; retained consumer routing with fresh generation/debt on late renewal, plus bounded comparison metrics. Greptile's overlapping-claim resurrection reproduced with an obsolete queued move; replies now preserve only the same still-valid dispatch generation. Scheduled tests have timeouts. Deterministic admission 13/13 and compiled real Redis/PG held-renewal forwarding case pass; prior exact-head reviews are superseded. Fresh full gates and normal follow-up push/exact-head review required; no scope expansion or owner merge.
 
 - Renewed build/lint and workspace 4,164/4,164, service build/lint, deterministic admission 13/13 and clean Linux real Redis/PG gateway 146/146 completed with zero skips. ADR/topology/CI-parity/observability guards passed. Comparison telemetry has bounded reasons and latency. Fresh external exact-head review/CI and resolved threads remain required after the normal follow-up push.
+
+### 2026-10-13 — R-01 PR2 ownership operation ordering
+
+- Fresh Qodo found four additional release/renewal/claim interleavings at 876a2b0. All four deterministic schedules failed before correction; an actual Redis/PG held-renewal reply also restarted ownership after Redis deletion in the preserved old image. Separate per-game lease I/O lanes and synchronous release epochs now order operations, cancel stale claim gestures without forwarding, preserve continuous valid identity and coalesce outstanding renewal writes. Idle lanes are removed; no slot-lock reentrancy or later R-01 scope. Deterministic admission 19/19 passes; renewed full gates and fresh exact-head reviews remain required.
+
+- Corrected clean Linux gateway 153/153 and deterministic admission 19/19 pass, zero skips. Renewed full build/lint and 19 hermetic workspaces (4,164 tests), standalone service build/lint and affected guards pass. Main still dd7fec5; fresh published-head CI/Qodo/Greptile/independent review and resolved threads are required after normal push. Minimal D3 is not PostgreSQL fencing; owner manual merge only.

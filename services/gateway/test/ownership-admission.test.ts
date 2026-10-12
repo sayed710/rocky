@@ -176,8 +176,8 @@ test('D3: overlapping claims cannot revive the generation captured by an obsolet
   f.redis.now = 15000;
   const evalRedis = f.redis.eval.bind(f.redis);
   f.redis.eval = async (...args) => { const result = await evalRedis(...args); renewalEntered.resolve(); await renewalReply.done; return result; };
-  const secondClaim = f.registry.claim('g'); await renewalEntered.done;
-  setReply.resolve(); await firstClaim;
+  const secondClaim = f.registry.claim('g');
+  setReply.resolve(); await firstClaim; await renewalEntered.done;
   paused = true;
   const first = f.router.route('g', 'alice', { kind: 'move', uci: 'b1c3' }); await entered.done;
   const queued = observeQueue(f.authority);
@@ -187,6 +187,102 @@ test('D3: overlapping claims cannot revive the generation captured by an obsolet
   release.resolve(); assert.equal((await first).state.ply, 1); await second;
   assert.deepEqual((await f.store.load('g')).map(e => e.seq), [0, 1]);
   assert.equal(f.frames.filter(m => m.t === 'move').length, 1);
+});
+
+test('D3: release and same-node claim finish with consistent Redis and local ownership', { timeout: 5000 }, async t => {
+  const f = await fixture(t), entered = barrier(), reply = barrier(), evalRedis = f.redis.eval.bind(f.redis);
+  f.redis.eval = async (...args) => {
+    if (args[0].includes("'DEL'")) { entered.resolve(); await reply.done; }
+    return evalRedis(...args);
+  };
+  const released = f.registry.release('g'); await entered.done;
+  const claimed = f.registry.claim('g');
+  await new Promise<void>(resolve => setImmediate(resolve));
+  reply.resolve(); await released; await claimed;
+  assert.equal(f.redis.current(), 'local', 'a completed fresh claim must not be deleted by the preceding release');
+  assert.equal(f.registry.holdsValidLease('g'), true);
+});
+
+test('D3: release cancels an in-flight claim gesture without forwarding or restoring ownership', { timeout: 5000 }, async t => {
+  const f = await fixture(t), entered = barrier(), reply = barrier();
+  await f.registry.release('g');
+  f.redis.claimReply = async () => { entered.resolve(); await reply.done; };
+  const refused = assert.rejects(f.router.route('g', 'alice', { kind: 'move', uci: 'b1c3' }), /ownership.*changed/);
+  await entered.done;
+  const released = f.registry.release('g');
+  assert.equal(f.registry.captureTicket('g'), undefined);
+  reply.resolve(); await refused; await released;
+  assert.equal(f.registry.ownedCount, 0); assert.equal(f.redis.current(), null);
+  assert.deepEqual((await f.store.load('g')).map(e => e.seq), [0]); assert.equal(f.frames.length, 0);
+});
+
+test('D3: an expired-generation renewal reply cannot restart ownership after release', { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t), entered = barrier(), reply = barrier(), evalRedis = f.redis.eval.bind(f.redis);
+  f.redis.eval = async (...args) => {
+    const result = await evalRedis(...args);
+    if (!args[0].includes("'DEL'")) { entered.resolve(); await reply.done; }
+    return result;
+  };
+  f.redis.now = 22000; f.registry.startRenewal(); t.after(() => f.registry.stopRenewal());
+  t.mock.timers.tick(15000); await entered.done;
+  const released = f.registry.release('g');
+  await new Promise<void>(resolve => setImmediate(resolve));
+  reply.resolve(); await released;
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.redis.current(), null);
+  assert.equal(f.registry.ownedCount, 0, 'an absent ticket generation must not make a release invisible to renewal');
+  assert.equal(f.registry.captureTicket('g'), undefined);
+});
+
+test('D3: repeated renewal ticks share the one outstanding ownership write', { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t), entered = barrier(), reply = barrier(), evalRedis = f.redis.eval.bind(f.redis);
+  let writes = 0;
+  f.redis.eval = async (...args) => { writes++; const result = await evalRedis(...args); entered.resolve(); await reply.done; return result; };
+  f.registry.startRenewal(); t.after(() => f.registry.stopRenewal());
+  t.mock.timers.tick(45000); await entered.done;
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(writes, 1);
+  reply.resolve(); await new Promise<void>(resolve => setImmediate(resolve));
+  t.mock.timers.tick(15000); await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(writes, 2, 'a settled renewal permits the next scheduled write');
+});
+
+test('D3: a delayed claim cannot leave a newer renewal with an obsolete local expiry', { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t), entered = barrier(), reply = barrier();
+  f.redis.now = 31000;
+  f.redis.claimReply = async () => { entered.resolve(); await reply.done; };
+  const claimed = f.registry.claim('g'); await entered.done;
+  f.redis.now = 45000; f.registry.startRenewal(); t.after(() => f.registry.stopRenewal());
+  t.mock.timers.tick(15000); await new Promise<void>(resolve => setImmediate(resolve));
+  f.redis.now = 60000; reply.resolve(); await claimed;
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.registry.holdsValidLease('g'), true, 'an older dispatch must not overwrite a later successful renewal');
+});
+
+test('D3: concurrent same-node claims preserve a queued gesture during continuous validity', { timeout: 5000 }, async t => {
+  const entered = barrier(), release = barrier(); let paused = false;
+  const f = await fixture(t, { log: store => ({ exists: id => store.exists(id), load: id => store.load(id),
+    append: async (...args) => { if (paused) { paused = false; entered.resolve(); await release.done; } return store.append(...args); } }) });
+  await f.registry.release('g');
+  const setEntered = barrier(), setReply = barrier(), renewalEntered = barrier(), renewalReply = barrier();
+  f.redis.claimReply = async () => { setEntered.resolve(); await setReply.done; };
+  const firstClaim = f.registry.claim('g'); await setEntered.done;
+  f.redis.now = 15000;
+  const evalRedis = f.redis.eval.bind(f.redis);
+  f.redis.eval = async (...args) => { const result = await evalRedis(...args); renewalEntered.resolve(); await renewalReply.done; return result; };
+  const secondClaim = f.registry.claim('g');
+  setReply.resolve(); await firstClaim; await renewalEntered.done;
+  paused = true;
+  const first = f.router.route('g', 'alice', { kind: 'move', uci: 'b1c3' }); await entered.done;
+  const queued = observeQueue(f.authority);
+  const second = f.router.route('g', 'bob', { kind: 'move', uci: 'e7e5' }).catch(error => error);
+  await queued.done; renewalReply.resolve(); await secondClaim; release.resolve(); await first;
+  const result: unknown = await second;
+  assert.ok(!(result instanceof Error), 'a continuously valid generation must not be replaced by another concurrent claim');
+  assert.deepEqual((await f.store.load('g')).map(e => e.seq), [0, 1, 2]);
 });
 
 for (const failure of ['expiry', 'generation', 'lifecycle', 'reload'] as const) {

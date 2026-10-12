@@ -43,7 +43,7 @@ import {
   parseTraceparent,
   isSampled,
 } from '@chess-platform/api';
-import { OwnershipRegistry, type OwnershipTicket } from './ownership.js';
+import { OwnershipRegistry, OwnershipAttemptExpiredError, type OwnershipTicket } from './ownership.js';
 import {
   ENQUEUE_REQUEST, START_REQUEST, FINISH_REQUEST, SETTLE_REQUEST,
   REQUEST_RETENTION_MS, requestKey, respond,
@@ -333,7 +333,7 @@ export class RedisCommandRouter implements CommandRouter {
    * BEFORE they compute. A non-owner's cached copy never sees the owner's moves.
    */
   async prepareOwnership(gameId: string): Promise<boolean> {
-    if (!this.registry.holdsValidLease(gameId) && !(await this.registry.claim(gameId)).owned) {
+    if (!this.registry.holdsValidLease(gameId) && !(await this.claimOwnership(gameId)).owned) {
       return false;
     }
     await this.rehydrateIfStale(gameId);
@@ -360,7 +360,7 @@ export class RedisCommandRouter implements CommandRouter {
     }
 
     // Fallback path: claim/renew lease via Redis, then apply locally or forward.
-    const claim = await this.registry.claim(gameId);
+    const claim = await this.claimOwnership(gameId);
 
     if (claim.owned) {
       // Consumer was started by the onClaimed hook (or already running).
@@ -374,6 +374,17 @@ export class RedisCommandRouter implements CommandRouter {
     return withCommandSpan(this.tracer, cmd.kind, { traceId: commandTraceId }, (commandSpan) =>
       this.forward(gameId, userId, cmd, commandTraceId, commandSpan.spanId, commandSpan.sampled),
     );
+  }
+
+  private async claimOwnership(gameId: string) {
+    try {
+      return await this.registry.claim(gameId);
+    } catch (err) {
+      if (err instanceof OwnershipAttemptExpiredError) {
+        throw new AuthorityError('command_expired', 'Command ownership changed before execution.');
+      }
+      throw err;
+    }
   }
 
   private async applyLocal(gameId: string, userId: string, cmd: Command): Promise<ApplyResult> {
