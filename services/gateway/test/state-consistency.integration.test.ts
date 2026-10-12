@@ -25,12 +25,13 @@ async function until(fn: () => boolean) {
     await new Promise(r => setTimeout(r, 5));
   }
 }
-function node(store: EventLog, leaseTtlSec = 30, ownershipCheckTimeoutMs = 1000) {
+function node(store: EventLog, leaseTtlSec = 30, ownershipCheckTimeoutMs = 1000, monotonicNow?: () => number) {
   const nodeId = `d4-${randomUUID()}`;
   const redis = new Redis(REDIS_URL!);
   const fan = createRedisPubSub({ url: REDIS_URL!, nodeId });
   const authority = new GameAuthority(fan.pubsub, () => 1000, store);
-  const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec, renewalIntervalSec: leaseTtlSec === 30 ? 15 : 1 });
+  const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec, renewalIntervalSec: leaseTtlSec === 30 ? 15 : 1,
+    ...(monotonicNow ? { monotonicNow } : {}) });
   const consumer = new OwnerCommandConsumer(authority, redis);
   const router = new RedisCommandRouter({ authority, registry, redis, nodeId, consumer, ownershipCheckTimeoutMs });
   const gateway = new RealtimeGateway(authority, fan.pubsub, { verify: token => ({ userId: token }) }, () => 1000, router);
@@ -241,6 +242,37 @@ stackTest('D3 real stack: first forwarded intent settles takeover debt before ST
       await until(() => frames.some(m => m.t === 'commandConfirmed'));
       assert.equal(frames.filter(m => m.t === 'commandConfirmed').length, 1);
     } finally { unsubscribe(); await a.close(); await b.close(); await store.closePlayerLocks(); }
+  });
+});
+
+stackTest('D3 real stack: expired local ticket retains consumer; fresh renewal generation hydrates forwarded work', { timeout: 90000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    let localNow = 0;
+    const store = new PostgresEventStore(pool), gameId = randomUUID(), a = node(store, 30, 1000, () => localNow), b = node(store);
+    const entered = barrier(), reply = barrier();
+    try {
+      await create(a.authority, gameId); assert.equal(await a.router.prepareOwnership(gameId), true);
+      const ticket = a.registry.captureTicket(gameId); assert.ok(ticket);
+      const evalRedis = a.redis.eval.bind(a.redis);
+      a.redis.eval = async (...args) => {
+        const result: unknown = await Reflect.apply(evalRedis, a.redis, args);
+        if (String(args[0]).includes("return redis.call('EXPIRE'")) { entered.resolve(); await reply.done; }
+        return result;
+      };
+      localNow = 22000; // Conservative local margin elapsed; real Redis lease remains owned.
+      a.registry.startRenewal(); t.mock.timers.tick(15000); await entered.done;
+      assert.equal(a.registry.captureTicket(gameId), undefined);
+      assert.equal(await b.redis.get(`game:owner:${gameId}`), ticket.nodeId);
+      await assert.rejects(b.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' }), /ownership.*changed/,
+        'the consumer replies with a definitive refusal instead of leaving the request unanswered');
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0]);
+      reply.resolve(); await until(() => a.registry.holdsValidLease(gameId));
+      assert.equal(a.registry.isTicketCurrent(ticket), false);
+      assert.equal((await b.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0, 1]);
+    } finally { reply.resolve(); await b.close(); await a.close(); await store.closePlayerLocks(); }
   });
 });
 

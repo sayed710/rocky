@@ -179,3 +179,41 @@ The serial full Chromium run completed 285/285 (9.1 minutes), zero skips and
 zero retries, using unchanged assertions and timeouts. This separate passing
 run does not erase the retained failed invocations or establish their root cause.
 Final publication, CI and external exact-head gates remain separate.
+
+## Published review corrections (8406722 superseded)
+
+The actual Qodo engine review at issuecomment-6132624361 reported three bugs:
+per-intent connection overhead, stopping consumers at conservative local expiry,
+and missing comparison diagnostics; rules zero. Two deterministic failures
+confirmed the consumer/late-renewal availability issue. Ticket invalidation now
+retains the consumer while Redis may still route to this node; a successful
+renewal after expiry establishes new identity and reload debt. A real Redis/PG
+held-renewal schedule proves a forwarded intent receives a definitive refusal
+during the gap, and a new forwarded intent succeeds after renewal. Its initial
+overloaded-eval wrapper failed TypeScript; after correction the compiled test
+passed. That compilation failure is not passing evidence.
+
+Bounded reason counters and comparison latency metrics now diagnose failure
+without unbounded labels or raw errors. Per-intent connection isolation remains
+a documented minimal-repair tradeoff; this is not public throughput certification
+or the excluded R-02 cache-capacity work. Fresh Qodo reassessment is required.
+
+Greptile at the same published SHA identified overlapping claim responses that
+could preserve a generation installed by another pending claim, plus missing
+barrier-test timeouts. The actual schedule admitted an obsolete queued move
+and failed its expected-refusal assertion. Claim renewal replies now retain
+identity only if the generation observed at dispatch is still the same and
+locally valid. The 13 deterministic admission tests pass, and all newly scheduled
+barrier tests have explicit bounded timeouts. Fresh full final-head gates remain
+required. The first exact-head Gemini review (project
+f1d51840-ea30-4147-83fe-8e26b834b39e, conversation
+3212e0ad-ac14-4006-add5-c8c15442bd2d) reported zero findings at 8406722;
+it is retained as historical evidence and is superseded by these corrections.
+
+Renewed corrected build/lint and all 19 hermetic workspaces completed with
+4,164 tests and zero skips. Service build/lint, 13 admission tests, and the clean
+Linux full real-service gateway suite completed 146/146 with zero skips. ADR,
+topology, CI-parity and observability guards passed. The new metrics use four
+bounded reasons; tests assert timeout/error/mismatch counts and one duration
+sample per attempted comparison. All external exact-head approval must be
+renewed after the normal follow-up push.

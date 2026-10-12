@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-01 PR2 D3: normal PR #106 integration and expiry-generation correction verified; full local gates complete, fresh published-head external gates pending; owner manual merge required._
+_Last updated: 2026-10-13 — R-01 PR2 D3: Qodo/Greptile renewal and overlapping-claim schedules reproduced and corrected; renewed local gates verified; fresh exact-head external gates pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: normal PR #106 integration and expiry-generation correction verified; full local gates complete, fresh published-head external gates pending; owner manual merge required._
 
 Prior: _Last updated: 2026-10-12 — R-01 PR2 D3: owner-merged PR #106 integrated normally after checkpoint; R-04 consumer cleanup preserved, no conflicts; integrated validation and fresh exact-head reviews pending; owner manual merge required._
 
@@ -5463,3 +5465,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 
 - Corrected full build/lint and all 19 hermetic workspaces passed (4,164 tests); clean Linux real Redis/PG gateway 143/143, persistence PostgreSQL 210/210, API PostgreSQL 109/109, scripts 333/333, backup/restore 2/2 and eight guards passed. Supporting integrated Nginx 20/20, load 86/86 and POSIX API/load 2/2 plus 1/1 passed. Serial Chromium completed 285/285 with unchanged assertions/timeouts and zero retries/skips; prior Windows preview crash and four-worker 283/285 failures are retained without passing credit.
 - Gemini 3.8 Flash High/high effort corrected post-fix review completed read-only with zero actionable findings (agy 1.3.3, project 73b4e941-2e21-4bb1-b185-a0f6419be3ad, conversation 73f721cd-5cc5-4b4e-a1df-7eb488e0d955). Final published-head CI, Qodo Bugs/Rules/Requirements zero, Greptile, resolved threads and independent exact-head review remain required. Main still verified at dd7fec5751f1501e10659a66ed940d5c5b2ceacb; owner merge only; later R-01 scope remains separate.
+
+### 2026-10-13 — R-01 PR2 published-review corrections
+
+- PR #109 opened normally at 8406722. Qodo's consumer availability issue reproduced; retained consumer routing with fresh generation/debt on late renewal, plus bounded comparison metrics. Greptile's overlapping-claim resurrection reproduced with an obsolete queued move; replies now preserve only the same still-valid dispatch generation. Scheduled tests have timeouts. Deterministic admission 13/13 and compiled real Redis/PG held-renewal forwarding case pass; prior exact-head reviews are superseded. Fresh full gates and normal follow-up push/exact-head review required; no scope expansion or owner merge.
+
+- Renewed build/lint and workspace 4,164/4,164, service build/lint, deterministic admission 13/13 and clean Linux real Redis/PG gateway 146/146 completed with zero skips. ADR/topology/CI-parity/observability guards passed. Comparison telemetry has bounded reasons and latency. Fresh external exact-head review/CI and resolved threads remain required after the normal follow-up push.

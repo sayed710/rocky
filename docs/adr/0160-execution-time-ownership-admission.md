@@ -13,6 +13,10 @@ reload debt. Continuous renewals keep identity; new claims, release and detected
 loss invalidate old tickets. Slot generations are never reused after recreation.
 Local expiry ends continuity: claim invalidates expired tracking before I/O,
 and renewal checks expiry before dispatch and after its acknowledgement.
+Ticket invalidation retains the consumer while Redis may still route to this
+node. A successful renewal after local expiry establishes a new generation and
+reload debt. Claim responses preserve continuity only for the same still-valid
+generation observed before claim I/O, including overlapping claims.
 
 After takeover reload, application enters PR1's stable slot. Admission requires
 current identity, settled reload debt, conservative local expiry and a matching
@@ -20,6 +24,12 @@ Redis owner. The comparison uses a dedicated connection with no offline queue,
 resend or reconnect, bounded by one total deadline (default 1000 ms). It neither
 renews nor acquires ownership. Lease expiry starts at Redis dispatch time,
 rather than acknowledgement time.
+The isolated per-intent connection is a deliberate minimal-repair tradeoff;
+shared connection pooling and public-scale throughput are not certified here.
+Operators can observe comparison duration via
+`gateway_ownership_check_duration_seconds` and refusals via
+`gateway_ownership_check_failures_total`, with only the bounded reasons
+timeout, error, mismatch and invalidated. No game IDs or raw errors are labels.
 
 After asynchronous validation, the slot synchronously rechecks identity,
 expiry, lifecycle and freshness immediately before domain execution. Reload

@@ -229,6 +229,13 @@ async function main(): Promise<void> {
   const claimsCounter = metrics.counter('gateway_ownership_claims_total');
   const releasesCounter = metrics.counter('gateway_ownership_releases_total');
   const renewalFailuresCounter = metrics.counter('gateway_ownership_renewal_failures_total');
+  const ownershipCheckFailuresCounters = {
+    timeout: metrics.counter('gateway_ownership_check_failures_total', { reason: 'timeout' }),
+    error: metrics.counter('gateway_ownership_check_failures_total', { reason: 'error' }),
+    mismatch: metrics.counter('gateway_ownership_check_failures_total', { reason: 'mismatch' }),
+    invalidated: metrics.counter('gateway_ownership_check_failures_total', { reason: 'invalidated' }),
+  };
+  const ownershipCheckLatencyHistogram = metrics.histogram('gateway_ownership_check_duration_seconds', [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5]);
   const fastPathCommandsCounter = metrics.counter('gateway_fast_path_commands_total');
   const forwardLatencyHistogram = metrics.histogram('gateway_forward_latency_seconds', [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5]);
   if (!secret || secret.length < 32) {
@@ -500,6 +507,8 @@ async function main(): Promise<void> {
       claimsCounter,
       releasesCounter,
       renewalFailuresCounter,
+      ownershipCheckFailuresCounters,
+      ownershipCheckLatencyHistogram,
       ownedGamesGauge,
     });
     // Consumer must exist before the router so ownership hooks can start it.
