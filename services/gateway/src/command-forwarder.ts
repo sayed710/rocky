@@ -43,7 +43,7 @@ import {
   parseTraceparent,
   isSampled,
 } from '@chess-platform/api';
-import { OwnershipRegistry } from './ownership.js';
+import { OwnershipRegistry, type OwnershipTicket } from './ownership.js';
 import {
   ENQUEUE_REQUEST, START_REQUEST, FINISH_REQUEST, SETTLE_REQUEST,
   REQUEST_RETENTION_MS, requestKey, respond,
@@ -60,6 +60,8 @@ export interface RedisCommandRouterOptions {
   nodeId: string;
   /** Timeout for forwarded command responses, in ms (default 5000). */
   forwardTimeoutMs?: number;
+  /** Total connect/owner-comparison budget for local execution admission. */
+  ownershipCheckTimeoutMs?: number;
   /**
    * Owner command consumer. When this node claims ownership, the router
    * starts the consumer for that game so forwarded commands are processed.
@@ -84,6 +86,12 @@ const RESP_PREFIX = 'game:resp';
 /** Another delivery already admitted this identity; it owns the response. */
 class DuplicateForwardedRequest extends Error {}
 class UnownedForwardedRequest extends Error {}
+
+interface OwnershipAdmission {
+  readonly lifecycleGeneration: number;
+  readonly ownership: OwnershipTicket | undefined;
+  readonly check: (requireFresh?: boolean) => void;
+}
 
 /** Wire format for a forwarded command. */
 export interface ForwardedCommand {
@@ -202,6 +210,7 @@ export class RedisCommandRouter implements CommandRouter {
   private readonly redis: Redis;
   private readonly nodeId: string;
   private readonly forwardTimeoutMs: number;
+  private readonly ownershipCheckTimeoutMs: number;
   private readonly consumer: OwnerCommandConsumer;
   private readonly tracer: Tracer;
   /** Games newly claimed by this node whose cached aggregate has not been rehydrated yet. */
@@ -228,6 +237,10 @@ export class RedisCommandRouter implements CommandRouter {
     this.redis = opts.redis;
     this.nodeId = opts.nodeId;
     this.forwardTimeoutMs = opts.forwardTimeoutMs ?? DEFAULT_FORWARD_TIMEOUT_MS;
+    this.ownershipCheckTimeoutMs = opts.ownershipCheckTimeoutMs ?? 1000;
+    if (!Number.isFinite(this.ownershipCheckTimeoutMs) || this.ownershipCheckTimeoutMs <= 0) {
+      throw new Error('ownershipCheckTimeoutMs must be finite and positive');
+    }
     this.consumer = opts.consumer;
     this.consumer.bindOwner(opts.nodeId);
     this.tracer = opts.tracer ?? new NullTracer();
@@ -236,6 +249,13 @@ export class RedisCommandRouter implements CommandRouter {
     this.fastPathCommandsCounter = opts.fastPathCommandsCounter;
     this.forwardLatencyHistogram = opts.forwardLatencyHistogram;
     this.installHooks();
+    this.consumer.setOwnershipAdmission(async gameId => {
+      const admission = this.captureAdmission(gameId);
+      // This is outside apply's slot. START_REQUEST remains the atomic forwarded
+      // admission; the original ticket is checked after it and before mutation.
+      await this.rehydrateIfStale(gameId);
+      return admission;
+    });
   }
 
   /**
@@ -330,14 +350,12 @@ export class RedisCommandRouter implements CommandRouter {
   }
 
   async route(gameId: string, userId: string, cmd: Command): Promise<ApplyResult> {
-    // Fast path: if this node holds a valid, non-expired local lease for gameId outside
-    // the safety margin, apply locally immediately without touching Redis.
-    // Preserves takeover rehydration (rehydrateIfStale) if the game was newly claimed.
+    // A valid local lease avoids reacquiring ownership. Execution still compares
+    // Redis ownership under the slot after all hydration/command waits.
     if (this.registry.holdsValidLease(gameId)) {
       this.fastPathCommandsCounter?.inc();
-      await this.rehydrateIfStale(gameId);
       return withCommandSpan(this.tracer, cmd.kind, { traceId: generateTraceId() }, () =>
-        this.authority.apply(gameId, userId, cmd),
+        this.applyLocal(gameId, userId, cmd),
       );
     }
 
@@ -345,10 +363,9 @@ export class RedisCommandRouter implements CommandRouter {
     const claim = await this.registry.claim(gameId);
 
     if (claim.owned) {
-      await this.rehydrateIfStale(gameId);
       // Consumer was started by the onClaimed hook (or already running).
       return withCommandSpan(this.tracer, cmd.kind, { traceId: generateTraceId() }, () =>
-        this.authority.apply(gameId, userId, cmd),
+        this.applyLocal(gameId, userId, cmd),
       );
     }
 
@@ -357,6 +374,40 @@ export class RedisCommandRouter implements CommandRouter {
     return withCommandSpan(this.tracer, cmd.kind, { traceId: commandTraceId }, (commandSpan) =>
       this.forward(gameId, userId, cmd, commandTraceId, commandSpan.spanId, commandSpan.sampled),
     );
+  }
+
+  private async applyLocal(gameId: string, userId: string, cmd: Command): Promise<ApplyResult> {
+    const admission = this.captureAdmission(gameId);
+    admission.check(false);
+    const ownership = admission.ownership;
+    if (!ownership) throw new AuthorityError('command_expired', 'Command ownership changed before execution.');
+    await this.rehydrateIfStale(gameId);
+    admission.check();
+    return this.authority.apply(gameId, userId, cmd, {
+      lifecycleGeneration: admission.lifecycleGeneration,
+      recheckAdmission: admission.check,
+      beforeExecute: async () => {
+        admission.check();
+        if (!(await this.registry.validateTicket(ownership, this.ownershipCheckTimeoutMs))) {
+          throw new AuthorityError('command_expired', 'Command ownership could not be verified before execution.');
+        }
+        admission.check();
+      },
+    });
+  }
+
+  private captureAdmission(gameId: string): OwnershipAdmission {
+    const ticket = Object.freeze({ ownership: this.registry.captureTicket(gameId),
+      lifecycleGeneration: this.authority.captureLifecycle(gameId) });
+    return Object.freeze({ ownership: ticket.ownership, lifecycleGeneration: ticket.lifecycleGeneration, check: (requireFresh = true) => {
+      if (!ticket.ownership || !this.registry.isTicketCurrent(ticket.ownership) ||
+        !this.authority.isLifecycleCurrent(gameId, ticket.lifecycleGeneration)) {
+        throw new AuthorityError('command_expired', 'Command ownership changed before execution.');
+      }
+      if (requireFresh && this.staleAfterClaim.has(gameId)) {
+        throw new AuthorityError('command_expired', 'Command ownership requires a new attempt after reload.');
+      }
+    } });
   }
 
   /**
@@ -538,6 +589,12 @@ export class RedisCommandRouter implements CommandRouter {
  */
 export class OwnerCommandConsumer {
   private nodeId = '';
+  private ownershipAdmission: ((gameId: string) => Promise<OwnershipAdmission>) | undefined;
+
+  /** Router-owned reload debt is prepared outside the slot, never reentrantly. */
+  setOwnershipAdmission(prepare: (gameId: string) => Promise<OwnershipAdmission>): void {
+    this.ownershipAdmission = prepare;
+  }
 
   /** Installed by the router, before its claim hook can launch a consumer. */
   bindOwner(nodeId: string): void { this.nodeId = nodeId; }
@@ -662,6 +719,7 @@ export class OwnerCommandConsumer {
       }
     };
     let admitted = false;
+    let expiredAtStart = false;
     const executor = randomUUID();
     const stateKey = requestKey(envelope.requestId);
     let response: ForwardedResult;
@@ -669,6 +727,7 @@ export class OwnerCommandConsumer {
       if (envelope.version !== 2) {
         throw new AuthorityError('command_expired', 'Legacy forwarded command has no safe execution lifetime.');
       }
+      const ownershipAdmission = await this.ownershipAdmission?.(envelope.gameId);
       await this.authority.ensureLoaded(envelope.gameId);
       const result = await this.authority.apply(
         envelope.gameId,
@@ -680,11 +739,17 @@ export class OwnerCommandConsumer {
               `game:owner:${envelope.gameId}`, `${CMD_PREFIX}:${envelope.gameId}`, raw, this.nodeId, executor, REQUEST_RETENTION_MS));
             if (status === 'not_owner') throw new UnownedForwardedRequest();
             if (status === 'started' || status === 'done') throw new DuplicateForwardedRequest();
-            if (status === 'expired') throw new AuthorityError('command_expired', 'Forwarded command expired before execution.');
+            if (status === 'expired') {
+              expiredAtStart = true;
+              throw new AuthorityError('command_expired', 'Forwarded command expired before execution.');
+            }
             if (status !== 'admitted') throw new CommandOutcomeUnknownError(envelope.requestId);
             admitted = true;
+            ownershipAdmission?.check();
           },
           requestId: envelope.requestId,
+          ...(ownershipAdmission ? { lifecycleGeneration: ownershipAdmission.lifecycleGeneration,
+            recheckAdmission: ownershipAdmission.check } : {}),
         },
       );
 
@@ -723,7 +788,7 @@ export class OwnerCommandConsumer {
             : err instanceof Error ? err.message : String(err),
         },
       };
-      if (!admitted && envelope.version === 2 && errorCode !== 'command_expired') {
+      if (!admitted && envelope.version === 2 && !expiredAtStart) {
         // Loading can fail before the lock/admission hook. Revoke that queued
         // identity before reporting a definitive failure; a competing executor
         // may have admitted it while we were awaiting the load.

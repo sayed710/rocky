@@ -10,6 +10,7 @@ import {
 } from '@chess-platform/realtime-gateway';
 import { OwnerCommandConsumer, RedisCommandRouter } from '../src/command-forwarder.js';
 import type { OwnershipRegistry } from '../src/ownership.js';
+import { requestKey } from '../src/forwarded-request.js';
 import { ForwardRedis } from './support/forward-redis.js';
 
 // Only transport and lease discovery are simulated. Both replicas use the production
@@ -41,7 +42,7 @@ function fixture(gameId: string) {
     await consumer.processCommand(payload);
   };
   return {
-    store, owner, ownerPubSub, router, transport, consume, claims: () => claims,
+    store, owner, ownerPubSub, router, transport, consumer, consume, claims: () => claims,
     onTimeout: (work: () => Promise<void>) => { transport.onWait = work; },
     create: () => owner.createGame({
       gameId, players: { white: 'alice', black: 'bob' }, rated: false,
@@ -260,6 +261,29 @@ test('R-03: failure before admission revokes the queued identity before reportin
   await assert.rejects(f.router.route(id, 'alice', { kind: 'resign' }), /expired before execution/);
   f.store.load = load; await f.consume(copy);
   assert.equal((await f.store.load(id)).filter(({ event }) => event.type === 'GameEnded').length, 0);
+});
+
+test('D3/R-03: lifecycle refusal before START_REQUEST tombstones the exact identity before replying', async () => {
+  const id = 'forward-lifecycle-refusal', f = fixture(id); await f.create(); let copy = '';
+  let entered!: () => void, release!: () => void;
+  const captured = new Promise<void>(r => { entered = r; });
+  const resume = new Promise<void>(r => { release = r; });
+  f.consumer.setOwnershipAdmission(async gameId => {
+    const lifecycleGeneration = f.owner.captureLifecycle(gameId);
+    entered(); await resume;
+    return { lifecycleGeneration, ownership: undefined, check: () => undefined };
+  });
+  f.transport.loseResponses = false;
+  f.onTimeout(async () => {
+    copy = f.transport.lists.get(`game:cmd:v2:${id}`)![0]!;
+    const delivery = f.consume(); await captured;
+    f.owner.evict(id); release(); await delivery;
+  });
+  await assert.rejects(f.router.route(id, 'alice', { kind: 'resign' }), /expired before execution/);
+  assert.equal(f.transport.records.get(requestKey(JSON.parse(copy).requestId))?.status, 'expired');
+  await f.consume(copy);
+  assert.equal(f.owner.getState(id).status.over, false);
+  assert.equal((await f.store.load(id)).filter(e => e.event.type === 'GameEnded').length, 0);
 });
 
 test('R-03: stale consumer hands unstarted work to new owner with the same identity', async () => {

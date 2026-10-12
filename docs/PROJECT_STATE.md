@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-12 — R-01 PR1 D4: Qodo/Greptile lifecycle findings reproduced and corrected; authority 110/110; corrected-head full validation and renewed external gates pending; manual merge and later PRs remain owner decisions._
+_Last updated: 2026-10-12 — R-01 PR2 D3: merged PR1 verified; real Redis/PG RED reproduced and admission repair focused GREEN; full validation and exact-head gates pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-12 — R-01 PR1 D4: Qodo/Greptile lifecycle findings reproduced and corrected; authority 110/110; corrected-head full validation and renewed external gates pending; manual merge and later PRs remain owner decisions._
 
 Prior: _Last updated: 2026-10-12 — R-01 PR1 D4: stable game-slot implementation and baseline RED/focused GREEN verified; final-head validation, external review gates and owner manual merge pending; later R-01 work remains separate._
 
@@ -5440,3 +5442,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Forced reload errors now propagate through a separate result promise; ordinary invalidated callers retry the current lifecycle; successful durable creation restores residency. Added a cold-then-forced-failure regression. Authority suite 110/110 passes.
 - Greptile's additional valid real-service scheduling gap corrected: takeover/reclaim tests now wait for the actual forced reload request before releasing the older read. No D3 or later scope added.
 - Published-head CI/reviews from a70043c are superseded by these corrections. Renewed full gates and exact-head external reviews remain required before owner readiness; no merge or deployment.
+
+### 2026-10-12 — R-01 PR2: execution-time ownership admission
+
+- PR #108 owner-merged at `202eee3f833e479e43fcafb07f80e539b3361809`; supplied clean D3 worktree, origin/main and GitHub main matched that prerequisite after fresh fetch.
+- Disposable Redis/PG RED on merged PR1: first admitted append held, second legal local move queued, real three-second lease expired and successor loaded ply 0; releasing the append let the obsolete move commit durable seq 2. Desired refusal assertion failed.
+- Immutable claim/lifecycle tickets, bounded isolated Redis comparison and synchronous final admission check refuse obsolete waiting intents before mutation/persistence. Reclaim, hydration changes, expiry/timeout, lifecycle/reload races and exact early-refusal tombstones are covered; admitted first work may finish.
+- [Verification](audits/R01_D3_OWNERSHIP_ADMISSION_2026-10-12.md) and [ADR-0160](adr/0160-execution-time-ownership-admission.md): authority 113/113; focused real-service/ownership/R-03 47/47 before the last test; final focused R-03/admission 30/30, all zero skips. A new-test missing-import failure was fixed and receives no passing credit. Full clean-install and independent/external gates remain pending here.
+- PR #106/#107 inspected read-only and remain separate. No revision contract, recovery, draw propagation, grants/fencing, capacity policy, production migration, deployment or merge. Minimal D3 is not PostgreSQL fencing; public multi-gateway production still requires the separately staged strong fence.

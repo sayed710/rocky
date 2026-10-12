@@ -22,6 +22,13 @@ export type ClaimResult =
   | { readonly owned: true; readonly nodeId: string }
   | { readonly owned: false; readonly ownerNodeId: string };
 
+/** Process-local admission identity, not a durable PostgreSQL fencing token. */
+export interface OwnershipTicket {
+  readonly gameId: string;
+  readonly nodeId: string;
+  readonly claimGeneration: number;
+}
+
 export interface OwnershipRegistryOptions {
   /** Redis client (the same connection used for pub/sub publish is fine). */
   redis: Redis;
@@ -31,6 +38,8 @@ export interface OwnershipRegistryOptions {
   leaseTtlSec?: number;
   /** Renewal interval in seconds (default 15). */
   renewalIntervalSec?: number;
+  /** Monotonic milliseconds; injectable for deterministic lease schedules. */
+  monotonicNow?: () => number;
   /** Optional metric counter for successful ownership claims. */
   claimsCounter?: Counter;
   /** Optional metric counter for ownership releases. */
@@ -74,6 +83,7 @@ export class OwnershipRegistry {
   private readonly nodeId: string;
   private readonly leaseTtlSec: number;
   private readonly renewalIntervalSec: number;
+  private readonly monotonicNow: () => number;
   private readonly claimsCounter: Counter | undefined;
   private readonly releasesCounter: Counter | undefined;
   private readonly renewalFailuresCounter: Counter | undefined;
@@ -81,6 +91,8 @@ export class OwnershipRegistry {
   private readonly ownedGames = new Set<string>();
   /** Per-game monotonic expiration instant (`performance.now() + leaseTtlSec * 1000`). */
   private readonly leaseExpiryMs = new Map<string, number>();
+  private readonly claimGeneration = new Map<string, number>();
+  private claimSequence = 0;
   private renewalTimer: ReturnType<typeof setInterval> | undefined;
   private onClaimed: ((gameId: string) => void) | undefined;
   private onReleased: ((gameId: string) => void) | undefined;
@@ -90,6 +102,7 @@ export class OwnershipRegistry {
     this.nodeId = opts.nodeId;
     this.leaseTtlSec = opts.leaseTtlSec ?? DEFAULT_LEASE_TTL_SEC;
     this.renewalIntervalSec = opts.renewalIntervalSec ?? DEFAULT_RENEWAL_INTERVAL_SEC;
+    this.monotonicNow = opts.monotonicNow ?? (() => performance.now());
 
     // Both values come from operator-set env vars, and renewing no more often than the lease
     // lasts is not a tuning choice — it is a broken lease. Every renewal would race the key's
@@ -179,11 +192,12 @@ export class OwnershipRegistry {
    * returns the owner's node ID.
    */
   async claim(gameId: string): Promise<ClaimResult> {
+    const startedAt = this.monotonicNow();
     const key = ownerKey(gameId);
     // SET NX EX — atomic claim with a real key-level TTL.
     const set = await this.redis.set(key, this.nodeId, 'EX', this.leaseTtlSec, 'NX');
     if (set === 'OK') {
-      this.markClaimed(gameId, { keyWasFree: true });
+      this.markClaimed(gameId, { keyWasFree: true, startedAt });
       return { owned: true, nodeId: this.nodeId };
     }
 
@@ -197,7 +211,7 @@ export class OwnershipRegistry {
       // after another node has taken the game: split-brain. Extend the key first, and only
       // treat ourselves as the owner if that succeeded.
       if (await this.renewLease(gameId)) {
-        this.markClaimed(gameId);
+        this.markClaimed(gameId, { startedAt });
         return { owned: true, nodeId: this.nodeId };
       }
       return { owned: false, ownerNodeId: (await this.redis.get(key)) ?? 'unknown' };
@@ -206,7 +220,7 @@ export class OwnershipRegistry {
       // Race: key expired between SET NX and GET. Retry once.
       const retry = await this.redis.set(key, this.nodeId, 'EX', this.leaseTtlSec, 'NX');
       if (retry === 'OK') {
-        this.markClaimed(gameId, { keyWasFree: true });
+        this.markClaimed(gameId, { keyWasFree: true, startedAt });
         return { owned: true, nodeId: this.nodeId };
       }
       const retryOwner = await this.redis.get(key);
@@ -214,7 +228,7 @@ export class OwnershipRegistry {
         // Same reasoning as the branch above: the key exists and is ours, but its TTL was not
         // refreshed by the failed SET NX.
         if (await this.renewLease(gameId)) {
-          this.markClaimed(gameId);
+          this.markClaimed(gameId, { startedAt });
           return { owned: true, nodeId: this.nodeId };
         }
         return { owned: false, ownerNodeId: (await this.redis.get(key)) ?? 'unknown' };
@@ -231,13 +245,15 @@ export class OwnershipRegistry {
    * threw keeps it there on purpose (see `renewAll`) — so `onClaimed` must fire and the router must
    * reload. Renewing a key this node still holds is continuous ownership and is not new.
    */
-  private markClaimed(gameId: string, { keyWasFree = false }: { keyWasFree?: boolean } = {}): void {
+  private markClaimed(gameId: string, { keyWasFree = false, startedAt }: { keyWasFree?: boolean; startedAt: number }): void {
     const wasNew = keyWasFree || !this.ownedGames.has(gameId);
     this.ownedGames.add(gameId);
     // Record monotonic instant (performance.now()) when the lease expires in Redis.
     // performance.now() is monotonic and immune to NTP system clock adjustments.
-    this.leaseExpiryMs.set(gameId, performance.now() + this.leaseTtlSec * 1000);
+    // Start at dispatch, not reply: delayed Redis acknowledgements cannot extend local expiry.
+    this.leaseExpiryMs.set(gameId, startedAt + this.leaseTtlSec * 1000);
     if (wasNew) {
+      this.claimGeneration.set(gameId, ++this.claimSequence);
       this.claimsCounter?.inc();
       this.ownedGamesGauge?.set(this.ownedGames.size);
       this.onClaimed?.(gameId);
@@ -259,7 +275,45 @@ export class OwnershipRegistry {
     if (!this.ownedGames.has(gameId)) return false;
     const expiresAt = this.leaseExpiryMs.get(gameId);
     if (expiresAt === undefined) return false;
-    return performance.now() < expiresAt - this.safetyMarginMs;
+    return this.monotonicNow() < expiresAt - this.safetyMarginMs;
+  }
+
+  captureTicket(gameId: string): OwnershipTicket | undefined {
+    const generation = this.claimGeneration.get(gameId);
+    if (generation === undefined || !this.holdsValidLease(gameId)) return undefined;
+    return Object.freeze({ gameId, nodeId: this.nodeId, claimGeneration: generation });
+  }
+
+  isTicketCurrent(ticket: OwnershipTicket): boolean {
+    return ticket.nodeId === this.nodeId &&
+      this.claimGeneration.get(ticket.gameId) === ticket.claimGeneration &&
+      this.holdsValidLease(ticket.gameId);
+  }
+
+  /** Bounded, isolated, non-renewing validation. Late replies never revive an attempt. */
+  async validateTicket(ticket: OwnershipTicket, timeoutMs = 1000): Promise<boolean> {
+    if (!this.isTicketCurrent(ticket)) return false;
+    let conn: Redis | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const comparisonConn = this.redis.duplicate({ lazyConnect: true, enableOfflineQueue: false,
+        autoResendUnfulfilledCommands: false, maxRetriesPerRequest: 0,
+        retryStrategy: () => null, connectTimeout: timeoutMs, commandTimeout: timeoutMs });
+      conn = comparisonConn;
+      comparisonConn.on('error', () => undefined);
+      const compare = (async () => {
+        await comparisonConn.connect();
+        return await comparisonConn.get(ownerKey(ticket.gameId)) === ticket.nodeId;
+      })();
+      const deadline = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+      const matches = await Promise.race([compare, deadline]);
+      return matches && this.isTicketCurrent(ticket);
+    } catch {
+      return false;
+    } finally {
+      if (timer) clearTimeout(timer);
+      conn?.disconnect();
+    }
   }
 
   /**
@@ -282,13 +336,15 @@ export class OwnershipRegistry {
    */
   async release(gameId: string): Promise<void> {
     const key = ownerKey(gameId);
-    await this.redis.eval(RELEASE_LUA, 1, key, this.nodeId);
+    // Invalidate before I/O so a queued command cannot be admitted during release.
+    this.claimGeneration.delete(gameId);
     this.leaseExpiryMs.delete(gameId);
     if (this.ownedGames.delete(gameId)) {
       this.releasesCounter?.inc();
       this.ownedGamesGauge?.set(this.ownedGames.size);
       this.onReleased?.(gameId);
     }
+    await this.redis.eval(RELEASE_LUA, 1, key, this.nodeId);
   }
 
   /** Release all owned games. Called during graceful shutdown. */
@@ -336,18 +392,23 @@ export class OwnershipRegistry {
    */
   private async renewAll(): Promise<void> {
     for (const gameId of [...this.ownedGames]) {
+      const generation = this.claimGeneration.get(gameId);
+      const startedAt = this.monotonicNow();
       try {
         const stillOurs = await this.renewLease(gameId);
+        // A renewal begun before release/reclaim must never resurrect the old lease.
+        if (this.claimGeneration.get(gameId) !== generation) continue;
         if (!stillOurs) {
           // Lost ownership — another node claimed after our key expired.
           this.leaseExpiryMs.delete(gameId);
+          this.claimGeneration.delete(gameId);
           if (this.ownedGames.delete(gameId)) {
             this.ownedGamesGauge?.set(this.ownedGames.size);
             this.onReleased?.(gameId);
           }
         } else {
           // SUCCESSFUL renewal: refresh the recorded monotonic lease expiration timestamp.
-          this.markClaimed(gameId);
+          this.markClaimed(gameId, { startedAt });
         }
       } catch (err) {
         // Renewal error (e.g., Redis is down or unreachable).
