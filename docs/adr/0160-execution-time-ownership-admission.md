@@ -24,6 +24,9 @@ restore released ownership. A cancelled claim gesture becomes command_expired
 without forwarding. Continuous valid claims preserve identity; queued lease I/O
 starts its expiry clock only when dispatched. Idle lanes are removed and repeated
 renewal ticks share the outstanding write. Hooks never await slot hydration.
+Renewals start independently across games: one game's pending lease operation
+must not delay another game's renewal. Each game's own lane still orders and
+coalesces its operations.
 
 After takeover reload, application enters PR1's stable slot. Admission requires
 current identity, settled reload debt, conservative local expiry and a matching

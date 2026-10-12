@@ -249,6 +249,39 @@ test('D3: repeated renewal ticks share the one outstanding ownership write', { t
   assert.equal(writes, 2, 'a settled renewal permits the next scheduled write');
 });
 
+test('D3: a blocked claim for one game cannot starve another game of renewal', { timeout: 5000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let now = 0, holdFirst = false;
+  const entered = barrier(), reply = barrier();
+  const keys = new Map<string, { node: string; expires: number }>();
+  const current = (key: string) => { const value = keys.get(key); return value && now < value.expires ? value.node : null; };
+  const boundary = {
+    async set(key: string, node: string, _ex: string, seconds: number) {
+      if (current(key)) return null; keys.set(key, { node, expires: now + seconds * 1000 }); return 'OK';
+    },
+    async get(key: string) { return current(key); },
+    async eval(script: string, _n: number, key: string, node: string, seconds?: string) {
+      if (current(key) !== node) return 0;
+      if (script.includes("'DEL'")) { keys.delete(key); return 1; }
+      keys.set(key, { node, expires: now + Number(seconds) * 1000 });
+      if (key.endsWith(':first') && holdFirst) { entered.resolve(); await reply.done; }
+      return 1;
+    },
+  };
+  const registry = new OwnershipRegistry({ redis: boundary as unknown as Redis, nodeId: 'local',
+    leaseTtlSec: 30, renewalIntervalSec: 15, monotonicNow: () => now });
+  t.after(() => registry.stopRenewal());
+  await registry.claim('first'); await registry.claim('second');
+  now = 15000; holdFirst = true;
+  const claim = registry.claim('first'); await entered.done;
+  registry.startRenewal(); t.mock.timers.tick(15000);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  now = 22000;
+  const otherLeaseRemainedValid = registry.holdsValidLease('second');
+  reply.resolve(); await claim; await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(otherLeaseRemainedValid, true, 'healthy game renewal must not wait behind another game ownership lane');
+});
+
 test('D3: a delayed claim cannot leave a newer renewal with an obsolete local expiry', { timeout: 5000 }, async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const f = await fixture(t), entered = barrier(), reply = barrier();

@@ -482,9 +482,7 @@ export class OwnershipRegistry {
    * longer own a key (lost the race / lease stolen), drop it from the local set.
    */
   private async renewAll(): Promise<void> {
-    for (const gameId of [...this.ownedGames]) {
-      await this.renewGame(gameId);
-    }
+    await Promise.all([...this.ownedGames].map(gameId => this.renewGame(gameId)));
   }
 
   private renewGame(gameId: string): Promise<void> {

@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-01 PR2 D3: release/claim/renewal operations ordered with cancellation epochs; reproduced Qodo races corrected, gateway 153/153 and full local gates verified; fresh exact-head external gates pending; owner manual merge required._
+_Last updated: 2026-10-13 — R-01 PR2 D3: cross-game renewal starvation reproduced and corrected; gateway 154/154 and admission 20/20 verified; renewed full local and exact-head external gates required; owner manual merge required._
+
+Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: release/claim/renewal operations ordered with cancellation epochs; reproduced Qodo races corrected, gateway 153/153 and full local gates verified; fresh exact-head external gates pending; owner manual merge required._
 
 Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: Qodo/Greptile renewal and overlapping-claim schedules reproduced and corrected; renewed local gates verified; fresh exact-head external gates pending; owner manual merge required._
 
@@ -5479,3 +5481,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Fresh Qodo found four additional release/renewal/claim interleavings at 876a2b0. All four deterministic schedules failed before correction; an actual Redis/PG held-renewal reply also restarted ownership after Redis deletion in the preserved old image. Separate per-game lease I/O lanes and synchronous release epochs now order operations, cancel stale claim gestures without forwarding, preserve continuous valid identity and coalesce outstanding renewal writes. Idle lanes are removed; no slot-lock reentrancy or later R-01 scope. Deterministic admission 19/19 passes; renewed full gates and fresh exact-head reviews remain required.
 
 - Corrected clean Linux gateway 153/153 and deterministic admission 19/19 pass, zero skips. Renewed full build/lint and 19 hermetic workspaces (4,164 tests), standalone service build/lint and affected guards pass. Main still dd7fec5; fresh published-head CI/Qodo/Greptile/independent review and resolved threads are required after normal push. Minimal D3 is not PostgreSQL fencing; owner manual merge only.
+
+### 2026-10-13 — R-01 PR2 independent game renewals
+
+- Fresh Greptile review of 8b8691d found a blocked claim for one game delaying every later game's renewal. The controlled two-game regression failed before correction. renewAll now starts renewals independently across games, retaining per-game ordering, synchronous release epochs and shared outstanding writes. Admission 20/20 and clean Linux real Redis/PostgreSQL gateway 154/154 pass, zero skips; full build/lint, service lint and eight guards pass. Renewed root tests and fresh published-head gates are required before final delivery. Previous reviews are superseded, including the interrupted third exact-head Gemini run. Main remains verified dd7fec5 with no web delta; D3 only and owner manual merge required.
+
+- Renewed root tests completed: all 19 hermetic workspaces and 4,164 tests pass, zero skips. Full build/lint, service build/lint, clean Linux gateway 154/154, admission 20/20 and all eight guards are verified before the normal follow-up push. Fresh CI/Qodo/Greptile/independent exact-head review and resolved threads remain required; no old approval is reused.

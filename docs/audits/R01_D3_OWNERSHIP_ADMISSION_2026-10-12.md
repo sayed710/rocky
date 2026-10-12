@@ -254,3 +254,22 @@ complete with 4,164 tests and zero skips; standalone service build/lint, ADR,
 topology and observability checks pass. The combined diff remains 11 D3-focused
 files with no web-source delta against merged main. Fresh published-head CI and
 external reviews are required after the next normal push.
+
+## Cross-game renewal correction
+
+Fresh Greptile review of published 8b8691d found that sequential renewAll
+awaited the first game's pending claim lane before starting another game's
+renewal. A controlled two-game test genuinely failed: the healthy second game
+lost local lease validity while the first claim acknowledgement was held.
+The failure is retained in greptile-cross-game-red.txt outside the repository.
+Renewals now start independently across games through Promise.all; per-game
+ordering, release epochs and outstanding-write coalescing remain intact.
+All 20 deterministic admission tests and clean Linux real Redis/PostgreSQL
+gateway 154/154 pass, zero skips. Renewed full root validation and fresh
+published-head reviews are required. The third exact-head Gemini run was
+interrupted after this finding and is not approval; 8b8691d reviews are
+superseded by this correction. This remains D3 ownership admission scope.
+
+Renewed root build/lint and all 19 hermetic workspaces completed with 4,164
+tests and zero skips. Service build/lint, clean Linux gateway154/154 and all
+eight repository guards pass. Fresh published-head gates remain required.
