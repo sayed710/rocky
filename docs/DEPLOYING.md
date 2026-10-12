@@ -475,7 +475,7 @@ If an issue is detected during or after deployment:
     default; `--max 0` returns none in v3.16.3), so the workflow asks for `--max 256` and refuses a
     history of 256 or more entries before the upgrade (and in the rollback step's re-read): an older
     disqualifying record could hide beyond the window. Helm prunes stored history to `--history-max`
-    (default 10) on each upgrade, so this only happens when that limit was disabled; review the
+    (default 10) on each upgrade, so this only happens when that limit was disabled or set to 256 or higher; review the
     release's records and reduce them below 256 before re-running.
   - **When the step runs.** Exactly when post-deploy verification failed:
     `if: failure() && steps.smoke_check.outcome == 'failure'`. `scripts/check-deploy-gates.mjs`
