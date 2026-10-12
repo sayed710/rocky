@@ -50,8 +50,9 @@ function delayedRead(store: EventLog) {
   let reads = 0;
   const log: EventLog = { exists: id => store.exists(id), append: (...args) => store.append(...args),
     load: async id => {
+      const read = ++reads;
       const snapshot = await store.load(id);
-      if (++reads === 1) { entered.resolve(); await release.done; }
+      if (read === 1) { entered.resolve(); await release.done; }
       return snapshot;
     } };
   return { log, entered, release, reads: () => reads };
@@ -76,6 +77,7 @@ stackTest('D4 real stack: simultaneous cold joins coalesce; normal owner and for
       assert.equal(second.last('joined'), undefined, 'second join must wait for the single flight');
       delay.release.resolve();
       await until(() => !!first.last('joined') && !!second.last('joined'));
+      assert.equal(delay.reads(), 1, 'both completed joins used the same cold read');
       assert.equal((await b.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
       // Another gateway forwards the exact black response via the production Redis consumer.
       assert.equal((await a.router.route(gameId, 'bob', { kind: 'move', uci: 'e7e5' })).state.ply, 2);
