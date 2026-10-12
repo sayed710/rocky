@@ -436,6 +436,7 @@ export class AuthApi {
     // A required proactive refresh is itself a session transition. Complete it before capturing
     // the generation that this logout is allowed to clear.
     const loggingOut = this.session.current?.tokens.accessToken;
+    const loggingOutUserId = this.session.current?.user.id;
     let token: string | undefined;
     try {
       // An explicit sign-out makes one real refresh attempt even during a backoff, so a recovered
@@ -455,6 +456,9 @@ export class AuthApi {
       return;
     }
     const expectedGeneration = this.session.captureGeneration();
+    // Refresh recovery may return a newer peer session. An older logout must
+    // never revoke a different account that replaced its original principal.
+    if (this.session.current?.user.id !== loggingOutUserId) throw new NoSessionError('account changed during logout');
     await this.cookieCoordinator.run(async () => {
       this.session.assertGeneration(expectedGeneration);
       const currentToken = this.session.current?.tokens.accessToken;

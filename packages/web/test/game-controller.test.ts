@@ -42,6 +42,17 @@ function setup(locale: 'en' | 'ar' = 'en') {
   return { factory, scheduler, client, sync, controller, positions, turns, clocks, statuses, colors, metadatas };
 }
 
+test('account reauthorization clears the old board color and publishes the new server seat', () => {
+  const { factory, sync, controller, colors, client } = setup();
+  controller.start(); sync.start(); factory.last.open();
+  const state = stateView(0, 'w', 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1');
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state });
+  sync.sessionChanged('u2'); factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'black', state });
+  assert.deepEqual(colors, ['w', null, 'b']);
+  controller.dispose(); sync.stop(); client.close();
+});
+
 function stateView(
   ply: number,
   turn: WsColor,
@@ -781,13 +792,13 @@ test('onMetadata derives correctly and fires on changes', () => {
   sync.start();
 
   // 1. Initial state before join: connected=false, rest=null (emitted by controller.start())
-  // 2. Open transitions to connected=true
+  // 2. Open awaits the gateway join acknowledgment.
   factory.last.open();
 
-  assert.equal(metadatas.length, 2);
+  assert.equal(metadatas.length, 1);
   assert.equal(metadatas[0].connected, false);
   assert.equal(metadatas[0].role, null);
-  assert.equal(metadatas[1].connected, true);
+  assert.equal(sync.getState().connected, false);
 
   // 3. Join as spectator with presence
   const validFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';

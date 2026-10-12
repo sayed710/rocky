@@ -15,7 +15,9 @@
  * stay with `@chess-platform/core` / the UI. `fen` is only valid at
  * `snapshot.ply`; consumers replay `moves` after it with the view-only mover.
  */
-import type { WsClient } from './ws-client.js';
+import type { Scheduler, WsClient } from './ws-client.js';
+import { isTransientRefreshFailure, NoSessionError } from './session.js';
+import type { SessionManager } from './session.js';
 import type {
   EndedBroadcast,
   GameStatus,
@@ -47,8 +49,10 @@ export interface PendingMove {
 /** Observable, authoritative client-side game state. */
 export interface GameSyncState {
   readonly gameId: string;
-  /** True while the underlying socket is open. */
+  /** True after the gateway acknowledges a join on the active socket. */
   readonly connected: boolean;
+  /** Automatic recovery exhausted, or a rejected join requires an explicit retry. */
+  readonly recoveryAvailable: boolean;
   readonly role: Role | null;
   /** Our wire color, or null when spectating / unknown. */
   readonly myColor: WsColor | null;
@@ -90,6 +94,10 @@ export interface GameSyncOptions {
   readonly gameId: string;
   /** Access token for authenticated join; omitted for anonymous spectators. */
   readonly token?: string;
+  /** Production authentication lifecycle; static tokens remain a non-browser test seam. */
+  readonly session?: SessionManager;
+  /** Timer seam for bounded authentication recovery. */
+  readonly scheduler?: Scheduler;
 }
 
 export type GameSyncListener = (state: GameSyncState) => void;
@@ -129,6 +137,7 @@ function initialState(gameId: string): GameSyncState {
   return {
     gameId,
     connected: false,
+    recoveryAvailable: false,
     role: null,
     myColor: null,
     snapshot: null,
@@ -153,6 +162,18 @@ export class GameSync {
   private readonly client: WsClient;
   private readonly gameId: string;
   private token: string | undefined;
+  private readonly session: SessionManager | undefined;
+  private readonly scheduler: Scheduler;
+  private joinEpoch = 0;
+  private resolvingToken = false;
+  private awaitingJoin = false;
+  private retryHandle: unknown = null;
+  private retryAttempt = 0;
+  private suspended = false;
+  private terminalJoinFailure = false;
+  private authorizedUserId: string | null = null;
+  private joiningAccessToken: string | undefined;
+  private rejectedAccessToken: string | undefined;
   private state: GameSyncState;
   private clientSeq = 0;
   /** Bounded exact receipts also cover a confirmation arriving before the unknown notice. */
@@ -161,6 +182,7 @@ export class GameSync {
   /** At capacity, retain a conservative aggregate warning rather than silently forgetting outcomes. */
   private uncertaintyOverflow = false;
   private latestCommandReject: RejectMessage | null = null;
+  private joinReject: RejectMessage | null = null;
   private rejectDuringUncertainty = false;
   private joined = false;
   private readonly listeners = new Set<GameSyncListener>();
@@ -171,6 +193,11 @@ export class GameSync {
     this.client = client;
     this.gameId = options.gameId;
     this.token = options.token;
+    this.session = options.session;
+    this.scheduler = options.scheduler ?? {
+      setTimeout: (handler, ms) => setTimeout(handler, ms),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    };
     this.state = initialState(options.gameId);
   }
 
@@ -204,19 +231,56 @@ export class GameSync {
     this.client.networkOffline();
   }
 
-  /** The browser reported it is back online — retry the connection immediately. */
+  /** Retry after network restoration or an explicit recovery action. */
   networkOnline(): void {
-    this.client.reconnectNow();
+    if (!this.unsubscribe || this.suspended || this.terminalJoinFailure) return;
+    this.patch({ recoveryAvailable: false });
+    if (this.client.state === 'open' && !this.state.connected) {
+      this.clearAuthRetry();
+      this.retryAttempt = 0;
+      this.joinCurrentSocket();
+      return;
+    }
+    if (this.client.state === 'closed') this.client.connect();
+    else this.client.reconnectNow();
+  }
+
+  /** Revoke player privileges before asynchronous logout can refresh credentials. */
+  logoutRequested(): void {
+    // Initial restoration may still be pending; start() must inherit this barrier.
+    this.invalidateJoin();
+    this.suspended = true;
+    this.terminalJoinFailure = false;
+    this.authorizedUserId = null;
+    this.joiningAccessToken = undefined;
+    this.rejectedAccessToken = undefined;
+    this.joinReject = null;
+    this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null, pending: null,
+      pendingAction: null, lastReject: this.commandNotice() });
+    if (this.unsubscribe) this.client.close(1000, 'session-changed');
+  }
+
+  /** A completed session boundary requires a fresh server-authorized join. */
+  sessionChanged(_userId: string | null): void {
+    this.logoutRequested();
+    this.suspended = false;
+    if (this.unsubscribe) this.client.connect();
   }
 
   /** Wire up the client and open the connection. */
   start(): void {
+    if (this.unsubscribe) return;
     this.unsubscribe = this.client.on({
       open: () => this.handleOpen(),
       message: (msg) => this.handleMessage(msg),
-      statechange: (state) => this.patch({ connected: state === 'open' }),
+      statechange: (state) => {
+        if (state !== 'open') {
+          this.invalidateJoin();
+          this.patch({ connected: false });
+        }
+      },
     });
-    this.client.connect();
+    if (!this.suspended) this.client.connect();
   }
 
   /**
@@ -226,8 +290,10 @@ export class GameSync {
    * GameSync on it.
    */
   stop(): void {
+    this.invalidateJoin();
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.patch({ connected: false });
   }
 
   /**
@@ -243,6 +309,7 @@ export class GameSync {
    * from stale oracle destinations during the optimistic window.
    */
   submitMove(uci: string): PendingMove | null {
+    if (!this.canCommand()) return null;
     if (this.state.myColor === null) return null;
     if (this.state.status?.over) return null;
     if (this.state.turn !== this.state.myColor) return null;
@@ -283,6 +350,7 @@ export class GameSync {
   }
 
   private sendAction(action: SimpleCommand): boolean {
+    if (!this.canCommand()) return false;
     if (this.state.pending !== null || this.state.pendingAction !== null || this.state.status?.over) return false;
     const sent = this.client.send({ t: action, gameId: this.gameId });
     if (sent) {
@@ -294,15 +362,151 @@ export class GameSync {
   }
 
   private handleOpen(): void {
+    this.invalidateJoin();
+    if (this.suspended || this.terminalJoinFailure) return;
+    this.patch({ recoveryAvailable: false });
     if (this.joined) {
       this.reconnectLastPly = this.state.ply;
     }
-    this.client.send({ t: 'join', gameId: this.gameId, ...(this.token !== undefined ? { token: this.token } : {}) });
+    this.retryAttempt = 0;
+    this.joinCurrentSocket();
+  }
+
+  private canCommand(): boolean {
+    if (!this.state.connected) return false;
+    if (!this.session) return true;
+    this.session.captureGeneration(); // Observe persisted cross-tab logout barriers too.
+    return this.session.current?.user.id === this.authorizedUserId;
+  }
+
+  private clearAuthRetry(): void {
+    if (this.retryHandle !== null) this.scheduler.clearTimeout(this.retryHandle);
+    this.retryHandle = null;
+  }
+
+  private invalidateJoin(): void {
+    this.joinEpoch++;
+    this.resolvingToken = false;
+    this.awaitingJoin = false;
+    this.clearAuthRetry();
+  }
+
+  private scheduleJoinRetry(session: SessionManager | undefined): void {
+    if (this.retryAttempt >= 3) {
+      this.patch({ recoveryAvailable: true });
+      return;
+    }
+    const epoch = this.joinEpoch;
+    const socket = this.client.generation;
+    const delay = Math.max(1_000 * 2 ** this.retryAttempt++, session?.refreshRetryDelayMs ?? 0);
+    this.clearAuthRetry();
+    this.retryHandle = this.scheduler.setTimeout(() => {
+      this.retryHandle = null;
+      if (this.unsubscribe && !this.suspended && epoch === this.joinEpoch
+        && socket === this.client.generation && this.client.state === 'open') this.joinCurrentSocket();
+    }, delay);
+  }
+
+  private joinCurrentSocket(): void {
+    if (!this.unsubscribe || this.suspended || this.client.state !== 'open'
+      || this.resolvingToken || this.awaitingJoin || this.state.connected) return;
+    const epoch = this.joinEpoch;
+    const socket = this.client.generation;
+    const active = (): boolean => Boolean(this.unsubscribe) && !this.suspended
+      && epoch === this.joinEpoch && socket === this.client.generation && this.client.state === 'open';
+    const sendJoin = (token: string | undefined, userId: string | null): void => {
+      if (!active()) return;
+      this.resolvingToken = false;
+      this.authorizedUserId = userId;
+      this.joiningAccessToken = token;
+      this.awaitingJoin = true;
+      if (!this.client.send({ t: 'join', gameId: this.gameId, ...(token !== undefined ? { token } : {}) })) {
+        this.awaitingJoin = false;
+        this.patch({ recoveryAvailable: true });
+      }
+    };
+    const session = this.session;
+    if (!session) {
+      if (this.token !== undefined && this.token === this.rejectedAccessToken) {
+        this.patch({ recoveryAvailable: true });
+        return;
+      }
+      sendJoin(this.token, null);
+      return;
+    }
+    session.captureGeneration();
+    const initial = session.current;
+    const serverRejected = initial !== null && initial.tokens.accessToken === this.rejectedAccessToken;
+    const needsRefresh = serverRejected || session.isAccessTokenExpired(initial);
+    // A fresh in-memory session is validated in this same turn by the manager's
+    // expiry contract. Only the refresh path needs an asynchronous continuation.
+    if (initial && !needsRefresh) {
+      sendJoin(initial.tokens.accessToken, initial.user.id);
+      return;
+    }
+    if (!initial) {
+      sendJoin(undefined, null);
+      return;
+    }
+    this.resolvingToken = true;
+    // Gateway unauthorized is the same credential-recovery boundary as an HTTP 401.
+    // refreshNow retains the manager's single flight, cooldown and reset barriers.
+    const tokenRequest = serverRejected
+      ? session.refreshNow().then((current) => current.tokens.accessToken)
+      : session.validAccessToken();
+    void tokenRequest.then((token) => {
+      if (!active()) return;
+      session.captureGeneration();
+      const current = session.current;
+      if (!token || !current || current.user.id !== initial.user.id
+        || current.tokens.accessToken !== token || token === this.rejectedAccessToken
+        || session.isAccessTokenExpired(current)) {
+        throw new NoSessionError();
+      }
+      sendJoin(token, current?.user.id ?? null);
+    }).catch((error: unknown) => {
+      if (!active()) return;
+      this.resolvingToken = false;
+      session.captureGeneration();
+      if (!active()) return;
+      const current = session.current;
+      if (error instanceof NoSessionError && current?.user.id === initial.user.id) {
+        if (!session.isAccessTokenExpired(current) && current.tokens.accessToken !== this.rejectedAccessToken) {
+          // A peer supplied fresh credentials; the superseded result never publishes its token.
+          this.invalidateJoin();
+          this.retryAttempt = 0;
+          this.joinCurrentSocket();
+        } else {
+          this.scheduleJoinRetry(session);
+        }
+      } else if (isTransientRefreshFailure(error)) {
+        this.scheduleJoinRetry(session);
+      } else if (!current) {
+        this.sessionChanged(null);
+      } else if (error instanceof NoSessionError) {
+        this.sessionChanged(current.user.id);
+      }
+    });
   }
 
   private handleMessage(msg: ServerMessage): void {
+    if ('gameId' in msg && msg.gameId !== this.gameId) return;
+    if (msg.t !== 'joined' && msg.t !== 'reject' && !this.state.connected) return;
     switch (msg.t) {
       case 'joined': {
+        if (!this.awaitingJoin && !this.state.connected) return;
+        if (this.session) {
+          const epoch = this.joinEpoch;
+          const socket = this.client.generation;
+          const userId = this.authorizedUserId;
+          this.session.captureGeneration();
+          // Observing a durable logout barrier can synchronously reset the route.
+          if (epoch !== this.joinEpoch || socket !== this.client.generation || this.suspended
+            || this.client.state !== 'open' || (this.session.current?.user.id ?? null) !== userId) return;
+        }
+        this.awaitingJoin = false;
+        this.rejectedAccessToken = undefined;
+        this.joinReject = null;
         const reconnectPly = this.reconnectLastPly;
         this.reconnectLastPly = null;
         this.joined = true;
@@ -399,6 +603,8 @@ export class GameSync {
       pending: null,
       pendingAction: null,
       lastReject: this.commandNotice(),
+      connected: true,
+      recoveryAvailable: false,
     });
   }
 
@@ -442,6 +648,25 @@ export class GameSync {
   }
 
   private applyReject(msg: RejectMessage): void {
+    if (this.awaitingJoin) {
+      if (msg.code === 'unauthorized') this.rejectedAccessToken = this.joiningAccessToken;
+      this.awaitingJoin = false;
+      // A refused rejoin cannot settle commands admitted on the previous socket.
+      // Keep their exact uncertainty visible alongside the authorization refusal.
+      this.joinReject = msg;
+      this.patch({ connected: false, recoveryAvailable: false, role: null, myColor: null,
+        pending: null, pendingAction: null, lastReject: this.commandNotice() });
+      if (msg.code === 'invalid_command') {
+        // Gateway hydration may fail transiently before any authorization is granted.
+        this.scheduleJoinRetry(this.session);
+      } else {
+        this.invalidateJoin();
+        this.terminalJoinFailure = msg.code === 'unknown_game';
+        this.patch({ recoveryAvailable: !this.terminalJoinFailure });
+        this.client.close(1000, 'join-rejected');
+      }
+      return;
+    }
     const pending = this.state.pending;
     const rollsBack = pending !== null && (msg.ref === null || msg.ref === pending.clientSeq);
     this.latestCommandReject = msg;
@@ -469,7 +694,7 @@ export class GameSync {
   /** The existing UI displays message; retain both uncertainty and the latest definite refusal. */
   private commandNotice(): RejectMessage | OutcomeUnknownMessage | null {
     const latest = [...this.uncertainRequests.values()].at(-1);
-    if (!latest && !this.uncertaintyOverflow) return this.latestCommandReject;
+    if (!latest && !this.uncertaintyOverflow) return this.joinReject ?? this.latestCommandReject;
     const notice: OutcomeUnknownMessage = latest ?? {
       t: 'outcomeUnknown', code: 'outcome_unknown', gameId: this.gameId, ref: null,
       requestId: '', message: 'Earlier command outcomes remain unknown.',
@@ -478,6 +703,7 @@ export class GameSync {
     if (this.uncertainRequests.size > 1) messages.push(`${this.uncertainRequests.size} command outcomes remain unknown.`);
     if (latest && this.uncertaintyOverflow) messages.push('Additional earlier command outcomes remain unknown.');
     if (this.latestCommandReject) messages.push(`Latest command rejected: ${this.latestCommandReject.message}`);
+    if (this.joinReject) messages.push(`Join rejected: ${this.joinReject.message}`);
     return { ...notice, message: messages.join(' ') };
   }
 

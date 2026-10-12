@@ -51,6 +51,8 @@ export interface AuthErrorInfo {
 export interface AuthCallbacks {
   /** Called when the session state changes (login, logout, restore). */
   onSessionChange: (session: AuthSession | null) => void;
+  /** Synchronous boundary before logout can await a shared token refresh. */
+  onLogoutRequested?: () => void;
   /** Called when an auth action is pending (for UI spinner/disabled state). */
   onPending: (pending: boolean) => void;
   /** Called when an error occurs (for UI error display). */
@@ -154,6 +156,11 @@ export class AuthController {
    */
   private sessionGeneration = 0;
   private pendingOperations = 0;
+  private logoutInFlight: {
+    readonly promise: Promise<void>;
+    readonly userId: string | null;
+    readonly accessToken: string | undefined;
+  } | null = null;
   private disposed = false;
 
   constructor(opts: AuthControllerOptions) {
@@ -364,9 +371,32 @@ export class AuthController {
   }
 
   /** Log out and clear the persisted session. */
-  async logout(): Promise<void> {
-    if (this.disposed) return;
-    const generation = this.sessionGeneration;
+  logout(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    const current = this.client.session.current;
+    const userId = current?.user.id ?? this.session?.userId ?? null;
+    const existing = this.logoutInFlight;
+    if (existing && existing.userId === userId
+      && (!current || existing.accessToken === current.tokens.accessToken)) return existing.promise;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const pending = new Promise<void>((success, failure) => { resolve = success; reject = failure; });
+    // Publish the lock before synchronous callbacks, including a reentrant logout request.
+    this.logoutInFlight = { promise: pending, userId, accessToken: current?.tokens.accessToken };
+    const generation = ++this.sessionGeneration;
+    void this.performLogout(generation).then(() => {
+      if (this.logoutInFlight?.promise === pending) this.logoutInFlight = null;
+      resolve();
+    }, (error: unknown) => {
+      if (this.logoutInFlight?.promise === pending) this.logoutInFlight = null;
+      reject(error);
+    });
+    return pending;
+  }
+
+  private async performLogout(generation: number): Promise<void> {
+    const originalSession = this.session;
+    this.callbacks.onLogoutRequested?.();
     this.beginPendingOperation();
     try {
       await this.client.auth.logout();
@@ -377,8 +407,16 @@ export class AuthController {
         // `AuthApi.logout()` clears the token manager before awaiting the server. If another tab
         // signs in after that boundary, its adoption is the newer state and must remain mirrored
         // here when the older logout request eventually settles.
+        this.client.session.captureGeneration();
         if (generation === this.sessionGeneration && !this.client.session.isAuthenticated) {
           this.clearControllerSession();
+        } else if (generation === this.sessionGeneration && this.session === originalSession) {
+          const current = this.client.session.current;
+          if (current) {
+            const mirrored = this.adoptSession(current.user);
+            // Same-account adoption is normally deduplicated, but logout suspended the game.
+            if (mirrored === originalSession) this.callbacks.onSessionChange(mirrored);
+          }
         }
       }
       this.finishPendingOperation();

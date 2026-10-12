@@ -609,6 +609,7 @@ export const enMessages = {
   'game.connection.connected': 'Connected',
   'game.connection.connecting': 'Connecting…',
   'game.connection.reconnecting': 'Reconnecting…',
+  'game.connection.unavailable': 'Unable to connect',
   'game.connection.offline': 'Offline',
   'game.connection.announcement': 'Connection: {status}. ',
   'game.role.playingWhite': 'Playing as White',

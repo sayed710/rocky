@@ -360,6 +360,41 @@ stackTest('an owner lets go of a copy it loaded only to answer a late forwarded 
   });
 });
 
+stackTest('R-03: a late unowned expiry evicts its temporary copy without executing or changing request identity', async () => {
+  await withStack(async (s) => {
+    // Construct the post-release state without launching background consumers:
+    // the real authority/log has one timeout, but no replica owns or watches it.
+    const gameId = randomUUID();
+    await s.a.authority.createGame({ gameId, timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: true, at: T0 });
+    s.clock.now = MOVED;
+    await s.a.authority.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+    s.clock.now = DEADLINE;
+    await s.a.authority.apply(gameId, FLAG_ACTOR_ID, { kind: 'expireFlag' });
+    const before = await s.store.load(gameId);
+    assert.equal(before.filter(({ event }) => event.type === 'GameEnded').length, 1);
+    s.a.authority.evict(gameId);
+    const requestId = randomUUID();
+    const responseKey = `game:resp:test-${requestId}`;
+    const commandKey = `game:cmd:v2:${gameId}`;
+    const payload = JSON.stringify({ version: 2, requestId, gameId, userId: FLAG_ACTOR_ID, cmd: { kind: 'expireFlag' }, responseKey });
+    try {
+      await s.redis.eval(ENQUEUE_REQUEST, 2, requestKey(requestId), commandKey, payload, 5000, REQUEST_RETENTION_MS);
+      // Deliver a real dequeued envelope after the old owner's release, as an
+      // already-fulfilled BLPOP can do. Transport ordering is controlled here.
+      assert.equal(await s.redis.lpop(commandKey), payload);
+      // @ts-expect-error exercise the production receiver after ownership loss
+      await s.a.consumer.processCommand(payload);
+      assert.equal(s.a.authority.has(gameId), false, 'a refused late expiry must release its cold ended copy');
+      assert.deepEqual(await s.store.load(gameId), before, 'no duplicate timeout or command execution');
+      assert.equal(await s.redis.get(ownerKey(gameId)), null, 'cleanup does not reclaim ownership');
+      assert.deepEqual(await s.redis.lrange(commandKey, 0, -1), [payload], 'hand back only the unchanged original request');
+      assert.equal(await s.redis.llen(responseKey), 0, 'the obsolete owner fabricates no outcome');
+    } finally {
+      await s.redis.del(requestKey(requestId), responseKey, commandKey);
+    }
+  });
+});
+
 stackTest('R-03: expired forwarded resignation leaves the actual PostgreSQL event log unchanged', async () => {
   await withStack(async (s) => {
     const { gameId } = await seekGameUnderway(s);

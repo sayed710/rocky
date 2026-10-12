@@ -93,6 +93,121 @@ test('initial session is null and isAuthenticated is false', () => {
   assert.equal(ctrl.isAuthenticated(), false);
 });
 
+test('logout notifies the game boundary before awaiting logout authentication', async () => {
+  let notified = false;
+  let release!: () => void;
+  const response = new Promise<void>((resolve) => { release = resolve; });
+  const client = makeFakeClient({ logout: async () => {
+    assert.equal(notified, true, 'pending rejoin is invalidated before the auth operation');
+    await response;
+  } }) as unknown as GambitClient;
+  const controller = new AuthController({ client, storage: makeFakeStorage(), callbacks: {
+    onSessionChange: () => {}, onPending: () => {}, onError: () => {},
+    onLogoutRequested: () => { notified = true; },
+  } });
+  const pending = controller.logout();
+  assert.equal(notified, true); release(); await pending; controller.dispose();
+});
+
+test('same-account adoption during an older logout resumes the current session notification', async (t) => {
+  const auth = (token: string): AuthResponse => ({
+    user: { id: 'u1', handle: 'alice', country: null, createdAt: '2020-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: token, tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  });
+  let release!: () => void;
+  const client = new GambitClient({ baseUrl: 'https://api.test', tokenStore: new MemoryTokenStore(),
+    transport: { send: async (request) => request.url.endsWith('/v1/auth/logout')
+      ? new Promise((resolve) => { release = () => resolve(json(200, {})); })
+      : json(200, auth('initial-token')) } });
+  const notifications: (string | null)[] = [];
+  const controller = new AuthController({ client, storage: makeFakeStorage(), callbacks: {
+    onSessionChange: (session) => { notifications.push(session?.userId ?? null); },
+    onLogoutRequested: () => { notifications.push('ending'); }, onPending: () => {}, onError: () => {},
+  } });
+  t.after(() => controller.dispose());
+  await controller.login('alice', 'password');
+  const logout = controller.logout(); await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(typeof release, 'function');
+  client.session.adopt(auth('newer-token'), false);
+  release(); await logout;
+  assert.equal(client.session.current?.tokens.accessToken === 'newer-token', true);
+  assert.deepEqual(notifications, ['u1', 'ending', 'u1']);
+});
+
+test('two logout requests share the held operation and cannot resume watching early', async (t) => {
+  const auth: AuthResponse = {
+    user: { id: 'u1', handle: 'alice', country: null, createdAt: '2020-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: 'initial-token', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  };
+  let release!: () => void;
+  let logoutRequests = 0;
+  const client = new GambitClient({ baseUrl: 'https://api.test', tokenStore: new MemoryTokenStore(),
+    transport: { send: async (request) => {
+      if (!request.url.endsWith('/v1/auth/logout')) return json(200, auth);
+      logoutRequests++;
+      return new Promise((resolve) => { release = () => resolve(json(200, {})); });
+    } } });
+  const notifications: (string | null)[] = [];
+  const controller = new AuthController({ client, callbacks: {
+    onSessionChange: (session) => { notifications.push(session?.userId ?? null); },
+    onLogoutRequested: () => { notifications.push('ending'); }, onPending: () => {}, onError: () => {},
+  } });
+  t.after(() => controller.dispose());
+  await controller.login('alice', 'password');
+  const first = controller.logout(); await new Promise<void>((resolve) => setImmediate(resolve));
+  let secondSettled = false;
+  const second = controller.logout().then(() => { secondSettled = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  try {
+    assert.equal(logoutRequests, 1);
+    assert.equal(secondSettled, false);
+    assert.deepEqual(notifications, ['u1', 'ending']);
+  } finally { release(); await Promise.all([first, second]); }
+  assert.deepEqual(notifications, ['u1', 'ending', null]);
+});
+
+for (const userId of ['u1', 'u2']) {
+  test(`explicit logout of newer ${userId} credentials is not absorbed by an older logout`, async (t) => {
+    const auth = (id: string, token: string): AuthResponse => ({
+      user: { id, handle: id, country: null, createdAt: '2020-01-01T00:00:00Z', roles: ['user'] },
+      tokens: { accessToken: token, tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+    });
+    const releases: (() => void)[] = [];
+    const client = new GambitClient({ baseUrl: 'https://api.test', tokenStore: new MemoryTokenStore(),
+      transport: { send: async (request) => request.url.endsWith('/v1/auth/logout')
+        ? new Promise((resolve) => { releases.push(() => resolve(json(200, {}))); })
+        : json(200, auth('u1', 'initial-token')) } });
+    let adopted!: (session: StoredSession) => void;
+    const register = client.session.onAdopted.bind(client.session);
+    client.session.onAdopted = (handler) => { adopted = handler; register(handler); };
+    const notifications: (string | null)[] = [];
+    const controller = new AuthController({ client, callbacks: {
+      onSessionChange: (session) => { notifications.push(session?.userId ?? null); },
+      onLogoutRequested: () => { notifications.push('ending'); }, onPending: () => {}, onError: () => {},
+    } });
+    t.after(() => controller.dispose());
+    const flush = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
+    await controller.login('u1', 'password');
+    const first = controller.logout(); await flush();
+    // Drive the registered peer-adoption observer with real canonical manager state.
+    // This is an observer seam, not a live cross-tab or server integration claim.
+    client.session.adopt(auth(userId, 'newer-token'), false);
+    adopted(client.session.current!);
+    const second = controller.logout();
+    try {
+      assert.equal(notifications.filter((value) => value === 'ending').length, 2);
+      releases[0]!(); await first; await flush();
+      assert.equal(releases.length, 2, 'the newer credentials have their own real AuthApi request');
+      assert.equal(notifications.includes(null), false, 'older completion cannot release the newer logout suspension');
+      releases[1]!(); await second;
+      assert.equal(client.session.current === null, true);
+      assert.equal(notifications.filter((value) => value === null).length, 1);
+    } finally {
+      releases[0]?.(); await first; await flush(); releases[1]?.(); await second;
+    }
+  });
+}
+
 test('login creates a session with correct fields from AuthResponse', async () => {
   const client = makeFakeClient() as any;
   let sessions: (AuthSession | null)[] = [];
@@ -605,7 +720,7 @@ test('overlapping auth operations keep the UI pending until every operation sett
   });
 
   const first = controller.logout();
-  const second = controller.logout();
+  const second = controller.login('alice', 'pw');
   await second;
 
   assert.deepEqual(pendingStates, [true], 'the first operation is still pending');

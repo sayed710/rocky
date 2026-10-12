@@ -543,6 +543,7 @@ export const arMessages = {
   "game.connection.connected": "متصل",
   "game.connection.connecting": "جارٍ الاتصال…",
   "game.connection.reconnecting": "جارٍ إعادة الاتصال…",
+  "game.connection.unavailable": "تعذر الاتصال",
   "game.connection.offline": "غير متصل",
   "game.connection.announcement": "الاتصال: {status}. ",
   "game.role.playingWhite": "تلعب بالأبيض",

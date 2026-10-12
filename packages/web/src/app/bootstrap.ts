@@ -316,6 +316,7 @@ export function bootstrap(
   let setPlayBotAuthenticated: ((authenticated: boolean) => void) | null = null;
   let lobbySessionHandler: (() => void) | null = null;
   let gameSessionHandler: ((session: AuthSession | null) => void) | null = null;
+  let gameLogoutHandler: (() => void) | null = null;
   let endgameSessionHandler: (() => void) | null = null;
   let commentarySessionHandler: ((signedIn: boolean) => void) | null = null;
   const auth = new AuthController({
@@ -323,6 +324,7 @@ export function bootstrap(
     i18n: app.i18n,
     ...(deps?.webauthnAdapter !== undefined ? { webauthnAdapter: deps.webauthnAdapter } : {}),
     callbacks: {
+      onLogoutRequested: () => gameLogoutHandler?.(),
       onSessionChange: (session) => {
         currentAuthSession = session;
         if (session !== null) {
@@ -475,6 +477,7 @@ export function bootstrap(
       i18n: app.i18n,
     });
     gameSessionHandler = mountedGame.onSessionChange;
+    gameLogoutHandler = mountedGame.onLogoutRequested;
     return createBootstrapped(app, auth, theme, shellLocalization, mountedGame);
   }
 
