@@ -111,6 +111,43 @@ test('anything that does not prove a single safe target is refused, with the rea
   }
 });
 
+/** N revisions: 1..N-1 superseded, N deployed (a long but otherwise healthy history). */
+function longHistory(n) {
+  return Array.from({ length: n }, (_, i) => entry(i + 1, i + 1 === n ? 'deployed' : 'superseded'));
+}
+
+test('a history that fills the --max 256 window is refused: completeness cannot be proven', () => {
+  // cmd/helm/history.go (v3.16.3) keeps only the newest --max records (default 256), so a
+  // disqualifying older record (a pending-* or a second deployed revision) can sit outside a full
+  // window. 256 or more returned entries therefore prove nothing about the rest.
+  for (const n of [256, 257, 300]) {
+    assert.throws(() => resolveRollbackRevision(longHistory(n)), (error) => {
+      assert.ok(error instanceof RollbackRevisionError, `${n}: ${error}`);
+      assert.match(error.message, new RegExp(`returned ${n} revisions, which fills the --max 256 window`));
+      assert.match(error.message, /cannot be proven complete/);
+      return true;
+    }, `${n} entries`);
+  }
+  // The window check comes first: even a history that would otherwise be refused for another
+  // reason reports the saturated window.
+  const saturatedAndPending = longHistory(256);
+  saturatedAndPending[0] = entry(1, 'pending-upgrade');
+  assert.throws(() => resolveRollbackRevision(saturatedAndPending), /fills the --max 256 window/);
+});
+
+test('a history of 255 entries is below the window and still resolves', () => {
+  const target = resolveRollbackRevision(longHistory(255));
+  assert.equal(target.revision, 255);
+  assert.equal(target.newestRevision, 255);
+});
+
+test('the CLI refuses a saturated history with the window reason', () => {
+  const bad = spawnSync(process.execPath, [CLI], { input: JSON.stringify(longHistory(256)), encoding: 'utf8' });
+  assert.equal(bad.status, 1);
+  assert.equal(bad.stdout, '');
+  assert.match(bad.stderr, /^resolve-rollback-revision: [^\n]*fills the --max 256 window[^\n]*\n$/);
+});
+
 test('the known status set is exactly Helm v3\'s', () => {
   assert.deepEqual([...HELM_STATUSES].sort(), [
     'deployed', 'failed', 'pending-install', 'pending-rollback', 'pending-upgrade',

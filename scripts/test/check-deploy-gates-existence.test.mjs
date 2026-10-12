@@ -16,10 +16,11 @@ const deployYml = readFileSync(new URL('../../.github/workflows/deploy.yml', imp
 const STATUS_CMD = 'helm status gambit > /dev/null 2> "$STATUS_ERR" || STATUS_RC=$?';
 const LIST_CMD = `helm list --all --filter '^gambit$' -o json > "$LIST_OUT" 2> "$LIST_ERR" || LIST_RC=$?`;
 const INIT_LINE = 'RELEASE_EXISTS=""\n';
-const ABSENT_ARM = 'absent) RELEASE_EXISTS=false ;;';
+const ABSENT_ARM_HEAD = '            absent)\n';
+const ABSENT_ASSIGNMENT = '              RELEASE_EXISTS=false\n';
 const CLASSIFY = 'if node scripts/release-existence.mjs classify --release gambit';
 const EXISTENCE_READ = `RELEASE_EXISTENCE=$(sed -n 's/^release_existence=//p' "$EXISTENCE_FILE")`;
-const HISTORY_CHECK = 'if ! helm history gambit -o json > "$RB_HISTORY" 2> "$RB_HISTORY_ERR"; then';
+const HISTORY_CHECK = 'if ! helm history gambit -o json --max 256 > "$RB_HISTORY" 2> "$RB_HISTORY_ERR"; then';
 const REVISION_CHECK = 'if ! node scripts/release-existence.mjs only-initial-revision < "$RB_HISTORY" 2> "$RB_HISTORY_ERR" > /dev/null; then';
 const UNINSTALL_CMD = 'helm uninstall gambit --wait --timeout 5m0s';
 const ROLLBACK_BRANCH = 'elif [ "$RELEASE_EXISTS" = "true" ] && [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then';
@@ -31,6 +32,14 @@ const ENV_BINDING = 'RELEASE_EXISTS: ${{ steps.pre_upgrade.outputs.release_exist
 function mutate(from, to, text = deployYml) {
   assert.equal(text.split(from).length, 2, `expected exactly one occurrence of: ${from}`);
   return text.replace(from, () => to);
+}
+
+/** Replaces the first occurrence of `from` after the unique `anchor`. */
+function mutateAfter(anchor, from, to, text = deployYml) {
+  assert.equal(text.split(anchor).length, 2, `expected exactly one occurrence of: ${anchor}`);
+  const at = text.indexOf(from, text.indexOf(anchor));
+  assert.notEqual(at, -1, `expected ${from} after ${anchor}`);
+  return text.slice(0, at) + to + text.slice(at + from.length);
 }
 
 function assertRejected(text, pattern) {
@@ -73,7 +82,12 @@ test('rejects RELEASE_EXISTS=false chained after an echo', () => {
 });
 
 test('rejects the unknown arm falling through to absence', () => {
-  const text = mutate(ABSENT_ARM, 'absent|*) RELEASE_EXISTS=false ;;');
+  const text = mutate(ABSENT_ARM_HEAD, '            absent|*)\n');
+  assertRejected(text, /must have exactly the arms/);
+});
+
+test('rejects RELEASE_EXISTS=false set a second time in the absent arm', () => {
+  const text = mutate(ABSENT_ARM_HEAD, `${ABSENT_ARM_HEAD}${ABSENT_ASSIGNMENT}`);
   assertRejected(text, /RELEASE_EXISTS must be assigned exactly as/);
 });
 
@@ -118,7 +132,7 @@ test('rejects the classifier stdout redirected to a file other than the one RELE
 });
 
 test('rejects an uninstall without the helm history re-check', () => {
-  const text = mutate(HISTORY_CHECK, 'if false; then');
+  const text = mutateAfter(UNINSTALL_BRANCH, HISTORY_CHECK, 'if false; then');
   assertRejected(text, /the uninstall must be guarded/);
 });
 
@@ -128,12 +142,7 @@ test('rejects an uninstall without the only-initial-revision check', () => {
 });
 
 test('rejects a history re-check that does not stop the step', () => {
-  const block = mutate(HISTORY_CHECK, `${HISTORY_CHECK}\n              true`);
-  const marker = `${HISTORY_CHECK}\n              true\n`;
-  const start = block.indexOf(marker);
-  const fiAt = block.indexOf('\n            fi\n', start);
-  const body = block.slice(start, fiAt).replace(/\n\s*exit 1/, '\n              :');
-  const text = block.slice(0, start) + body + block.slice(fiAt);
+  const text = mutateAfter(`${UNINSTALL_BRANCH}\n            ${HISTORY_CHECK}`, '              exit 1\n', '              :\n');
   assertRejected(text, /must end its branch with `exit 1`/);
 });
 
