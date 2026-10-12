@@ -94,14 +94,26 @@ interface GameRecord {
   game: Game;
   readonly events: GameEvent[];
   readonly broadcasts: BroadcastLogEntry[];
-  /** Serialization tail: commands await the previous command's completion. */
-  lock: Promise<void>;
   broadcastSeq: number;
   /** Durable-log head seq already persisted (`events.length - 1`). */
   persistedSeq: number;
   /** Set when an uncertain append could not be reconciled with the durable log. */
   stale: boolean;
 }
+
+/** The serialization boundary outlives every replaceable resident snapshot. */
+interface GameSlot {
+  record: GameRecord | undefined;
+  tail: Promise<void>;
+  pending: number;
+  generation: number;
+  dispose: boolean;
+  reloads: number;
+  reload: { generation: number; done: Promise<boolean> } | undefined;
+  coldLoad: { generation: number; done: Promise<LoadOutcome> } | undefined;
+}
+
+type LoadOutcome = 'loaded' | 'missing' | 'invalidated';
 
 /** Short, stable hash of a FEN string for cheap desync detection. */
 export function fenHash(fen: string): string {
@@ -141,8 +153,14 @@ export interface ApplyResult {
   readonly state: StateView;
 }
 
+/** Admission runs under the game slot, after hydration and before domain execution. */
+export interface ApplyOptions {
+  readonly beforeExecute?: () => Promise<void>;
+  readonly requestId?: string;
+}
+
 export class GameAuthority {
-  private readonly games = new Map<string, GameRecord>();
+  private readonly games = new Map<string, GameSlot>();
 
   constructor(
     private readonly pubsub: PubSub,
@@ -159,13 +177,14 @@ export class GameAuthority {
 
   /** Whether a live game is currently held in the hot cache. */
   has(gameId: string): boolean {
-    return this.games.has(gameId);
+    const slot = this.games.get(gameId);
+    return slot?.record !== undefined && !slot.dispose;
   }
 
   /** A resident game is safe for synchronous edge reads only after any reload completes. */
   hasFresh(gameId: string): boolean {
-    const record = this.games.get(gameId);
-    return record !== undefined && !record.stale;
+    const slot = this.games.get(gameId);
+    return slot?.record !== undefined && !slot.record.stale && !slot.dispose && slot.reloads === 0;
   }
 
   /**
@@ -173,7 +192,7 @@ export class GameAuthority {
    * Unlike {@link has} this consults the store, so an evicted/cold game counts.
    */
   async knows(gameId: string): Promise<boolean> {
-    return this.games.has(gameId) || this.store.exists(gameId);
+    return this.has(gameId) || this.store.exists(gameId);
   }
 
   /**
@@ -183,43 +202,47 @@ export class GameAuthority {
    * not a broadcast (joiners receive the full state instead).
    */
   async createGame(params: Omit<CreateGameParams, 'at'> & { at?: number }): Promise<StateView> {
-    if (this.games.has(params.gameId)) {
-      throw new AuthorityError('invalid_command', `game ${params.gameId} already exists`);
-    }
-    const at = params.at ?? this.now();
-    // Wrapped for the same reason the persist below is: this function's contract is that a refused
-    // creation surfaces as `AuthorityError`, and `Game.create` refuses some of them itself — a
-    // `chess960` game without a starting-position id, or any other variant carrying one (ADR-0137).
-    // `codeOf` in `gateway.ts` does fall back to `invalid_command` for an unrecognised error, so an
-    // escaping `GameError` would already reach the client as the right reject code; this makes that
-    // a stated guarantee rather than a lucky default, and keeps the two failure paths in this one
-    // function consistent. Raised in the Qodo review of PR #145.
-    let game: Game;
-    let events: GameEvent[];
-    try {
-      ({ game, events } = Game.create({ ...params, at }));
-    } catch (err) {
-      throw new AuthorityError('invalid_command', `cannot create game ${params.gameId}: ${(err as Error).message}`);
-    }
-    // Persist first: an append against a fresh id fails if the game already
-    // exists in the durable log, so the store is the single source of truth for
-    // uniqueness across restarts.
-    let persistedSeq: number;
-    try {
-      persistedSeq = await this.store.append(params.gameId, -1, events);
-    } catch (err) {
-      throw new AuthorityError('invalid_command', `cannot create game ${params.gameId}: ${(err as Error).message}`);
-    }
-    this.games.set(params.gameId, {
-      game,
-      events: [...events],
-      broadcasts: [],
-      lock: Promise.resolve(),
-      broadcastSeq: 0,
-      persistedSeq,
-      stale: false,
+    const slot = this.slotFor(params.gameId);
+    return this.enqueue(params.gameId, slot, async () => {
+      if (slot.record) {
+        throw new AuthorityError('invalid_command', `game ${params.gameId} already exists`);
+      }
+      const at = params.at ?? this.now();
+      // Wrapped for the same reason the persist below is: this function's contract is that a refused
+      // creation surfaces as `AuthorityError`, and `Game.create` refuses some of them itself — a
+      // `chess960` game without a starting-position id, or any other variant carrying one (ADR-0137).
+      // `codeOf` in `gateway.ts` does fall back to `invalid_command` for an unrecognised error, so an
+      // escaping `GameError` would already reach the client as the right reject code; this makes that
+      // a stated guarantee rather than a lucky default, and keeps the two failure paths in this one
+      // function consistent. Raised in the Qodo review of PR #145.
+      let game: Game;
+      let events: GameEvent[];
+      try {
+        ({ game, events } = Game.create({ ...params, at }));
+      } catch (err) {
+        throw new AuthorityError('invalid_command', `cannot create game ${params.gameId}: ${(err as Error).message}`);
+      }
+      // Persist first: an append against a fresh id fails if the game already
+      // exists in the durable log, so the store is the single source of truth for
+      // uniqueness across restarts.
+      let persistedSeq: number;
+      try {
+        persistedSeq = await this.store.append(params.gameId, -1, events);
+      } catch (err) {
+        throw new AuthorityError('invalid_command', `cannot create game ${params.gameId}: ${(err as Error).message}`);
+      }
+      slot.record = {
+        game,
+        events: [...events],
+        broadcasts: [],
+        broadcastSeq: 0,
+        persistedSeq,
+        stale: false,
+      };
+      // Eviction of a not-yet-created game must not discard a successful creation.
+      slot.dispose = false;
+      return this.viewOf(game);
     });
-    return this.viewOf(game);
   }
 
   /**
@@ -228,11 +251,59 @@ export class GameAuthority {
    * game exists anywhere. Safe to call repeatedly; a cache hit is a no-op.
    */
   async ensureLoaded(gameId: string): Promise<boolean> {
-    const resident = this.games.get(gameId);
-    if (resident) return resident.stale ? this.reloadFromLog(gameId) : true;
-    const logged = await this.store.load(gameId);
-    if (logged.length === 0) return false;
-    this.games.set(gameId, this.rebuildRecord(gameId, logged));
+    for (;;) {
+      if (this.hasFresh(gameId)) return true;
+      const slot = this.slotFor(gameId);
+      const generation = slot.generation;
+      const current = (): boolean => this.games.get(gameId) === slot && slot.generation === generation;
+      try {
+        // Await the fallible reload result, never the rejection-neutral queue tail.
+        if (slot.reloads > 0 && slot.reload?.generation === generation) {
+          const loaded = await this.awaitReload(slot, generation);
+          if (slot.generation !== generation) continue;
+          if (!loaded) return false;
+          if (!current()) continue;
+        } else {
+          let attempt = slot.coldLoad;
+          if (attempt?.generation !== generation) {
+            // A settled failed reload is retried by a new ordinary load.
+            if (slot.reloads === 0) slot.reload = undefined;
+            const done = this.enqueue<LoadOutcome>(gameId, slot, async () => {
+              if (!current()) return 'invalidated';
+              if (slot.record && !slot.record.stale && !slot.dispose) return 'loaded';
+              const loaded = await this.refreshSlot(gameId, slot, generation);
+              if (!current()) return 'invalidated';
+              return loaded ? 'loaded' : 'missing';
+            });
+            attempt = { generation, done };
+            slot.coldLoad = attempt;
+          }
+          let outcome: LoadOutcome;
+          try { outcome = await attempt.done; }
+          finally { if (slot.coldLoad === attempt) slot.coldLoad = undefined; }
+          if (outcome === 'invalidated' || slot.generation !== generation) continue;
+          if (outcome === 'missing') return false;
+          // A forced read requested during cold loading supersedes that snapshot.
+          const loaded = await this.awaitReload(slot, generation);
+          if (slot.generation !== generation) continue;
+          if (!loaded) return false;
+          if (!current()) continue;
+        }
+        if (this.hasFresh(gameId)) return true;
+      } catch (err) {
+        if (slot.generation !== generation) continue;
+        throw err;
+      }
+    }
+  }
+
+  private async awaitReload(slot: GameSlot, generation: number): Promise<boolean> {
+    let reload = slot.reload;
+    while (reload?.generation === generation) {
+      const loaded = await reload.done;
+      if (slot.reload === reload) return loaded;
+      reload = slot.reload;
+    }
     return true;
   }
 
@@ -243,35 +314,35 @@ export class GameAuthority {
    * node takes over ownership, where the cached copy is precisely what cannot be trusted — the
    * previous owner's moves reached this node as room broadcasts, which never touch the authority.
    *
-   * The record is swapped in only after the log read resolves, so there is no window in which the
-   * game is missing from the cache. Evicting first and loading second would open one, and a
-   * concurrent command or join landing inside it would be answered `unknown_game`.
+   * The read and installation use the same slot as cold loading and commands. A forced read
+   * always queues its own snapshot after earlier work. Missing durable state clears the resident;
+   * failed reads leave it stale, and a later call retries. Eviction invalidates delayed results.
    */
   async reloadFromLog(gameId: string): Promise<boolean> {
-    const resident = this.games.get(gameId);
-    if (!resident) {
-      const logged = await this.store.load(gameId);
-      if (logged.length === 0) return false;
-      this.games.set(gameId, this.rebuildRecord(gameId, logged));
-      return true;
-    }
-    resident.stale = true;
-    const run = resident.lock.then(() => this.refreshRecord(gameId, resident));
-    resident.lock = run.then(() => undefined, () => undefined);
-    return run;
+    const slot = this.slotFor(gameId);
+    const generation = slot.generation;
+    if (slot.record) slot.record.stale = true;
+    slot.reloads++;
+    const done = this.enqueue(gameId, slot, async () => {
+      try { return await this.refreshSlot(gameId, slot, generation); }
+      finally { slot.reloads--; }
+    });
+    slot.reload = { generation, done };
+    return done;
   }
 
   /** Preserve the command queue while replacing its state with PostgreSQL truth. */
-  private async refreshRecord(gameId: string, record: GameRecord): Promise<boolean> {
+  private async refreshSlot(gameId: string, slot: GameSlot, generation = slot.generation, revive = true): Promise<boolean> {
+    if (generation !== slot.generation) return false;
+    if (slot.record) slot.record.stale = true;
     const logged = await this.store.load(gameId);
-    if (logged.length === 0) return false;
-    const fresh = this.rebuildRecord(gameId, logged);
-    record.game = fresh.game;
-    record.events.splice(0, record.events.length, ...fresh.events);
-    record.broadcasts.splice(0, record.broadcasts.length, ...fresh.broadcasts);
-    record.broadcastSeq = fresh.broadcastSeq;
-    record.persistedSeq = fresh.persistedSeq;
-    record.stale = false;
+    if (generation !== slot.generation || this.games.get(gameId) !== slot) return false;
+    if (logged.length === 0) {
+      slot.record = undefined;
+      return false;
+    }
+    slot.record = this.rebuildRecord(gameId, logged);
+    if (revive) slot.dispose = false;
     return true;
   }
 
@@ -281,7 +352,39 @@ export class GameAuthority {
    * bound memory; a no-op for an unknown id.
    */
   evict(gameId: string): void {
-    this.games.delete(gameId);
+    const slot = this.games.get(gameId);
+    if (!slot) return;
+    slot.generation++;
+    slot.dispose = true;
+    this.releaseSlot(gameId, slot);
+  }
+
+  private slotFor(gameId: string): GameSlot {
+    let slot = this.games.get(gameId);
+    if (!slot) {
+      slot = { record: undefined, tail: Promise.resolve(), pending: 0, generation: 0,
+        dispose: false, reloads: 0, reload: undefined, coldLoad: undefined };
+      this.games.set(gameId, slot);
+    }
+    return slot;
+  }
+
+  /** Pending includes queued work, so disposal cannot create a competing lock. */
+  private enqueue<T>(gameId: string, slot: GameSlot, execute: () => Promise<T>): Promise<T> {
+    slot.pending++;
+    const run = slot.tail.then(execute);
+    const finish = (): void => {
+      slot.pending--;
+      this.releaseSlot(gameId, slot);
+    };
+    slot.tail = run.then(finish, finish);
+    return run;
+  }
+
+  private releaseSlot(gameId: string, slot: GameSlot): void {
+    if (slot.pending === 0 && (slot.dispose || !slot.record) && this.games.get(gameId) === slot) {
+      this.games.delete(gameId);
+    }
   }
 
   /**
@@ -314,7 +417,6 @@ export class GameAuthority {
       game,
       events,
       broadcasts,
-      lock: Promise.resolve(),
       broadcastSeq,
       persistedSeq: events.length - 1,
       stale: false,
@@ -358,27 +460,24 @@ export class GameAuthority {
    * resolves only after any in-flight command for the same game completes, so
    * two moves can never race. Rejections surface as {@link AuthorityError}.
    */
-  apply(gameId: string, userId: string, cmd: Command, beforeExecute?: () => Promise<void>, requestId?: string): Promise<ApplyResult> {
-    const rec = this.require(gameId);
-    const run = rec.lock.then(async () => {
-      const result = await this.applyNow(gameId, rec, userId, cmd, beforeExecute);
+  apply(gameId: string, userId: string, cmd: Command, options: ApplyOptions = {}): Promise<ApplyResult> {
+    const slot = this.games.get(gameId);
+    if (!slot || slot.dispose) throw new AuthorityError('unknown_game', `no such game ${gameId}`);
+    return this.enqueue(gameId, slot, async () => {
+      if (slot.record?.stale && !(await this.refreshSlot(gameId, slot, slot.generation, false))) {
+        throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
+      }
+      const rec = slot.record;
+      if (!rec) throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
+      const result = await this.applyNow(gameId, rec, userId, cmd, options.beforeExecute);
       // Only a successful authoritative execution confirms this exact identity.
       // Position similarity, including a different request's same move, cannot.
-      if (requestId) this.pubsub.publish(gameChannel(gameId), { t: 'commandConfirmed', gameId, requestId });
+      if (options.requestId) this.pubsub.publish(gameChannel(gameId), { t: 'commandConfirmed', gameId, requestId: options.requestId });
       return result;
     });
-    // Keep the chain alive regardless of this command's success/failure.
-    rec.lock = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
   }
 
   private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command, beforeExecute?: () => Promise<void>): Promise<ApplyResult> {
-    if (rec.stale && !(await this.refreshRecord(gameId, rec))) {
-      throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
-    }
     // Forwarded admission occurs after the lock and stale reload, before any
     // command/domain mutation or durable append. Local commands need no hook.
     if (beforeExecute) await beforeExecute();
@@ -492,7 +591,8 @@ export class GameAuthority {
     } catch (err) {
       rec.stale = true;
       try {
-        await this.refreshRecord(gameId, rec);
+        const slot = this.games.get(gameId);
+        if (slot) await this.refreshSlot(gameId, slot, slot.generation, false);
       } catch {
         // A later command must retry the durable reload before using this cache entry.
       }
@@ -591,8 +691,10 @@ export class GameAuthority {
   }
 
   private require(gameId: string): GameRecord {
-    const rec = this.games.get(gameId);
-    if (!rec) throw new AuthorityError('unknown_game', `no such game ${gameId}`);
+    const slot = this.games.get(gameId);
+    const rec = slot?.record;
+    if (!rec || slot?.dispose) throw new AuthorityError('unknown_game', `no such game ${gameId}`);
+    if (slot.reloads > 0) throw new AuthorityError('invalid_command', 'durable game reload is required');
     return rec;
   }
 }

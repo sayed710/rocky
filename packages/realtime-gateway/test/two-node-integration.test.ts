@@ -416,8 +416,9 @@ async function twoNodeHarness() {
   };
 }
 
-test('sketch: sequential moves across nodes without spurious rejections', async () => {
+test('sketch: sequential moves across nodes without spurious rejections', async (t) => {
   const { connect1, connect2, consumer1, consumer2 } = await twoNodeHarness();
+  t.after(() => { consumer1.stop(); consumer2.stop(); });
 
   const alice = connect1('alice');
   const bob = connect2('bob');
@@ -451,8 +452,9 @@ test('sketch: sequential moves across nodes without spurious rejections', async 
   consumer2.stop();
 });
 
-test('sketch: broadcasts reach spectators on both nodes', async () => {
+test('sketch: broadcasts reach spectators on both nodes', async (t) => {
   const { connect1, connect2, consumer1, consumer2 } = await twoNodeHarness();
+  t.after(() => { consumer1.stop(); consumer2.stop(); });
 
   const alice = connect1('alice');
   const bob = connect2('bob');
@@ -463,6 +465,11 @@ test('sketch: broadcasts reach spectators on both nodes', async () => {
   bob.deliver({ t: 'join', gameId: 'g1', token: 'token-bob' });
   spec1.deliver({ t: 'join', gameId: 'g1' });
   spec2.deliver({ t: 'join', gameId: 'g1' });
+
+  // The cold node must finish joining/subscribing before it can receive a move.
+  await flush();
+  assert.ok(bob.last('joined'));
+  assert.ok(spec2.last('joined'));
 
   alice.deliver({ t: 'move', gameId: 'g1', uci: 'e2e4', clientSeq: 1 });
   await flush();
@@ -483,8 +490,9 @@ test('sketch: broadcasts reach spectators on both nodes', async () => {
   consumer2.stop();
 });
 
-test('sketch: ownership can transfer after owner release', async () => {
+test('sketch: ownership can transfer after owner release', async (t) => {
   const { connect1, connect2, consumer1, consumer2, redis } = await twoNodeHarness();
+  t.after(() => { consumer1.stop(); consumer2.stop(); });
 
   const alice = connect1('alice');
   const bob = connect2('bob');

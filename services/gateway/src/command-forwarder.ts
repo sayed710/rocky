@@ -674,16 +674,18 @@ export class OwnerCommandConsumer {
         envelope.gameId,
         envelope.userId,
         envelope.cmd,
-        async () => {
-          const status = String(await this.redis.eval(START_REQUEST, 3, stateKey,
-            `game:owner:${envelope.gameId}`, `${CMD_PREFIX}:${envelope.gameId}`, raw, this.nodeId, executor, REQUEST_RETENTION_MS));
-          if (status === 'not_owner') throw new UnownedForwardedRequest();
-          if (status === 'started' || status === 'done') throw new DuplicateForwardedRequest();
-          if (status === 'expired') throw new AuthorityError('command_expired', 'Forwarded command expired before execution.');
-          if (status !== 'admitted') throw new CommandOutcomeUnknownError(envelope.requestId);
-          admitted = true;
+        {
+          beforeExecute: async () => {
+            const status = String(await this.redis.eval(START_REQUEST, 3, stateKey,
+              `game:owner:${envelope.gameId}`, `${CMD_PREFIX}:${envelope.gameId}`, raw, this.nodeId, executor, REQUEST_RETENTION_MS));
+            if (status === 'not_owner') throw new UnownedForwardedRequest();
+            if (status === 'started' || status === 'done') throw new DuplicateForwardedRequest();
+            if (status === 'expired') throw new AuthorityError('command_expired', 'Forwarded command expired before execution.');
+            if (status !== 'admitted') throw new CommandOutcomeUnknownError(envelope.requestId);
+            admitted = true;
+          },
+          requestId: envelope.requestId,
         },
-        envelope.requestId,
       );
 
       response = {

@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-06 — Launch Preparation A07: REMAINS OPEN — release Firefox 157.0 EN/AR journeys pass after one promotion-chooser correction; physical mobile/orientation and real Safari evidence unavailable on this host (external dependencies); Playwright WebKit recorded as supporting only; final-head PR gates and owner integration pending; A06 remains closed; O06 untouched and last._
+_Last updated: 2026-10-12 — R-01 PR1 D4: Qodo/Greptile lifecycle findings reproduced and corrected; authority 110/110; corrected-head full validation and renewed external gates pending; manual merge and later PRs remain owner decisions._
+
+Prior: _Last updated: 2026-10-12 — R-01 PR1 D4: stable game-slot implementation and baseline RED/focused GREEN verified; final-head validation, external review gates and owner manual merge pending; later R-01 work remains separate._
+
+Prior: _Last updated: 2026-10-06 — Launch Preparation A07: REMAINS OPEN — release Firefox 157.0 EN/AR journeys pass after one promotion-chooser correction; physical mobile/orientation and real Safari evidence unavailable on this host (external dependencies); Playwright WebKit recorded as supporting only; final-head PR gates and owner integration pending; A06 remains closed; O06 untouched and last._
 
 Prior: _Last updated: 2026-10-06 — Launch Preparation A06: CLOSED for bounded genuine manual NVDA/EN/AR/RTL/mixed-direction/Chrome 200%/low-vision evidence; eight observed defects corrected and retested; final-head delivery gates and owner integration pending; A07/O06/public-launch approval remain separate._
 
@@ -5420,3 +5424,19 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Release Mozilla Firefox 157.0 (official CDN, hash- and signature-verified) passed English and Arabic/RTL journeys: landing, UI registration, Create Game, seeks, active game, click moves, clocks, supporting portrait/landscape viewport swaps mid-game, promotion, resignation, engine analysis, profile/history, public documents and service-worker offline reload with the server stopped.
 - One correction: the promotion chooser now takes the covered board squares out of the tab order and reveals each focused choice whole. Firefox left 59 px of the focused Queen below a 570×214 viewport, and Shift+Tab could reach a square hidden behind the dialog in any engine. Covered by a hermetic unit regression with a mutation check.
 - **A07 REMAINS OPEN**: no physical phone/tablet, adb target or real Safari environment exists on this host; nothing was purchased or registered. Playwright WebKit is supporting compatibility evidence only, not Safari. Release-Firefox keyboard focus order is not credited (automation window never held focus). CI remains Chromium-only, with the reasoning recorded. A06 remains closed; O06 untouched and last; not public-launch approval.
+
+
+### 2026-10-12 — R-01 PR1: stable hydration and game-slot lifetime
+
+- Owner-authorized D4 only on main 84b3d9d. Fresh disposable Redis/PostgreSQL reproduction confirmed late cold-load cache rollback and false legal Black refusal.
+- Stable slot serialization, single-flight cold loading, separately queued forced reads, generation-aware delayed installation and deferred eviction implemented; existing R-03 admission and exact receipt semantics preserved through ApplyOptions.
+- See [verification and limitations](audits/R01_D4_STABLE_HYDRATION_2026-10-12.md) and [ADR-0159](adr/0159-stable-game-slot-hydration.md). Authority suite 105/105 and initial focused real-service suite 50/50; initial full gateway run had a recorded Redis connectivity/readiness failure and is not passing evidence.
+- Final-head full gates, independent review, CI/Qodo/Greptile and owner manual merge remain pending. PR #106/#107 branches and original R-01 audit fixture are unchanged. No later PR, production migration, deployment or merge authorized by this milestone.
+
+
+### 2026-10-12 — R-01 PR1 lifecycle review corrections
+
+- Qodo's three valid edge cases reproduced with four failing tests: failed forced reads swallowed for resident/cold joiners, creation evicted during initial append, and generation-invalidated joins treated as missing.
+- Forced reload errors now propagate through a separate result promise; ordinary invalidated callers retry the current lifecycle; successful durable creation restores residency. Added a cold-then-forced-failure regression. Authority suite 110/110 passes.
+- Greptile's additional valid real-service scheduling gap corrected: takeover/reclaim tests now wait for the actual forced reload request before releasing the older read. No D3 or later scope added.
+- Published-head CI/reviews from a70043c are superseded by these corrections. Renewed full gates and exact-head external reviews remain required before owner readiness; no merge or deployment.
