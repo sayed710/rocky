@@ -411,6 +411,19 @@ If an issue is detected during or after deployment:
   list, or a list that does show `gambit` — is *unknown*: the deploy fails with an `::error::`
   carrying the helm error, and **nothing was changed**. Check cluster connectivity and credentials
   (the `KUBECONFIG` secret, API server reachability, RBAC on the Helm release Secrets), then re-run.
+- **Pre-flight: does anything of the release still live?** *Absent* only means Helm has no record of
+  `gambit`; its objects can outlive that record (for example when its release Secrets were deleted).
+  `helm upgrade --install` would then adopt every object annotated `meta.helm.sh/release-name=gambit`,
+  and a failed `--atomic` install or the uninstall after a failed smoke check would delete them. So
+  before an absent release counts as absent, `pre_upgrade` lists the kinds the chart renders
+  (Deployments, StatefulSets, Services, ConfigMaps, Secrets, Ingresses, NetworkPolicies, and
+  ExternalSecrets when the cluster serves that API) by the label `app.kubernetes.io/instance=gambit`
+  and by that annotation (`scripts/recovery-ownership.mjs inventory`; names and the one annotation
+  only, never Secret data). If anything is found, the deploy fails with an `::error::` naming every
+  object and **nothing was changed**: recover the release (restore its Helm release records) or adopt
+  or remove those objects deliberately, then re-run. If any of these `kubectl` queries fails, the
+  result is unknown and refused the same way: fix `kubectl` access (API discovery, RBAC to list those
+  kinds in the namespace) and re-run. An empty namespace installs as before.
 - **Pre-flight: is there a rollback target?** A deploy over an existing release does not start
   without a verified automatic rollback target (owner decision, 2026-10-11; see below for what
   "verified" means). A `rolling` deploy whose pre-upgrade history proves none fails in `pre_upgrade`
@@ -420,8 +433,9 @@ If an issue is detected during or after deployment:
 - **Automatic rollback after a failed post-deploy check**: When `helm upgrade` succeeds but the smoke
   check fails, the workflow's rollback step acts on what it recorded *before* the upgrade:
   - a failed **initial install** (absence positively established, `release_exists` exactly `false`)
-    is uninstalled, but only after a fresh `helm history gambit -o json` shows exactly one revision,
-    revision 1 — the release this run created. Otherwise the step refuses: no uninstall, no rollback;
+    is uninstalled, but only after a fresh `helm history gambit -o json --max 256` shows exactly one
+    revision, revision 1, deployed and carrying this run's marker (below) — the release this run
+    created. Otherwise the step refuses: no uninstall, no rollback;
     inspect `helm history gambit` and remove or roll back manually;
   - otherwise (`release_exists` exactly `true`) it runs `helm rollback gambit <rev> --wait --timeout 5m0s` only to the revision the
     `pre_upgrade` step verified (`scripts/resolve-rollback-revision.mjs`): the single revision with
@@ -444,6 +458,46 @@ If an issue is detected during or after deployment:
     (and canary/blue-green still refuse it because the newest revision is not the deployed one).
     Should the rollback step still find no verified target, or a `release_exists` other than exactly
     `true`/`false`, it **refuses**: no rollback, no uninstall, and an `::error::` naming the reason.
+  - **Only the run's own revision is recovered.** Helm has no lock on a release, so an operator (or
+    another tool) can upgrade, roll back or reinstall it between `pre_upgrade` and the rollback step.
+    The workflow's `helm upgrade --install` therefore records `--description "gambit-deploy
+    <run id>-<attempt> <version>"`, and before uninstalling or rolling back the step re-reads
+    `helm history gambit -o json --max 256` and requires that the newest revision is exactly the
+    pre-upgrade newest + 1 (revision 1 after an initial install), is `deployed`, carries this run's
+    marker, and (for a rollback) that the verified target is still in the history
+    (`scripts/recovery-ownership.mjs check`). Otherwise it refuses with an `::error::` saying what
+    changed (for example "the newest revision is 4, but this run's upgrade can only have created
+    revision 3 … another writer changed release gambit") and prints the history. Then find out who
+    changed the release (`helm history gambit` shows each revision's description), decide which
+    revision should serve, and roll back manually. A writer acting in the moment between this check
+    and the `helm` command it guards is not excluded (no compare-and-swap in Helm); see ADR-0076.
+  - **History window.** Helm returns only the newest `--max` records of `helm history` (256 by
+    default; `--max 0` returns none in v3.16.3), so the workflow asks for `--max 256` and refuses a
+    history of 256 or more entries before the upgrade (and in the rollback step's re-read): an older
+    disqualifying record could hide beyond the window. Helm prunes stored history to `--history-max`
+    (default 10) on each upgrade, so this only happens when that limit was disabled; review the
+    release's records and reduce them below 256 before re-running.
+  - **When the step runs.** Exactly when post-deploy verification failed:
+    `if: failure() && steps.smoke_check.outcome == 'failure'`. `scripts/check-deploy-gates.mjs`
+    (gate 11) fails on any other condition (`always()`, `false`, a missing `if:`), on an upgrade
+    without `--description "$DEPLOY_MARKER"`, on an uninstall or rollback without the history
+    re-read and ownership check, on RELEASE_EXISTS=false before the inventory, and on a
+    `helm history` without `--max 256`.
+  - **Accepted limitations.** (1) There is no compare-and-swap or lease on a Helm release, so a
+    writer acting between the ownership re-check and the `helm rollback` / `helm uninstall` it
+    guards is not detected. The window is a few seconds, but it exists. Leave deploys of an
+    environment to the workflow (its `concurrency` group queues them) and do not upgrade by hand
+    while a deploy runs. (2) Release state is only what Helm's storage holds: the Secrets labelled
+    `owner=helm,name=gambit` in the kubeconfig context's namespace (Helm's default Secret driver).
+    A release recorded elsewhere (another namespace or `HELM_DRIVER`) is invisible to the existence
+    check and the history re-read. The inventory covers only that one namespace and the chart's
+    rendered kinds, so it does not see StatefulSet PersistentVolumeClaims or Pods, for example.
+    (3) `helm uninstall --wait --timeout 5m0s` waits only for the objects it deleted from the
+    release manifest (Helm v3.16.3 `pkg/action/uninstall.go`, `WaitForDelete(deletedResources)`).
+    Objects kept by `helm.sh/resource-policy: keep` and PVCs created from `volumeClaimTemplates`
+    remain. If the wait times out, the step fails, but the deletion was already requested and the
+    release records are purged anyway. Check
+    `kubectl get deploy,sts,svc,cm,pvc -l app.kubernetes.io/instance=gambit` before re-running.
 
   When the step refuses, inspect `helm history gambit`, choose the last revision that served
   healthily (normally the one that was `deployed` before this run), and roll back to it explicitly:
