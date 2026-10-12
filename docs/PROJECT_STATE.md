@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-12 — R-01 PR2 D3: merged PR1 verified; real Redis/PG RED reproduced and admission repair focused GREEN; full validation and exact-head gates pending; owner manual merge required._
+_Last updated: 2026-10-13 — R-01 PR2 D3: normal PR #106 integration and expiry-generation correction verified; full local gates complete, fresh published-head external gates pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-12 — R-01 PR2 D3: owner-merged PR #106 integrated normally after checkpoint; R-04 consumer cleanup preserved, no conflicts; integrated validation and fresh exact-head reviews pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-12 — R-01 PR2 D3: merged PR1 verified; real Redis/PG RED reproduced and admission repair focused GREEN; full validation and exact-head gates pending; owner manual merge required._
 
 Prior: _Last updated: 2026-10-12 — R-01 PR1 D4: Qodo/Greptile lifecycle findings reproduced and corrected; authority 110/110; corrected-head full validation and renewed external gates pending; manual merge and later PRs remain owner decisions._
 
@@ -5450,3 +5454,12 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Immutable claim/lifecycle tickets, bounded isolated Redis comparison and synchronous final admission check refuse obsolete waiting intents before mutation/persistence. Reclaim, hydration changes, expiry/timeout, lifecycle/reload races and exact early-refusal tombstones are covered; admitted first work may finish.
 - [Verification](audits/R01_D3_OWNERSHIP_ADMISSION_2026-10-12.md) and [ADR-0160](adr/0160-execution-time-ownership-admission.md): authority 113/113; focused real-service/ownership/R-03 47/47 before the last test; final focused R-03/admission 30/30, all zero skips. A new-test missing-import failure was fixed and receives no passing credit. Full clean-install and independent/external gates remain pending here.
 - PR #106/#107 inspected read-only and remain separate. No revision contract, recovery, draw propagation, grants/fencing, capacity policy, production migration, deployment or merge. Minimal D3 is not PostgreSQL fencing; public multi-gateway production still requires the separately staged strong fence.
+
+- Owner later merged PR #106 at `dd7fec5751f1501e10659a66ed940d5c5b2ceacb`. Fresh mandatory preflight verified GitHub/fetched main; all D3 work preserved in `c6dc537`, then clean normal integration produced `0a9532b` without conflicts. Consumer releaseExpiryCopy and R-04 regressions preserved; web matches main exactly. Pre-integration full build/lint, 19 hermetic workspaces, gateway 132/132, scripts 333/333 and eight guards passed; these and the interrupted post-fix review are not final integrated-head approval. Renewed combined regression/full validation and independent/external gates remain required.
+
+- Integrated gates passed: workspace 4,164; gateway 141; focused 75; Chromium 285 (zero retries); scripts 333; load 86; Nginx 20; eight guards. Recorded POSIX invocation failures were corrected through explicit container setup only. Integrated Gemini review reported zero findings but final source inspection then reproduced delayed same-node reclaim/renewal resurrection of an expired ticket. Corrected expiry invalidation and two deterministic schedules pass (admission 11/11, corrected full real Redis/PG gateway 143/143). Renewed post-fix/exact-head gates remain required; prior approval is superseded.
+
+### 2026-10-13 — R-01 PR2 integrated candidate validation
+
+- Corrected full build/lint and all 19 hermetic workspaces passed (4,164 tests); clean Linux real Redis/PG gateway 143/143, persistence PostgreSQL 210/210, API PostgreSQL 109/109, scripts 333/333, backup/restore 2/2 and eight guards passed. Supporting integrated Nginx 20/20, load 86/86 and POSIX API/load 2/2 plus 1/1 passed. Serial Chromium completed 285/285 with unchanged assertions/timeouts and zero retries/skips; prior Windows preview crash and four-worker 283/285 failures are retained without passing credit.
+- Gemini 3.8 Flash High/high effort corrected post-fix review completed read-only with zero actionable findings (agy 1.3.3, project 73b4e941-2e21-4bb1-b185-a0f6419be3ad, conversation 73f721cd-5cc5-4b4e-a1df-7eb488e0d955). Final published-head CI, Qodo Bugs/Rules/Requirements zero, Greptile, resolved threads and independent exact-head review remain required. Main still verified at dd7fec5751f1501e10659a66ed940d5c5b2ceacb; owner merge only; later R-01 scope remains separate.

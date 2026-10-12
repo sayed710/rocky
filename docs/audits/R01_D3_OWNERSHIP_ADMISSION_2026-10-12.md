@@ -10,8 +10,8 @@ at 19:46:54 UTC. Historical R-01 audit and PR1 worktrees were read only.
 Original verification/remediation-design reports remain authoritative for their
 recorded baseline and limitations.
 
-PR #106 remains OPEN at `d03298510b995a6018af6764f1053431267fce28`;
-#107 remains OPEN at `cf1bc030c63b97cb2b4a25b8581b4f514f054360`.
+At initial preflight PR #106 was OPEN at `d03298510b995a6018af6764f1053431267fce28`;
+#107 was OPEN at `cf1bc030c63b97cb2b4a25b8581b4f514f054360`.
 #106 overlaps consumer cleanup; #107 has no D3 source overlap. Neither was merged
 or cherry-picked. Future #106 integration must run its temporary expiry-copy
 cleanup plus R-03/R-04 exact receipt, authentication, readiness and expiry
@@ -98,3 +98,84 @@ Qodo Bugs/Rules/Requirements zero, fresh exact-head Greptile and resolved review
 threads are required before owner-ready delivery. Any new push invalidates older
 exact-head approvals. Actual publication/final-head results are reported
 separately; pending gates are not treated as passed.
+
+## Owner-merged PR #106 integration checkpoint
+
+The owner subsequently merged #106 at 20:22:59 UTC on 2026-10-12. Required fresh
+status/worktree/branch/fetch checks verified origin/main and GitHub main at
+`dd7fec5751f1501e10659a66ed940d5c5b2ceacb`. The full D3 candidate, including
+previously uncommitted tests/docs, was preserved as checkpoint `c6dc537`;
+existing evidence and a tracked patch were retained outside the worktree.
+
+From a clean feature branch a normal merge produced
+`0a9532b7d1729c4905a33d3ac7c0a9452c082554`, with no conflicts. PR #106's
+UnownedForwardedRequest releaseExpiryCopy cleanup and both its deterministic
+and actual Redis/PostgreSQL regressions are present. Web files are byte-identical
+to merged main; there is no R-04 source modification in the D3 delta.
+
+Before integration, full build/lint, all 19 hermetic workspaces, clean Linux
+gateway 132/132, script tests 333/333 and eight repository guards passed.
+Those are historical pre-integration results, not integrated-head approval.
+The in-progress post-fix Gemini run was interrupted at the owner's integration
+request after entering a background-task wait; retained partial logs receive no
+review approval credit. Fresh integrated/exact-final-head reviews and all
+mandatory validation are required. No force push, discarded work, main-branch
+write, PR merge or production migration occurred.
+
+## Integrated validation and final source-review correction
+
+At the merged checkpoint the full build/lint and 19 hermetic workspaces passed
+(4,164 tests); Linux gateway 141/141, focused regression matrix 75/75, authority
+113/113, browser Chromium 285/285 with retries disabled, script tests 333/333,
+load unit 86/86, real Nginx trusted-edge/web-delivery 20/20 and all eight guards
+passed. All counted suites had zero failures and skips.
+
+The first POSIX load invocation lacked the deploy folder in the gateway image;
+the corrected invocation mounted that folder read-only and passed 1/1. The first
+API POSIX container invocation lacked an init process and failed detached-worker
+liveness verification (1 pass/1 fail); unchanged source with Docker --init passed
+2/2. Failed invocations are retained and are not passing evidence. No unrelated
+worker fix was made.
+
+Integrated Gemini 3.8 Flash High/high effort, agy 1.3.3, read-only completed
+20:32:23–20:38:41 UTC, project a624cea0-05e1-4003-9b32-3807b62d9ba3,
+conversation d5bc9fe1-bfc7-4f27-ad06-3dbcea5c5584. It reported zero actionable
+findings, with readOnlyViolation false. This checkpoint review is historical;
+it is not approval for subsequent changes or the eventual published HEAD.
+
+Final source inspection then reproduced an additional D3 ABA schedule: after
+local expiry, a same-node SET NX reclaim creates the actual key but its reply
+is held; periodic renewal refreshes the old local generation before that reply.
+The deterministic test failed (old ticket current: true, expected false).
+Expired tracking is now invalidated before claim I/O and before renewal; a late
+renewal response crossing local expiry also cannot resurrect continuity. New
+claims create new tickets and reload debt. Both schedules pass among the final
+11 deterministic admission tests. The corrected full Linux Redis/PostgreSQL
+gateway suite passes 143/143, zero skips. Fresh post-fix/exact-head review and
+publication checks are required after this correction.
+
+Corrected post-fix Gemini review completed read-only at 20:45:29–20:52:53 UTC,
+project 73b4e941-2e21-4bb1-b185-a0f6419be3ad, conversation
+73f721cd-5cc5-4b4e-a1df-7eb488e0d955: zero actionable findings,
+readOnlyViolation false. Model/effort/agy version remained Gemini 3.8 Flash
+High/high/1.3.3; no fallback. Final published-head review remains a separate gate.
+
+Corrected full build/lint and workspace 4,164/4,164 passed; script unit 333/333,
+eight guards, API PostgreSQL 109/109 and persistence PostgreSQL 210/210 passed,
+all zero skips. Persistence's first run was 209/210 because its redaction test
+requires a non-empty password but the disposable trust-auth URL omitted one;
+the corrected full invocation supplied an explicit disposable test password.
+The first script PostgreSQL invocation in the gateway image lacked pg_dump and
+Docker; unchanged tests on the host using existing Docker tooling passed 2/2.
+
+The first corrected browser run lost Vite preview with Windows exit 0xC0000409
+and was interrupted, not credited. The next four-worker run finished 283/285;
+achievements visibility and analysis enabled assertions timed out with pending
+HTTP requests in the retained traces. A serial full run uses the original
+assertions/timeouts and zero retries; its result is recorded separately.
+No web or unrelated worker source fix was made for these environment failures.
+
+The serial full Chromium run completed 285/285 (9.1 minutes), zero skips and
+zero retries, using unchanged assertions and timeouts. This separate passing
+run does not erase the retained failed invocations or establish their root cause.
+Final publication, CI and external exact-head gates remain separate.

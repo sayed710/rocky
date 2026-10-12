@@ -19,6 +19,7 @@ class LeaseRedis {
   owner: string | null = null;
   expires = 0;
   compare: (() => Promise<void>) | undefined;
+  claimReply: (() => Promise<void>) | undefined;
   connectError = false;
   disconnected = 0;
   options: RedisOptions | undefined;
@@ -26,7 +27,8 @@ class LeaseRedis {
   current() { return this.now < this.expires ? this.owner : null; }
   async set(_key: string, node: string, _ex: string, seconds: number) {
     if (this.current()) return null;
-    this.owner = node; this.expires = this.now + seconds * 1000; return 'OK';
+    this.owner = node; this.expires = this.now + seconds * 1000;
+    await this.claimReply?.(); return 'OK';
   }
   async get() { return this.current(); }
   async eval(script: string, _n: number, _key: string, node: string, seconds?: string) {
@@ -102,6 +104,40 @@ test('D3: generation change during takeover hydration refuses the original inten
   assert.equal((await f.store.load('g')).length, 1);
   assert.equal(f.frames.length, 0);
   assert.equal((await f.router.route('g', 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
+});
+
+test('D3: renewal cannot revive an expired ticket while a same-node reclaim reply is pending', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t), entered = barrier(), reply = barrier();
+  const ticket = f.registry.captureTicket('g'); assert.ok(ticket);
+  f.redis.now = 30001;
+  f.redis.claimReply = async () => { entered.resolve(); await reply.done; };
+  const reclaim = f.registry.claim('g'); await entered.done;
+  f.registry.startRenewal(); t.after(() => f.registry.stopRenewal());
+  t.mock.timers.tick(15000);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const revived = f.registry.isTicketCurrent(ticket);
+  reply.resolve(); await reclaim;
+  assert.equal(revived, false, 'a renewed same-node key must not resurrect the previous claim generation');
+  assert.equal(f.registry.isTicketCurrent(ticket), false);
+  assert.ok(f.registry.captureTicket('g'));
+});
+
+test('D3: a renewal acknowledgement crossing local expiry cannot revive its ticket', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const f = await fixture(t), entered = barrier(), reply = barrier();
+  const ticket = f.registry.captureTicket('g'); assert.ok(ticket);
+  const evalRedis = f.redis.eval.bind(f.redis);
+  f.redis.eval = async (...args) => {
+    const result = await evalRedis(...args);
+    entered.resolve(); await reply.done; return result;
+  };
+  f.registry.startRenewal(); t.after(() => f.registry.stopRenewal());
+  t.mock.timers.tick(15000); await entered.done;
+  f.redis.now = 30001; reply.resolve();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.registry.isTicketCurrent(ticket), false);
+  assert.equal(f.registry.captureTicket('g'), undefined);
 });
 
 for (const failure of ['expiry', 'generation', 'lifecycle', 'reload'] as const) {

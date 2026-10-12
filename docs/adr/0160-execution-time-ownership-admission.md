@@ -11,6 +11,8 @@ hydration or waiting: node identity, registry claim generation and GameAuthority
 slot lifecycle generation. Registry identity persists independently of router
 reload debt. Continuous renewals keep identity; new claims, release and detected
 loss invalidate old tickets. Slot generations are never reused after recreation.
+Local expiry ends continuity: claim invalidates expired tracking before I/O,
+and renewal checks expiry before dispatch and after its acknowledgement.
 
 After takeover reload, application enters PR1's stable slot. Admission requires
 current identity, settled reload debt, conservative local expiry and a matching

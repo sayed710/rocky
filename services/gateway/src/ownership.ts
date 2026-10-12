@@ -192,6 +192,9 @@ export class OwnershipRegistry {
    * returns the owner's node ID.
    */
   async claim(gameId: string): Promise<ClaimResult> {
+    // An expired local generation cannot be renewed into continuity while a new
+    // claim acknowledgement is pending. New intents must acquire a new ticket.
+    if (!this.holdsValidLease(gameId)) this.forgetClaim(gameId);
     const startedAt = this.monotonicNow();
     const key = ownerKey(gameId);
     // SET NX EX — atomic claim with a real key-level TTL.
@@ -337,6 +340,11 @@ export class OwnershipRegistry {
   async release(gameId: string): Promise<void> {
     const key = ownerKey(gameId);
     // Invalidate before I/O so a queued command cannot be admitted during release.
+    this.forgetClaim(gameId);
+    await this.redis.eval(RELEASE_LUA, 1, key, this.nodeId);
+  }
+
+  private forgetClaim(gameId: string): void {
     this.claimGeneration.delete(gameId);
     this.leaseExpiryMs.delete(gameId);
     if (this.ownedGames.delete(gameId)) {
@@ -344,7 +352,6 @@ export class OwnershipRegistry {
       this.ownedGamesGauge?.set(this.ownedGames.size);
       this.onReleased?.(gameId);
     }
-    await this.redis.eval(RELEASE_LUA, 1, key, this.nodeId);
   }
 
   /** Release all owned games. Called during graceful shutdown. */
@@ -392,12 +399,20 @@ export class OwnershipRegistry {
    */
   private async renewAll(): Promise<void> {
     for (const gameId of [...this.ownedGames]) {
+      if (!this.holdsValidLease(gameId)) {
+        this.forgetClaim(gameId);
+        continue;
+      }
       const generation = this.claimGeneration.get(gameId);
       const startedAt = this.monotonicNow();
       try {
         const stillOurs = await this.renewLease(gameId);
         // A renewal begun before release/reclaim must never resurrect the old lease.
         if (this.claimGeneration.get(gameId) !== generation) continue;
+        if (!this.holdsValidLease(gameId)) {
+          this.forgetClaim(gameId);
+          continue;
+        }
         if (!stillOurs) {
           // Lost ownership — another node claimed after our key expired.
           this.leaseExpiryMs.delete(gameId);
