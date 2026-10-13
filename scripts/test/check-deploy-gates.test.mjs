@@ -84,6 +84,10 @@ for (const write of [
   `echo "it's 5" > "$RESOLVED"; sed 's/a/b/' f`,
   `printf "don't" 1> "$RESOLVED" # it's`,
   `echo "it's" >> "$RESOLVED"; x='y'`,
+  // Quote forms a quote-state scan misreads: ANSI-C quoting (`\'` does not end $'...') and an
+  // apostrophe inside a backtick substitution within double quotes.
+  `echo $'it\\'s' > "$RESOLVED"; sed 's/a/b/' /dev/null`,
+  `echo "\`printf "it's"\`" > "$RESOLVED"; sed 's/a/b/' /dev/null`,
 ]) {
   test(`rejects another write to the resolver's output file: ${write.replace(/\r/g, '\\r').replace(/\n/g, '\\n')}`, () => {
     const text = mutate(PREV_REV_LINE, `${write}\n              ${PREV_REV_LINE}`);
@@ -104,15 +108,22 @@ for (const other of [
   });
 }
 
-// Inside single quotes nothing redirects: a literal that mentions a redirection is not a write.
+// Fail-closed: quoting is not parsed, so a redirection mentioned inside a single-quoted literal or an
+// inline comment is still counted as a write (a false positive only fails the gate).
 for (const literal of [
   `echo 'example: 1> "$RESOLVED" next'`,
   `echo 'example: > $RESOLVED next'`,
 ]) {
-  test(`does not count a single-quoted literal as a write to the resolver's output: ${literal}`, () => {
-    assert.deepEqual(checkRollbackTarget(mutate(PREV_REV_LINE, `${literal}\n              ${PREV_REV_LINE}`)), []);
+  test(`counts a redirection mentioned in a single-quoted literal (fail-closed): ${literal}`, () => {
+    const text = mutate(PREV_REV_LINE, `${literal}\n              ${PREV_REV_LINE}`);
+    assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs, found 2 write/);
   });
 }
+
+test('counts a redirection mentioned in an inline comment (fail-closed): echo x # example: > "$RESOLVED"', () => {
+  const text = mutate(PREV_REV_LINE, `echo x # example: > "$RESOLVED"\n              ${PREV_REV_LINE}`);
+  assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs, found 2 write/);
+});
 
 test('the real deploy.yml with CRLF line endings passes gate 10', () => {
   assert.deepEqual(checkRollbackTarget(deployYml.replace(/\r/g, '').replace(/\n/g, '\r\n')), []);

@@ -136,6 +136,9 @@ for (const write of [
   `printf 'release_existence=absent\\n' > "$EXISTENCE_FILE"''`,
   // An apostrophe inside double quotes is a literal, not the start of a single-quoted segment.
   `echo "it's absent" > "$EXISTENCE_FILE"; sed 's/a/b/' f`,
+  // Quote forms a quote-state scan misreads: ANSI-C quoting and a backtick substitution.
+  `echo $'it\\'s' > "$EXISTENCE_FILE"; sed 's/a/b/' /dev/null`,
+  `echo "\`printf "it's"\`" > "$EXISTENCE_FILE"; sed 's/a/b/' /dev/null`,
 ]) {
   test(`rejects a forged verdict written to the classifier output file: ${write.replace(/\n/g, '\\n')}`, () => {
     const text = mutate(EXISTENCE_READ, `${write}\n            ${EXISTENCE_READ}`);
@@ -143,9 +146,9 @@ for (const write of [
   });
 }
 
-test('does not count a single-quoted literal that mentions a redirection as a write to the classifier output file', () => {
+test('counts a redirection mentioned in a single-quoted literal as a write to the classifier output file (fail-closed)', () => {
   const text = mutate(EXISTENCE_READ, `echo 'example: 1> "$EXISTENCE_FILE" next'\n            ${EXISTENCE_READ}`);
-  assert.deepEqual(checkReleaseExistence(text), []);
+  assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
 });
 
 test('rejects the classifier stdout redirected to a file other than the one RELEASE_EXISTENCE is read from', () => {
