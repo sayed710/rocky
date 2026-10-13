@@ -330,12 +330,15 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
 ## HIST-WIN-WORKER — historical Windows worker / Signature B failures
 
 - **State / relevance / evidence:** historical, cause unknown. [O10 audit](LAUNCH_O10_WINDOWS_SIGNATURE_B_VERIFICATION_2026-10-05.md)
-  records three bounded readable runs on `5ee3441` with zero Signature B captures;
+  records three bounded readable runs on
+  `5ee3441222e94a30f31e0e630bfd941dc3eaec44` with zero Signature B captures;
   O10's bounded verification closed, **not a root-cause repair**. It distinguishes
   API DB-backed execution from persistence suites not exercised. E-MAIN PROJECT_STATE
   and [R-01 D3 audit](R01_D3_OWNERSHIP_ADMISSION_2026-10-12.md) retain unsuccessful
   Windows invocations; unrelated #107 body also records whole-file API crashes before
   passing repeats. Similar symptoms alone do not establish a common cause.
+  O10's diagnostic glob had one POSIX assertion failure and nine skips per run;
+  these runs are readable diagnostic evidence, not passing full-suite CI.
 - **Follow-up / dependency / boundary / assignment / closure:** unassigned diagnostic
   follow-up if it recurs, separate PR only after reproducible cause. Preserve exact
   SHA, Node/OS, exit status, diagnostic capture and suite coverage; no speculative
@@ -351,6 +354,10 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
   passed 285. Consult the audit and [final delivery](https://github.com/sayed710/rocky/pull/109#issuecomment-6134157203)
   for baseline/head progression; no causal remediation was established. These failures
   are not evidence that the final suite failed, and later GREEN does not erase them.
+  Source checkpoint is the audit at E-MAIN (`9dda14b`), covering the integrated D3
+  candidate after base `dd7fec5`. The committed browser-failure paragraph does not
+  identify an exact per-invocation candidate SHA; recover it from retained run
+  provenance before a causal comparison. Do not assign final #109 HEAD to that run.
 - **Follow-up / dependency / boundary / assignment / closure:** unassigned; preserve
   exact invocation/concurrency/head and logs, capture preview exit/diagnostics on
   recurrence, then propose a focused diagnostic repair if causal evidence warrants.
