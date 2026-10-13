@@ -25,6 +25,9 @@
  *  10. The automatic rollback targets only the revision scripts/resolve-rollback-revision.mjs verified
  *      (no inline revision selection such as history[history.length - 1]); PREV_REV is read only from
  *      the file the resolver writes its output to.
+ *  Gates 10 and 11 pin each evidence temp file ("$RESOLVED", "$EXISTENCE_FILE", "$INV_VERDICT",
+ *  "$MARKER_FILE") to a positive allowlist of references (checkEvidenceReferences): its mktemp, its
+ *  one producer, its sed reads and its publication; any other reference fails the gate.
  *  11. Release existence is never derived from a bare `helm status` exit code: RELEASE_EXISTS=false is
  *      set only by the confirmed-absence arm of scripts/release-existence.mjs's classification (status
  *      not-found AND an empty `helm list --all`), and the rollback step uninstalls only behind a fresh
@@ -179,37 +182,79 @@ function checkDeployGates() {
 }
 
 /**
- * The writes to "$file" in `shellText` (gates 10 and 11). Pass every non-comment line, echo lines
- * included. Counted:
- * - any output redirection onto it: an optional fd number or `&` (so `1>`, `2>`, `&>`, ...), then
- *   `>`, `>>`, `>|`, `>&` or `<>`, optional whitespace, then the target;
- * - `tee [flags] [other files] <target>`.
- * The target is `"$file"`, `"${file}"`, `$file` or `${file}`, ending at a word boundary of the shell
- * (whitespace, `;`, `&`, `|`, `(`, `)`, `<`, `>`, a quote or end of line), so `$file_OLD` is another
- * file while `"$file"""` (an empty quote concatenated on) is the same one.
+ * Positive reference allowlist for the temp files whose contents become trusted evidence (gates 10
+ * and 11): "$RESOLVED" (the verified rollback target), "$EXISTENCE_FILE" (the release existence
+ * verdict), "$INV_VERDICT" (the orphan inventory verdict) and "$MARKER_FILE" (the run marker).
  *
- * Before matching, backslash-newline continuations are joined into a space. Nothing else is
- * normalised.
+ * Contract: every reference to the protected variable in the workflow text must be a whole logical
+ * line matching one of the variable's allowed forms (`forms`), each line naming the variable exactly
+ * once, and every form marked `once` must appear exactly once. Any other reference fails the gate,
+ * whatever it is: a write by any redirection or tee, a read, an alias (`X=$RESOLVED`), cp / mv /
+ * sed -i, an fd opened with exec, eval, an indirect name (`v=RESOLVED; ... ${!v}`, `declare`,
+ * `printf -v`) or merely a different quoting. A reference is any occurrence of the NAME as an
+ * identifier token (`(?<![A-Za-z0-9_])NAME(?![A-Za-z0-9_])`), with or without `$`, braces or quotes,
+ * so a bare name counts too, while `$RESOLVED_OLD` is another variable.
  *
- * Fail-closed contract: any text that looks like a redirection or tee onto the file counts as a
- * write, even inside single or double quotes, an inline comment or a multi-line string
- * (`echo 'see > $file'`, `echo x # > "$file"`, `$file"x"`). This is deliberate. Without a shell
- * parser, quoting cannot be judged reliably: ANSI-C quotes (`$'it\'s'`) and backtick substitutions
- * inside double quotes have both hidden real writes from a quote-masking scan. A false positive only
- * fails the gate, while a miss lets a second writer through.
+ * Guarantee: within the workflow text, nothing refers to an evidence file other than its mktemp,
+ * its one producer (whose stdout is redirected to it), its sed reads and (for "$RESOLVED") its
+ * publication to $GITHUB_OUTPUT. In particular no second writer can name it.
  *
- * This is a pattern check, not a shell parser. Out of scope: writers that are not redirections or tee
- * (cp, mv, sed -i, dd of=, ...), writes through an fd opened earlier (`exec 3> ...; ... >&3`), aliases
- * of the path in another variable, and heredoc bodies. The behavioural snapshot tests are the primary
- * guard; this only keeps the obvious second writer out.
+ * Normalisation, as bash does it: CR is stripped and backslash-newline is removed entirely (not
+ * replaced by a space), so a name split across a continuation is spliced back together. Because
+ * YAML strips the run block's indentation before bash sees the script, the check runs twice — once
+ * keeping the whitespace after a continuation and once removing it — and a line fails if it fails
+ * either way. Comment lines are dropped unless they continue the previous line; text after an inline
+ * `#` is not stripped, so a mention in an inline comment or in a quoted literal fails (fail-closed:
+ * without a shell parser quoting cannot be judged, and a false positive only fails the gate).
+ *
+ * Out of scope: writing the same temp path through a variable that never names the protected one
+ * (infeasible by construction, as the path comes from mktemp and is never copied elsewhere — any
+ * such copy is itself a reference), a name assembled from pieces at run time (`x=RESOL; y=${x}VED`),
+ * YAML-level escapes inside quoted scalars, and anything outside this workflow step (other steps'
+ * processes, actions, the runner). This is still a static check, not a shell parser: the behavioural
+ * snapshot tests remain the primary guard.
+ *
+ * @param {string} workflowText The workflow text (comments included; they are dropped here).
+ * @param {string} name The protected variable's name.
+ * @param {{ label: string, re: RegExp, once?: boolean }[]} forms The allowed whole-line forms.
+ * @returns {string[]} Problems (empty when every reference is an allowed form).
  */
-function writesTo(shellText, file) {
-  const text = shellText.replace(/\\\r?\n/g, ' ');
-  const target = `(?:"\\$${file}"|"\\$\\{${file}\\}"|\\$${file}|\\$\\{${file}\\})(?=[\\s;&|()<>"']|$)`;
-  const redirects = text.match(new RegExp(`(?:[0-9]+|&)?(?:>>|>\\||>&|>|<>)\\s*${target}`, 'gm')) ?? [];
-  const tees = text.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s${target}`, 'gm')) ?? [];
-  return [...redirects, ...tees];
+export function checkEvidenceReferences(workflowText, name, forms) {
+  const raw = workflowText.replace(/\r/g, '').split('\n');
+  // A comment line is dropped unless the line before it ends with a continuation backslash.
+  const kept = raw.filter((line, i) => !/^\s*#/.test(line) || (i > 0 && /\\$/.test(raw[i - 1]))).join('\n');
+  const variants = [kept.replace(/\\\n/g, ''), kept.replace(/\\\n[ \t]*/g, '')]
+    .map((text) => text.split('\n').map((line) => line.replace(/[ \t]+/g, ' ').trim()));
+  const token = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, 'g');
+  const offending = new Set();
+  const badCounts = new Set();
+  for (const lines of variants) {
+    const refs = lines.filter((line) => (line.match(token) ?? []).length > 0);
+    for (const line of refs) {
+      if (line.match(token).length !== 1 || !forms.some((form) => form.re.test(line))) offending.add(line);
+    }
+    for (const form of forms.filter((f) => f.once)) {
+      const n = refs.filter((line) => line.match(token).length === 1 && form.re.test(line)).length;
+      if (n !== 1) badCounts.add(`\`${form.label}\` must appear exactly once, found ${n}`);
+    }
+  }
+  const allowed = `"$${name}" may only be referenced in its allowed forms [${forms.map((f) => f.label).join(' | ')}]`;
+  const found = [];
+  if (offending.size > 0) {
+    found.push(`${allowed}; offending line(s): [${[...offending].join(' | ')}]`);
+  }
+  for (const why of badCounts) found.push(`${allowed}; ${why}`);
+  return found;
 }
+
+/** Shared allowed forms: the mktemp that creates the file, and `VAR=$(sed -n 's/^key=//p' "$NAME")` reads. */
+const evidenceFile = (name) => ({ label: `${name}=$(mktemp)`, re: new RegExp(`^${name}=\\$\\(mktemp\\)$`), once: true });
+const sedRead = (name) => ({
+  label: `VAR=$(sed -n 's/^<key>=//p' "$${name}")`,
+  re: new RegExp(`^[A-Z_][A-Z0-9_]*=\\$\\(sed -n 's/\\^[a-z_]+=//p' "\\$${name}"\\)$`),
+});
+/** Arguments of a producer: words, quotes and plain `$VAR` / `${VAR}` / `${VAR[@]}` expansions; no redirection, substitution or command separator. */
+const PRODUCER_ARGS = String.raw`(?:[^;&|<>\x60'\\$()]|\$\{?[A-Za-z_][A-Za-z0-9_]*(?:\[@\])?\}?)*`;
 
 /**
  * The stdout redirections (`>`, `>>`, `>|`, `>&N`, `1>`, `&>`) of the simple command that starts
@@ -231,8 +276,10 @@ function stdoutRedirects(command) {
  * configuration that already failed (Amendment 2026-10-11 of ADR-0076).
  *
  * The only accepted non-empty PREV_REV is exactly `$(sed -n 's/^rollback_revision=//p' "$X")`, where
- * "$X" is the file the resolver's stdout is redirected to and nothing else writes to it (by any
- * redirection or `tee`, as counted by writesTo). The step output the rollback reads must be published as exactly
+ * "$X" is the file the resolver's stdout is redirected to. "$RESOLVED" may be referenced only as
+ * `RESOLVED=$(mktemp)`, the resolver's `> "$RESOLVED"` (once), `VAR=$(sed -n 's/^<key>=//p' "$RESOLVED")`
+ * reads (also inside an echo's `$(...)`) and `cat "$RESOLVED" >> "$GITHUB_OUTPUT"` (once); see
+ * checkEvidenceReferences. The step output the rollback reads must be published as exactly
  * `echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"`.
  *
  * Returns the list of problems (empty when the wiring is intact).
@@ -256,11 +303,22 @@ export function checkRollbackTarget(deployText) {
   if (resolverOutputs.length === 0) {
     fail('the rollback target is not resolved by scripts/resolve-rollback-revision.mjs (with stdout redirected to a file, `> "$FILE"`) — automatic rollback must target only the verified pre-upgrade deployed revision');
   }
-  for (const file of resolverOutputs) {
-    const writes = writesTo(commands.join('\n'), file);
-    if (writes.length !== 1) {
-      fail(`"$${file}" must be written only by scripts/resolve-rollback-revision.mjs, found ${writes.length} write(s)`);
-    }
+  // The resolver's output file is referenced only in its allowed forms (see checkEvidenceReferences).
+  for (const why of checkEvidenceReferences(deployText, 'RESOLVED', [
+    evidenceFile('RESOLVED'),
+    {
+      label: 'elif node scripts/resolve-rollback-revision.mjs < "$HISTORY_FILE" > "$RESOLVED" 2> "$HISTORY_ERR"; then',
+      re: /^(?:if|elif) node scripts\/resolve-rollback-revision\.mjs < "\$HISTORY_FILE" > "\$RESOLVED" 2> "\$HISTORY_ERR"; then$/,
+      once: true,
+    },
+    sedRead('RESOLVED'),
+    {
+      label: `echo "...$(sed -n 's/^<key>=//p' "$RESOLVED")..."`,
+      re: /^echo "(?:[^"`\\$]|\$[A-Z_][A-Z0-9_]*)*\$\(sed -n 's\/\^[a-z_]+=\/\/p' "\$RESOLVED"\)(?:[^"`\\$]|\$[A-Z_][A-Z0-9_]*)*"$/,
+    },
+    { label: 'cat "$RESOLVED" >> "$GITHUB_OUTPUT"', re: /^cat "\$RESOLVED" >> "\$GITHUB_OUTPUT"$/, once: true },
+  ])) {
+    fail(why);
   }
   if (/history\s*\[\s*history\.length\s*-\s*1\s*\]|\bnode\s+-e\b/.test(code)) {
     fail('selects a revision with inline JavaScript (e.g. history[history.length - 1]) — the newest revision can be a failed release that helm rollback would re-apply');
@@ -308,8 +366,8 @@ export function checkRollbackTarget(deployText) {
  * - the list corroboration LIST_CMD and the scripts/release-existence.mjs classifier are both present;
  * - RELEASE_EXISTS is assigned exactly three times: `RELEASE_EXISTS=""`, the `exists)` arm and the
  *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from "$EXISTENCE_FILE", the
- *   file the classifier's stdout is redirected to (`> "$EXISTENCE_FILE"`) and that nothing else writes
- *   (by any redirection or `tee`, as counted by writesTo, echo lines included);
+ *   file the classifier's stdout is redirected to (`> "$EXISTENCE_FILE"`) and that is referenced only
+ *   by its mktemp, that classifier invocation and sed reads (checkEvidenceReferences, echo lines included);
  * - that case has only the `exists)`, `absent)` and `*)` arms, and the `*)` arm (unknown existence) ends
  *   with `exit 1` before `;;`;
  * - release_exists is published only as `echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"`, and the
@@ -400,9 +458,16 @@ export function checkReleaseExistence(deployText) {
       classifierStdouts.some((redirects) => redirects.length !== 1 || redirects[0] !== '> "$EXISTENCE_FILE"')) {
     fail(`the classifier's stdout must be redirected exactly once, as \`> "$EXISTENCE_FILE"\`, found: [${classifierStdouts.map((r) => r.join(' ')).join(' | ')}]`);
   }
-  const existenceWrites = writesTo(lines.filter((line) => !/^\s*#/.test(line)).join('\n'), 'EXISTENCE_FILE');
-  if (existenceWrites.length !== 1) {
-    fail(`"$EXISTENCE_FILE" must be written only by scripts/release-existence.mjs classify, found ${existenceWrites.length} write(s): [${existenceWrites.map((w) => w.trim()).join(' | ')}]`);
+  for (const why of checkEvidenceReferences(deployText, 'EXISTENCE_FILE', [
+    evidenceFile('EXISTENCE_FILE'),
+    {
+      label: 'if node scripts/release-existence.mjs classify ... > "$EXISTENCE_FILE" 2>> "$LIST_ERR"; then',
+      re: new RegExp(String.raw`^if node scripts/release-existence\.mjs classify ${PRODUCER_ARGS} > "\$EXISTENCE_FILE" 2>> "\$LIST_ERR"; then$`),
+      once: true,
+    },
+    sedRead('EXISTENCE_FILE'),
+  ])) {
+    fail(why);
   }
 
   // The rollback step: from its `- name:` line to the next step (or end of file).
@@ -499,7 +564,8 @@ function stepLines(lines, name) {
  * Gate 11, confirmed absence: before RELEASE_EXISTS=false the `absent)` arm inventories the
  * namespace (scripts/recovery-ownership.mjs inventory) for every kind the chart renders, by the
  * release's instance label and by Helm's release-name annotation, and refuses (`exit 1`) unless
- * the verdict is exactly `empty`.
+ * the verdict is exactly `empty`. "$INV_VERDICT" is referenced only by its mktemp, the inventory
+ * classifier's redirect and sed reads (checkEvidenceReferences).
  */
 function checkOrphanInventory(absentArm, code, lines) {
   const found = [];
@@ -532,9 +598,16 @@ function checkOrphanInventory(absentArm, code, lines) {
   if (inventoryAssignments.length !== 2 || !ALLOWED_INVENTORY.every((a) => inventoryAssignments.includes(a))) {
     fail(`INVENTORY must be "unknown" or read from the inventory classifier's output, found: [${inventoryAssignments.join(' | ')}]`);
   }
-  const verdictWrites = writesTo(lines.filter((line) => !/^\s*#/.test(line)).join('\n'), 'INV_VERDICT');
-  if (verdictWrites.length !== 1) {
-    fail(`"$INV_VERDICT" must be written only by scripts/recovery-ownership.mjs inventory, found ${verdictWrites.length} write(s)`);
+  for (const why of checkEvidenceReferences(lines.join('\n'), 'INV_VERDICT', [
+    evidenceFile('INV_VERDICT'),
+    {
+      label: 'if node scripts/recovery-ownership.mjs inventory ... > "$INV_VERDICT" 2>> "$INV_ERR"; then',
+      re: new RegExp(String.raw`^if node scripts/recovery-ownership\.mjs inventory ${PRODUCER_ARGS} > "\$INV_VERDICT" 2>> "\$INV_ERR"; then$`),
+      once: true,
+    },
+    sedRead('INV_VERDICT'),
+  ])) {
+    fail(why);
   }
   if (!absentArm.includes('SNAPSHOT_NEWEST=0')) {
     fail('the `absent)` arm must record the snapshot\'s newest revision as `SNAPSHOT_NEWEST=0`');
@@ -545,7 +618,9 @@ function checkOrphanInventory(absentArm, code, lines) {
 /**
  * Gate 11, recovery wiring: the rollback step runs exactly on a failed post-deploy verification;
  * the helm upgrade records this run's marker; the marker and the snapshot's newest revision come
- * only from pre_upgrade's own evidence; every `helm history` asks for the --max 256 window.
+ * only from pre_upgrade's own evidence ("$MARKER_FILE" is referenced only by its mktemp, the marker
+ * CLI's redirect and the sed read, checkEvidenceReferences); every `helm history` asks for the
+ * --max 256 window.
  */
 export function checkRecoveryWiring(deployText) {
   const found = [];
@@ -574,9 +649,15 @@ export function checkRecoveryWiring(deployText) {
   const MARKER_CMD = /^if ! node scripts\/recovery-ownership\.mjs marker --run-id "\$GITHUB_RUN_ID" --run-attempt "\$GITHUB_RUN_ATTEMPT" --version "\$VERSION" > "\$MARKER_FILE"; then$/;
   const MARKER_READ = `DEPLOY_MARKER=$(sed -n 's/^deploy_marker=//p' "$MARKER_FILE")`;
   const markerAssignments = code.filter((line) => /(?:^|[\s;])DEPLOY_MARKER=/.test(line));
-  if (!code.some((line) => MARKER_CMD.test(line)) || markerAssignments.length !== 1 || markerAssignments[0] !== MARKER_READ ||
-      writesTo(lines.filter((line) => !/^\s*#/.test(line)).join('\n'), 'MARKER_FILE').length !== 1) {
-    fail(`DEPLOY_MARKER must be assigned only as \`${MARKER_READ}\`, from the output of \`node scripts/recovery-ownership.mjs marker\` (the only write to "$MARKER_FILE"), found: [${markerAssignments.join(' | ')}]`);
+  if (!code.some((line) => MARKER_CMD.test(line)) || markerAssignments.length !== 1 || markerAssignments[0] !== MARKER_READ) {
+    fail(`DEPLOY_MARKER must be assigned only as \`${MARKER_READ}\`, from the output of \`node scripts/recovery-ownership.mjs marker\`, found: [${markerAssignments.join(' | ')}]`);
+  }
+  for (const why of checkEvidenceReferences(deployText, 'MARKER_FILE', [
+    evidenceFile('MARKER_FILE'),
+    { label: 'if ! node scripts/recovery-ownership.mjs marker ... > "$MARKER_FILE"; then', re: MARKER_CMD, once: true },
+    sedRead('MARKER_FILE'),
+  ])) {
+    fail(why);
   }
   const published = (key, exact) => {
     const all = lines.filter((line) => !/^\s*#/.test(line) && line.includes(`${key}=`) && /"\$GITHUB_OUTPUT"/.test(line)).map((line) => line.trim());

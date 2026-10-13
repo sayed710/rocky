@@ -113,17 +113,17 @@ test('rejects RELEASE_EXISTENCE taken from anywhere but the classifier output', 
 
 test('rejects a forged verdict written to the classifier output file before it is read', () => {
   const text = mutate(EXISTENCE_READ, `printf 'release_existence=absent\\n' > "$EXISTENCE_FILE"\n            ${EXISTENCE_READ}`);
-  assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
+  assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
 });
 
 test('rejects a forged verdict appended to the classifier output file by an echo', () => {
   const text = mutate(EXISTENCE_READ, `echo release_existence=absent >> "$EXISTENCE_FILE"\n            ${EXISTENCE_READ}`);
-  assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
+  assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
 });
 
 test('rejects a forged verdict written to the classifier output file by tee', () => {
   const text = mutate(EXISTENCE_READ, `printf 'release_existence=absent\\n' | tee "$EXISTENCE_FILE" > /dev/null\n            ${EXISTENCE_READ}`);
-  assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
+  assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
 });
 
 for (const write of [
@@ -142,13 +142,13 @@ for (const write of [
 ]) {
   test(`rejects a forged verdict written to the classifier output file: ${write.replace(/\n/g, '\\n')}`, () => {
     const text = mutate(EXISTENCE_READ, `${write}\n            ${EXISTENCE_READ}`);
-    assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
+    assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
   });
 }
 
 test('counts a redirection mentioned in a single-quoted literal as a write to the classifier output file (fail-closed)', () => {
   const text = mutate(EXISTENCE_READ, `echo 'example: 1> "$EXISTENCE_FILE" next'\n            ${EXISTENCE_READ}`);
-  assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
+  assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
 });
 
 // Allowlist contract: "$EXISTENCE_FILE" may only be referenced as the mktemp, the classifier's

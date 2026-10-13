@@ -45,16 +45,16 @@ test("rejects a sed reading a file other than the resolver's output", () => {
 
 test("rejects another write to the resolver's output file", () => {
   const text = mutate(PREV_REV_LINE, `echo rollback_revision=5 > "$RESOLVED"\n              ${PREV_REV_LINE}`);
-  assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs/);
+  assertRejected(text, /"\$RESOLVED" may only be referenced in its allowed forms/);
 });
 
 test("rejects a tee write to the resolver's output file", () => {
   const text = mutate(PREV_REV_LINE, `printf 'rollback_revision=5\\n' | tee "$RESOLVED" >/dev/null\n              ${PREV_REV_LINE}`);
-  assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs/);
+  assertRejected(text, /"\$RESOLVED" may only be referenced in its allowed forms/);
 });
 
-// Every output-redirection spelling that (over)writes the resolver's output file must be counted, so
-// one extra write before PREV_REV is read makes "$RESOLVED" written twice.
+// Every output-redirection spelling that (over)writes the resolver's output file is a reference outside
+// the allowlist, so one extra write before PREV_REV is read is rejected.
 for (const write of [
   `printf 'rollback_revision=5\\n' 1> "$RESOLVED"`,
   `printf 'rollback_revision=5\\n' >| "$RESOLVED"`,
@@ -91,38 +91,45 @@ for (const write of [
 ]) {
   test(`rejects another write to the resolver's output file: ${write.replace(/\r/g, '\\r').replace(/\n/g, '\\n')}`, () => {
     const text = mutate(PREV_REV_LINE, `${write}\n              ${PREV_REV_LINE}`);
-    assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs, found 2 write/);
+    assertRejected(text, /"\$RESOLVED" may only be referenced in its allowed forms/);
   });
 }
 
-// Writes to other files (a longer variable name, or stderr captured elsewhere) are not writes to it.
+// Writes to other files (a longer variable name, or stderr captured elsewhere) are not references to it.
 for (const other of [
   `printf 'rollback_revision=5\\n' > "$RESOLVED_OLD"`,
   `printf 'rollback_revision=5\\n' 1> $RESOLVED_OLD`,
   `printf 'rollback_revision=5\\n' >| \${RESOLVED_OLD}`,
   `printf 'rollback_revision=5\\n' | tee $RESOLVED_OLD >/dev/null`,
-  `sed -n p "$RESOLVED" 2> "$HISTORY_ERR" 2>> "$LIST_ERR"`,
+  `sed -n p "$HISTORY_FILE" 2> "$HISTORY_ERR" 2>> "$LIST_ERR"`,
 ]) {
   test(`does not count a write to another file as a write to the resolver's output: ${other}`, () => {
     assert.deepEqual(checkRollbackTarget(mutate(PREV_REV_LINE, `${other}\n              ${PREV_REV_LINE}`)), []);
   });
 }
 
-// Fail-closed: quoting is not parsed, so a redirection mentioned inside a single-quoted literal or an
-// inline comment is still counted as a write (a false positive only fails the gate).
+// Under the allowlist a read of "$RESOLVED" that is not a `VAR=$(sed -n 's/^<key>=//p' ...)` form is
+// rejected too, even with its stderr captured elsewhere (it was accepted as "not a write" before).
+test('rejects a read of the resolver output outside the allowlist: sed -n p "$RESOLVED" 2> "$HISTORY_ERR" 2>> "$LIST_ERR"', () => {
+  const text = mutate(PREV_REV_LINE, `sed -n p "$RESOLVED" 2> "$HISTORY_ERR" 2>> "$LIST_ERR"\n              ${PREV_REV_LINE}`);
+  assertRejected(text, /"\$RESOLVED" may only be referenced in its allowed forms/);
+});
+
+// Fail-closed: quoting is not parsed, so a mention inside a single-quoted literal or an inline comment
+// is still a reference outside the allowlist (a false positive only fails the gate).
 for (const literal of [
   `echo 'example: 1> "$RESOLVED" next'`,
   `echo 'example: > $RESOLVED next'`,
 ]) {
   test(`counts a redirection mentioned in a single-quoted literal (fail-closed): ${literal}`, () => {
     const text = mutate(PREV_REV_LINE, `${literal}\n              ${PREV_REV_LINE}`);
-    assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs, found 2 write/);
+    assertRejected(text, /"\$RESOLVED" may only be referenced in its allowed forms/);
   });
 }
 
 test('counts a redirection mentioned in an inline comment (fail-closed): echo x # example: > "$RESOLVED"', () => {
   const text = mutate(PREV_REV_LINE, `echo x # example: > "$RESOLVED"\n              ${PREV_REV_LINE}`);
-  assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs, found 2 write/);
+  assertRejected(text, /"\$RESOLVED" may only be referenced in its allowed forms/);
 });
 
 // Allowlist contract: "$RESOLVED" may only be referenced in its allowed forms (the mktemp, the
