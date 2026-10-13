@@ -188,28 +188,58 @@ function checkDeployGates() {
  * (whitespace, `;`, `&`, `|`, `(`, `)`, `<`, `>`, a quote or end of line), so `$file_OLD` is another
  * file while `"$file"""` (an empty quote concatenated on) is the same one.
  *
- * Before matching, backslash-newline continuations are joined into a space, and every single-quoted
- * segment (`'...'` within one line) is blanked to spaces of the same length: nothing inside single
- * quotes expands or redirects, so `echo 'see > $file'` is not a write, and `"$file"''` keeps its
- * word boundary.
+ * Before matching, backslash-newline continuations are joined into a space, and every real
+ * single-quoted segment is blanked to spaces of the same length (see maskSingleQuoted): nothing inside
+ * single quotes expands or redirects, so `echo 'see > $file'` is not a write, and `"$file"''` keeps
+ * its word boundary. An apostrophe inside double quotes (`echo "it's" > "$file"`) is a literal and
+ * does not hide the redirection.
  *
  * This is a pattern check, not a shell parser. Known fail-closed false positives: `$file"x"` (a
  * different path, counted because a quote ends the target) and a redirection mentioned inside a
  * double-quoted string (`echo "see > $file"`), which is not parsed. Out of scope: writers that are not
  * redirections or tee (cp, mv, sed -i, dd of=, ...), writes through an fd opened earlier
- * (`exec 3> ...; ... >&3`), aliases of the path in another variable, heredoc bodies, and quoting the
- * blanking misreads (a lone `'` inside a double-quoted string or an unquoted `\'` pairs with the next
- * `'` on the line). The behavioural snapshot tests are the primary guard; this only keeps the obvious
- * second writer out.
+ * (`exec 3> ...; ... >&3`), aliases of the path in another variable, and heredoc bodies. The
+ * behavioural snapshot tests are the primary guard; this only keeps the obvious second writer out.
  */
 function writesTo(shellText, file) {
   const text = shellText
     .replace(/\\\r?\n/g, ' ')
-    .replace(/'[^'\n]*'/g, (quoted) => ' '.repeat(quoted.length));
+    .split('\n')
+    .map(maskSingleQuoted)
+    .join('\n');
   const target = `(?:"\\$${file}"|"\\$\\{${file}\\}"|\\$${file}|\\$\\{${file}\\})(?=[\\s;&|()<>"']|$)`;
   const redirects = text.match(new RegExp(`(?:[0-9]+|&)?(?:>>|>\\||>&|>|<>)\\s*${target}`, 'gm')) ?? [];
   const tees = text.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s${target}`, 'gm')) ?? [];
   return [...redirects, ...tees];
+}
+
+/**
+ * `line` with each single-quoted segment, quotes included, replaced by spaces of the same length.
+ * A quote-state scan, not a shell parser: unquoted, `\` escapes the next character; inside double
+ * quotes, `\` escapes `"`, `\`, `$` or a backtick and `'` is a literal; inside single quotes all is
+ * literal until the next `'`. An unterminated single quote is left as is (more text, not less, is
+ * matched).
+ */
+function maskSingleQuoted(line) {
+  let out = '';
+  let inDouble = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '\\' && (!inDouble || '"\\$`'.includes(line[i + 1] ?? ''))) {
+      out += line.slice(i, i + 2);
+      i++;
+    } else if (c === '"') {
+      inDouble = !inDouble;
+      out += c;
+    } else if (c === "'" && !inDouble && line.indexOf("'", i + 1) !== -1) {
+      const end = line.indexOf("'", i + 1);
+      out += ' '.repeat(end - i + 1);
+      i = end;
+    } else {
+      out += c;
+    }
+  }
+  return out;
 }
 
 /**
