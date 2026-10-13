@@ -57,6 +57,8 @@ export type LegalMoves = { readonly [from: string]: readonly string[] };
  * client to render correctly (used on join and on resume).
  */
 export interface StateView {
+  /** Durable game_events.seq of this exact event prefix; not a ply or ownership token. */
+  readonly stateRevision: number;
   readonly gameId: string;
   readonly variant: Variant;
   readonly players: Players;
@@ -203,6 +205,7 @@ export interface StateMessage {
 
 /** An applied, authoritative move broadcast to every member of a room. */
 export interface MoveBroadcast {
+  readonly stateRevision: number;
   readonly t: 'move';
   readonly gameId: string;
   readonly ply: number;
@@ -214,8 +217,8 @@ export interface MoveBroadcast {
   readonly serverTs: number;
   /**
    * Legal destinations for the side to move in the **resulting** position
-   * (after this move has been applied). Empty (`{}`) when the move ended the
-   * game. This is the push-based refresh mechanism: every broadcast carries
+   * at this event's durable prefix, before any subsequent GameEnded event.
+   * This is the push-based refresh mechanism: every broadcast carries
    * the authoritative legal-move map so clients never starve after a live move.
    */
   readonly legalMoves: LegalMoves;
@@ -223,6 +226,7 @@ export interface MoveBroadcast {
 
 /** A terminal event broadcast to every member of a room. */
 export interface EndedBroadcast {
+  readonly stateRevision: number;
   readonly t: 'ended';
   readonly gameId: string;
   readonly result: ResultString;
@@ -236,6 +240,7 @@ export interface EndedBroadcast {
  * any gateway replica learns it; carries both seats so it is safe to apply in any order.
  */
 export interface ReadyBroadcast {
+  readonly stateRevision: number;
   readonly t: 'ready';
   readonly gameId: string;
   readonly ready: ReadyView;

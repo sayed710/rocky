@@ -16,7 +16,7 @@
  * Wire colors are `'w' | 'b'` (the core/game domain), distinct from the web UI's
  * `'white' | 'black'` orientation type.
  */
-import type { Variant } from '../api/models.js';
+import { VARIANTS, type Variant } from '../api/models.js';
 
 export type { Variant };
 
@@ -87,6 +87,8 @@ export type LegalMoves = { readonly [from: string]: readonly string[] };
 
 /** A complete authoritative snapshot; sufficient on its own to render a game. */
 export interface StateView {
+  /** Absent on legacy servers; presence does not advertise durable recovery. */
+  readonly stateRevision?: number;
   readonly gameId: string;
   readonly variant: Variant;
   readonly players: Players;
@@ -191,6 +193,7 @@ export interface StateMessage {
 }
 
 export interface MoveBroadcast {
+  readonly stateRevision?: number;
   readonly t: 'move';
   readonly gameId: string;
   readonly ply: number;
@@ -202,14 +205,15 @@ export interface MoveBroadcast {
   readonly serverTs: number;
   /**
    * Legal destinations for the side to move in the **resulting** position
-   * (after this move has been applied). Empty (`{}`) when the move ended the
-   * game. This is the push-based refresh mechanism: every broadcast carries
+   * at this event's durable prefix, before any subsequent GameEnded event.
+   * This is the push-based refresh mechanism: every broadcast carries
    * the authoritative legal-move map so clients never starve after a live move.
    */
   readonly legalMoves: LegalMoves;
 }
 
 export interface EndedBroadcast {
+  readonly stateRevision?: number;
   readonly t: 'ended';
   readonly gameId: string;
   readonly result: ResultString;
@@ -220,6 +224,7 @@ export interface EndedBroadcast {
 
 /** A seat's readiness became durable; carries both seats (ADR-0148). */
 export interface ReadyBroadcast {
+  readonly stateRevision?: number;
   readonly t: 'ready';
   readonly gameId: string;
   readonly ready: ReadyView;
@@ -314,6 +319,9 @@ const SERVER_TYPES: ReadonlySet<string> = new Set([
   'ready',
 ]);
 
+/** PostgreSQL INTEGER limit; independent of clientSeq's validation contract. */
+const MAX_STATE_REVISION = 2_147_483_647;
+
 /** Serialize a client intent to a string frame (default JSON codec). */
 export function encodeClient(msg: ClientMessage): string {
   return JSON.stringify(msg);
@@ -323,17 +331,110 @@ export function encodeClient(msg: ClientMessage): string {
  * Parse a server frame. Returns `null` for malformed input or unknown message
  * types rather than throwing, so a hostile/buggy server cannot crash the client.
  */
-export function decodeServer(frame: string): ServerMessage | null {
+export function decodeServer(frame: string, mode: 'legacy' | 'revision' = 'legacy'): ServerMessage | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(frame);
   } catch {
     return null;
   }
-  if (typeof parsed !== 'object' || parsed === null) return null;
-  const t = (parsed as { t?: unknown }).t;
-  if (typeof t === 'string' && SERVER_TYPES.has(t)) return parsed as ServerMessage;
-  return null;
+  if (!record(parsed) || typeof parsed.t !== 'string' || !SERVER_TYPES.has(parsed.t)) return null;
+  return validRevisionFrame(parsed, mode) ? parsed as unknown as ServerMessage : null;
+}
+
+function validRevisionFrame(parsed: Record<string, unknown>, mode: 'legacy' | 'revision'): boolean {
+  const type = parsed.t;
+  if (typeof type !== 'string') return false;
+  const snapshot = ['joined', 'state', 'resumed'].includes(type);
+  const event = ['move', 'ready', 'ended'].includes(type);
+  if (!snapshot && !event) return true;
+  const payload = snapshot ? parsed.state : parsed;
+  if (!record(payload)) return false;
+  const revisioned = Object.hasOwn(payload, 'stateRevision');
+  if (!revisioned && mode === 'revision') return false;
+  if (revisioned && !(snapshot ? validState(payload) : validEvent(parsed))) return false;
+  if (snapshot && revisioned && (parsed.gameId !== payload.gameId ||
+      (parsed.t === 'joined' && (typeof parsed.role !== 'string' || !['white', 'black', 'spectator'].includes(parsed.role))))) return false;
+  if (parsed.t === 'resumed') {
+    if (!Array.isArray(parsed.missed)) return false;
+    for (const missed of parsed.missed) {
+      if (!record(missed) || typeof missed.t !== 'string' || !['move', 'ready', 'ended'].includes(missed.t) ||
+          Object.hasOwn(missed, 'stateRevision') !== revisioned ||
+          (revisioned && (!validEvent(missed) || missed.gameId !== parsed.gameId))) return false;
+    }
+  }
+  return true;
+}
+
+export type LegacyStateView = StateView & { readonly stateRevision?: never };
+export type RevisionedStateView = StateView & { readonly stateRevision: number };
+
+/** A stamp identifies the wire format, not freshness, replay capability or command confirmation. */
+export function isRevisionedState(state: StateView): state is RevisionedStateView {
+  return validRevision(state.stateRevision);
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validRevision(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_STATE_REVISION;
+}
+
+function nonnegative(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function color(value: unknown): boolean { return value === 'w' || value === 'b'; }
+function clock(value: unknown): boolean { return record(value) && nonnegative(value.w) && nonnegative(value.b); }
+function ready(value: unknown): boolean { return record(value) && typeof value.w === 'boolean' && typeof value.b === 'boolean'; }
+function legalMoves(value: unknown): boolean {
+  return record(value) && Object.entries(value).every(([from, destinations]) => /^[a-h][1-8]$/.test(from) &&
+    Array.isArray(destinations) && destinations.every(to => typeof to === 'string' && /^[a-h][1-8]$/.test(to)));
+}
+
+const TERMINATIONS: readonly Termination[] = [
+  'checkmate', 'resignation', 'timeout', 'stalemate', 'agreement', 'insufficient_material',
+  'fifty_move', 'threefold', 'variant', 'aborted', 'no_show',
+];
+function ending(value: Record<string, unknown>): boolean {
+  return typeof value.result === 'string' && ['1-0', '0-1', '1/2-1/2', '*'].includes(value.result) &&
+    TERMINATIONS.some(t => t === value.termination) && (value.winner === null || color(value.winner));
+}
+
+function validState(value: Record<string, unknown>): boolean {
+  const tc = value.timeControl;
+  const status = value.status;
+  return validRevision(value.stateRevision) && typeof value.gameId === 'string' && value.gameId.length > 0 &&
+    VARIANTS.some(v => v === value.variant) && record(value.players) &&
+    typeof value.players.white === 'string' && typeof value.players.black === 'string' &&
+    record(tc) && nonnegative(tc.initialMs) && nonnegative(tc.incrementMs) && nonnegative(tc.delayMs) &&
+    typeof tc.kind === 'string' && ['increment', 'delay', 'sudden_death', 'unlimited'].includes(tc.kind) &&
+    typeof value.fen === 'string' && typeof value.fenHash === 'string' &&
+    typeof value.ply === 'number' && Number.isSafeInteger(value.ply) && value.ply >= 0 && color(value.turn) &&
+    clock(value.clock) && (value.turnStartedAt === null || nonnegative(value.turnStartedAt)) &&
+    record(status) && (status.over === false || (status.over === true && ending(status))) &&
+    (value.drawOffer === null || color(value.drawOffer)) && Array.isArray(value.moves) &&
+    value.moves.every(move => record(move) && typeof move.ply === 'number' && Number.isSafeInteger(move.ply) &&
+      move.ply > 0 && typeof move.uci === 'string' && typeof move.san === 'string' && color(move.by)) &&
+    legalMoves(value.legalMoves) && (value.chess960StartId === null ||
+      (typeof value.chess960StartId === 'number' && Number.isInteger(value.chess960StartId) &&
+       value.chess960StartId >= 0 && value.chess960StartId <= 959)) &&
+    (value.ready === null || ready(value.ready));
+}
+
+function validEvent(value: Record<string, unknown>): boolean {
+  if (!validRevision(value.stateRevision) || value.stateRevision === 0 ||
+      typeof value.gameId !== 'string' || value.gameId.length === 0 || !nonnegative(value.serverTs)) return false;
+  switch (value.t) {
+    case 'ready': return ready(value.ready);
+    case 'ended': return ending(value);
+    case 'move': return typeof value.ply === 'number' && Number.isSafeInteger(value.ply) && value.ply > 0 &&
+      typeof value.uci === 'string' && typeof value.san === 'string' && color(value.by) &&
+      typeof value.fenHash === 'string' && clock(value.clock) && legalMoves(value.legalMoves);
+    default: return false;
+  }
 }
 
 /** The opposite side to move. */

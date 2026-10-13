@@ -27,7 +27,7 @@ test('poison backoff survives restart and duplicated Redis wakeups cannot bypass
   await first.stop();
   const restarted = make();
   await restarted.start();
-  for (let n = 0; n < 10; n++) pubsub.publish(gamesEndedChannel(), { t: 'ended', gameId: 'game-000000', result: '1-0', termination: 'resignation', winner: 'w', serverTs: now });
+  for (let n = 0; n < 10; n++) pubsub.publish(gamesEndedChannel(), { t: 'ended', stateRevision: 1, gameId: 'game-000000', result: '1-0', termination: 'resignation', winner: 'w', serverTs: now });
   await restarted.scan();
   assert.equal(calls, 1);
   now = TERMINAL_RETRY_BASE_MS - 1;

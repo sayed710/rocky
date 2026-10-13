@@ -50,11 +50,11 @@ async function noShow(r: Rig, gameId: string, ready: readonly ('w' | 'b')[]): Pr
     game = step.game;
   }
   const ended = game.expireNoShow(1_000 + TOURNAMENT_DEADLINE_MS);
-  await r.events.append(gameId, head, ended.events);
+  const stateRevision = await r.events.append(gameId, head, ended.events);
   const ending = ended.events[0]!;
   if (ending.type !== 'GameEnded') throw new Error('unreachable');
   r.pubsub.publish(gameChannel(gameId), {
-    t: 'ended', gameId, result: ending.result, termination: ending.termination, winner: ending.winner, serverTs: ending.at,
+    t: 'ended', stateRevision, gameId, result: ending.result, termination: ending.termination, winner: ending.winner, serverTs: ending.at,
   });
   return ending;
 }

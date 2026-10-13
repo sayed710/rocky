@@ -78,6 +78,7 @@ class FakeRedis implements RedisLike {
 function makeBroadcast(ply: number): Broadcast {
   return {
     t: 'move',
+    stateRevision: ply,
     gameId: 'g1',
     ply,
     uci: 'e2e4',

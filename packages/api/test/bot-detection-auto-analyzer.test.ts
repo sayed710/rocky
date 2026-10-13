@@ -46,6 +46,7 @@ test('BotAutoAnalyzer: end-to-end auto-analysis of finished games', async () => 
 
   const endedMsg: EndedBroadcast = {
     t: 'ended',
+    stateRevision: 1,
     gameId,
     result: '0-1',
     termination: 'checkmate',
@@ -86,6 +87,7 @@ test('BotAutoAnalyzer: crash-safety and error logging on analysis rejection', as
   const gameId = 'game-failed-1';
   const endedMsg: EndedBroadcast = {
     t: 'ended',
+    stateRevision: 1,
     gameId,
     result: '1-0',
     termination: 'resignation',
@@ -120,6 +122,7 @@ test('BotAutoAnalyzer: a failed analysis is retried on re-broadcast', async () =
 
   const endedMsg: EndedBroadcast = {
     t: 'ended',
+    stateRevision: 1,
     gameId: 'game-retry-1',
     result: '1-0',
     termination: 'resignation',
@@ -153,6 +156,7 @@ test('BotAutoAnalyzer: deduplication skips re-analysis for seen gameId', async (
   const gameId = 'game-dedup-1';
   const endedMsg: EndedBroadcast = {
     t: 'ended',
+    stateRevision: 1,
     gameId,
     result: '1-0',
     termination: 'resignation',
@@ -185,6 +189,7 @@ test('BotAutoAnalyzer: ignores non-ended broadcasts and stops cleanly', async ()
 
   const moveMsg: MoveBroadcast = {
     t: 'move',
+    stateRevision: 1,
     gameId: 'game-1',
     ply: 1,
     uci: 'e2e4',
@@ -205,6 +210,7 @@ test('BotAutoAnalyzer: ignores non-ended broadcasts and stops cleanly', async ()
 
   const endedMsg: EndedBroadcast = {
     t: 'ended',
+    stateRevision: 1,
     gameId: 'game-1',
     result: '1-0',
     termination: 'resignation',

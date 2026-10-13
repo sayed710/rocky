@@ -35,7 +35,7 @@ test('startup and wakeup storage failures retain safe diagnostic codes in worker
   try {
     await worker.initialScan;
     assert.equal(lines.length, 1);
-    pubsub.publish(gamesEndedChannel(), { t: 'ended', gameId: 'any', result: '1-0', termination: 'resignation', winner: 'w', serverTs: 0 });
+    pubsub.publish(gamesEndedChannel(), { t: 'ended', stateRevision: 1, gameId: 'any', result: '1-0', termination: 'resignation', winner: 'w', serverTs: 0 });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(lines.length, 2);
     for (const line of lines) {

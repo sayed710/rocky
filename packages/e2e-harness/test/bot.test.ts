@@ -55,6 +55,7 @@ class StubPubSub implements PubSub {
 function makeCannedState(gameId: string, ply: number): StateView {
   return {
     gameId,
+    stateRevision: ply,
     variant: 'standard',
     players: {
       white: ENGINE_BOT_USER_IDS.novice,
@@ -84,6 +85,7 @@ function makeCannedState(gameId: string, ply: number): StateView {
 function makeMoveBroadcast(gameId: string, ply: number): Broadcast {
   return {
     t: 'move',
+    stateRevision: ply,
     gameId,
     ply,
     uci: 'e2e4',

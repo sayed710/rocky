@@ -32,6 +32,8 @@ const MAX_RETRY_DELAY_SECONDS = 3600;
 
 /** A game whose projection became terminal in a committed batch. */
 export interface ProjectedEnding {
+  /** Terminal durable event position retained from the validated stream projection. */
+  readonly stateRevision: number;
   readonly gameId: string;
   readonly result: ResultString;
   readonly termination: Termination;
@@ -378,7 +380,7 @@ async function upsertProjection(client: PoolClient, p: GameProjection): Promise<
 }
 
 function endingOf(p: GameProjection): ProjectedEnding {
-  return { gameId: p.id, result: p.result!, termination: p.termination!, endedAt: p.endedAt! };
+  return { gameId: p.id, stateRevision: p.lastSeq, result: p.result!, termination: p.termination!, endedAt: p.endedAt! };
 }
 
 export interface GamesProjectionWorkerOptions<B = GamesProjectionBatch> {

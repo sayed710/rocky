@@ -501,7 +501,7 @@ test('EngineBotMover: the terminal broadcast stops bot work even when the local 
   await flush();
   // The owner's game ended; this node's copy still says ply 1 and in progress.
   pubsub.publish(gameChannel(gameId), {
-    t: 'ended', gameId, result: '1-0', termination: 'resignation', winner: 'w', serverTs: Date.now(),
+    t: 'ended', stateRevision: 2, gameId, result: '1-0', termination: 'resignation', winner: 'w', serverTs: Date.now(),
   });
 
   assert.equal(pubsub.subscriberCount(gameChannel(gameId)), 0, 'unsubscribed on ended');

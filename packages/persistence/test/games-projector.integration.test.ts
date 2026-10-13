@@ -79,6 +79,12 @@ async function drain(projector: PgGamesProjector, pool: Pool): Promise<string[]>
   const endings: string[] = [];
   for (;;) {
     const batch = await projector.runBatch();
+    for (const ending of batch.endings) {
+      const terminal = await pool.query<{ seq: number }>(
+        "SELECT seq FROM game_events WHERE game_id = $1 AND type = 'GameEnded'", [ending.gameId],
+      );
+      assert.equal(ending.stateRevision, terminal.rows[0]!.seq, 'projection wake-up retains the durable terminal position');
+    }
     endings.push(...batch.endings.map((e) => e.gameId));
     if (batch.busy || batch.more) continue;
     if (await caughtUp(pool)) return endings;

@@ -417,6 +417,7 @@ async function main(): Promise<void> {
           pubsub.publish(gamesProjectedEndedChannel(), {
             t: 'ended',
             gameId: ending.gameId,
+            stateRevision: ending.stateRevision,
             result: ending.result,
             termination: ending.termination,
             winner: ending.result === '1-0' ? 'w' : ending.result === '0-1' ? 'b' : null,

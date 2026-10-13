@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-02 PR1 F3: current-main RED reproduced; instance lifecycle/R-04 cleanup corrected; local gates pass including gateway 172/172; exact-head owner-review PR gates pending; F1/F2/F4 remain open._
+_Last updated: 2026-10-13 — R-01 state-revision foundation: fresh baseline RED reproduced; focused revision/compatibility tests 13/13 GREEN; full local and exact-head delivery gates pending; D1/D2 remain open._
+
+Prior: _Last updated: 2026-10-13 — R-02 PR1 F3: current-main RED reproduced; instance lifecycle/R-04 cleanup corrected; local gates pass including gateway 172/172; exact-head owner-review PR gates pending; F1/F2/F4 remain open._
 
 Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: cross-game renewal starvation reproduced and corrected; gateway 154/154 and admission 20/20 verified; renewed full local and exact-head external gates required; owner manual merge required._
 
@@ -169,6 +171,25 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## R-01 increment — durable state-revision foundation (2026-10-13)
+
+Owner-authorized isolated implementation starts from `bf0ce91fae99e06daae8348a913c5632c815e94b`,
+after #110 and #111 merged. Fresh compiled baseline tests reproduced eight
+behavioral failures with one passing control. The focused foundation suite is
+now 13/13 GREEN: durable stamps, same-ply/no-op readiness, own-prefix batched
+events, validated reload/append positions, bounded capacity, commit barriers,
+legacy compatibility and malformed revisioned frames. [ADR-0161](adr/0161-durable-state-revision-foundation.md)
+records the contract and rollout boundary. The games projection retains its
+durable terminal sequence in its internal notification; directly affected
+fixtures carry valid stamps. Full local and exact-head PR gates remain pending
+in this milestone; only the owner merges.
+
+This increment does not close D1 recovery or D2 draw publication. GameSync,
+last-ply resume semantics, R-03 receipts and R-04 authorization checks are not
+activated or replaced by revisions. PostgreSQL fencing, stale edge reads,
+late appends, missed Pub/Sub broadcasts, R-02/F1/F2/F4 and Helm #107 remain
+separate tracked work. See [open findings](audits/OPEN_FINDINGS_TRACKER.md).
 
 ## M15 Increment 58 — kubelet probe NetworkPolicy contract
 
