@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-01 PR2 D3: cross-game renewal starvation reproduced and corrected; gateway 154/154 and admission 20/20 verified; renewed full local and exact-head external gates required; owner manual merge required._
+_Last updated: 2026-10-13 — R-02 PR1 F3: current-main RED reproduced; instance lifecycle/R-04 cleanup corrected; local gates pass including gateway 172/172; exact-head owner-review PR gates pending; F1/F2/F4 remain open._
+
+Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: cross-game renewal starvation reproduced and corrected; gateway 154/154 and admission 20/20 verified; renewed full local and exact-head external gates required; owner manual merge required._
 
 Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: release/claim/renewal operations ordered with cancellation epochs; reproduced Qodo races corrected, gateway 153/153 and full local gates verified; fresh exact-head external gates pending; owner manual merge required._
 
@@ -5487,3 +5489,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Fresh Greptile review of 8b8691d found a blocked claim for one game delaying every later game's renewal. The controlled two-game regression failed before correction. renewAll now starts renewals independently across games, retaining per-game ordering, synchronous release epochs and shared outstanding writes. Admission 20/20 and clean Linux real Redis/PostgreSQL gateway 154/154 pass, zero skips; full build/lint, service lint and eight guards pass. Renewed root tests and fresh published-head gates are required before final delivery. Previous reviews are superseded, including the interrupted third exact-head Gemini run. Main remains verified dd7fec5 with no web delta; D3 only and owner manual merge required.
 
 - Renewed root tests completed: all 19 hermetic workspaces and 4,164 tests pass, zero skips. Full build/lint, service build/lint, clean Linux gateway 154/154, admission 20/20 and all eight guards are verified before the normal follow-up push. Fresh CI/Qodo/Greptile/independent exact-head review and resolved threads remain required; no old approval is reused.
+
+### 2026-10-13 — R-02 PR1: F3 consumer instance identity
+
+- Mandatory Git preflight verified current merged PR #109 main `9dda14b4775157d035201a9fee3e536b022543f7`. Before production edits, controlled F3 failed 5/6 with a passing no-replacement stop control; actual Redis/ioredis delayed disconnect rejection failed 1/1. Original R-02 evidence is read only and historical.
+- Loops and callbacks now use captured connection identity: old A cannot retry under B's membership, stop B or evict its copy. Existing R-03 admitted completion/exact handoff, D3 tickets/lanes/release epochs and D4 slot lifetime remain intact; domain, persistence, deployment and revision contracts are untouched.
+- Genuine Gemini 3.8 Flash High/high-effort read-only review identified an over-broad expiry guard. Three no-replacement controls failed before correction; R-04 cleanup still runs without B. First Linux full run failed 164/166 (new-test Node 22 warning accounting and unchanged flag-readiness/Redis ETIMEDOUT); failure remains retained with timeout cause unproven. Corrected Linux Redis/PG suite passes 172/172. See [proof, provenance and limits](audits/R02_F3_CONSUMER_IDENTITY_2026-10-13.md).
+- Local verification: focused F3/D3/R-03 67/67; clean Linux real Redis/PG gateway 172/172; workspace build/lint and 19-workspace tests 4,164/4,164; PostgreSQL persistence 210/API 109/backup 2; scripts 333/load 86; actual Nginx 8+12; POSIX API/load 2+1; eight guards. All positive counted suites have zero failures/skips/cancellations. Fresh exact-head independent review, CI/Qodo/Greptile/resolved-thread gates remain pending here. F1 terminal ownership policy, F2 authority-cache policy and F4 abandoned claim metadata are not fixed. Owner merge only; no main write, force push or deployment is authorized.
