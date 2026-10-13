@@ -222,6 +222,43 @@ test('admission selects the reloaded resident and only a successful exact reques
   assert.equal((await store.load('g')).length, 3);
 });
 
+test('D3: lifecycle invalidation during admission refuses mutation and emits no exact receipt', { timeout: 5000 }, async () => {
+  const { store } = await fixture(), pubsub = new InMemoryPubSub(), frames: Broadcast[] = [];
+  pubsub.subscribe(gameChannel('g'), msg => frames.push(msg));
+  const a = new GameAuthority(pubsub, () => 1000, store);
+  await a.ensureLoaded('g');
+  const entered = barrier(), release = barrier(), lifecycleGeneration = a.captureLifecycle('g');
+  const refused = assert.rejects(a.apply('g', 'alice', { kind: 'move', uci: 'b1c3' }, {
+    lifecycleGeneration, requestId: 'obsolete-exact-id',
+    beforeExecute: async () => { entered.resolve(); await release.done; },
+  }), /lifecycle changed/);
+  await entered.done; a.evict('g'); release.resolve(); await refused;
+  assert.equal((await store.load('g')).length, 1); assert.equal(frames.length, 0);
+  await a.ensureLoaded('g');
+  await a.apply('g', 'alice', { kind: 'move', uci: 'b1c3' }, {
+    lifecycleGeneration: a.captureLifecycle('g'), requestId: 'current-exact-id',
+  });
+  assert.deepEqual(frames.filter(m => m.t === 'commandConfirmed').map(m => m.requestId), ['current-exact-id']);
+});
+
+test('D3: an evicted and recreated idle slot never reuses an old lifecycle ticket', async () => {
+  const { store } = await fixture(), a = new GameAuthority(new InMemoryPubSub(), () => 1000, store);
+  await a.ensureLoaded('g'); const generation = a.captureLifecycle('g');
+  a.evict('g'); await a.ensureLoaded('g');
+  await assert.rejects(a.apply('g', 'alice', { kind: 'resign' }, { lifecycleGeneration: generation }), /lifecycle changed/);
+  assert.equal(a.getState('g').status.over, false); assert.equal((await store.load('g')).length, 1);
+});
+
+test('D3: synchronous admission recheck covers loss between callback resolution and slot continuation', async () => {
+  const { store, seed } = await fixture(); let current = true;
+  await assert.rejects(seed.apply('g', 'alice', { kind: 'resign' }, {
+    beforeExecute: async () => { queueMicrotask(() => { current = false; }); },
+    recheckAdmission: () => { if (!current) throw new AuthorityError('command_expired', 'ownership lost at continuation'); },
+    requestId: 'lost-at-continuation',
+  }), /lost at continuation/);
+  assert.equal(seed.getState('g').status.over, false); assert.equal((await store.load('g')).length, 1);
+});
+
 for (const resident of [true, false]) {
   test(`forced-read failures reach ${resident ? 'resident' : 'cold'} joiners as load errors`, { timeout: 5000 }, async () => {
     const { store } = await fixture();

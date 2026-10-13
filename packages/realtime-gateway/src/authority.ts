@@ -156,11 +156,16 @@ export interface ApplyResult {
 /** Admission runs under the game slot, after hydration and before domain execution. */
 export interface ApplyOptions {
   readonly beforeExecute?: () => Promise<void>;
+  /** Final synchronous ticket check after the admission promise resumes this slot. */
+  readonly recheckAdmission?: () => void;
   readonly requestId?: string;
+  /** A local ownership attempt must not survive eviction/recreation of its slot. */
+  readonly lifecycleGeneration?: number;
 }
 
 export class GameAuthority {
   private readonly games = new Map<string, GameSlot>();
+  private lifecycleSequence = 0;
 
   constructor(
     private readonly pubsub: PubSub,
@@ -354,7 +359,7 @@ export class GameAuthority {
   evict(gameId: string): void {
     const slot = this.games.get(gameId);
     if (!slot) return;
-    slot.generation++;
+    slot.generation = ++this.lifecycleSequence;
     slot.dispose = true;
     this.releaseSlot(gameId, slot);
   }
@@ -362,11 +367,21 @@ export class GameAuthority {
   private slotFor(gameId: string): GameSlot {
     let slot = this.games.get(gameId);
     if (!slot) {
-      slot = { record: undefined, tail: Promise.resolve(), pending: 0, generation: 0,
+      slot = { record: undefined, tail: Promise.resolve(), pending: 0, generation: ++this.lifecycleSequence,
         dispose: false, reloads: 0, reload: undefined, coldLoad: undefined };
       this.games.set(gameId, slot);
     }
     return slot;
+  }
+
+  /** Capture before loading/waiting; slot generations are never reused by this authority. */
+  captureLifecycle(gameId: string): number {
+    return this.slotFor(gameId).generation;
+  }
+
+  isLifecycleCurrent(gameId: string, generation: number): boolean {
+    const slot = this.games.get(gameId);
+    return slot !== undefined && !slot.dispose && slot.generation === generation;
   }
 
   /** Pending includes queued work, so disposal cannot create a competing lock. */
@@ -464,12 +479,29 @@ export class GameAuthority {
     const slot = this.games.get(gameId);
     if (!slot || slot.dispose) throw new AuthorityError('unknown_game', `no such game ${gameId}`);
     return this.enqueue(gameId, slot, async () => {
+      const checkLifecycle = (): void => {
+        if (options.lifecycleGeneration !== undefined &&
+          !this.isLifecycleCurrent(gameId, options.lifecycleGeneration)) {
+          throw new AuthorityError('command_expired', 'Command ownership lifecycle changed before execution.');
+        }
+      };
+      checkLifecycle();
       if (slot.record?.stale && !(await this.refreshSlot(gameId, slot, slot.generation, false))) {
         throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
       }
+      checkLifecycle();
+      if (!slot.record) throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
+      // Admission may await external validation, but must never enqueue a reload
+      // behind the slot it already holds. Select the resident only after admission.
+      if (options.beforeExecute) await options.beforeExecute();
+      options.recheckAdmission?.();
+      checkLifecycle();
+      if (options.lifecycleGeneration !== undefined && (slot.record?.stale || slot.reloads > 0)) {
+        throw new AuthorityError('command_expired', 'Command requires a fresh ownership attempt after reload.');
+      }
       const rec = slot.record;
       if (!rec) throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
-      const result = await this.applyNow(gameId, rec, userId, cmd, options.beforeExecute);
+      const result = await this.applyNow(gameId, rec, userId, cmd);
       // Only a successful authoritative execution confirms this exact identity.
       // Position similarity, including a different request's same move, cannot.
       if (options.requestId) this.pubsub.publish(gameChannel(gameId), { t: 'commandConfirmed', gameId, requestId: options.requestId });
@@ -477,10 +509,7 @@ export class GameAuthority {
     });
   }
 
-  private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command, beforeExecute?: () => Promise<void>): Promise<ApplyResult> {
-    // Forwarded admission occurs after the lock and stale reload, before any
-    // command/domain mutation or durable append. Local commands need no hook.
-    if (beforeExecute) await beforeExecute();
+  private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command): Promise<ApplyResult> {
     const at = this.now();
     if (cmd.kind === 'expireNoShow') {
       // Checked before anything else so a player can never issue it, and the worker never as a seat.

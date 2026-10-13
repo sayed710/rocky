@@ -6,7 +6,19 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-12 — R-01 PR1 D4: Qodo/Greptile lifecycle findings reproduced and corrected; authority 110/110; corrected-head full validation and renewed external gates pending; manual merge and later PRs remain owner decisions._
+_Last updated: 2026-10-13 — R-01 PR2 D3: cross-game renewal starvation reproduced and corrected; gateway 154/154 and admission 20/20 verified; renewed full local and exact-head external gates required; owner manual merge required._
+
+Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: release/claim/renewal operations ordered with cancellation epochs; reproduced Qodo races corrected, gateway 153/153 and full local gates verified; fresh exact-head external gates pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: Qodo/Greptile renewal and overlapping-claim schedules reproduced and corrected; renewed local gates verified; fresh exact-head external gates pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-13 — R-01 PR2 D3: normal PR #106 integration and expiry-generation correction verified; full local gates complete, fresh published-head external gates pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-12 — R-01 PR2 D3: owner-merged PR #106 integrated normally after checkpoint; R-04 consumer cleanup preserved, no conflicts; integrated validation and fresh exact-head reviews pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-12 — R-01 PR2 D3: merged PR1 verified; real Redis/PG RED reproduced and admission repair focused GREEN; full validation and exact-head gates pending; owner manual merge required._
+
+Prior: _Last updated: 2026-10-12 — R-01 PR1 D4: Qodo/Greptile lifecycle findings reproduced and corrected; authority 110/110; corrected-head full validation and renewed external gates pending; manual merge and later PRs remain owner decisions._
 
 Prior: _Last updated: 2026-10-12 — R-01 PR1 D4: stable game-slot implementation and baseline RED/focused GREEN verified; final-head validation, external review gates and owner manual merge pending; later R-01 work remains separate._
 
@@ -5440,3 +5452,38 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Forced reload errors now propagate through a separate result promise; ordinary invalidated callers retry the current lifecycle; successful durable creation restores residency. Added a cold-then-forced-failure regression. Authority suite 110/110 passes.
 - Greptile's additional valid real-service scheduling gap corrected: takeover/reclaim tests now wait for the actual forced reload request before releasing the older read. No D3 or later scope added.
 - Published-head CI/reviews from a70043c are superseded by these corrections. Renewed full gates and exact-head external reviews remain required before owner readiness; no merge or deployment.
+
+### 2026-10-12 — R-01 PR2: execution-time ownership admission
+
+- PR #108 owner-merged at `202eee3f833e479e43fcafb07f80e539b3361809`; supplied clean D3 worktree, origin/main and GitHub main matched that prerequisite after fresh fetch.
+- Disposable Redis/PG RED on merged PR1: first admitted append held, second legal local move queued, real three-second lease expired and successor loaded ply 0; releasing the append let the obsolete move commit durable seq 2. Desired refusal assertion failed.
+- Immutable claim/lifecycle tickets, bounded isolated Redis comparison and synchronous final admission check refuse obsolete waiting intents before mutation/persistence. Reclaim, hydration changes, expiry/timeout, lifecycle/reload races and exact early-refusal tombstones are covered; admitted first work may finish.
+- [Verification](audits/R01_D3_OWNERSHIP_ADMISSION_2026-10-12.md) and [ADR-0160](adr/0160-execution-time-ownership-admission.md): authority 113/113; focused real-service/ownership/R-03 47/47 before the last test; final focused R-03/admission 30/30, all zero skips. A new-test missing-import failure was fixed and receives no passing credit. Full clean-install and independent/external gates remain pending here.
+- PR #106/#107 inspected read-only and remain separate. No revision contract, recovery, draw propagation, grants/fencing, capacity policy, production migration, deployment or merge. Minimal D3 is not PostgreSQL fencing; public multi-gateway production still requires the separately staged strong fence.
+
+- Owner later merged PR #106 at `dd7fec5751f1501e10659a66ed940d5c5b2ceacb`. Fresh mandatory preflight verified GitHub/fetched main; all D3 work preserved in `c6dc537`, then clean normal integration produced `0a9532b` without conflicts. Consumer releaseExpiryCopy and R-04 regressions preserved; web matches main exactly. Pre-integration full build/lint, 19 hermetic workspaces, gateway 132/132, scripts 333/333 and eight guards passed; these and the interrupted post-fix review are not final integrated-head approval. Renewed combined regression/full validation and independent/external gates remain required.
+
+- Integrated gates passed: workspace 4,164; gateway 141; focused 75; Chromium 285 (zero retries); scripts 333; load 86; Nginx 20; eight guards. Recorded POSIX invocation failures were corrected through explicit container setup only. Integrated Gemini review reported zero findings but final source inspection then reproduced delayed same-node reclaim/renewal resurrection of an expired ticket. Corrected expiry invalidation and two deterministic schedules pass (admission 11/11, corrected full real Redis/PG gateway 143/143). Renewed post-fix/exact-head gates remain required; prior approval is superseded.
+
+### 2026-10-13 — R-01 PR2 integrated candidate validation
+
+- Corrected full build/lint and all 19 hermetic workspaces passed (4,164 tests); clean Linux real Redis/PG gateway 143/143, persistence PostgreSQL 210/210, API PostgreSQL 109/109, scripts 333/333, backup/restore 2/2 and eight guards passed. Supporting integrated Nginx 20/20, load 86/86 and POSIX API/load 2/2 plus 1/1 passed. Serial Chromium completed 285/285 with unchanged assertions/timeouts and zero retries/skips; prior Windows preview crash and four-worker 283/285 failures are retained without passing credit.
+- Gemini 3.8 Flash High/high effort corrected post-fix review completed read-only with zero actionable findings (agy 1.3.3, project 73b4e941-2e21-4bb1-b185-a0f6419be3ad, conversation 73f721cd-5cc5-4b4e-a1df-7eb488e0d955). Final published-head CI, Qodo Bugs/Rules/Requirements zero, Greptile, resolved threads and independent exact-head review remain required. Main still verified at dd7fec5751f1501e10659a66ed940d5c5b2ceacb; owner merge only; later R-01 scope remains separate.
+
+### 2026-10-13 — R-01 PR2 published-review corrections
+
+- PR #109 opened normally at 8406722. Qodo's consumer availability issue reproduced; retained consumer routing with fresh generation/debt on late renewal, plus bounded comparison metrics. Greptile's overlapping-claim resurrection reproduced with an obsolete queued move; replies now preserve only the same still-valid dispatch generation. Scheduled tests have timeouts. Deterministic admission 13/13 and compiled real Redis/PG held-renewal forwarding case pass; prior exact-head reviews are superseded. Fresh full gates and normal follow-up push/exact-head review required; no scope expansion or owner merge.
+
+- Renewed build/lint and workspace 4,164/4,164, service build/lint, deterministic admission 13/13 and clean Linux real Redis/PG gateway 146/146 completed with zero skips. ADR/topology/CI-parity/observability guards passed. Comparison telemetry has bounded reasons and latency. Fresh external exact-head review/CI and resolved threads remain required after the normal follow-up push.
+
+### 2026-10-13 — R-01 PR2 ownership operation ordering
+
+- Fresh Qodo found four additional release/renewal/claim interleavings at 876a2b0. All four deterministic schedules failed before correction; an actual Redis/PG held-renewal reply also restarted ownership after Redis deletion in the preserved old image. Separate per-game lease I/O lanes and synchronous release epochs now order operations, cancel stale claim gestures without forwarding, preserve continuous valid identity and coalesce outstanding renewal writes. Idle lanes are removed; no slot-lock reentrancy or later R-01 scope. Deterministic admission 19/19 passes; renewed full gates and fresh exact-head reviews remain required.
+
+- Corrected clean Linux gateway 153/153 and deterministic admission 19/19 pass, zero skips. Renewed full build/lint and 19 hermetic workspaces (4,164 tests), standalone service build/lint and affected guards pass. Main still dd7fec5; fresh published-head CI/Qodo/Greptile/independent review and resolved threads are required after normal push. Minimal D3 is not PostgreSQL fencing; owner manual merge only.
+
+### 2026-10-13 — R-01 PR2 independent game renewals
+
+- Fresh Greptile review of 8b8691d found a blocked claim for one game delaying every later game's renewal. The controlled two-game regression failed before correction. renewAll now starts renewals independently across games, retaining per-game ordering, synchronous release epochs and shared outstanding writes. Admission 20/20 and clean Linux real Redis/PostgreSQL gateway 154/154 pass, zero skips; full build/lint, service lint and eight guards pass. Renewed root tests and fresh published-head gates are required before final delivery. Previous reviews are superseded, including the interrupted third exact-head Gemini run. Main remains verified dd7fec5 with no web delta; D3 only and owner manual merge required.
+
+- Renewed root tests completed: all 19 hermetic workspaces and 4,164 tests pass, zero skips. Full build/lint, service build/lint, clean Linux gateway 154/154, admission 20/20 and all eight guards are verified before the normal follow-up push. Fresh CI/Qodo/Greptile/independent exact-head review and resolved threads remain required; no old approval is reused.

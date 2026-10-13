@@ -1,9 +1,10 @@
-/** D4 only: real Redis/PostgreSQL, two gateway instances in one process, controlled log I/O. */
+/** R-01 D4/D3: real Redis/PostgreSQL, two gateway instances in one process, controlled I/O. */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
+import { createServer, type Socket } from 'node:net';
 import { Redis } from 'ioredis';
-import { GameAuthority, InMemoryConnection, RealtimeGateway, type EventLog } from '@chess-platform/realtime-gateway';
+import { GameAuthority, InMemoryConnection, RealtimeGateway, gameChannel, type EventLog, type Broadcast } from '@chess-platform/realtime-gateway';
 import { PostgresEventStore, migrate, migrationsDir } from '@chess-platform/persistence/pg';
 import { withTestDatabase } from '@chess-platform/persistence/test-support';
 import { OwnershipRegistry } from '../src/ownership.js';
@@ -24,14 +25,15 @@ async function until(fn: () => boolean) {
     await new Promise(r => setTimeout(r, 5));
   }
 }
-function node(store: EventLog) {
+function node(store: EventLog, leaseTtlSec = 30, ownershipCheckTimeoutMs = 1000, monotonicNow?: () => number) {
   const nodeId = `d4-${randomUUID()}`;
   const redis = new Redis(REDIS_URL!);
   const fan = createRedisPubSub({ url: REDIS_URL!, nodeId });
   const authority = new GameAuthority(fan.pubsub, () => 1000, store);
-  const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec: 30, renewalIntervalSec: 15 });
+  const registry = new OwnershipRegistry({ redis, nodeId, leaseTtlSec, renewalIntervalSec: leaseTtlSec === 30 ? 15 : 1,
+    ...(monotonicNow ? { monotonicNow } : {}) });
   const consumer = new OwnerCommandConsumer(authority, redis);
-  const router = new RedisCommandRouter({ authority, registry, redis, nodeId, consumer });
+  const router = new RedisCommandRouter({ authority, registry, redis, nodeId, consumer, ownershipCheckTimeoutMs });
   const gateway = new RealtimeGateway(authority, fan.pubsub, { verify: token => ({ userId: token }) }, () => 1000, router);
   const connections: InMemoryConnection[] = [];
   const join = (gameId: string, userId: string) => {
@@ -43,7 +45,7 @@ function node(store: EventLog) {
     consumer.stop(); registry.stopRenewal(); await registry.releaseAll();
     await fan.close(); await redis.quit();
   };
-  return { authority, router, registry, join, close };
+  return { authority, router, registry, redis, pubsub: fan.pubsub, join, close };
 }
 function delayedRead(store: EventLog) {
   const entered = barrier(), release = barrier();
@@ -86,6 +88,222 @@ stackTest('D4 real stack: simultaneous cold joins coalesce; normal owner and for
       assert.equal(first.last('joined')?.state.ply, 0);
       assert.equal(second.last('joined')?.state.ply, 0);
     } finally { delay.release.resolve(); await b.close(); await a.close(); await store.closePlayerLocks(); }
+  });
+});
+
+function pauseNextAppend(store: EventLog) {
+  const entered = barrier(), release = barrier(); let pause = false;
+  const log: EventLog = { exists: id => store.exists(id), load: id => store.load(id),
+    append: async (...args) => {
+      if (pause) { pause = false; entered.resolve(); await release.done; }
+      return store.append(...args);
+    } };
+  return { log, entered, release, arm: () => { pause = true; } };
+}
+
+function commandQueued(authority: GameAuthority) {
+  const queued = barrier(), apply = authority.apply.bind(authority);
+  authority.apply = (...args) => { const done = apply(...args); queued.resolve(); return done; };
+  return queued;
+}
+
+for (const takeover of ['expiry', 'same-node-reclaim'] as const) {
+  stackTest(`D3 real stack: ${takeover} refuses obsolete queued local move; admitted first append finishes`, { timeout: 90000 }, async () => {
+    await withTestDatabase(async ({ pool }) => {
+      await migrate(pool, migrationsDir());
+      const store = new PostgresEventStore(pool), gameId = randomUUID(), paused = pauseNextAppend(store);
+      const a = node(paused.log, takeover === 'expiry' ? 3 : 30), b = node(store);
+      const frames: Broadcast[] = [];
+      const unsubscribe = a.pubsub.subscribe(gameChannel(gameId), msg => { frames.push(msg); });
+      let first: ReturnType<GameAuthority['apply']> | undefined;
+      let refused: Promise<void> | undefined;
+      try {
+        await create(a.authority, gameId); assert.equal(await a.router.prepareOwnership(gameId), true);
+        paused.arm();
+        first = a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' });
+        await paused.entered.done;
+        assert.equal(a.registry.holdsValidLease(gameId), true);
+        const queued = commandQueued(a.authority);
+        refused = assert.rejects(a.router.route(gameId, 'bob', { kind: 'move', uci: 'e7e5' }), /ownership.*changed/);
+        await queued.done; // The second legal intent is actually in the production slot queue.
+        if (takeover === 'expiry') {
+          const end = Date.now() + 5000;
+          while (await b.redis.get(`game:owner:${gameId}`)) {
+            assert.ok(Date.now() < end, 'real Redis lease must expire');
+            await new Promise(r => setTimeout(r, 10));
+          }
+          assert.equal(await b.router.prepareOwnership(gameId), true);
+          assert.equal(b.authority.getState(gameId).ply, 0, 'successor read precedes the admitted append');
+        } else {
+          await a.registry.release(gameId); assert.equal((await a.registry.claim(gameId)).owned, true);
+        }
+        paused.release.resolve(); assert.equal((await first).state.ply, 1); await refused;
+        assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0, 1]);
+        assert.equal(a.authority.getState(gameId).ply, 1, 'no obsolete domain advancement');
+        await until(() => frames.some(m => m.t === 'move'));
+        assert.equal(frames.filter(m => m.t === 'move').length, 1);
+        assert.equal(frames.filter(m => m.t === 'commandConfirmed').length, 0);
+        if (takeover === 'same-node-reclaim') {
+          assert.equal((await a.router.route(gameId, 'bob', { kind: 'move', uci: 'e7e5' })).state.ply, 2,
+            'a genuinely new gesture can settle reclaim debt');
+        }
+      } finally {
+        paused.release.resolve(); await Promise.allSettled([first, refused]); unsubscribe();
+        await a.close(); await b.close(); await store.closePlayerLocks();
+      }
+    });
+  });
+}
+
+stackTest('D3 real stack: reclaim during hydration cannot rebind the waiting local intent', { timeout: 90000 }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    const store = new PostgresEventStore(pool), gameId = randomUUID(), delay = delayedRead(store);
+    const seed = node(store), a = node(delay.log);
+    try {
+      await create(seed.authority, gameId);
+      const obsolete = assert.rejects(a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' }), /ownership.*changed/);
+      await delay.entered.done;
+      await a.registry.release(gameId); assert.equal((await a.registry.claim(gameId)).owned, true);
+      delay.release.resolve(); await obsolete;
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0]);
+      assert.equal((await a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
+    } finally { delay.release.resolve(); await a.close(); await seed.close(); await store.closePlayerLocks(); }
+  });
+});
+
+stackTest('D3 real stack: local lease expires while the real Redis comparison reply is held', { timeout: 90000 }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    const store = new PostgresEventStore(pool), gameId = randomUUID(), a = node(store, 3, 4000);
+    const entered = barrier(), release = barrier();
+    try {
+      await create(a.authority, gameId); assert.equal(await a.router.prepareOwnership(gameId), true);
+      const duplicate = a.redis.duplicate.bind(a.redis);
+      a.redis.duplicate = (...args) => {
+        const conn = duplicate(...args);
+        if (args[0]?.enableOfflineQueue === false) {
+          const get = conn.get.bind(conn);
+          conn.get = async key => { const owner = await get(key); entered.resolve(); await release.done; return owner; };
+        }
+        return conn;
+      };
+      const refused = assert.rejects(a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' }), /ownership.*verified/);
+      await entered.done;
+      await until(() => !a.registry.holdsValidLease(gameId));
+      release.resolve(); await refused;
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0]);
+      assert.equal(a.authority.getState(gameId).ply, 0);
+    } finally { release.resolve(); await a.close(); await store.closePlayerLocks(); }
+  });
+});
+
+stackTest('D3 real stack: a blackholed owner-comparison socket fails closed within its budget', { timeout: 90000 }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    const store = new PostgresEventStore(pool), gameId = randomUUID(), a = node(store, 30, 500);
+    const accepted = barrier(), sockets = new Set<Socket>();
+    const blackhole = createServer(socket => { sockets.add(socket); accepted.resolve(); });
+    await new Promise<void>(resolve => { blackhole.listen(0, '127.0.0.1', resolve); });
+    const address = blackhole.address(); assert.ok(address && typeof address === 'object');
+    try {
+      await create(a.authority, gameId); assert.equal(await a.router.prepareOwnership(gameId), true);
+      const duplicate = a.redis.duplicate.bind(a.redis);
+      a.redis.duplicate = (...args) => args[0]?.enableOfflineQueue === false
+        ? new Redis({ ...args[0], host: '127.0.0.1', port: address.port }) : duplicate(...args);
+      const refused = assert.rejects(a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' }), /ownership.*verified/);
+      await accepted.done; await refused;
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0]);
+      assert.equal(a.authority.getState(gameId).ply, 0);
+      a.redis.duplicate = duplicate;
+      assert.equal((await a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1,
+        'timed-out validation released the actual stable slot');
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) => blackhole.close(err => err ? reject(err) : resolve()));
+      await a.close(); await store.closePlayerLocks();
+    }
+  });
+});
+
+stackTest('D3 real stack: first forwarded intent settles takeover debt before START_REQUEST execution', { timeout: 90000 }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    const store = new PostgresEventStore(pool), gameId = randomUUID(), a = node(store), b = node(store);
+    const frames: Broadcast[] = [], unsubscribe = b.pubsub.subscribe(gameChannel(gameId), msg => { frames.push(msg); });
+    try {
+      await create(a.authority, gameId); await b.authority.ensureLoaded(gameId);
+      await a.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' });
+      assert.equal(b.authority.getState(gameId).ply, 0);
+      await a.registry.release(gameId); assert.equal((await b.registry.claim(gameId)).owned, true);
+      const black = await a.router.route(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
+      assert.equal(black.state.ply, 2); assert.equal(b.authority.getState(gameId).ply, 2);
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0, 1, 2]);
+      await until(() => frames.some(m => m.t === 'commandConfirmed'));
+      assert.equal(frames.filter(m => m.t === 'commandConfirmed').length, 1);
+    } finally { unsubscribe(); await a.close(); await b.close(); await store.closePlayerLocks(); }
+  });
+});
+
+stackTest('D3 real stack: expired local ticket retains consumer; fresh renewal generation hydrates forwarded work', { timeout: 90000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    let localNow = 0;
+    const store = new PostgresEventStore(pool), gameId = randomUUID(), a = node(store, 30, 1000, () => localNow), b = node(store);
+    const entered = barrier(), reply = barrier();
+    try {
+      await create(a.authority, gameId); assert.equal(await a.router.prepareOwnership(gameId), true);
+      const ticket = a.registry.captureTicket(gameId); assert.ok(ticket);
+      const evalRedis = a.redis.eval.bind(a.redis);
+      a.redis.eval = async (...args) => {
+        const result: unknown = await Reflect.apply(evalRedis, a.redis, args);
+        if (String(args[0]).includes("return redis.call('EXPIRE'")) { entered.resolve(); await reply.done; }
+        return result;
+      };
+      localNow = 22000; // Conservative local margin elapsed; real Redis lease remains owned.
+      a.registry.startRenewal(); t.mock.timers.tick(15000); await entered.done;
+      assert.equal(a.registry.captureTicket(gameId), undefined);
+      assert.equal(await b.redis.get(`game:owner:${gameId}`), ticket.nodeId);
+      await assert.rejects(b.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' }), /ownership.*changed/,
+        'the consumer replies with a definitive refusal instead of leaving the request unanswered');
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0]);
+      reply.resolve(); await until(() => a.registry.holdsValidLease(gameId));
+      assert.equal(a.registry.isTicketCurrent(ticket), false);
+      assert.equal((await b.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0, 1]);
+    } finally { reply.resolve(); await b.close(); await a.close(); await store.closePlayerLocks(); }
+  });
+});
+
+stackTest('D3 real stack: release cancels late renewal even when ticket generation was absent', { timeout: 90000 }, async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    let localNow = 0;
+    const store = new PostgresEventStore(pool), gameId = randomUUID(), a = node(store, 30, 1000, () => localNow), b = node(store);
+    const entered = barrier(), reply = barrier();
+    try {
+      await create(a.authority, gameId); assert.equal(await a.router.prepareOwnership(gameId), true);
+      const evalRedis = a.redis.eval.bind(a.redis);
+      a.redis.eval = async (...args) => {
+        const result: unknown = await Reflect.apply(evalRedis, a.redis, args);
+        if (String(args[0]).includes("return redis.call('EXPIRE'")) { entered.resolve(); await reply.done; }
+        return result;
+      };
+      localNow = 22000; a.registry.startRenewal(); t.mock.timers.tick(15000); await entered.done;
+      assert.equal(a.registry.captureTicket(gameId), undefined);
+      const released = a.registry.release(gameId);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(a.registry.ownedCount, 0, 'release invalidates local admission immediately');
+      reply.resolve(); await released;
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(a.registry.ownedCount, 0, 'the late reply must not restart the released consumer');
+      assert.equal(a.registry.captureTicket(gameId), undefined);
+      assert.equal(await b.redis.get(`game:owner:${gameId}`), null);
+      assert.equal((await b.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
+      assert.deepEqual((await store.load(gameId)).map(e => e.seq), [0, 1]);
+    } finally { reply.resolve(); await b.close(); await a.close(); await store.closePlayerLocks(); }
   });
 });
 
