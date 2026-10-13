@@ -214,7 +214,9 @@ function checkDeployGates() {
  * Out of scope: writing the same temp path through a variable that never names the protected one
  * (infeasible by construction, as the path comes from mktemp and is never copied elsewhere — any
  * such copy is itself a reference), a name assembled from pieces at run time (`x=RESOL; y=${x}VED`),
- * YAML-level escapes inside quoted scalars, and anything outside this workflow step (other steps'
+ * a literal name split into quoted segments and resolved by a nameref or other builtin
+ * (`declare -n ref=RES""OLVED`), YAML-level escapes inside quoted scalars, and anything outside this
+ * workflow step (other steps'
  * processes, actions, the runner). This is still a static check, not a shell parser: the behavioural
  * snapshot tests remain the primary guard.
  *
@@ -303,8 +305,10 @@ function hasWriteSite(line, name) {
  * read (`$(( NAME + 1 ))`) or a length `${#NAME}` also counts as a write site.
  *
  * Out of scope: a name composed at run time and then reached by indirection or eval of the composed
- * string (`v=PREV; declare -n r=${v}_REV`, `eval "${v}_REV=5"`), a name spelled with escapes
- * (`$'\x50'REV_REV`), YAML-level escapes inside quoted scalars, and anything outside this workflow
+ * string (`v=PREV; declare -n r=${v}_REV`, `eval "${v}_REV=5"`), a name spelled with escapes or with
+ * ANSI-C / locale quoting (`$'\x50'REV_REV`, `$'PREV'_REV`, `$"PREV"_REV`; these are deliberate
+ * obfuscation, which the owner accepted as outside this regression guard's contract),
+ * YAML-level escapes inside quoted scalars, and anything outside this workflow
  * (other steps' processes, actions, the runner). This is a static check, not a shell parser: the
  * behavioural snapshot tests remain the primary guard.
  *
