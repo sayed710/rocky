@@ -53,6 +53,51 @@ test("rejects a tee write to the resolver's output file", () => {
   assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs/);
 });
 
+// Every output-redirection spelling that (over)writes the resolver's output file must be counted, so
+// one extra write before PREV_REV is read makes "$RESOLVED" written twice.
+for (const write of [
+  `printf 'rollback_revision=5\\n' 1> "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' >| "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' 1>> "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' 1>| "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' &> "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' &>> "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' 2> "$RESOLVED" >&2`,
+  `printf 'rollback_revision=5\\n' 2>> "$RESOLVED" >&2`,
+  `printf 'rollback_revision=5\\n' >& "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' 1<> "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' >"$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' > "\${RESOLVED}"`,
+  `printf 'rollback_revision=5\\n' > \${RESOLVED}`,
+  `printf 'rollback_revision=5\\n' > $RESOLVED`,
+  `printf 'rollback_revision=5\\n' 1> $RESOLVED`,
+  `printf 'rollback_revision=5\\n' >| \${RESOLVED}`,
+  `printf 'rollback_revision=5\\n' | tee "\${RESOLVED}" >/dev/null`,
+  `printf 'rollback_revision=5\\n' | tee -a $RESOLVED >/dev/null`,
+]) {
+  test(`rejects another write to the resolver's output file: ${write}`, () => {
+    const text = mutate(PREV_REV_LINE, `${write}\n              ${PREV_REV_LINE}`);
+    assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs, found 2 write/);
+  });
+}
+
+// Writes to other files (a longer variable name, or stderr captured elsewhere) are not writes to it.
+for (const other of [
+  `printf 'rollback_revision=5\\n' > "$RESOLVED_OLD"`,
+  `printf 'rollback_revision=5\\n' 1> $RESOLVED_OLD`,
+  `printf 'rollback_revision=5\\n' >| \${RESOLVED_OLD}`,
+  `printf 'rollback_revision=5\\n' | tee $RESOLVED_OLD >/dev/null`,
+  `sed -n p "$RESOLVED" 2> "$HISTORY_ERR" 2>> "$LIST_ERR"`,
+]) {
+  test(`does not count a write to another file as a write to the resolver's output: ${other}`, () => {
+    assert.deepEqual(checkRollbackTarget(mutate(PREV_REV_LINE, `${other}\n              ${PREV_REV_LINE}`)), []);
+  });
+}
+
+test('the real deploy.yml with CRLF line endings passes gate 10', () => {
+  assert.deepEqual(checkRollbackTarget(deployYml.replace(/\r/g, '').replace(/\n/g, '\r\n')), []);
+});
+
 test('rejects publishing a prev_revision output other than $PREV_REV', () => {
   const text = mutate(PUBLISH_LINE, 'echo "prev_revision=$NEWEST_REV" >> "$GITHUB_OUTPUT"');
   assertRejected(text, /every prev_revision output must be published exactly as/);
