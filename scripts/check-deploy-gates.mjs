@@ -185,17 +185,30 @@ function checkDeployGates() {
  *   `>`, `>>`, `>|`, `>&` or `<>`, optional whitespace, then the target;
  * - `tee [flags] [other files] <target>`.
  * The target is `"$file"`, `"${file}"`, `$file` or `${file}`, ending at a word boundary of the shell
- * (whitespace, `;`, `&`, `|`, `(`, `)`, `<`, `>` or end of line), so `$file_OLD` is another file.
+ * (whitespace, `;`, `&`, `|`, `(`, `)`, `<`, `>`, a quote or end of line), so `$file_OLD` is another
+ * file while `"$file"""` (an empty quote concatenated on) is the same one.
  *
- * This is a pattern check, not a shell parser. Out of scope: writers that are not redirections or
- * tee (cp, mv, sed -i, dd of=, ...), writes through an fd opened earlier (`exec 3> ...; ... >&3`),
- * aliases of the path in another variable, and heredoc bodies. The behavioural snapshot tests are
- * the primary guard; this only keeps the obvious second writer out.
+ * Before matching, backslash-newline continuations are joined into a space, and every single-quoted
+ * segment (`'...'` within one line) is blanked to spaces of the same length: nothing inside single
+ * quotes expands or redirects, so `echo 'see > $file'` is not a write, and `"$file"''` keeps its
+ * word boundary.
+ *
+ * This is a pattern check, not a shell parser. Known fail-closed false positives: `$file"x"` (a
+ * different path, counted because a quote ends the target) and a redirection mentioned inside a
+ * double-quoted string (`echo "see > $file"`), which is not parsed. Out of scope: writers that are not
+ * redirections or tee (cp, mv, sed -i, dd of=, ...), writes through an fd opened earlier
+ * (`exec 3> ...; ... >&3`), aliases of the path in another variable, heredoc bodies, and quoting the
+ * blanking misreads (a lone `'` inside a double-quoted string or an unquoted `\'` pairs with the next
+ * `'` on the line). The behavioural snapshot tests are the primary guard; this only keeps the obvious
+ * second writer out.
  */
 function writesTo(shellText, file) {
-  const target = `(?:"\\$${file}"|"\\$\\{${file}\\}"|\\$${file}|\\$\\{${file}\\})(?=[\\s;&|()<>]|$)`;
-  const redirects = shellText.match(new RegExp(`(?:[0-9]+|&)?(?:>>|>\\||>&|>|<>)\\s*${target}`, 'gm')) ?? [];
-  const tees = shellText.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s${target}`, 'gm')) ?? [];
+  const text = shellText
+    .replace(/\\\r?\n/g, ' ')
+    .replace(/'[^'\n]*'/g, (quoted) => ' '.repeat(quoted.length));
+  const target = `(?:"\\$${file}"|"\\$\\{${file}\\}"|\\$${file}|\\$\\{${file}\\})(?=[\\s;&|()<>"']|$)`;
+  const redirects = text.match(new RegExp(`(?:[0-9]+|&)?(?:>>|>\\||>&|>|<>)\\s*${target}`, 'gm')) ?? [];
+  const tees = text.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s${target}`, 'gm')) ?? [];
   return [...redirects, ...tees];
 }
 
