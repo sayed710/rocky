@@ -287,7 +287,14 @@ export class RedisCommandRouter implements CommandRouter {
         this.staleAfterClaim.add(gameId);
         this.consumer.startConsumer(gameId);
       },
-      onReleased: (gameId) => this.consumer.stopConsumer(gameId),
+      onReleased: (gameId) => {
+        // The registry invokes this synchronously after invalidating local ownership,
+        // before a successor claim can record its debt. Retire only the released debt:
+        // pending reloads still settle through their generation/promise identity guards.
+        this.staleAfterClaim.delete(gameId);
+        this.claimGeneration.delete(gameId);
+        this.consumer.stopConsumer(gameId);
+      },
     });
   }
 
@@ -301,7 +308,7 @@ export class RedisCommandRouter implements CommandRouter {
    * reapply their request; subsequent new requests use the normal ownership path.
    *
    * Concurrent commands for the same claim share one log read rather than each issuing their own.
-   * The stale mark is cleared only on success, and only by a reload started for the current claim:
+   * An owned claim's stale mark is cleared only on success, by a reload started for that claim:
    * if ownership was lost and re-claimed while an older reload was still reading, that reload's
    * snapshot predates the other owner's moves, so this starts a new reload at once; for a game in
    * this node's cache it queues behind the older one on the game's command lock, so it reads the

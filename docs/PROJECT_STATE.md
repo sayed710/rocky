@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-01 revision foundation: Qodo/Greptile Crazyhouse and prefix replay findings reproduced and corrected; foundation 15/15 GREEN; renewed full local and exact-head gates pending; D1/D2 remain open._
+_Last updated: 2026-10-13 — R-01 PR #112 integration: owner-merged R-02/F4 #113 incorporated; both milestone histories preserved; integrated local gates pass; renewed exact-head gates pending; Qodo requirement-gap result unverified; D1/D2 remain open._
+
+Prior: _Last updated: 2026-10-13 — R-01 revision foundation: Qodo/Greptile Crazyhouse and prefix replay findings reproduced and corrected; foundation 15/15 GREEN; renewed full local and exact-head gates pending; D1/D2 remain open._
+
+Prior: _Last updated: 2026-10-13 — R-02 F4: merged-main abandoned claim metadata RED reproduced; release-owned debt retirement GREEN, gateway 185/185 and workspace 4,164/4,164; independent post-fix review complete; final exact-head publication gates pending; F1/F2 remain open._
 
 Prior: _Last updated: 2026-10-13 — R-01 state-revision foundation: fresh baseline RED reproduced; focused revision/compatibility tests 13/13 GREEN; full local and exact-head delivery gates pending; D1/D2 remain open._
 
@@ -173,6 +177,45 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## R-01 PR #112 — integration of owner-merged R-02/F4 (2026-10-13)
+
+Owner merged [PR #113](https://github.com/sayed710/rocky/pull/113) at
+`557eff02379feef7ecda421db16479e0bfbe681e` (15:42:13 UTC).
+Fresh remote and GitHub main agree on that commit. A normal main integration
+preserves the F4 production/tests/audit/tracker verbatim and both original
+Revision Contract milestones below. The only manual merge resolution is this
+document; production changes are inherited from approved main.
+
+Prior header ordering follows the original milestone commits: revision
+correction 15:05:35 UTC, F4 candidate 14:44:52 UTC, revision foundation
+14:41:13 UTC. Their historical pending/open claims remain historical; F4 has
+since been owner-merged. Integrated tests and exact-final-head CI/Gemini/
+Greptile/Qodo/thread checks must be renewed after publication. The earlier
+Qodo substantive engine reported Bugs 0 and Rules 0 but no Requirement gaps
+result; Skill insights 0 is not equivalent. Owner readiness remains on hold
+unless the mandatory requirement-gap evidence is obtained or the owner
+explicitly changes that gate. D1/D2 and PostgreSQL fencing remain separate.
+
+Read-only Qodo portal inspection for `sayed710/rocky` shows an unchecked
+Requirement gap control and "No spec source connected." Documentation/design
+integrations offer Confluence and Notion connections; no specification source
+is connected. No settings, connections or billing were changed. Qodo's
+[Spec Agent documentation](https://docs.qodo.ai/code-review/view-requirement-gaps-in-findings)
+requires a linked specification and notes that an untouched displayed-off
+toggle can still use the default enabled engine flag. The missing spec-source
+prerequisite is confirmed; effective backend enablement, entitlement and
+empty-category formatting are not established. No provider outage or quota
+failure is inferred. An actual final-head requirement result, or an explicit
+owner gate decision, remains necessary; issue/rule/skill counts do not replace it.
+
+Integrated local build/lint, workspace 4,180/4,180, focused revision 15/15,
+real Linux Redis/PostgreSQL gateway 185/185, PostgreSQL persistence 210/210
+and all eight repository guards pass with zero skips. Two gateway attempts
+through the Windows host bridge each passed 183/185 with different
+readiness/ownership/forwarding failures. The unchanged source passes on a
+direct Docker network; failed diagnostics remain retained, cause unproven,
+and no production or test-timeout remediation is claimed.
 
 ## R-01 revision foundation — reviewer corrections (2026-10-13)
 
@@ -5534,3 +5577,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Loops and callbacks now use captured connection identity: old A cannot retry under B's membership, stop B or evict its copy. Existing R-03 admitted completion/exact handoff, D3 tickets/lanes/release epochs and D4 slot lifetime remain intact; domain, persistence, deployment and revision contracts are untouched.
 - Genuine Gemini 3.8 Flash High/high-effort read-only review identified an over-broad expiry guard. Three no-replacement controls failed before correction; R-04 cleanup still runs without B. First Linux full run failed 164/166 (new-test Node 22 warning accounting and unchanged flag-readiness/Redis ETIMEDOUT); failure remains retained with timeout cause unproven. Corrected Linux Redis/PG suite passes 172/172. See [proof, provenance and limits](audits/R02_F3_CONSUMER_IDENTITY_2026-10-13.md).
 - Local verification: focused F3/D3/R-03 67/67; clean Linux real Redis/PG gateway 172/172; workspace build/lint and 19-workspace tests 4,164/4,164; PostgreSQL persistence 210/API 109/backup 2; scripts 333/load 86; actual Nginx 8+12; POSIX API/load 2+1; eight guards. All positive counted suites have zero failures/skips/cancellations. Fresh exact-head independent review, CI/Qodo/Greptile/resolved-thread gates remain pending here. F1 terminal ownership policy, F2 authority-cache policy and F4 abandoned claim metadata are not fixed. Owner merge only; no main write, force push or deployment is authorized.
+
+### 2026-10-13 — R-02 F4: abandoned claim metadata retirement candidate
+
+- Owner merged #110/#111; fresh fetched/live/GitHub main verified as `bf0ce91fae99e06daae8348a913c5632c815e94b`. New isolated worktree `rocky-fix-r02-f4-abandoned-20261013`, branch `fix/r02-f4-abandoned-claim-cleanup`; original F3 and Codex 2 revision checkouts are not edited.
+- Fresh unchanged-production RED: controlled F4 11 tests (5 pass/6 assertion failures), real Redis/PG 2 (1 pass/1 assertion failure: 12 retained entries), complete Linux gateway 185 (178 pass/7 intentional F4 failures), all zero skips/cancellations. Compilation/missing-vector/POSIX setup failures are retained separately with no reproduction or passing credit.
+- Only the synchronous registry release hook retires the released router stale/generation debt; pending reloads, successor generations, D3 immutable tickets, D4 busy slots, F3 consumer instance isolation, R-03 exact identity/unknown outcomes and R-04 authorization/cleanup remain intact. No eviction policy, command replay, queue clearing, sweep or new service. See [F4 proof and limits](audits/R02_F4_ABANDONED_CLAIM_METADATA_2026-10-13.md).
+- Corrected focused 80/80; clean Linux Redis/PG gateway 185/185; renewed full build/lint and 19-workspace tests 4,164/4,164; PG persistence/API/backup 210/109/2; scripts/load 333/86; actual Nginx 8+12; POSIX API/load 2+1; eight guards and root/gateway production audits pass. Positive counted suites have zero failures/skips/cancellations/TODOs. Frozen Gemini 3.8 Flash High/high pre/post reviews complete with no post-fix actionable code findings; first contaminated pre-review fingerprint is disclosed, not credited.
+- Final committed-head independent review and published-head CI/Qodo/Greptile/thread/equality gates remain separate and pending at this source checkpoint. F4 is not closed before owner merge. F1/F2 policies, R-01 revision/D1/D2, PostgreSQL fencing, Helm #107, deployed/load/heap certification and deferred P2/P3 statuses remain unchanged. No merge/deployment authorized.
