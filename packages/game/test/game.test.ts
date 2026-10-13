@@ -23,6 +23,24 @@ test('a fresh game is ongoing with White to move', () => {
   assert.equal(game.turn, 'w');
 });
 
+test('incremental event prefixes agree with full replay without mutating the resident game', () => {
+  const created = Game.create({ gameId: 'prefix', timeControl: TC, at: 0,
+    players: { white: 'alice', black: 'bob' }, initialFen: '4k2r/8/8/8/8/8/8/R3K3 w - - 99 1' });
+  const before = created.game.snapshot();
+  const result = created.game.playMove('a1a2', 1_000);
+  assert.deepEqual(result.events.map(event => event.type), ['MovePlayed', 'GameEnded']);
+  let prefix = created.game;
+  for (let i = 0; i < result.events.length; i++) {
+    prefix = prefix.withEvents([result.events[i]!]);
+    const replay = Game.fromEvents([...created.events, ...result.events.slice(0, i + 1)]);
+    assert.deepEqual(prefix.snapshot(), replay.snapshot());
+    assert.equal(prefix.status.over, i === result.events.length - 1);
+  }
+  assert.equal(created.game.snapshot(), before);
+  assert.equal(created.game.status.over, false);
+  assert.deepEqual(prefix.snapshot(), result.game.snapshot());
+});
+
 test('playing moves advances the game and records SAN', () => {
   let { game } = newGame();
   let t = 1_000;

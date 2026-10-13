@@ -31,6 +31,14 @@ The retained head is the final stored sequence, rather than an array-length
 substitute. The committed games projection passes its already validated
 terminal `lastSeq` through its internal ending notification as well.
 
+Live intermediate prefixes fold only the newly emitted events onto the resident
+game through `Game.withEvents`, which delegates the existing pure reducer.
+Hydration likewise folds each stored event once rather than replaying every
+earlier prefix repeatedly. Immutable move-list copying remains; no constant-time
+command or cache-memory bound is claimed. The codec accepts the authority's
+Crazyhouse drop origins (`P@`, `N@`, `B@`, `R@`, `Q@`) alongside board squares,
+while destinations remain board squares.
+
 ## Compatibility
 
 The web mirror permits legacy absence, exports explicit legacy/revisioned
@@ -61,6 +69,14 @@ append heads, and unchecked revisioned wire frames. Additional deterministic
 tests cover append barriers, capacity and coercible malformed enum values.
 Existing R-03/R-04/D3/D4, variant, readiness and terminal suites remain regression
 gates. Exact-head test/reviewer evidence belongs in the PR handoff.
+
+Qodo on the first published candidate identified full-history terminal-prefix
+replay and rejection of legal Crazyhouse drop frames (also found by Greptile).
+Two new compiled behavioral tests failed before the corrections: one recorded
+an unwanted full replay call; the other decoded a valid drop frame as null.
+Both pass after correction, making the foundation suite 15/15. A domain test
+also verifies incremental prefixes match full replay without mutating the
+resident game. Earlier exact-head reviews are superseded by the correction.
 
 This foundation does not implement D1 coherent recovery, D2 draw fanout,
 complete revision replay, stale-state rejection, recovery negotiation, cache

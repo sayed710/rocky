@@ -418,17 +418,17 @@ export class GameAuthority {
       previous = entry.seq;
     }
     const events = logged.map((e) => e.event);
-    const game = Game.fromEvents(events);
+    let game = Game.fromEvents(events.slice(0, 1));
     const broadcasts: BroadcastLogEntry[] = [];
     let broadcastSeq = 0;
     // Replay incrementally: a MovePlayed/GameEnded broadcast carries the
     // fenHash + legalMoves of the position *after* that event, exactly as the
     // live path computes them.
-    for (let i = 0; i < events.length; i++) {
+    for (let i = 1; i < events.length; i++) {
       const ev = events[i]!;
+      game = game.withEvents([ev]);
       if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded' && ev.type !== 'PlayerReady') continue;
-      const upto = Game.fromEvents(events.slice(0, i + 1));
-      const msg = this.toBroadcast(gameId, ev, upto, logged[i]!.seq);
+      const msg = this.toBroadcast(gameId, ev, game, logged[i]!.seq);
       if (!msg) continue;
       const seq = ++broadcastSeq;
       broadcasts.push({ seq, ply: msg.t === 'move' ? msg.ply : null, msg });
@@ -606,12 +606,12 @@ export class GameAuthority {
 
     const pending: BroadcastLogEntry[] = [];
     let nextSeq = rec.broadcastSeq;
+    let prefix = rec.game;
     for (let i = 0; i < result.events.length; i++) {
       const ev = result.events[i]!;
+      prefix = i === result.events.length - 1 ? result.game : prefix.withEvents([ev]);
       if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded' && ev.type !== 'PlayerReady') continue;
-      const game = i === result.events.length - 1 ? result.game :
-        Game.fromEvents([...rec.events, ...result.events.slice(0, i + 1)]);
-      const msg = this.toBroadcast(gameId, ev, game, rec.persistedSeq + i + 1);
+      const msg = this.toBroadcast(gameId, ev, prefix, rec.persistedSeq + i + 1);
       if (!msg) continue;
       pending.push({ seq: ++nextSeq, ply: msg.t === 'move' ? msg.ply : null, msg });
     }

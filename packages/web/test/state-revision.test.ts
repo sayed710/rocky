@@ -61,3 +61,17 @@ test('revisioned enum fields reject coercible arrays and objects', () => {
     assert.equal(decode(JSON.stringify({ t: 'state', gameId: 'g', state: { ...state, stateRevision: 0, timeControl: { ...state.timeControl, kind } } })), null);
   }
 });
+
+test('revisioned Crazyhouse snapshots and moves preserve legal drop origins', () => {
+  const legalMoves = { 'P@': ['e4', 'd5'], e2: ['e3', 'e4'] };
+  const snapshot = { ...state, variant: 'crazyhouse', stateRevision: 3, legalMoves };
+  for (const t of ['state', 'joined', 'resumed']) {
+    const frame = { t, gameId: 'g', role: 'white', state: snapshot, missed: [] };
+    assert.deepEqual(decode(JSON.stringify(frame)), frame);
+  }
+  const frame = { t: 'move', gameId: 'g', stateRevision: 3, ply: 2, uci: 'd5e4', san: 'dxe4',
+    by: 'b', fenHash: '0123456789ab', clock: state.clock, serverTs: 1_000, legalMoves };
+  assert.deepEqual(decode(JSON.stringify(frame), 'revision'), frame);
+  assert.equal(decode(JSON.stringify({ ...frame, legalMoves: { 'X@': ['e4'] } })), null);
+  assert.equal(decode(JSON.stringify({ ...frame, legalMoves: { 'P@': ['e9'] } })), null);
+});

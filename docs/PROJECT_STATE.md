@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-01 state-revision foundation: fresh baseline RED reproduced; focused revision/compatibility tests 13/13 GREEN; full local and exact-head delivery gates pending; D1/D2 remain open._
+_Last updated: 2026-10-13 — R-01 revision foundation: Qodo/Greptile Crazyhouse and prefix replay findings reproduced and corrected; foundation 15/15 GREEN; renewed full local and exact-head gates pending; D1/D2 remain open._
+
+Prior: _Last updated: 2026-10-13 — R-01 state-revision foundation: fresh baseline RED reproduced; focused revision/compatibility tests 13/13 GREEN; full local and exact-head delivery gates pending; D1/D2 remain open._
 
 Prior: _Last updated: 2026-10-13 — R-02 PR1 F3: current-main RED reproduced; instance lifecycle/R-04 cleanup corrected; local gates pass including gateway 172/172; exact-head owner-review PR gates pending; F1/F2/F4 remain open._
 
@@ -171,6 +173,21 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## R-01 revision foundation — reviewer corrections (2026-10-13)
+
+Qodo found rejection of Crazyhouse drop frames and full-history replay on a
+terminal command; Greptile independently reported the drop-frame defect.
+Two compiled tests genuinely failed before correction. The corrected foundation
+suite passes 15/15. `Game.withEvents` reuses the existing pure reducer to fold
+trusted emitted/logged events onto immutable resident prefixes; live terminal
+commands do not reconstruct the historical stream, and hydration folds each
+event once. A domain test pins prefix parity and resident immutability.
+The web codec accepts existing Crazyhouse pocket-origin keys while still
+rejecting malformed origins/destinations. [ADR-0161](adr/0161-durable-state-revision-foundation.md)
+records these corrections. Earlier head reviews are superseded; full local and
+exact-final-head CI/model/Qodo/Greptile gates require renewal. D1/D2 and the
+previously listed deferred work remain open. Owner alone merges PR #112.
 
 ## R-01 increment — durable state-revision foundation (2026-10-13)
 

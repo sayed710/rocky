@@ -390,7 +390,7 @@ function color(value: unknown): boolean { return value === 'w' || value === 'b';
 function clock(value: unknown): boolean { return record(value) && nonnegative(value.w) && nonnegative(value.b); }
 function ready(value: unknown): boolean { return record(value) && typeof value.w === 'boolean' && typeof value.b === 'boolean'; }
 function legalMoves(value: unknown): boolean {
-  return record(value) && Object.entries(value).every(([from, destinations]) => /^[a-h][1-8]$/.test(from) &&
+  return record(value) && Object.entries(value).every(([from, destinations]) => /^(?:[a-h][1-8]|[PNBRQ]@)$/.test(from) &&
     Array.isArray(destinations) && destinations.every(to => typeof to === 'string' && /^[a-h][1-8]$/.test(to)));
 }
 

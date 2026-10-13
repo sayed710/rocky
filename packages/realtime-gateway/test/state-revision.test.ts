@@ -58,6 +58,15 @@ test('REV-03 move-plus-ending frames carry their own durable prefix and replay i
   assert.deepEqual(authority.getState(params.gameId), result.state);
 });
 
+test('terminal command builds prefixes without replaying the historical event log', async context => {
+  const authority = new GameAuthority(new InMemoryPubSub(), () => 1_000);
+  await authority.createGame({ ...params, initialFen: '4k2r/8/8/8/8/8/8/R3K3 w - - 99 1' });
+  const replay = context.mock.method(Game, 'fromEvents');
+  const result = await authority.apply(params.gameId, 'alice', { kind: 'move', uci: 'a1a2' });
+  assert.deepEqual(result.events.map(event => event.type), ['MovePlayed', 'GameEnded']);
+  assert.equal(replay.mock.callCount(), 0, 'live prefix construction must fold only the newly emitted events');
+});
+
 test('REV-04 reload rejects corrupt stored positions instead of renumbering them', async () => {
   const { events } = Game.create({ ...params, at: 1_000 });
   const second: GameEvent = { type: 'DrawOffered', by: 'w', at: 1_000 };
