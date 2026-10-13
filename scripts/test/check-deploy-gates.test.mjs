@@ -74,8 +74,14 @@ for (const write of [
   `printf 'rollback_revision=5\\n' >| \${RESOLVED}`,
   `printf 'rollback_revision=5\\n' | tee "\${RESOLVED}" >/dev/null`,
   `printf 'rollback_revision=5\\n' | tee -a $RESOLVED >/dev/null`,
+  // A backslash-newline continuation between the operator and the target.
+  `printf 'rollback_revision=5\\n' > \\\n              "$RESOLVED"`,
+  `printf 'rollback_revision=5\\n' > \\\r\n              "$RESOLVED"`,
+  // Empty quote segments concatenate to the same path.
+  `printf 'rollback_revision=5\\n' > "$RESOLVED"''`,
+  `printf 'rollback_revision=5\\n' > "$RESOLVED"""`,
 ]) {
-  test(`rejects another write to the resolver's output file: ${write}`, () => {
+  test(`rejects another write to the resolver's output file: ${write.replace(/\r/g, '\\r').replace(/\n/g, '\\n')}`, () => {
     const text = mutate(PREV_REV_LINE, `${write}\n              ${PREV_REV_LINE}`);
     assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs, found 2 write/);
   });
@@ -91,6 +97,16 @@ for (const other of [
 ]) {
   test(`does not count a write to another file as a write to the resolver's output: ${other}`, () => {
     assert.deepEqual(checkRollbackTarget(mutate(PREV_REV_LINE, `${other}\n              ${PREV_REV_LINE}`)), []);
+  });
+}
+
+// Inside single quotes nothing redirects: a literal that mentions a redirection is not a write.
+for (const literal of [
+  `echo 'example: 1> "$RESOLVED" next'`,
+  `echo 'example: > $RESOLVED next'`,
+]) {
+  test(`does not count a single-quoted literal as a write to the resolver's output: ${literal}`, () => {
+    assert.deepEqual(checkRollbackTarget(mutate(PREV_REV_LINE, `${literal}\n              ${PREV_REV_LINE}`)), []);
   });
 }
 

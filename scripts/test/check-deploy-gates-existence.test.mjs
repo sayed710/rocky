@@ -130,12 +130,21 @@ for (const write of [
   `printf 'release_existence=absent\\n' 1> "$EXISTENCE_FILE"`,
   `printf 'release_existence=absent\\n' >| "$EXISTENCE_FILE"`,
   `printf 'release_existence=absent\\n' > "\${EXISTENCE_FILE}"`,
+  // A backslash-newline continuation between the operator and the target.
+  `printf 'release_existence=absent\\n' > \\\n            "$EXISTENCE_FILE"`,
+  // An empty quote segment concatenates to the same path.
+  `printf 'release_existence=absent\\n' > "$EXISTENCE_FILE"''`,
 ]) {
-  test(`rejects a forged verdict written to the classifier output file: ${write}`, () => {
+  test(`rejects a forged verdict written to the classifier output file: ${write.replace(/\n/g, '\\n')}`, () => {
     const text = mutate(EXISTENCE_READ, `${write}\n            ${EXISTENCE_READ}`);
     assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
   });
 }
+
+test('does not count a single-quoted literal that mentions a redirection as a write to the classifier output file', () => {
+  const text = mutate(EXISTENCE_READ, `echo 'example: 1> "$EXISTENCE_FILE" next'\n            ${EXISTENCE_READ}`);
+  assert.deepEqual(checkReleaseExistence(text), []);
+});
 
 test('rejects the classifier stdout redirected to a file other than the one RELEASE_EXISTENCE is read from', () => {
   const text = mutate(`"\${LIST_ARGS[@]}" > "$EXISTENCE_FILE"`, `"\${LIST_ARGS[@]}" > "$LIST_OUT"`);
