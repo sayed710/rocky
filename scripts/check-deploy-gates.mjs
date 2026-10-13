@@ -219,8 +219,8 @@ function stdoutRedirects(command) {
  * configuration that already failed (Amendment 2026-10-11 of ADR-0076).
  *
  * The only accepted non-empty PREV_REV is exactly `$(sed -n 's/^rollback_revision=//p' "$X")`, where
- * "$X" is the file the resolver's stdout is redirected to and nothing else writes to it (by `>`,
- * `>>`, or `tee`). The step output the rollback reads must be published as exactly
+ * "$X" is the file the resolver's stdout is redirected to and nothing else writes to it (by any
+ * redirection or `tee`, as counted by writesTo). The step output the rollback reads must be published as exactly
  * `echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"`.
  *
  * Returns the list of problems (empty when the wiring is intact).
@@ -297,7 +297,7 @@ export function checkRollbackTarget(deployText) {
  * - RELEASE_EXISTS is assigned exactly three times: `RELEASE_EXISTS=""`, the `exists)` arm and the
  *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from "$EXISTENCE_FILE", the
  *   file the classifier's stdout is redirected to (`> "$EXISTENCE_FILE"`) and that nothing else writes
- *   (by `>`, `>>` or `tee`, echo lines included);
+ *   (by any redirection or `tee`, as counted by writesTo, echo lines included);
  * - that case has only the `exists)`, `absent)` and `*)` arms, and the `*)` arm (unknown existence) ends
  *   with `exit 1` before `;;`;
  * - release_exists is published only as `echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"`, and the
