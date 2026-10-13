@@ -179,12 +179,23 @@ function checkDeployGates() {
 }
 
 /**
- * The writes to "$file" in `shellText` (gates 10 and 11): `>` and `>>` redirections onto it, and
- * `tee [flags] [other files] "$file"`. Pass every non-comment line, echo lines included.
+ * The writes to "$file" in `shellText` (gates 10 and 11). Pass every non-comment line, echo lines
+ * included. Counted:
+ * - any output redirection onto it: an optional fd number or `&` (so `1>`, `2>`, `&>`, ...), then
+ *   `>`, `>>`, `>|`, `>&` or `<>`, optional whitespace, then the target;
+ * - `tee [flags] [other files] <target>`.
+ * The target is `"$file"`, `"${file}"`, `$file` or `${file}`, ending at a word boundary of the shell
+ * (whitespace, `;`, `&`, `|`, `(`, `)`, `<`, `>` or end of line), so `$file_OLD` is another file.
+ *
+ * This is a pattern check, not a shell parser. Out of scope: writers that are not redirections or
+ * tee (cp, mv, sed -i, dd of=, ...), writes through an fd opened earlier (`exec 3> ...; ... >&3`),
+ * aliases of the path in another variable, and heredoc bodies. The behavioural snapshot tests are
+ * the primary guard; this only keeps the obvious second writer out.
  */
 function writesTo(shellText, file) {
-  const redirects = shellText.match(new RegExp(`(?:^|[^0-9&])>>?\\s*"\\$${file}"`, 'gm')) ?? [];
-  const tees = shellText.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s"\\$${file}"`, 'g')) ?? [];
+  const target = `(?:"\\$${file}"|"\\$\\{${file}\\}"|\\$${file}|\\$\\{${file}\\})(?=[\\s;&|()<>]|$)`;
+  const redirects = shellText.match(new RegExp(`(?:[0-9]+|&)?(?:>>|>\\||>&|>|<>)\\s*${target}`, 'gm')) ?? [];
+  const tees = shellText.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s${target}`, 'gm')) ?? [];
   return [...redirects, ...tees];
 }
 
