@@ -27,7 +27,11 @@
  *      the file the resolver writes its output to.
  *  Gates 10 and 11 pin each evidence temp file ("$RESOLVED", "$EXISTENCE_FILE", "$INV_VERDICT",
  *  "$MARKER_FILE") to a positive allowlist of references (checkEvidenceReferences): its mktemp, its
- *  one producer, its sed reads and its publication; any other reference fails the gate.
+ *  one producer, its sed reads and its publication; any other reference fails the gate. The decision
+ *  scalars read from those files (PREV_REV, SNAPSHOT_NEWEST, RELEASE_EXISTENCE, RELEASE_EXISTS,
+ *  INVENTORY, DEPLOY_MARKER) are pinned the same way to a positive allowlist of write sites
+ *  (checkDecisionWrites): any assignment, builtin (`read`, `printf -v`, `declare`, `unset`, ...),
+ *  assigning expansion or eval string naming them outside their allowed lines fails the gate.
  *  11. Release existence is never derived from a bare `helm status` exit code: RELEASE_EXISTS=false is
  *      set only by the confirmed-absence arm of scripts/release-existence.mjs's classification (status
  *      not-found AND an empty `helm list --all`), and the rollback step uninstalls only behind a fresh
@@ -220,12 +224,8 @@ function checkDeployGates() {
  * @returns {string[]} Problems (empty when every reference is an allowed form).
  */
 export function checkEvidenceReferences(workflowText, name, forms) {
-  const raw = workflowText.replace(/\r/g, '').split('\n');
-  // A comment line is dropped unless the line before it ends with a continuation backslash.
-  const kept = raw.filter((line, i) => !/^\s*#/.test(line) || (i > 0 && /\\$/.test(raw[i - 1]))).join('\n');
-  const variants = [kept.replace(/\\\n/g, ''), kept.replace(/\\\n[ \t]*/g, '')]
-    .map((text) => text.split('\n').map((line) => line.replace(/[ \t]+/g, ' ').trim()));
-  const token = new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, 'g');
+  const variants = logicalLineVariants(workflowText);
+  const token = identifierToken(name);
   const offending = new Set();
   const badCounts = new Set();
   for (const lines of variants) {
@@ -246,6 +246,127 @@ export function checkEvidenceReferences(workflowText, name, forms) {
   for (const why of badCounts) found.push(`${allowed}; ${why}`);
   return found;
 }
+
+/**
+ * The workflow's logical lines as bash reads them, in the two variants checkEvidenceReferences
+ * describes: CR stripped, comment lines dropped unless they continue the previous line,
+ * backslash-newline removed (keeping, then removing, the whitespace after it), whitespace collapsed.
+ *
+ * @param {string} workflowText
+ * @returns {string[][]}
+ */
+function logicalLineVariants(workflowText) {
+  const raw = workflowText.replace(/\r/g, '').split('\n');
+  // A comment line is dropped unless the line before it ends with a continuation backslash.
+  const kept = raw.filter((line, i) => !/^\s*#/.test(line) || (i > 0 && /\\$/.test(raw[i - 1]))).join('\n');
+  return [kept.replace(/\\\n/g, ''), kept.replace(/\\\n[ \t]*/g, '')]
+    .map((text) => text.split('\n').map((line) => line.replace(/[ \t]+/g, ' ').trim()));
+}
+
+/** NAME as a whole identifier token, with or without `$`, braces or quotes around it. */
+const identifierToken = (name) => new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, 'g');
+
+/**
+ * Whether `line` writes (or may write) the variable `name`: it has a write site of it, i.e.
+ * (a) a bare occurrence of the identifier token — one not immediately preceded by `$`, `${` or
+ *     `${!` (an assignment, `read`, `printf -v`, `declare` / `local` / `export` / `typeset` /
+ *     `readonly`, `let`, `((...))`, `unset`, `mapfile`, a nameref target, an `eval` string ...), or
+ * (b) an assigning expansion: `${NAME=`, `${NAME:=` or a subscript `${NAME[`.
+ * The line is also inspected with every `'`, `"` and `\` removed, so a name spliced by quoting
+ * (`PREV""_REV`) or escaped (`\PREV_REV`) is a write site too; a site in either spelling counts.
+ */
+function hasWriteSite(line, name) {
+  const token = identifierToken(name);
+  return [line, line.replace(/['"\\]/g, '')].some((text) =>
+    [...text.matchAll(token)].some((m) => {
+      const before = text.slice(0, m.index);
+      const after = text.slice(m.index + name.length);
+      if (/\$\{!?$/.test(before)) return /^(?::?=|\[)/.test(after);
+      return !/\$$/.test(before);
+    }));
+}
+
+/**
+ * Positive write-site allowlist for the decision scalars read from the evidence files (gates 10 and
+ * 11): PREV_REV, SNAPSHOT_NEWEST, RELEASE_EXISTENCE, RELEASE_EXISTS, INVENTORY and DEPLOY_MARKER.
+ * checkEvidenceReferences keeps every second writer away from the files, but a shell builtin can
+ * rewrite the variable after its verified read without naming any file (`read -r PREV_REV <<< 5`,
+ * `printf -v INVENTORY %s empty`, `: "${PREV_REV:=5}"`, `unset RELEASE_EXISTENCE`).
+ *
+ * Contract: every logical line holding a write site of NAME (hasWriteSite: a bare token, or
+ * `${NAME=` / `${NAME:=` / `${NAME[`) must be, as a whole, one of NAME's allowed lines, and each
+ * allowed line must appear exactly its allowed number of times. Lines and their normalisation
+ * (comments, CR, backslash-newline in both variants, whitespace) are those of
+ * checkEvidenceReferences; matching is case-sensitive, so the output key `prev_revision=` is another
+ * token. Reads — `$NAME`, `"$NAME"`, `${NAME}`, `${NAME:-...}`, `${NAME:+...}`, `${!NAME}` — are
+ * unrestricted. Fail-closed: a bare mention in a quoted literal or an inline comment, an arithmetic
+ * read (`$(( NAME + 1 ))`) or a length `${#NAME}` also counts as a write site.
+ *
+ * Out of scope: a name composed at run time and then reached by indirection or eval of the composed
+ * string (`v=PREV; declare -n r=${v}_REV`, `eval "${v}_REV=5"`), a name spelled with escapes
+ * (`$'\x50'REV_REV`), YAML-level escapes inside quoted scalars, and anything outside this workflow
+ * (other steps' processes, actions, the runner). This is a static check, not a shell parser: the
+ * behavioural snapshot tests remain the primary guard.
+ *
+ * @param {string} workflowText The workflow text (comments included; they are dropped here).
+ * @param {string} name The decision variable's name.
+ * @param {{ line: string, count: number }[]} forms The allowed whole lines and their exact counts.
+ * @returns {string[]} Problems (empty when every write site is an allowed line, counted exactly).
+ */
+export function checkDecisionWrites(workflowText, name, forms) {
+  const offending = new Set();
+  const badCounts = new Set();
+  for (const lines of logicalLineVariants(workflowText)) {
+    const writes = lines.filter((line) => hasWriteSite(line, name));
+    for (const line of writes) {
+      if (!forms.some((form) => form.line === line)) offending.add(line);
+    }
+    for (const form of forms) {
+      const n = writes.filter((line) => line === form.line).length;
+      if (n !== form.count) badCounts.add(`\`${form.line}\` must appear exactly ${form.count} time(s), found ${n}`);
+    }
+  }
+  const allowed = `decision variable ${name} may only be written in its allowed forms [${forms.map((f) => `${f.line} (x${f.count})`).join(' | ')}]`;
+  const found = [];
+  if (offending.size > 0) found.push(`${allowed}; offending write site line(s): [${[...offending].join(' | ')}]`);
+  for (const why of badCounts) found.push(`${allowed}; ${why}`);
+  return found;
+}
+
+/** The allowed write sites of each decision variable (checkDecisionWrites), exactly as in deploy.yml. */
+const DECISION_WRITES = {
+  PREV_REV: [
+    { line: 'PREV_REV=""', count: 1 },
+    { line: `PREV_REV=$(sed -n 's/^rollback_revision=//p' "$RESOLVED")`, count: 1 },
+    { line: 'PREV_REV: ${{ steps.pre_upgrade.outputs.prev_revision }}', count: 1 },
+  ],
+  SNAPSHOT_NEWEST: [
+    { line: 'SNAPSHOT_NEWEST=""', count: 1 },
+    { line: 'SNAPSHOT_NEWEST=0', count: 1 },
+    { line: `SNAPSHOT_NEWEST=$(sed -n 's/^rollback_newest_revision=//p' "$RESOLVED")`, count: 1 },
+    { line: 'SNAPSHOT_NEWEST: ${{ steps.pre_upgrade.outputs.snapshot_newest_revision }}', count: 1 },
+  ],
+  RELEASE_EXISTENCE: [
+    { line: 'RELEASE_EXISTENCE=unknown', count: 1 },
+    { line: `RELEASE_EXISTENCE=$(sed -n 's/^release_existence=//p' "$EXISTENCE_FILE")`, count: 1 },
+  ],
+  RELEASE_EXISTS: [
+    { line: 'RELEASE_EXISTS=""', count: 1 },
+    { line: 'exists) RELEASE_EXISTS=true ;;', count: 1 },
+    { line: 'RELEASE_EXISTS=false', count: 1 },
+    { line: 'RELEASE_EXISTS: ${{ steps.pre_upgrade.outputs.release_exists }}', count: 1 },
+  ],
+  INVENTORY: [
+    { line: 'INVENTORY=unknown', count: 1 },
+    { line: `INVENTORY=$(sed -n 's/^orphan_inventory=//p' "$INV_VERDICT")`, count: 1 },
+  ],
+  DEPLOY_MARKER: [
+    { line: `DEPLOY_MARKER=$(sed -n 's/^deploy_marker=//p' "$MARKER_FILE")`, count: 1 },
+    // The upgrade step's and the rollback step's env bindings (each step's one binding is checked
+    // by checkRecoveryWiring).
+    { line: 'DEPLOY_MARKER: ${{ steps.pre_upgrade.outputs.deploy_marker }}', count: 2 },
+  ],
+};
 
 /** Shared allowed forms: the mktemp that creates the file, and `VAR=$(sed -n 's/^key=//p' "$NAME")` reads. */
 const evidenceFile = (name) => ({ label: `${name}=$(mktemp)`, re: new RegExp(`^${name}=\\$\\(mktemp\\)$`), once: true });
@@ -320,6 +441,8 @@ export function checkRollbackTarget(deployText) {
   ])) {
     fail(why);
   }
+  // ...and PREV_REV, once read from it, is written nowhere else (see checkDecisionWrites).
+  for (const why of checkDecisionWrites(deployText, 'PREV_REV', DECISION_WRITES.PREV_REV)) fail(why);
   if (/history\s*\[\s*history\.length\s*-\s*1\s*\]|\bnode\s+-e\b/.test(code)) {
     fail('selects a revision with inline JavaScript (e.g. history[history.length - 1]) — the newest revision can be a failed release that helm rollback would re-apply');
   }
@@ -397,6 +520,11 @@ export function checkReleaseExistence(deployText) {
   }
   if (!/^if node scripts\/release-existence\.mjs classify --release gambit --status-exit "\$STATUS_RC" \\$/m.test(codeText)) {
     fail('release existence must be classified by `node scripts/release-existence.mjs classify` from the helm status/list evidence');
+  }
+  // The decision variables read from the evidence files are written only at their allowed sites
+  // (checkDecisionWrites; PREV_REV is gate 10's). Checked before any early return below.
+  for (const name of ['SNAPSHOT_NEWEST', 'RELEASE_EXISTENCE', 'RELEASE_EXISTS', 'INVENTORY', 'DEPLOY_MARKER']) {
+    for (const why of checkDecisionWrites(deployText, name, DECISION_WRITES[name])) fail(why);
   }
 
   // Assignments, including any chained after an echo (quoted text blanked out first).
