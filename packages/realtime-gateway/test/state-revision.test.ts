@@ -66,7 +66,11 @@ test('REV-04 reload rejects corrupt stored positions instead of renumbering them
     [{ seq: 0, event: events[0]! }, { seq: 2, event: second }],
     [{ seq: 0, event: events[0]! }, { seq: 0, event: second }],
     [{ seq: 1, event: events[0]! }, { seq: 0, event: second }],
-    ...[-1, 0.5, 2_147_483_648, Number.MAX_SAFE_INTEGER + 1, NaN].map(seq => [{ seq, event: events[0]! }]),
+    ...[-1, 0.5, '0', null, undefined, 2_147_483_648, Number.MAX_SAFE_INTEGER + 1, NaN].map(seq => {
+      const entry: LoggedEvent = { seq: 0, event: events[0]! };
+      Reflect.set(entry, 'seq', seq); // Deliberately malformed adapter data at the persistence boundary.
+      return [entry];
+    }),
   ];
   for (const history of histories) {
     const store: EventLog = { append: async () => 0, load: async () => history, exists: async () => true };
