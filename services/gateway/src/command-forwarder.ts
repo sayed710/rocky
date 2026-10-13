@@ -124,6 +124,12 @@ export interface ForwardedFailure {
 
 export type ForwardedResult = ForwardedSuccess | ForwardedFailure;
 
+/** A stopped loop must never borrow a replacement's lifecycle under the same game ID. */
+interface ConsumerInstance {
+  readonly gameId: string;
+  readonly conn: Redis;
+}
+
 /** Malformed acknowledgements can never establish a confirmed rejection. */
 function decodeResult(raw: string): ForwardedResult {
   const result = JSON.parse(raw) as ForwardedResult;
@@ -673,28 +679,35 @@ export class OwnerCommandConsumer {
 
   private async consumeLoop(gameId: string, conn: Redis): Promise<void> {
     const cmdKey = `${CMD_PREFIX}:${gameId}`;
-    // Liveness is tracked by `blockingConns`, which is populated *before* this
+    // Liveness belongs to the exact connection in `blockingConns`, populated *before* this
     // loop launches — unlike `loops`, whose entry is assigned only after this
     // method's synchronous prefix runs (so the first guard check would see it
     // absent and exit immediately).
-    while (this.running && this.blockingConns.has(gameId)) {
+    const instance: ConsumerInstance = { gameId, conn };
+    while (this.running && this.isCurrentInstance(instance)) {
       try {
         const raw = await conn.blpop(cmdKey, this.blpopTimeoutSec);
         if (!raw) continue; // timeout, loop back
 
         const payload = Array.isArray(raw) ? raw[1] : raw;
-        await this.processCommand(payload);
+        // A popped request still uses the existing admission/settlement protocol;
+        // stopping a loop must not discard it or cancel already-admitted work.
+        await this.processCommand(payload, instance);
       } catch (err) {
         // A forced disconnect (stop/stopConsumer) rejects the pending BLPOP;
         // exit quietly in that case rather than logging a spurious error.
-        if (!this.running || !this.blockingConns.has(gameId)) break;
+        if (!this.running || !this.isCurrentInstance(instance)) break;
         console.error(`[OwnerCommandConsumer] error for ${gameId}:`, err);
         await new Promise((r) => setTimeout(r, 100));
       }
     }
   }
 
-  private async processCommand(raw: string): Promise<void> {
+  private isCurrentInstance(instance: ConsumerInstance): boolean {
+    return this.blockingConns.get(instance.gameId) === instance.conn;
+  }
+
+  private async processCommand(raw: string, instance?: ConsumerInstance): Promise<void> {
     // A malformed payload throws out to consumeLoop, which logs it and backs off. Swallowing it
     // here would drop the message silently — the one failure mode an observability change must
     // not introduce.
@@ -723,6 +736,10 @@ export class OwnerCommandConsumer {
       (envelope.userId === NO_SHOW_ACTOR || envelope.userId === FLAG_ACTOR) && !this.authority.has(envelope.gameId);
     // Before the response, so the forwarding replica never observes the reply ahead of the eviction.
     const releaseExpiryCopy = (): void => {
+      // A late completion must not evict B's copy. With no replacement, R-04
+      // still releases the temporary unwatched ended copy loaded only for expiry.
+      const currentConn = instance ? this.blockingConns.get(instance.gameId) : undefined;
+      if (currentConn && currentConn !== instance?.conn) return;
       const { gameId } = envelope;
       const unwatched = loadedForExpiry && !this.hasLocalSessions(gameId);
       if (unwatched && this.authority.hasFresh(gameId) && this.authority.getState(gameId).status.over) {
@@ -776,7 +793,9 @@ export class OwnerCommandConsumer {
         // its lease and evicts. The load above must not retain that temporary
         // ended copy merely because admission correctly refuses the old owner.
         releaseExpiryCopy();
-        this.stopConsumer(envelope.gameId);
+        if (!instance || this.isCurrentInstance(instance)) {
+          this.stopConsumer(instance?.gameId ?? envelope.gameId);
+        }
         commandSpan.setAttribute('cmd.outcome', 'not_owner');
         commandSpan.setStatus('error');
         commandSpan.end();
