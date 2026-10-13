@@ -80,6 +80,10 @@ for (const write of [
   // Empty quote segments concatenate to the same path.
   `printf 'rollback_revision=5\\n' > "$RESOLVED"''`,
   `printf 'rollback_revision=5\\n' > "$RESOLVED"""`,
+  // An apostrophe inside double quotes is a literal, not the start of a single-quoted segment.
+  `echo "it's 5" > "$RESOLVED"; sed 's/a/b/' f`,
+  `printf "don't" 1> "$RESOLVED" # it's`,
+  `echo "it's" >> "$RESOLVED"; x='y'`,
 ]) {
   test(`rejects another write to the resolver's output file: ${write.replace(/\r/g, '\\r').replace(/\n/g, '\\n')}`, () => {
     const text = mutate(PREV_REV_LINE, `${write}\n              ${PREV_REV_LINE}`);

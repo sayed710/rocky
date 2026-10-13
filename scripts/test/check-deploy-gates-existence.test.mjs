@@ -134,6 +134,8 @@ for (const write of [
   `printf 'release_existence=absent\\n' > \\\n            "$EXISTENCE_FILE"`,
   // An empty quote segment concatenates to the same path.
   `printf 'release_existence=absent\\n' > "$EXISTENCE_FILE"''`,
+  // An apostrophe inside double quotes is a literal, not the start of a single-quoted segment.
+  `echo "it's absent" > "$EXISTENCE_FILE"; sed 's/a/b/' f`,
 ]) {
   test(`rejects a forged verdict written to the classifier output file: ${write.replace(/\n/g, '\\n')}`, () => {
     const text = mutate(EXISTENCE_READ, `${write}\n            ${EXISTENCE_READ}`);
