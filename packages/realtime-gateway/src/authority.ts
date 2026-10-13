@@ -20,8 +20,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Game, type GameEvent } from '@chess-platform/game';
 import type { Color, Position } from '@chess-platform/core';
 import type { CreateGameParams } from '@chess-platform/game';
-import { InMemoryEventLog, type EventLog } from './event-log';
-import type { GameBroadcast, LegalMoves, ReadyView, StateView } from './protocol';
+import { InMemoryEventLog, isStateRevision, nextEventHead, type EventLog, type LoggedEvent } from './event-log';
+import type { GameBroadcast, LegalMoves, StateView } from './protocol';
 import { gameChannel, gamesEndedChannel, type PubSub } from './pubsub';
 
 /**
@@ -95,7 +95,7 @@ interface GameRecord {
   readonly events: GameEvent[];
   readonly broadcasts: BroadcastLogEntry[];
   broadcastSeq: number;
-  /** Durable-log head seq already persisted (`events.length - 1`). */
+  /** Validated durable-log head, never a broadcast counter. */
   persistedSeq: number;
   /** Set when an uncertain append could not be reconciled with the durable log. */
   stale: boolean;
@@ -233,6 +233,7 @@ export class GameAuthority {
       let persistedSeq: number;
       try {
         persistedSeq = await this.store.append(params.gameId, -1, events);
+        this.validateAppendHead(persistedSeq, nextEventHead(-1, events.length));
       } catch (err) {
         throw new AuthorityError('invalid_command', `cannot create game ${params.gameId}: ${(err as Error).message}`);
       }
@@ -246,7 +247,7 @@ export class GameAuthority {
       };
       // Eviction of a not-yet-created game must not discard a successful creation.
       slot.dispose = false;
-      return this.viewOf(game);
+      return this.viewOf(game, persistedSeq);
     });
   }
 
@@ -408,22 +409,26 @@ export class GameAuthority {
    * produced it, so resume/catch-up ({@link getMissedSince}) works after a
    * restart.
    */
-  private rebuildRecord(gameId: string, logged: readonly { readonly event: GameEvent }[]): GameRecord {
+  private rebuildRecord(gameId: string, logged: readonly LoggedEvent[]): GameRecord {
+    let previous = -1;
+    for (const entry of logged) {
+      if (!isStateRevision(entry.seq) || entry.seq !== previous + 1) {
+        throw new Error(`invalid durable event sequence for ${gameId}`);
+      }
+      previous = entry.seq;
+    }
     const events = logged.map((e) => e.event);
-    const game = Game.fromEvents(events);
+    let game = Game.fromEvents(events.slice(0, 1));
     const broadcasts: BroadcastLogEntry[] = [];
     let broadcastSeq = 0;
     // Replay incrementally: a MovePlayed/GameEnded broadcast carries the
     // fenHash + legalMoves of the position *after* that event, exactly as the
     // live path computes them.
-    for (let i = 0; i < events.length; i++) {
+    for (let i = 1; i < events.length; i++) {
       const ev = events[i]!;
+      game = game.withEvents([ev]);
       if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded' && ev.type !== 'PlayerReady') continue;
-      const upto = Game.fromEvents(events.slice(0, i + 1));
-      const snap = upto.snapshot();
-      const fh = fenHash(upto.fen);
-      const legal: LegalMoves = snap.status.over ? {} : legalMovesOf(snap.position);
-      const msg = this.toBroadcast(gameId, ev, fh, legal, snap.ready);
+      const msg = this.toBroadcast(gameId, ev, game, logged[i]!.seq);
       if (!msg) continue;
       const seq = ++broadcastSeq;
       broadcasts.push({ seq, ply: msg.t === 'move' ? msg.ply : null, msg });
@@ -433,7 +438,7 @@ export class GameAuthority {
       events,
       broadcasts,
       broadcastSeq,
-      persistedSeq: events.length - 1,
+      persistedSeq: previous,
       stale: false,
     };
   }
@@ -442,7 +447,7 @@ export class GameAuthority {
   getState(gameId: string): StateView {
     const record = this.require(gameId);
     if (record.stale) throw new AuthorityError('invalid_command', 'durable game reload is required');
-    return this.viewOf(record.game);
+    return this.viewOf(record.game, record.persistedSeq);
   }
 
   /**
@@ -593,21 +598,20 @@ export class GameAuthority {
     result: { game: Game; events: GameEvent[] },
   ): Promise<ApplyResult> {
     // A no-op (a repeated readiness) changes nothing, so it neither touches the log nor broadcasts.
-    if (result.events.length === 0) return { events: [], broadcasts: [], state: this.viewOf(rec.game) };
+    if (result.events.length === 0) return { events: [], broadcasts: [], state: this.viewOf(rec.game, rec.persistedSeq) };
 
-    // Compute the resulting position's legal moves once per command.
-    // For MovePlayed broadcasts this is the post-move position's side-to-move
-    // legal moves (empty if the move ended the game). For GameEnded broadcasts
-    // the game is over so legal moves are always {}.
-    const resultingSnap = result.game.snapshot();
-    const resultingLegalMoves: LegalMoves =
-      resultingSnap.status.over ? {} : legalMovesOf(resultingSnap.position);
-    const resultingFenHash = fenHash(result.game.fen);
+    let expectedHead: number;
+    try { expectedHead = nextEventHead(rec.persistedSeq, result.events.length); }
+    catch (err) { throw new AuthorityError('invalid_command', (err as Error).message); }
 
     const pending: BroadcastLogEntry[] = [];
     let nextSeq = rec.broadcastSeq;
-    for (const ev of result.events) {
-      const msg = this.toBroadcast(gameId, ev, resultingFenHash, resultingLegalMoves, resultingSnap.ready);
+    let prefix = rec.game;
+    for (let i = 0; i < result.events.length; i++) {
+      const ev = result.events[i]!;
+      prefix = i === result.events.length - 1 ? result.game : prefix.withEvents([ev]);
+      if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded' && ev.type !== 'PlayerReady') continue;
+      const msg = this.toBroadcast(gameId, ev, prefix, rec.persistedSeq + i + 1);
       if (!msg) continue;
       pending.push({ seq: ++nextSeq, ply: msg.t === 'move' ? msg.ply : null, msg });
     }
@@ -616,7 +620,9 @@ export class GameAuthority {
     // so a durable-log failure leaves the in-memory game and the store in lock
     // step (nothing committed, nothing broadcast) rather than ahead of disk.
     try {
-      rec.persistedSeq = await this.store.append(gameId, rec.persistedSeq, result.events);
+      const returnedHead = await this.store.append(gameId, rec.persistedSeq, result.events);
+      this.validateAppendHead(returnedHead, expectedHead);
+      rec.persistedSeq = returnedHead;
     } catch (err) {
       rec.stale = true;
       try {
@@ -648,7 +654,7 @@ export class GameAuthority {
       if (msg.t === 'ended') this.pubsub.publish(gamesEndedChannel(), msg);
     }
 
-    return { events: result.events, broadcasts, state: this.viewOf(rec.game) };
+    return { events: result.events, broadcasts, state: this.viewOf(rec.game, rec.persistedSeq) };
   }
 
   private guard(fn: () => { game: Game; events: GameEvent[] }): { game: Game; events: GameEvent[] } {
@@ -662,30 +668,31 @@ export class GameAuthority {
   private toBroadcast(
     gameId: string,
     ev: GameEvent,
-    resultingFenHash: string,
-    resultingLegalMoves: LegalMoves,
-    resultingReady: ReadyView,
+    prefix: Game,
+    stateRevision: number,
   ): GameBroadcast | null {
     switch (ev.type) {
       case 'PlayerReady':
-        return { t: 'ready', gameId, ready: { ...resultingReady }, serverTs: ev.at };
+        return { t: 'ready', gameId, stateRevision, ready: { ...prefix.snapshot().ready }, serverTs: ev.at };
       case 'MovePlayed':
         return {
           t: 'move',
           gameId,
+          stateRevision,
           ply: ev.ply,
           uci: ev.uci,
           san: ev.san,
           by: ev.by,
-          fenHash: resultingFenHash,
+          fenHash: fenHash(prefix.fen),
           clock: { w: ev.remaining.w, b: ev.remaining.b },
           serverTs: ev.at,
-          legalMoves: resultingLegalMoves,
+          legalMoves: prefix.status.over ? {} : legalMovesOf(prefix.snapshot().position),
         };
       case 'GameEnded':
         return {
           t: 'ended',
           gameId,
+          stateRevision,
           result: ev.result,
           termination: ev.termination,
           winner: ev.winner,
@@ -696,11 +703,18 @@ export class GameAuthority {
     }
   }
 
-  private viewOf(game: Game): StateView {
+  private validateAppendHead(returned: number, expected: number): void {
+    if (!isStateRevision(returned) || returned !== expected) {
+      throw new Error('invalid durable event sequence returned by append');
+    }
+  }
+
+  private viewOf(game: Game, stateRevision: number): StateView {
     const snap = game.snapshot();
     const fen = game.fen;
     return {
       gameId: snap.gameId,
+      stateRevision,
       variant: snap.variant,
       players: snap.players,
       timeControl: snap.timeControl,

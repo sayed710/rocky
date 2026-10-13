@@ -6,7 +6,13 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-02 F4: merged-main abandoned claim metadata RED reproduced; release-owned debt retirement GREEN, gateway 185/185 and workspace 4,164/4,164; independent post-fix review complete; final exact-head publication gates pending; F1/F2 remain open._
+_Last updated: 2026-10-13 — R-01 PR #112 integration: owner-merged R-02/F4 #113 incorporated; both milestone histories preserved; integrated local gates pass; renewed exact-head gates pending; Qodo requirement-gap result unverified; D1/D2 remain open._
+
+Prior: _Last updated: 2026-10-13 — R-01 revision foundation: Qodo/Greptile Crazyhouse and prefix replay findings reproduced and corrected; foundation 15/15 GREEN; renewed full local and exact-head gates pending; D1/D2 remain open._
+
+Prior: _Last updated: 2026-10-13 — R-02 F4: merged-main abandoned claim metadata RED reproduced; release-owned debt retirement GREEN, gateway 185/185 and workspace 4,164/4,164; independent post-fix review complete; final exact-head publication gates pending; F1/F2 remain open._
+
+Prior: _Last updated: 2026-10-13 — R-01 state-revision foundation: fresh baseline RED reproduced; focused revision/compatibility tests 13/13 GREEN; full local and exact-head delivery gates pending; D1/D2 remain open._
 
 Prior: _Last updated: 2026-10-13 — R-02 PR1 F3: current-main RED reproduced; instance lifecycle/R-04 cleanup corrected; local gates pass including gateway 172/172; exact-head owner-review PR gates pending; F1/F2/F4 remain open._
 
@@ -171,6 +177,79 @@ Prior: _Last updated: 2026-09-05 — M15 Increment 52: deterministic analysis-ca
 Prior: _Last updated: 2026-09-05 — M15 Increment 51: Signature B mechanism isolation and diagnostic hardening._
 
 Prior: _Last updated: 2026-09-05 — M15 Increment 50: test:counts / standalone gateway host setup contract._
+
+## R-01 PR #112 — integration of owner-merged R-02/F4 (2026-10-13)
+
+Owner merged [PR #113](https://github.com/sayed710/rocky/pull/113) at
+`557eff02379feef7ecda421db16479e0bfbe681e` (15:42:13 UTC).
+Fresh remote and GitHub main agree on that commit. A normal main integration
+preserves the F4 production/tests/audit/tracker verbatim and both original
+Revision Contract milestones below. The only manual merge resolution is this
+document; production changes are inherited from approved main.
+
+Prior header ordering follows the original milestone commits: revision
+correction 15:05:35 UTC, F4 candidate 14:44:52 UTC, revision foundation
+14:41:13 UTC. Their historical pending/open claims remain historical; F4 has
+since been owner-merged. Integrated tests and exact-final-head CI/Gemini/
+Greptile/Qodo/thread checks must be renewed after publication. The earlier
+Qodo substantive engine reported Bugs 0 and Rules 0 but no Requirement gaps
+result; Skill insights 0 is not equivalent. Owner readiness remains on hold
+unless the mandatory requirement-gap evidence is obtained or the owner
+explicitly changes that gate. D1/D2 and PostgreSQL fencing remain separate.
+
+Read-only Qodo portal inspection for `sayed710/rocky` shows an unchecked
+Requirement gap control and "No spec source connected." Documentation/design
+integrations offer Confluence and Notion connections; no specification source
+is connected. No settings, connections or billing were changed. Qodo's
+[Spec Agent documentation](https://docs.qodo.ai/code-review/view-requirement-gaps-in-findings)
+requires a linked specification and notes that an untouched displayed-off
+toggle can still use the default enabled engine flag. The missing spec-source
+prerequisite is confirmed; effective backend enablement, entitlement and
+empty-category formatting are not established. No provider outage or quota
+failure is inferred. An actual final-head requirement result, or an explicit
+owner gate decision, remains necessary; issue/rule/skill counts do not replace it.
+
+Integrated local build/lint, workspace 4,180/4,180, focused revision 15/15,
+real Linux Redis/PostgreSQL gateway 185/185, PostgreSQL persistence 210/210
+and all eight repository guards pass with zero skips. Two gateway attempts
+through the Windows host bridge each passed 183/185 with different
+readiness/ownership/forwarding failures. The unchanged source passes on a
+direct Docker network; failed diagnostics remain retained, cause unproven,
+and no production or test-timeout remediation is claimed.
+
+## R-01 revision foundation — reviewer corrections (2026-10-13)
+
+Qodo found rejection of Crazyhouse drop frames and full-history replay on a
+terminal command; Greptile independently reported the drop-frame defect.
+Two compiled tests genuinely failed before correction. The corrected foundation
+suite passes 15/15. `Game.withEvents` reuses the existing pure reducer to fold
+trusted emitted/logged events onto immutable resident prefixes; live terminal
+commands do not reconstruct the historical stream, and hydration folds each
+event once. A domain test pins prefix parity and resident immutability.
+The web codec accepts existing Crazyhouse pocket-origin keys while still
+rejecting malformed origins/destinations. [ADR-0161](adr/0161-durable-state-revision-foundation.md)
+records these corrections. Earlier head reviews are superseded; full local and
+exact-final-head CI/model/Qodo/Greptile gates require renewal. D1/D2 and the
+previously listed deferred work remain open. Owner alone merges PR #112.
+
+## R-01 increment — durable state-revision foundation (2026-10-13)
+
+Owner-authorized isolated implementation starts from `bf0ce91fae99e06daae8348a913c5632c815e94b`,
+after #110 and #111 merged. Fresh compiled baseline tests reproduced eight
+behavioral failures with one passing control. The focused foundation suite is
+now 13/13 GREEN: durable stamps, same-ply/no-op readiness, own-prefix batched
+events, validated reload/append positions, bounded capacity, commit barriers,
+legacy compatibility and malformed revisioned frames. [ADR-0161](adr/0161-durable-state-revision-foundation.md)
+records the contract and rollout boundary. The games projection retains its
+durable terminal sequence in its internal notification; directly affected
+fixtures carry valid stamps. Full local and exact-head PR gates remain pending
+in this milestone; only the owner merges.
+
+This increment does not close D1 recovery or D2 draw publication. GameSync,
+last-ply resume semantics, R-03 receipts and R-04 authorization checks are not
+activated or replaced by revisions. PostgreSQL fencing, stale edge reads,
+late appends, missed Pub/Sub broadcasts, R-02/F1/F2/F4 and Helm #107 remain
+separate tracked work. See [open findings](audits/OPEN_FINDINGS_TRACKER.md).
 
 ## M15 Increment 58 — kubelet probe NetworkPolicy contract
 

@@ -263,6 +263,11 @@ export class Game {
     return new Game(state);
   }
 
+  /** Fold trusted emitted/logged events onto this immutable prefix; not command admission. */
+  withEvents(events: readonly GameEvent[]): Game {
+    return Game.applyAll(this, events);
+  }
+
   /** The current derived state (read-only). */
   snapshot(): GameState {
     return this.state;

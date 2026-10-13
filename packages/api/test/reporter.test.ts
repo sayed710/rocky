@@ -71,6 +71,7 @@ async function endGame(rig: Rig, gameId: string, result: '1-0' | '0-1' | '1/2-1/
   await rig.events.append(gameId, 0, [ending]);
   rig.pubsub.publish(gameChannel(gameId), {
     t: 'ended',
+    stateRevision: 1,
     gameId,
     result,
     termination: result === '*' ? 'aborted' : 'resignation',

@@ -19,6 +19,22 @@
 
 import type { GameEvent } from '@chess-platform/game';
 
+/** PostgreSQL INTEGER, matching game_events.seq. */
+export const MAX_STATE_REVISION = 2_147_483_647;
+
+export function isStateRevision(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_STATE_REVISION;
+}
+
+/** Pre-append capacity check; -1 is permitted only for a new stream. */
+export function nextEventHead(head: number, count: number): number {
+  if ((head !== -1 && !isStateRevision(head)) || !Number.isSafeInteger(count) || count < 0 ||
+      count > MAX_STATE_REVISION - head) {
+    throw new Error('durable event sequence exhausted or invalid');
+  }
+  return head + count;
+}
+
 /** One persisted event with its per-game append sequence (0-based). */
 export interface LoggedEvent {
   readonly seq: number;

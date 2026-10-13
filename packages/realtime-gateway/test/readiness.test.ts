@@ -203,7 +203,7 @@ test('no-show expiry ends the game once, fans out, and refuses every later comma
   assert.equal(first.status, 'fulfilled');
   assert.equal(second.status, 'rejected', 'a second expiry finds the game over');
   assert.deepEqual(spectator.last('ended'), {
-    t: 'ended', gameId: 'g', result: '*', termination: 'no_show', winner: null, serverTs: CREATED_AT + 60_000,
+    t: 'ended', stateRevision: 1, gameId: 'g', result: '*', termination: 'no_show', winner: null, serverTs: CREATED_AT + 60_000,
   });
   assert.equal(ended.length, 1);
   const types = (await n.store.load('g')).map(({ event }) => event.type);
@@ -254,7 +254,7 @@ test('a resume after restart replays readiness broadcasts from the durable log',
   const restarted = node({ store: first.store });
   await restarted.authority.ensureLoaded('g');
   assert.deepEqual(restarted.authority.getMissedSince('g', 0), [
-    { t: 'ready', gameId: 'g', ready: { w: true, b: false }, serverTs: CREATED_AT },
+    { t: 'ready', stateRevision: 1, gameId: 'g', ready: { w: true, b: false }, serverTs: CREATED_AT },
   ]);
 });
 
@@ -277,7 +277,7 @@ test('a player command reaching the owner after the deadline records the no-show
   bob.deliver({ t: 'join', gameId: 'late', token: 'token-bob' });
   await flush();
   assert.deepEqual(bob.last('ended'), {
-    t: 'ended', gameId: 'late', result: '1-0', termination: 'no_show', winner: 'w', serverTs: CREATED_AT + 300_000,
+    t: 'ended', stateRevision: 2, gameId: 'late', result: '1-0', termination: 'no_show', winner: 'w', serverTs: CREATED_AT + 300_000,
   });
   assert.deepEqual(await readyEvents(late.store, 'late'), ['w'], 'the late seat never became ready');
 });
