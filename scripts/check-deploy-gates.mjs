@@ -188,58 +188,27 @@ function checkDeployGates() {
  * (whitespace, `;`, `&`, `|`, `(`, `)`, `<`, `>`, a quote or end of line), so `$file_OLD` is another
  * file while `"$file"""` (an empty quote concatenated on) is the same one.
  *
- * Before matching, backslash-newline continuations are joined into a space, and every real
- * single-quoted segment is blanked to spaces of the same length (see maskSingleQuoted): nothing inside
- * single quotes expands or redirects, so `echo 'see > $file'` is not a write, and `"$file"''` keeps
- * its word boundary. An apostrophe inside double quotes (`echo "it's" > "$file"`) is a literal and
- * does not hide the redirection.
+ * Before matching, backslash-newline continuations are joined into a space. Nothing else is
+ * normalised.
  *
- * This is a pattern check, not a shell parser. Known fail-closed false positives: `$file"x"` (a
- * different path, counted because a quote ends the target) and a redirection mentioned inside a
- * double-quoted string (`echo "see > $file"`), which is not parsed. Out of scope: writers that are not
- * redirections or tee (cp, mv, sed -i, dd of=, ...), writes through an fd opened earlier
- * (`exec 3> ...; ... >&3`), aliases of the path in another variable, and heredoc bodies. The
- * behavioural snapshot tests are the primary guard; this only keeps the obvious second writer out.
+ * Fail-closed contract: any text that looks like a redirection or tee onto the file counts as a
+ * write, even inside single or double quotes, an inline comment or a multi-line string
+ * (`echo 'see > $file'`, `echo x # > "$file"`, `$file"x"`). This is deliberate. Without a shell
+ * parser, quoting cannot be judged reliably: ANSI-C quotes (`$'it\'s'`) and backtick substitutions
+ * inside double quotes have both hidden real writes from a quote-masking scan. A false positive only
+ * fails the gate, while a miss lets a second writer through.
+ *
+ * This is a pattern check, not a shell parser. Out of scope: writers that are not redirections or tee
+ * (cp, mv, sed -i, dd of=, ...), writes through an fd opened earlier (`exec 3> ...; ... >&3`), aliases
+ * of the path in another variable, and heredoc bodies. The behavioural snapshot tests are the primary
+ * guard; this only keeps the obvious second writer out.
  */
 function writesTo(shellText, file) {
-  const text = shellText
-    .replace(/\\\r?\n/g, ' ')
-    .split('\n')
-    .map(maskSingleQuoted)
-    .join('\n');
+  const text = shellText.replace(/\\\r?\n/g, ' ');
   const target = `(?:"\\$${file}"|"\\$\\{${file}\\}"|\\$${file}|\\$\\{${file}\\})(?=[\\s;&|()<>"']|$)`;
   const redirects = text.match(new RegExp(`(?:[0-9]+|&)?(?:>>|>\\||>&|>|<>)\\s*${target}`, 'gm')) ?? [];
   const tees = text.match(new RegExp(`\\btee\\b[^\\n|;&>]*\\s${target}`, 'gm')) ?? [];
   return [...redirects, ...tees];
-}
-
-/**
- * `line` with each single-quoted segment, quotes included, replaced by spaces of the same length.
- * A quote-state scan, not a shell parser: unquoted, `\` escapes the next character; inside double
- * quotes, `\` escapes `"`, `\`, `$` or a backtick and `'` is a literal; inside single quotes all is
- * literal until the next `'`. An unterminated single quote is left as is (more text, not less, is
- * matched).
- */
-function maskSingleQuoted(line) {
-  let out = '';
-  let inDouble = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === '\\' && (!inDouble || '"\\$`'.includes(line[i + 1] ?? ''))) {
-      out += line.slice(i, i + 2);
-      i++;
-    } else if (c === '"') {
-      inDouble = !inDouble;
-      out += c;
-    } else if (c === "'" && !inDouble && line.indexOf("'", i + 1) !== -1) {
-      const end = line.indexOf("'", i + 1);
-      out += ' '.repeat(end - i + 1);
-      i = end;
-    } else {
-      out += c;
-    }
-  }
-  return out;
 }
 
 /**
