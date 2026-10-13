@@ -65,7 +65,7 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
 | R-02-F1 | Observed terminal retention; policy pending | Reported P1 operational concern, no retirement SLA | Owner policy; implementation unassigned |
 | R-02-F2 | Observed cumulative cache residency; policy pending | Reported P2 capacity concern, no measured heap leak | Owner policy; implementation unassigned |
 | R-02-F3 | Confirmed defect on dd7fec5; separate remediation active, not closed | Reported P2 lifecycle correctness | Separate F3 agent; worktree branch verified below |
-| R-02-F4 | Confirmed defect on dd7fec5; pending | Reported P3 metadata retention, bytes/frequency unmeasured | Unassigned |
+| R-02-F4 | Reproduced on bf0ce91; F4 candidate locally GREEN, owner review/merge pending | Reported P3 metadata retention, bytes/frequency unmeasured | Codex 1; separate F4-only PR |
 | DEPLOY-107 | Implementation PR open; delivery gates pending | Recovery safety within deployment scope | Existing #107 implementer; no reassignment |
 | HIST-WIN-WORKER | Historical failure; cause unknown | Diagnostic follow-up, not newly mandatory launch work | Unassigned |
 | HIST-CHROMIUM | Historical failed invocations; cause unresolved | Preserve provenance; later passes do not prove repair | Unassigned |
@@ -284,6 +284,15 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
 
 ## R-02-F4 — abandoned claim/reload metadata after release
 
+- **2026-10-13 current-main revalidation:** after owner merges #110/#111, baseline
+  `bf0ce91fae99e06daae8348a913c5632c815e94b` reproduced the defect before production
+  edits: controlled 5 pass/6 intentional assertion failures, real Redis/PG 1 pass/1
+  assertion failure (12 retained entries), complete Linux gateway 178 pass/7 F4
+  failures; zero skips/cancellations. [F4 candidate proof](R02_F4_ABANDONED_CLAIM_METADATA_2026-10-13.md)
+  records release-owned debt retirement, pending/successor-generation controls and
+  corrected gateway 185/185, focused 80/80, workspace 4,164/4,164. **Not closed**:
+  final exact-head review/publication gates and owner merge remain separate.
+  Assigned Codex 1; F1/F2 and byte/frequency/heap bounds are unchanged.
 - **State / severity:** confirmed on dd7fec5, reported P3; **one intentional RED**.
   Twelve completed PG game IDs with controlled load failure then explicit release
   left `staleAfterClaim` and `claimGeneration` at 4→8→12 while `rehydrations`, owned
