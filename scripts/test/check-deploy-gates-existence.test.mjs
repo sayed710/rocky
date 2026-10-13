@@ -151,6 +151,22 @@ test('counts a redirection mentioned in a single-quoted literal as a write to th
   assertRejected(text, /"\$EXISTENCE_FILE" must be written only by scripts\/release-existence\.mjs classify, found 2 write/);
 });
 
+// Allowlist contract: "$EXISTENCE_FILE" may only be referenced as the mktemp, the classifier's
+// redirect and sed reads; the forms a write-pattern scan missed are rejected too.
+for (const [label, extra, offending] of [
+  ['an empty quoted prefix', `printf 'release_existence=absent\\n' > ''"$EXISTENCE_FILE"`, `> ''"$EXISTENCE_FILE"`],
+  ['tee after a redirection', `printf 'release_existence=absent\\n' | tee 2>/dev/null "$EXISTENCE_FILE"`, `tee 2>/dev/null "$EXISTENCE_FILE"`],
+  ['a name spliced by a backslash-newline', `printf 'release_existence=absent\\n' > "$EXISTENCE_\\\n          FILE"`, `> "$EXISTENCE_FILE"`],
+  ['cp onto it', `cp "$LIST_OUT" "$EXISTENCE_FILE"`, `cp "$LIST_OUT" "$EXISTENCE_FILE"`],
+]) {
+  test(`rejects a reference to the classifier output file outside the allowlist: ${label}`, () => {
+    const text = mutate(EXISTENCE_READ, `${extra}\n            ${EXISTENCE_READ}`);
+    const problems = checkReleaseExistence(text);
+    assert.ok(problems.some((p) => /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/.test(p) && p.includes(offending)),
+      `no allowlist problem naming ${offending}: ${problems.join(' | ')}`);
+  });
+}
+
 test('rejects the classifier stdout redirected to a file other than the one RELEASE_EXISTENCE is read from', () => {
   const text = mutate(`"\${LIST_ARGS[@]}" > "$EXISTENCE_FILE"`, `"\${LIST_ARGS[@]}" > "$LIST_OUT"`);
   assertRejected(text, /the classifier's stdout must be redirected exactly once, as `> "\$EXISTENCE_FILE"`/);

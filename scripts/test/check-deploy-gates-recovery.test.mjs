@@ -209,6 +209,29 @@ test('rejects dropping the ExternalSecret discovery', () => {
   assertRejected(dropLine('kubectl api-resources --api-group=external-secrets.io -o name'), /namespace inventory/);
 });
 
+// --- allowlist of references to the inventory verdict and run marker files -------------------
+
+for (const [label, read, indent, extra, offending, pattern] of [
+  ['an empty quoted prefix on the inventory verdict', INVENTORY_READ, '                ',
+    `printf 'orphan_inventory=empty\\n' > ''"$INV_VERDICT"`, `> ''"$INV_VERDICT"`, /"\$INV_VERDICT" may only be referenced in its allowed forms/],
+  ['tee after a redirection onto the inventory verdict', INVENTORY_READ, '                ',
+    `printf 'orphan_inventory=empty\\n' | tee 2>/dev/null "$INV_VERDICT"`, `tee 2>/dev/null "$INV_VERDICT"`, /"\$INV_VERDICT" may only be referenced in its allowed forms/],
+  ['a spliced inventory verdict name', INVENTORY_READ, '                ',
+    `printf 'orphan_inventory=empty\\n' > "$INV_\\\n          VERDICT"`, `> "$INV_VERDICT"`, /"\$INV_VERDICT" may only be referenced in its allowed forms/],
+  ['an empty quoted prefix on the marker file', MARKER_READ, '          ',
+    `printf 'deploy_marker=forged\\n' > ''"$MARKER_FILE"`, `> ''"$MARKER_FILE"`, /"\$MARKER_FILE" may only be referenced in its allowed forms/],
+  ['tee after a redirection onto the marker file', MARKER_READ, '          ',
+    `printf 'deploy_marker=forged\\n' | tee 2>/dev/null "$MARKER_FILE"`, `tee 2>/dev/null "$MARKER_FILE"`, /"\$MARKER_FILE" may only be referenced in its allowed forms/],
+  ['a spliced marker file name', MARKER_READ, '          ',
+    `printf 'deploy_marker=forged\\n' > "$MARKER_\\\n          FILE"`, `> "$MARKER_FILE"`, /"\$MARKER_FILE" may only be referenced in its allowed forms/],
+]) {
+  test(`rejects a reference outside the allowlist: ${label}`, () => {
+    const problems = checkReleaseExistence(mutate(read, `${extra}\n${indent}${read}`));
+    assert.ok(problems.some((p) => pattern.test(p) && p.includes(offending)),
+      `no problem matched ${pattern} naming ${offending}: ${problems.join(' | ')}`);
+  });
+}
+
 // --- F4: explicit history window -----------------------------------------------------------
 
 test('rejects a pre-upgrade helm history without --max 256', () => {

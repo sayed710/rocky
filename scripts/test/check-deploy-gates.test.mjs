@@ -125,6 +125,34 @@ test('counts a redirection mentioned in an inline comment (fail-closed): echo x 
   assertRejected(text, /"\$RESOLVED" must be written only by scripts\/resolve-rollback-revision\.mjs, found 2 write/);
 });
 
+// Allowlist contract: "$RESOLVED" may only be referenced in its allowed forms (the mktemp, the
+// resolver's redirect, sed reads and the publication to $GITHUB_OUTPUT). Every other reference fails,
+// whatever it is — including the forms a write-pattern scan missed.
+const RESOLVED_ALLOWLIST = /"\$RESOLVED" may only be referenced in its allowed forms/;
+for (const [label, extra, offending] of [
+  // Missed by the write scan: an empty quoted prefix, tee with a redirection before the file, and a
+  // name spliced back together by a backslash-newline (bash removes it; it is not a space). The
+  // continuation line sits at the run block's indentation, which YAML strips.
+  ['an empty quoted prefix', `printf x > ''"$RESOLVED"`, `printf x > ''"$RESOLVED"`],
+  ['tee after a redirection', `printf x | tee 2>/dev/null "$RESOLVED"`, `printf x | tee 2>/dev/null "$RESOLVED"`],
+  ['a name spliced by a backslash-newline', `printf x > "$RES\\\n          OLVED"`, `printf x > "$RESOLVED"`],
+  ['a name spliced by a backslash-CRLF', `printf x > "$RES\\\r\n          OLVED"`, `printf x > "$RESOLVED"`],
+  // Not writes by redirection at all, or not writes: still not an allowed form.
+  ['an alias', `X="$RESOLVED"`, `X="$RESOLVED"`],
+  ['cp onto it', `cp "$HISTORY_FILE" "$RESOLVED"`, `cp "$HISTORY_FILE" "$RESOLVED"`],
+  ['sed -i', `sed -i 's/4/5/' "$RESOLVED"`, `sed -i 's/4/5/' "$RESOLVED"`],
+  ['an exec fd', `exec 3>"$RESOLVED"`, `exec 3>"$RESOLVED"`],
+  ['an indirect name', `v=RESOLVED; printf x > "\${!v}"`, `v=RESOLVED; printf x > "\${!v}"`],
+  ['an extra read', `cat "$RESOLVED"`, `cat "$RESOLVED"`],
+]) {
+  test(`rejects a reference to the resolver's output file outside the allowlist: ${label}`, () => {
+    const text = mutate(PREV_REV_LINE, `${extra}\n              ${PREV_REV_LINE}`);
+    const problems = checkRollbackTarget(text);
+    assert.ok(problems.some((p) => RESOLVED_ALLOWLIST.test(p) && p.includes(offending)),
+      `no problem matched ${RESOLVED_ALLOWLIST} naming ${offending}: ${problems.join(' | ')}`);
+  });
+}
+
 test('the real deploy.yml with CRLF line endings passes gate 10', () => {
   assert.deepEqual(checkRollbackTarget(deployYml.replace(/\r/g, '').replace(/\n/g, '\r\n')), []);
 });
