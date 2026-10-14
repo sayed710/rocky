@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readdir, copyFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { ArenaTournament } from '@chess-platform/tournament';
-import { migrate } from '../src/pg/migrate';
+import { migrate, migrationFiles } from '../src/pg/migrate';
 import { PgTournamentsRepository } from '../src/pg/repositories';
 import { withTestDatabase } from '../src/test-support/database';
 
 const skip = process.env['DATABASE_URL'] ? false : 'DATABASE_URL not set';
 const migrations = resolve('migrations');
+// These upgrade fixtures stop at 0048, not at latest minus one. Later additive
+// migrations must run too; the 0049 data/projection assertions remain unchanged.
+const arenaUpgradeMigrations = migrationFiles(migrations).filter(migration => migration.version >= 49).length;
 const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } as const;
 
 // Insert raw legacy numeric spellings; JSON.stringify(number) would erase the
@@ -88,7 +91,7 @@ test('0049 backfill retains JS-restorable legacy timing and exact converted dead
       await pool.query("INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ($1,$1,'arena','running',1,$2::jsonb,1)", [id, raw]);
       const repo = new PgTournamentsRepository(pool);
       ArenaTournament.restore((await repo.readArena(id))!.snapshot);
-      assert.equal(await migrate(pool, migrations), 1);
+      assert.equal(await migrate(pool, migrations), arenaUpgradeMigrations);
       assert.equal(await migrate(pool, migrations), 0);
       assert.deepEqual((await pool.query('SELECT invalid,pending_launch,deadline_ms FROM arena_deadlines WHERE tournament_id=$1', [id])).rows[0], { invalid: false, pending_launch: false, deadline_ms: '9000000000001' });
       assert.deepEqual(await repo.listArenaWorkAfter(null, 50), []);
@@ -146,7 +149,7 @@ test('0049 backfill preserves restorable legacy counter precision without normal
       await pool.query("INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ('legacy-counter-parity','legacy','arena','running',1,$1::jsonb,1)", [raw]);
       const repo = new PgTournamentsRepository(pool);
       ArenaTournament.restore((await repo.readArena('legacy-counter-parity'))!.snapshot);
-      assert.equal(await migrate(pool, migrations), 1);
+      assert.equal(await migrate(pool, migrations), arenaUpgradeMigrations);
       assert.equal(await migrate(pool, migrations), 0);
       assert.deepEqual((await pool.query('SELECT invalid,pending_launch,deadline_ms FROM arena_deadlines WHERE tournament_id=\'legacy-counter-parity\'')).rows[0], { invalid: false, pending_launch: false, deadline_ms: '9000000000100' });
       assert.deepEqual(await repo.listArenaWorkAfter(null, 50), []);
@@ -254,7 +257,7 @@ test('Qodo correction: 0049 backfills malformed participant and linked pairing r
         activeGames: { 'a:1': { ...paired.activeGames['a:1']!, white: 'A', black: 'A' } }, gameLinks: [['a:1', 'linked']] };
       assert.throws(() => ArenaTournament.restore(corruptPairing as never), /Invalid persisted Arena pairing/);
       await new PgTournamentsRepository(pool).save(corruptPairing as never, 0);
-      assert.equal(await migrate(pool, migrations), 1);
+      assert.equal(await migrate(pool, migrations), arenaUpgradeMigrations);
       assert.equal(await migrate(pool, migrations), 0);
       assert.equal((await pool.query('SELECT invalid FROM arena_deadlines WHERE tournament_id=$1', [arena.config.id])).rows[0].invalid, true);
       assert.equal((await pool.query('SELECT invalid,deadline_ms FROM arena_deadlines WHERE tournament_id=$1', ['legacy-pairing'])).rows[0].invalid, true);
@@ -298,7 +301,7 @@ test('0049 backfills proven deadlines, preserves invalid evidence, reruns nothin
         const bad = { ...original, ...override, config: { ...original.config, id } };
         await pool.query('INSERT INTO tournaments (id,name,format,state,participant_count,snapshot,version) VALUES ($1,$1,\'arena\',\'running\',0,$2,1)', [id, JSON.stringify(bad)]);
       }
-      assert.equal(await migrate(pool, migrations), 1);
+      assert.equal(await migrate(pool, migrations), arenaUpgradeMigrations);
       assert.equal(await migrate(pool, migrations), 0);
       assert.deepEqual((await repo.findById('running'))!.snapshot, original);
       const rows = (await pool.query('SELECT * FROM arena_deadlines ORDER BY tournament_id')).rows;
