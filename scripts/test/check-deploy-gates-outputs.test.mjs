@@ -15,6 +15,11 @@
  * its exact capture line, so a reset moved after the capture (erasing a failed query's exit code)
  * fails the gate.
  *
+ * The raw payload files the classifiers read (STATUS_ERR, LIST_OUT, INV_API, INV_LABELLED,
+ * INV_ANNOTATED) are pinned to their exact references: a truncation (`: > "$INV_ANNOTATED"`),
+ * a rebinding (a second `X=$(mktemp)`) or a rewrite (`printf '[]\n' > "$LIST_OUT"`) after the
+ * capture fails the gate, since it would turn an occupied namespace into `empty`.
+ *
  * Each case mutates the real deploy.yml text in memory (never the file).
  */
 import { test } from 'node:test';
@@ -22,6 +27,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { checkReleaseExistence, checkRollbackTarget } from '../check-deploy-gates.mjs';
+import { BASE_INVENTORY_KINDS, classifyOrphanInventory } from '../lib/recovery-ownership.mjs';
 
 const deployYml = readFileSync(new URL('../../.github/workflows/deploy.yml', import.meta.url), 'utf8').replace(/\r/g, '');
 
@@ -167,4 +173,110 @@ test('rejects a changed jsonpath capture line: dropped || INV_ANNOTATION_RC=$?',
   const problems = gates(replaceOnce(ANNOTATED, mutated));
   assertProblem(problems, [resetRule('INV_ANNOTATION_RC'), ANNOTATED, `found: \`${mutated}\``]);
   assertProblem(problems, [writeRule('INV_ANNOTATION_RC'), `\`${ANNOTATED}\` must appear exactly 1 time(s), found 0`]);
+});
+
+// Raw classifier payload files: the files the classifiers read (STATUS_ERR, LIST_OUT, INV_API,
+// INV_LABELLED, INV_ANNOTATED) may be referenced only by their mktemp, their capture line, the
+// classifier invocation and the workflow's own fixed reads. Truncating or rebinding one after its
+// capture turns occupied evidence into empty evidence: an annotation-only orphan then classifies
+// `empty` instead of `occupied` (adoption, then deletion), and a contradictory `helm list` rewritten
+// to `[]` turns `unknown` into `absent`.
+const PAYLOAD_CAPTURES = {
+  STATUS_ERR: STATUS_CMD,
+  LIST_OUT: LIST_CMD,
+  INV_API: DISCOVERY,
+  INV_LABELLED: LABELLED,
+  INV_ANNOTATED: ANNOTATED,
+};
+
+for (const [file, capture] of Object.entries(PAYLOAD_CAPTURES)) {
+  test(`rejects truncation of "$${file}" right after its capture: : > "$${file}"`, () => {
+    const inserted = `: > "$${file}"`;
+    assertProblem(gates(insertAfter(capture, inserted)), [referenceRule(file), `offending line(s): [${inserted}]`]);
+  });
+
+  test(`rejects a second ${file}=$(mktemp) right after its capture`, () => {
+    assertProblem(gates(insertAfter(capture, `${file}=$(mktemp)`)), [
+      referenceRule(file),
+      `\`${file}=$(mktemp)\` must appear exactly once, found 2`,
+    ]);
+  });
+}
+
+const DISCOVERY_CONDITIONAL = `if [ "$INV_API_RC" = 0 ] && grep -qx 'externalsecrets.external-secrets.io' "$INV_API"; then`;
+
+/** Inserts `line` right before the one line whose trimmed text is `anchor`, at the same indentation. */
+function insertBefore(anchor, line, text = deployYml) {
+  const lines = text.split('\n');
+  const at = lines.map((l, i) => (l.trim() === anchor ? i : -1)).filter((i) => i !== -1);
+  assert.equal(at.length, 1, `expected exactly one line: ${anchor}`);
+  const indent = lines[at[0]].match(/^\s*/)[0];
+  lines.splice(at[0], 0, `${indent}${line}`);
+  return lines.join('\n');
+}
+
+test('rejects truncation of "$INV_API" inserted before the discovery conditional', () => {
+  const inserted = ': > "$INV_API"';
+  assertProblem(gates(insertBefore(DISCOVERY_CONDITIONAL, inserted)), [referenceRule('INV_API'), `offending line(s): [${inserted}]`]);
+});
+
+test('rejects truncation of "$INV_API" after the discovery conditional, before the inventory classifier', () => {
+  const inserted = ': > "$INV_API"';
+  assertProblem(gates(insertBefore('INV_LABEL_RC=0', inserted)), [referenceRule('INV_API'), `offending line(s): [${inserted}]`]);
+});
+
+test(`rejects rewriting the helm list output: printf '[]\\n' > "$LIST_OUT"`, () => {
+  const inserted = String.raw`printf '[]\n' > "$LIST_OUT"`;
+  assertProblem(gates(insertAfter(LIST_CMD, inserted)), [referenceRule('LIST_OUT'), `offending line(s): [${inserted}]`]);
+});
+
+test('rejects an ordinary alias of a payload file: ALIAS="$INV_ANNOTATED"', () => {
+  const inserted = 'ALIAS="$INV_ANNOTATED"';
+  assertProblem(gates(insertAfter(ANNOTATED, inserted)), [referenceRule('INV_ANNOTATED'), `offending line(s): [${inserted}]`]);
+});
+
+test('rejects removing the sole INV_LABELLED=$(mktemp)', () => {
+  assertProblem(gates(replaceOnce('INV_LABELLED=$(mktemp)\n', '')), [
+    referenceRule('INV_LABELLED'),
+    '`INV_LABELLED=$(mktemp)` must appear exactly once, found 0',
+  ]);
+});
+
+test('rejects a truncation whose file name is split across a line continuation', () => {
+  const lines = deployYml.split('\n');
+  const at = lines.findIndex((l) => l.trim() === ANNOTATED);
+  const indent = lines[at].match(/^\s*/)[0];
+  lines.splice(at + 1, 0, `${indent}: > "$INV_ANNOT\\`, `${indent}ATED"`);
+  assertProblem(gates(lines.join('\n')), [referenceRule('INV_ANNOTATED'), 'offending line(s): [: > "$INV_ANNOTATED"]']);
+});
+
+test('INV_ANNOTATED_OLD is another variable: printf x > "$INV_ANNOTATED_OLD" adds no payload-reference problem', () => {
+  const problems = gates(insertAfter(ANNOTATED, 'printf x > "$INV_ANNOTATED_OLD"'));
+  assert.ok(!problems.some((p) => p.includes(referenceRule('INV_ANNOTATED'))), problems.join(' | '));
+  assert.deepEqual(problems, []);
+});
+
+// Behavioural characterisation, through the real library: why the payload files must not be truncated.
+const annotationOnly = (overrides) => classifyOrphanInventory({
+  release: 'gambit',
+  kinds: BASE_INVENTORY_KINDS.join(','),
+  apiResourcesExit: 0,
+  apiResourcesStdout: '',
+  labelExit: 0,
+  labelStdout: '',
+  annotationExit: 0,
+  annotationStdout: 'ConfigMap/gambit-config\tgambit\n',
+  ...overrides,
+});
+
+test('an annotation-only orphan classifies occupied', () => {
+  assert.equal(annotationOnly({}).state, 'occupied');
+});
+
+test('the same inventory with its annotation output truncated classifies empty', () => {
+  assert.equal(annotationOnly({ annotationStdout: '' }).state, 'empty');
+});
+
+test('a failed annotation query with empty output classifies unknown', () => {
+  assert.equal(annotationOnly({ annotationExit: 1, annotationStdout: '' }).state, 'unknown');
 });
