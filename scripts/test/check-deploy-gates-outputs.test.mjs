@@ -10,7 +10,10 @@
  * The release-existence classifier's verdict is only as good as its inputs: `--status-stderr`
  * naming the wrong file, a dropped `"${LIST_ARGS[@]}"` or `--list-exit 0` turns a failed
  * `helm list` into "absent". The classifier and inventory invocations are pinned to their exact
- * lines, and LIST_ARGS, STATUS_RC and LIST_RC to their exact write sites.
+ * lines, and LIST_ARGS and the five exit codes (STATUS_RC, LIST_RC, INV_API_RC, INV_LABEL_RC,
+ * INV_ANNOTATION_RC) to their exact write sites; each exit code's `X=0` reset must directly precede
+ * its exact capture line, so a reset moved after the capture (erasing a failed query's exit code)
+ * fails the gate.
  *
  * Each case mutates the real deploy.yml text in memory (never the file).
  */
@@ -121,4 +124,47 @@ test('rejects LIST_ARGS=() inserted after the array build', () => {
 test('rejects a changed inventory classifier input: --label-exit 0', () => {
   const problems = gates(replaceOnce('--label-exit "$INV_LABEL_RC"', '--label-exit 0'));
   assertProblem(problems, [referenceRule('INV_VERDICT'), '--label-exit 0 --label-stdout "$INV_LABELLED"']);
+});
+
+// Exit-code resets: each `X=0` must directly precede its exact capture `... || X=$?`. A reset after
+// the capture erases a failed query's exit code, and the classifier then reads `unknown` as `empty`
+// (or a failed `helm status` / `helm list` as success).
+const DISCOVERY = 'kubectl api-resources --api-group=external-secrets.io -o name > "$INV_API" 2> "$INV_ERR" || INV_API_RC=$?';
+const LABELLED = 'kubectl get "$INV_KINDS" -l app.kubernetes.io/instance=gambit -o name > "$INV_LABELLED" 2>> "$INV_ERR" || INV_LABEL_RC=$?';
+const ANNOTATED = `kubectl get "$INV_KINDS" -o jsonpath='{range .items[*]}{.kind}/{.metadata.name}{"\\t"}{.metadata.annotations.meta\\.helm\\.sh/release-name}{"\\n"}{end}' > "$INV_ANNOTATED" 2>> "$INV_ERR" || INV_ANNOTATION_RC=$?`;
+const INVENTORY_CLASSIFIER_LAST = '--annotation-exit "$INV_ANNOTATION_RC" --annotation-stdout "$INV_ANNOTATED" > "$INV_VERDICT" 2>> "$INV_ERR"; then';
+const resetRule = (name) => `the reset \`${name}=0\` must directly precede its capture`;
+
+/** Moves the one line whose trimmed text is `line` to just after the one line `anchor`. */
+function moveAfter(line, anchor) {
+  const lines = deployYml.split('\n');
+  const at = lines.map((l, i) => (l.trim() === line ? i : -1)).filter((i) => i !== -1);
+  assert.equal(at.length, 1, `expected exactly one line: ${line}`);
+  lines.splice(at[0], 1);
+  return insertAfter(anchor, line, lines.join('\n'));
+}
+
+for (const [name, capture] of [
+  ['INV_ANNOTATION_RC', ANNOTATED],
+  ['INV_LABEL_RC', LABELLED],
+  ['INV_API_RC', DISCOVERY],
+  ['STATUS_RC', STATUS_CMD],
+  ['LIST_RC', LIST_CMD],
+]) {
+  test(`rejects ${name}=0 moved after its capture`, () => {
+    assertProblem(gates(moveAfter(`${name}=0`, capture)), [`producer input ${name}`, resetRule(name), capture]);
+  });
+}
+
+test('rejects an extra INV_ANNOTATION_RC=0 inserted after the inventory classifier call', () => {
+  const problems = gates(insertAfter(INVENTORY_CLASSIFIER_LAST, 'INV_ANNOTATION_RC=0'));
+  assertProblem(problems, [writeRule('INV_ANNOTATION_RC'), '`INV_ANNOTATION_RC=0` must appear exactly 1 time(s), found 2']);
+  assertProblem(problems, [resetRule('INV_ANNOTATION_RC'), 'found: `INVENTORY=$(sed']);
+});
+
+test('rejects a changed jsonpath capture line: dropped || INV_ANNOTATION_RC=$?', () => {
+  const mutated = ANNOTATED.replace(' || INV_ANNOTATION_RC=$?', '');
+  const problems = gates(replaceOnce(ANNOTATED, mutated));
+  assertProblem(problems, [resetRule('INV_ANNOTATION_RC'), ANNOTATED, `found: \`${mutated}\``]);
+  assertProblem(problems, [writeRule('INV_ANNOTATION_RC'), `\`${ANNOTATED}\` must appear exactly 1 time(s), found 0`]);
 });
