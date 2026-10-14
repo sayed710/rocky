@@ -27,12 +27,17 @@
  *      the file the resolver writes its output to.
  *  Gates 10 and 11 pin each evidence temp file ("$RESOLVED", "$EXISTENCE_FILE", "$INV_VERDICT",
  *  "$MARKER_FILE") to a positive allowlist of references (checkEvidenceReferences): its mktemp, its
- *  one producer, its sed reads — each an exact (variable, key) pair, once (EVIDENCE_READS) — and its
- *  publication; any other reference fails the gate. The decision
+ *  one producer — an exact whole line, arguments included — its sed reads — each an exact
+ *  (variable, key) pair, once (EVIDENCE_READS) — and its publication; any other reference fails the
+ *  gate. GITHUB_OUTPUT is pinned the same way (checkOutputPublications): every reference to it, in
+ *  any spelling, must be one of today's exact publication lines (OUTPUT_PUBLICATIONS), each once,
+ *  so no later line can overwrite a published value. The classifier's inputs (LIST_ARGS, STATUS_RC,
+ *  LIST_RC) are pinned to exact write sites (PRODUCER_WRITES, checkDecisionWrites). The decision
  *  scalars read from those files (PREV_REV, SNAPSHOT_NEWEST, RELEASE_EXISTENCE, RELEASE_EXISTS,
  *  INVENTORY, DEPLOY_MARKER) are pinned the same way to a positive allowlist of write sites
  *  (checkDecisionWrites): any assignment, builtin (`read`, `printf -v`, `declare`, `unset`, ...),
  *  assigning expansion or eval string naming them outside their allowed lines fails the gate.
+ *  These are accidental-regression guards; deliberate obfuscation is out of their contract.
  *  11. Release existence is never derived from a bare `helm status` exit code: RELEASE_EXISTS=false is
  *      set only by the confirmed-absence arm of scripts/release-existence.mjs's classification (status
  *      not-found AND an empty `helm list --all`), and the rollback step uninstalls only behind a fresh
@@ -316,12 +321,16 @@ function hasWriteSite(line, name) {
  * (other steps' processes, actions, the runner). This is a static check, not a shell parser: the
  * behavioural snapshot tests remain the primary guard.
  *
+ * The same contract pins the classifier's producer inputs (PRODUCER_WRITES: LIST_ARGS, STATUS_RC,
+ * LIST_RC), reported with `kind` "producer input".
+ *
  * @param {string} workflowText The workflow text (comments included; they are dropped here).
  * @param {string} name The decision variable's name.
  * @param {{ line: string, count: number }[]} forms The allowed whole lines and their exact counts.
+ * @param {string} [kind] How the variable is named in problems.
  * @returns {string[]} Problems (empty when every write site is an allowed line, counted exactly).
  */
-export function checkDecisionWrites(workflowText, name, forms) {
+export function checkDecisionWrites(workflowText, name, forms, kind = 'decision variable') {
   const offending = new Set();
   const badCounts = new Set();
   for (const lines of logicalLineVariants(workflowText)) {
@@ -334,7 +343,7 @@ export function checkDecisionWrites(workflowText, name, forms) {
       if (n !== form.count) badCounts.add(`\`${form.line}\` must appear exactly ${form.count} time(s), found ${n}`);
     }
   }
-  const allowed = `decision variable ${name} may only be written in its allowed forms [${forms.map((f) => `${f.line} (x${f.count})`).join(' | ')}]`;
+  const allowed = `${kind} ${name} may only be written in its allowed forms [${forms.map((f) => `${f.line} (x${f.count})`).join(' | ')}]`;
   const found = [];
   if (offending.size > 0) found.push(`${allowed}; offending write site line(s): [${[...offending].join(' | ')}]`);
   for (const why of badCounts) found.push(`${allowed}; ${why}`);
@@ -395,8 +404,78 @@ const EVIDENCE_READS = {
   INV_VERDICT: [['INVENTORY', 'orphan_inventory'], ['INV_OBJECTS', 'orphan_inventory_objects'], ['INV_REASON', 'orphan_inventory_reason']],
   MARKER_FILE: [['DEPLOY_MARKER', 'deploy_marker']],
 };
-/** Arguments of a producer: words, quotes and plain `$VAR` / `${VAR}` / `${VAR[@]}` expansions; no redirection, substitution or command separator. */
-const PRODUCER_ARGS = String.raw`(?:[^;&|<>\x60'\\$()]|\$\{?[A-Za-z_][A-Za-z0-9_]*(?:\[@\])?\}?)*`;
+/**
+ * The producer invocations, each one exact logical line (continuations joined) as in deploy.yml
+ * today. A changed argument (`--status-stderr "$LIST_ERR"`, a dropped `"${LIST_ARGS[@]}"`) is a
+ * different line and so an offending reference of the evidence file it writes.
+ */
+const STATUS_CMD = 'helm status gambit > /dev/null 2> "$STATUS_ERR" || STATUS_RC=$?';
+const LIST_CMD = `helm list --all --filter '^gambit$' -o json > "$LIST_OUT" 2> "$LIST_ERR" || LIST_RC=$?`;
+const LIST_ARGS_BUILD = 'LIST_ARGS=(--list-exit "$LIST_RC" --list-stdout "$LIST_OUT")';
+const EXISTENCE_CLASSIFIER = 'if node scripts/release-existence.mjs classify --release gambit --status-exit "$STATUS_RC" ' +
+  '--status-stderr "$STATUS_ERR" "${LIST_ARGS[@]}" > "$EXISTENCE_FILE" 2>> "$LIST_ERR"; then';
+const INVENTORY_CLASSIFIER = 'if node scripts/recovery-ownership.mjs inventory --release gambit --kinds "$INV_KINDS" ' +
+  '--api-exit "$INV_API_RC" --api-stdout "$INV_API" --label-exit "$INV_LABEL_RC" --label-stdout "$INV_LABELLED" ' +
+  '--annotation-exit "$INV_ANNOTATION_RC" --annotation-stdout "$INV_ANNOTATED" > "$INV_VERDICT" 2>> "$INV_ERR"; then';
+/** An exact whole-line form for checkEvidenceReferences. */
+const exactLine = (line) => ({ label: line, re: new RegExp(`^${escapeRegExp(line)}$`), once: true });
+
+/**
+ * The allowed write sites of the classifier's inputs (checkDecisionWrites, kind "producer input"):
+ * the exit codes it is given and the array that carries the `helm list` evidence. `LIST_ARGS` in
+ * `"${LIST_ARGS[@]}"` is a subscript, so the classifier line is one of its sites too.
+ */
+const PRODUCER_WRITES = {
+  STATUS_RC: [
+    { line: 'STATUS_RC=0', count: 1 },
+    { line: STATUS_CMD, count: 1 },
+  ],
+  LIST_RC: [
+    { line: 'LIST_RC=0', count: 1 },
+    { line: LIST_CMD, count: 1 },
+  ],
+  LIST_ARGS: [
+    { line: 'LIST_ARGS=()', count: 1 },
+    { line: LIST_ARGS_BUILD, count: 1 },
+    { line: EXISTENCE_CLASSIFIER, count: 1 },
+  ],
+};
+
+/**
+ * Every line of deploy.yml that may name GITHUB_OUTPUT, exactly as today, each once
+ * (checkOutputPublications).
+ */
+const OUTPUT_PUBLICATIONS = [
+  'echo "version=$VERSION" >> "$GITHUB_OUTPUT"',
+  'echo "environment=$ENV" >> "$GITHUB_OUTPUT"',
+  'echo "strategy=$STRATEGY" >> "$GITHUB_OUTPUT"',
+  'echo "canary_weight=$CANARY_WEIGHT" >> "$GITHUB_OUTPUT"',
+  'echo "active_color=$ACTIVE_COLOR" >> "$GITHUB_OUTPUT"',
+  'echo "target_color=$TARGET_COLOR" >> "$GITHUB_OUTPUT"',
+  'cat "$RESOLVED" >> "$GITHUB_OUTPUT"',
+  `printf '%s\\n' "$DEPLOYED_TAGS" >> "$GITHUB_OUTPUT"`,
+  'echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"',
+  'echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"',
+  'echo "rollback_refusal=$ROLLBACK_REFUSAL" >> "$GITHUB_OUTPUT"',
+  'echo "deploy_marker=$DEPLOY_MARKER" >> "$GITHUB_OUTPUT"',
+  'echo "snapshot_newest_revision=$SNAPSHOT_NEWEST" >> "$GITHUB_OUTPUT"',
+];
+
+/**
+ * Gate 10, step outputs: $GITHUB_OUTPUT is last-value-wins, so any further write to it — a second
+ * `prev_revision=` or `release_exists=`, another file copied into it — can replace the verified
+ * rollback target or the existence verdict the rollback step reads. Every reference to the
+ * GITHUB_OUTPUT token, in any spelling (`$GITHUB_OUTPUT`, `${GITHUB_OUTPUT}`, quoted or not, the bare
+ * name), must be one of OUTPUT_PUBLICATIONS, each exactly once; the matching and normalisation are
+ * checkEvidenceReferences'. Out of scope as there: deliberate obfuscation of the name.
+ *
+ * @param {string} deployText
+ * @returns {string[]} Problems (empty when every reference is an allowed publication).
+ */
+export function checkOutputPublications(deployText) {
+  return checkEvidenceReferences(deployText, 'GITHUB_OUTPUT', OUTPUT_PUBLICATIONS.map(exactLine))
+    .map((why) => `${DEPLOY_WORKFLOW}: ${why}`);
+}
 
 /**
  * The stdout redirections (`>`, `>>`, `>|`, `>&N`, `1>`, `&>`) of the simple command that starts
@@ -424,7 +503,8 @@ function stdoutRedirects(command) {
  * `SNAPSHOT_NEWEST=$(sed -n 's/^rollback_newest_revision=//p' "$RESOLVED")` (once each), one echo
  * whose `$(...)` reads key rollback_evidence (once) and `cat "$RESOLVED" >> "$GITHUB_OUTPUT"`
  * (once); see checkEvidenceReferences. The step output the rollback reads must be published as exactly
- * `echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"`.
+ * `echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"`, and no other line may name GITHUB_OUTPUT
+ * (checkOutputPublications), so nothing published later can replace it.
  *
  * Returns the list of problems (empty when the wiring is intact).
  */
@@ -467,6 +547,8 @@ export function checkRollbackTarget(deployText) {
   }
   // ...and PREV_REV, once read from it, is written nowhere else (see checkDecisionWrites).
   for (const why of checkDecisionWrites(deployText, 'PREV_REV', DECISION_WRITES.PREV_REV)) fail(why);
+  // ...and nothing else is published to $GITHUB_OUTPUT, in any spelling (checkOutputPublications).
+  found.push(...checkOutputPublications(deployText));
   if (/history\s*\[\s*history\.length\s*-\s*1\s*\]|\bnode\s+-e\b/.test(code)) {
     fail('selects a revision with inline JavaScript (e.g. history[history.length - 1]) — the newest revision can be a failed release that helm rollback would re-apply');
   }
@@ -510,7 +592,9 @@ export function checkRollbackTarget(deployText) {
  * expired credentials, RBAC, timeout) as "no release" uninstalls a live release (owner decision
  * 2026-10-11, ADR-0076). Asserted on the command lines (comments and echo lines excluded):
  * - the only `helm status` is the evidence-capturing STATUS_CMD (no `>/dev/null 2>&1`, no `if helm status`);
- * - the list corroboration LIST_CMD and the scripts/release-existence.mjs classifier are both present;
+ * - the list corroboration LIST_CMD (the only `helm list`) and the scripts/release-existence.mjs
+ *   classifier are both present; the classifier is exactly EXISTENCE_CLASSIFIER and its inputs
+ *   STATUS_RC, LIST_RC and LIST_ARGS are written only at their PRODUCER_WRITES sites;
  * - RELEASE_EXISTS is assigned exactly three times: `RELEASE_EXISTS=""`, the `exists)` arm and the
  *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from "$EXISTENCE_FILE", the
  *   file the classifier's stdout is redirected to (`> "$EXISTENCE_FILE"`) and that is referenced only
@@ -533,14 +617,18 @@ export function checkReleaseExistence(deployText) {
   const code = lines.filter(isCode).map((line) => line.trim());
   const codeText = code.join('\n');
 
-  const STATUS_CMD = 'helm status gambit > /dev/null 2> "$STATUS_ERR" || STATUS_RC=$?';
-  const LIST_CMD = `helm list --all --filter '^gambit$' -o json > "$LIST_OUT" 2> "$LIST_ERR" || LIST_RC=$?`;
   const statusCmds = code.filter((line) => /\bhelm\s+status\b/.test(line));
   if (statusCmds.length !== 1 || statusCmds[0] !== STATUS_CMD) {
     fail(`release existence must not be derived from a bare \`helm status\` exit code; the only helm status must be exactly \`${STATUS_CMD}\`, found: [${statusCmds.join(' | ')}]`);
   }
-  if (!code.includes(LIST_CMD)) {
-    fail(`release absence must be corroborated by exactly \`${LIST_CMD}\` (--all lists every status, Helm v3.16.3 pkg/action/list.go)`);
+  const listCmds = code.filter((line) => /\bhelm\s+list\b/.test(line));
+  if (listCmds.length !== 1 || listCmds[0] !== LIST_CMD) {
+    fail(`release absence must be corroborated by exactly one \`${LIST_CMD}\` (--all lists every status, Helm v3.16.3 pkg/action/list.go), found: [${listCmds.join(' | ')}]`);
+  }
+  // The classifier's inputs — the exit codes and the LIST_ARGS array — are written only at their
+  // exact sites (checkDecisionWrites), so `--list-exit 0` or a reset after the capture fails.
+  for (const [name, forms] of Object.entries(PRODUCER_WRITES)) {
+    for (const why of checkDecisionWrites(deployText, name, forms, 'producer input')) fail(why);
   }
   if (!/^if node scripts\/release-existence\.mjs classify --release gambit --status-exit "\$STATUS_RC" \\$/m.test(codeText)) {
     fail('release existence must be classified by `node scripts/release-existence.mjs classify` from the helm status/list evidence');
@@ -612,11 +700,7 @@ export function checkReleaseExistence(deployText) {
   }
   for (const why of checkEvidenceReferences(deployText, 'EXISTENCE_FILE', [
     evidenceFile('EXISTENCE_FILE'),
-    {
-      label: 'if node scripts/release-existence.mjs classify ... > "$EXISTENCE_FILE" 2>> "$LIST_ERR"; then',
-      re: new RegExp(String.raw`^if node scripts/release-existence\.mjs classify ${PRODUCER_ARGS} > "\$EXISTENCE_FILE" 2>> "\$LIST_ERR"; then$`),
-      once: true,
-    },
+    exactLine(EXISTENCE_CLASSIFIER),
     ...sedReads('EXISTENCE_FILE', EVIDENCE_READS.EXISTENCE_FILE),
   ])) {
     fail(why);
@@ -727,9 +811,7 @@ function checkOrphanInventory(absentArm, code, lines) {
   const DISCOVERY = 'kubectl api-resources --api-group=external-secrets.io -o name > "$INV_API" 2> "$INV_ERR" || INV_API_RC=$?';
   const LABELLED = 'kubectl get "$INV_KINDS" -l app.kubernetes.io/instance=gambit -o name > "$INV_LABELLED" 2>> "$INV_ERR" || INV_LABEL_RC=$?';
   const ANNOTATED = `kubectl get "$INV_KINDS" -o jsonpath='{range .items[*]}{.kind}/{.metadata.name}{"\\t"}{.metadata.annotations.meta\\.helm\\.sh/release-name}{"\\n"}{end}' > "$INV_ANNOTATED" 2>> "$INV_ERR" || INV_ANNOTATION_RC=$?`;
-  const CLASSIFY = 'if node scripts/recovery-ownership.mjs inventory --release gambit --kinds "$INV_KINDS" ' +
-    '--api-exit "$INV_API_RC" --api-stdout "$INV_API" --label-exit "$INV_LABEL_RC" --label-stdout "$INV_LABELLED" ' +
-    '--annotation-exit "$INV_ANNOTATION_RC" --annotation-stdout "$INV_ANNOTATED" > "$INV_VERDICT" 2>> "$INV_ERR"; then';
+  const CLASSIFY = INVENTORY_CLASSIFIER;
   const REFUSAL = 'if [ "$INVENTORY" != "empty" ]; then';
   // The arm with line continuations joined, as the shell reads it.
   const arm = absentArm.join('\n').replace(/\s*\\\n\s*/g, ' ').split('\n');
@@ -752,11 +834,7 @@ function checkOrphanInventory(absentArm, code, lines) {
   }
   for (const why of checkEvidenceReferences(lines.join('\n'), 'INV_VERDICT', [
     evidenceFile('INV_VERDICT'),
-    {
-      label: 'if node scripts/recovery-ownership.mjs inventory ... > "$INV_VERDICT" 2>> "$INV_ERR"; then',
-      re: new RegExp(String.raw`^if node scripts/recovery-ownership\.mjs inventory ${PRODUCER_ARGS} > "\$INV_VERDICT" 2>> "\$INV_ERR"; then$`),
-      once: true,
-    },
+    exactLine(INVENTORY_CLASSIFIER),
     ...sedReads('INV_VERDICT', EVIDENCE_READS.INV_VERDICT),
   ])) {
     fail(why);
