@@ -601,6 +601,33 @@ test('PG-F1 preparation refuses untrusted private CREATE and unexpected function
   });
 });
 
+test('PG-F1 preparation canonicalizes signatures without changing the installer session search path', { skip },async()=>{
+  await restrictedDatabase(async(admin,a,_b)=>{
+    const owners=(await admin.query(`SELECT pg_get_userbyid(c.relowner) AS tables,pg_get_userbyid(p.proowner) AS functions
+      FROM pg_class c,pg_proc p WHERE c.oid='game_fencing.grants'::regclass
+      AND p.oid='game_fencing.create_stream(uuid,uuid,jsonb)'::regprocedure`)).rows[0]!;
+    const installer=new Pool({connectionString:admin.options.connectionString,max:1,
+      options:'-c search_path=game_fencing,pg_catalog,public,pg_temp'});
+    try {
+      const path=(await installer.query('SHOW search_path')).rows[0]?.search_path;
+      assert.equal((await installer.query("SELECT 'game_fencing.create_stream(uuid,uuid,jsonb)'::regprocedure::text AS signature")).rows[0]?.signature,
+        'create_stream(uuid,uuid,jsonb)','the valid caller path renders an unqualified signature');
+      const db=randomUUID();
+      await prepareGameFencing(installer,{tableOwner:owners.tables,functionOwner:owners.functions,
+        databaseIncarnation:db,maxLeaseMs:30000});
+      assert.equal((await installer.query('SHOW search_path')).rows[0]?.search_path,path,'transaction-local path does not leak into pool reuse');
+      await admin.query('CREATE FUNCTION game_fencing.unexpected_path_test() RETURNS integer LANGUAGE sql AS $$SELECT 1$$');
+      await assert.rejects(prepareGameFencing(installer,{tableOwner:owners.tables,functionOwner:owners.functions,
+        databaseIncarnation:randomUUID(),maxLeaseMs:60000}),/unexpected fencing function signature/);
+      assert.equal((await installer.query('SHOW search_path')).rows[0]?.search_path,path,'rollback restores the caller path too');
+      assert.deepEqual((await admin.query('SELECT database_incarnation::text AS id,max_lease_ms FROM game_fencing.control')).rows,
+        [{id:db,max_lease_ms:30000}]);
+      const deniedGame=randomUUID();
+      await assert.rejects(a.query('SELECT game_fencing.create_stream($1,$2,$3)',[deniedGame,db,JSON.stringify(initialEvents(deniedGame))]),hasCode('42501'));
+    }finally{await installer.end();}
+  });
+});
+
 test('PG-F1 caller-client creation keeps seek, player locks, events and projection in one rollback/commit', { skip }, async()=>{
   await restrictedDatabase(async(admin,a,_b,db)=>{
     const login=(await a.query('SELECT session_user AS name')).rows[0]!.name;

@@ -54,6 +54,7 @@ export async function prepareGameFencing(pool: Pool,config: FencingPreparation):
   let safeToReuse=false;
   try {
     await client.query('BEGIN');
+    await client.query('SET LOCAL search_path = pg_catalog, public, pg_temp');
     const roles=await client.query<{ rolname: string; safe: boolean }>(`SELECT rolname,
       NOT (rolcanlogin OR rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls) AS safe
       FROM pg_catalog.pg_roles WHERE rolname=ANY($1::text[])`,[[config.tableOwner,config.functionOwner]]);

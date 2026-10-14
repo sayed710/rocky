@@ -177,6 +177,9 @@ reproduced these omissions before correction. These changes do not activate fenc
 Preparation also refuses untrusted private-schema CREATE and unexpected function
 signatures before ownership adoption. Creation preserves typed pre-write logging
 and player-lock refusals; the caller still owns rollback before any safe retry.
+The installer uses a transaction-local trusted search path excluding `game_fencing`,
+so catalog signature rendering remains schema-qualified regardless of the caller's
+session path. COMMIT and ROLLBACK restore that caller path; the allowlist is unchanged.
 
 The unchanged real Redis/PG baseline passes its D3/D4 characterization. A separate
 future-enforcement witness intentionally fails obsolete-admitted-write rejection.
