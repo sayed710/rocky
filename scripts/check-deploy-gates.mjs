@@ -27,7 +27,8 @@
  *      the file the resolver writes its output to.
  *  Gates 10 and 11 pin each evidence temp file ("$RESOLVED", "$EXISTENCE_FILE", "$INV_VERDICT",
  *  "$MARKER_FILE") to a positive allowlist of references (checkEvidenceReferences): its mktemp, its
- *  one producer, its sed reads and its publication; any other reference fails the gate. The decision
+ *  one producer, its sed reads — each an exact (variable, key) pair, once (EVIDENCE_READS) — and its
+ *  publication; any other reference fails the gate. The decision
  *  scalars read from those files (PREV_REV, SNAPSHOT_NEWEST, RELEASE_EXISTENCE, RELEASE_EXISTS,
  *  INVENTORY, DEPLOY_MARKER) are pinned the same way to a positive allowlist of write sites
  *  (checkDecisionWrites): any assignment, builtin (`read`, `printf -v`, `declare`, `unset`, ...),
@@ -201,7 +202,10 @@ function checkDeployGates() {
  *
  * Guarantee: within the workflow text, nothing refers to an evidence file other than its mktemp,
  * its one producer (whose stdout is redirected to it), its sed reads and (for "$RESOLVED") its
- * publication to $GITHUB_OUTPUT. In particular no second writer can name it.
+ * publication to $GITHUB_OUTPUT. In particular no second writer can name it. Each sed read is one
+ * exact `VAR=$(sed -n 's/^key=//p' "$NAME")` line for an allowed (variable, key) pair, appearing
+ * exactly once (EVIDENCE_READS; the "$RESOLVED" echo read is pinned to key rollback_evidence), so a
+ * read cannot assign into another variable (`GITHUB_OUTPUT=`, `PATH=`, ...) or read another key.
  *
  * Normalisation, as bash does it: CR is stripped and backslash-newline is removed entirely (not
  * replaced by a space), so a name split across a continuation is spliced back together. Because
@@ -372,12 +376,25 @@ const DECISION_WRITES = {
   ],
 };
 
-/** Shared allowed forms: the mktemp that creates the file, and `VAR=$(sed -n 's/^key=//p' "$NAME")` reads. */
+/** Shared allowed forms: the mktemp that creates the file, and its exact `VAR=$(sed -n 's/^key=//p' "$NAME")` reads. */
 const evidenceFile = (name) => ({ label: `${name}=$(mktemp)`, re: new RegExp(`^${name}=\\$\\(mktemp\\)$`), once: true });
-const sedRead = (name) => ({
-  label: `VAR=$(sed -n 's/^<key>=//p' "$${name}")`,
-  re: new RegExp(`^[A-Z_][A-Z0-9_]*=\\$\\(sed -n 's/\\^[a-z_]+=//p' "\\$${name}"\\)$`),
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * The exact reads of evidence file NAME: one whole-line form per allowed (variable, key) pair, each
+ * appearing exactly once. A read into any other variable (`GITHUB_OUTPUT=`, `PATH=`, ...) or of any
+ * other key is an offending reference.
+ */
+const sedReads = (name, pairs) => pairs.map(([variable, key]) => {
+  const line = `${variable}=$(sed -n 's/^${key}=//p' "$${name}")`;
+  return { label: line, re: new RegExp(`^${escapeRegExp(line)}$`), once: true };
 });
+/** The (variable, key) pairs deploy.yml reads from each evidence file, exactly as it does today. */
+const EVIDENCE_READS = {
+  RESOLVED: [['PREV_REV', 'rollback_revision'], ['SNAPSHOT_NEWEST', 'rollback_newest_revision']],
+  EXISTENCE_FILE: [['RELEASE_EXISTENCE', 'release_existence'], ['EXISTENCE_REASON', 'release_existence_reason']],
+  INV_VERDICT: [['INVENTORY', 'orphan_inventory'], ['INV_OBJECTS', 'orphan_inventory_objects'], ['INV_REASON', 'orphan_inventory_reason']],
+  MARKER_FILE: [['DEPLOY_MARKER', 'deploy_marker']],
+};
 /** Arguments of a producer: words, quotes and plain `$VAR` / `${VAR}` / `${VAR[@]}` expansions; no redirection, substitution or command separator. */
 const PRODUCER_ARGS = String.raw`(?:[^;&|<>\x60'\\$()]|\$\{?[A-Za-z_][A-Za-z0-9_]*(?:\[@\])?\}?)*`;
 
@@ -402,9 +419,11 @@ function stdoutRedirects(command) {
  *
  * The only accepted non-empty PREV_REV is exactly `$(sed -n 's/^rollback_revision=//p' "$X")`, where
  * "$X" is the file the resolver's stdout is redirected to. "$RESOLVED" may be referenced only as
- * `RESOLVED=$(mktemp)`, the resolver's `> "$RESOLVED"` (once), `VAR=$(sed -n 's/^<key>=//p' "$RESOLVED")`
- * reads (also inside an echo's `$(...)`) and `cat "$RESOLVED" >> "$GITHUB_OUTPUT"` (once); see
- * checkEvidenceReferences. The step output the rollback reads must be published as exactly
+ * `RESOLVED=$(mktemp)`, the resolver's `> "$RESOLVED"` (once), exactly the reads
+ * `PREV_REV=$(sed -n 's/^rollback_revision=//p' "$RESOLVED")` and
+ * `SNAPSHOT_NEWEST=$(sed -n 's/^rollback_newest_revision=//p' "$RESOLVED")` (once each), one echo
+ * whose `$(...)` reads key rollback_evidence (once) and `cat "$RESOLVED" >> "$GITHUB_OUTPUT"`
+ * (once); see checkEvidenceReferences. The step output the rollback reads must be published as exactly
  * `echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"`.
  *
  * Returns the list of problems (empty when the wiring is intact).
@@ -436,10 +455,11 @@ export function checkRollbackTarget(deployText) {
       re: /^(?:if|elif) node scripts\/resolve-rollback-revision\.mjs < "\$HISTORY_FILE" > "\$RESOLVED" 2> "\$HISTORY_ERR"; then$/,
       once: true,
     },
-    sedRead('RESOLVED'),
+    ...sedReads('RESOLVED', EVIDENCE_READS.RESOLVED),
     {
-      label: `echo "...$(sed -n 's/^<key>=//p' "$RESOLVED")..."`,
-      re: /^echo "(?:[^"`\\$]|\$[A-Z_][A-Z0-9_]*)*\$\(sed -n 's\/\^[a-z_]+=\/\/p' "\$RESOLVED"\)(?:[^"`\\$]|\$[A-Z_][A-Z0-9_]*)*"$/,
+      label: `echo "...$(sed -n 's/^rollback_evidence=//p' "$RESOLVED")..."`,
+      re: /^echo "(?:[^"`\\$]|\$[A-Z_][A-Z0-9_]*)*\$\(sed -n 's\/\^rollback_evidence=\/\/p' "\$RESOLVED"\)(?:[^"`\\$]|\$[A-Z_][A-Z0-9_]*)*"$/,
+      once: true,
     },
     { label: 'cat "$RESOLVED" >> "$GITHUB_OUTPUT"', re: /^cat "\$RESOLVED" >> "\$GITHUB_OUTPUT"$/, once: true },
   ])) {
@@ -597,7 +617,7 @@ export function checkReleaseExistence(deployText) {
       re: new RegExp(String.raw`^if node scripts/release-existence\.mjs classify ${PRODUCER_ARGS} > "\$EXISTENCE_FILE" 2>> "\$LIST_ERR"; then$`),
       once: true,
     },
-    sedRead('EXISTENCE_FILE'),
+    ...sedReads('EXISTENCE_FILE', EVIDENCE_READS.EXISTENCE_FILE),
   ])) {
     fail(why);
   }
@@ -737,7 +757,7 @@ function checkOrphanInventory(absentArm, code, lines) {
       re: new RegExp(String.raw`^if node scripts/recovery-ownership\.mjs inventory ${PRODUCER_ARGS} > "\$INV_VERDICT" 2>> "\$INV_ERR"; then$`),
       once: true,
     },
-    sedRead('INV_VERDICT'),
+    ...sedReads('INV_VERDICT', EVIDENCE_READS.INV_VERDICT),
   ])) {
     fail(why);
   }
@@ -787,7 +807,7 @@ export function checkRecoveryWiring(deployText) {
   for (const why of checkEvidenceReferences(deployText, 'MARKER_FILE', [
     evidenceFile('MARKER_FILE'),
     { label: 'if ! node scripts/recovery-ownership.mjs marker ... > "$MARKER_FILE"; then', re: MARKER_CMD, once: true },
-    sedRead('MARKER_FILE'),
+    ...sedReads('MARKER_FILE', EVIDENCE_READS.MARKER_FILE),
   ])) {
     fail(why);
   }
