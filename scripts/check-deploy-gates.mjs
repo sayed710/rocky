@@ -34,7 +34,11 @@
  *  so no later line can overwrite a published value. The classifiers' inputs (LIST_ARGS and the
  *  exit codes STATUS_RC, LIST_RC, INV_API_RC, INV_LABEL_RC, INV_ANNOTATION_RC) are pinned to exact
  *  write sites (PRODUCER_WRITES, checkDecisionWrites), and each exit code's `X=0` reset must
- *  directly precede its exact capture line (checkResetPrecedesCapture). The decision
+ *  directly precede its exact capture line (checkResetPrecedesCapture). The raw payload files
+ *  the classifiers read ("$STATUS_ERR", "$LIST_OUT", "$INV_API", "$INV_LABELLED",
+ *  "$INV_ANNOTATED") are pinned by checkEvidenceReferences to their mktemp and a fixed table of
+ *  exact lines (PAYLOAD_REFERENCES: capture, classifier invocation, fixed reads), each once, so no
+ *  line can truncate, rebind or rewrite a capture before its classifier reads it. The decision
  *  scalars read from those files (PREV_REV, SNAPSHOT_NEWEST, RELEASE_EXISTENCE, RELEASE_EXISTS,
  *  INVENTORY, DEPLOY_MARKER) are pinned the same way to a positive allowlist of write sites
  *  (checkDecisionWrites): any assignment, builtin (`read`, `printf -v`, `declare`, `unset`, ...),
@@ -470,6 +474,29 @@ const EXIT_CODE_CAPTURES = {
   INV_ANNOTATION_RC: ANNOTATED,
 };
 
+/** The `*)` arm's diagnostic read of "$STATUS_ERR", whitespace-collapsed as logicalLineVariants does. */
+const STATUS_ERR_READ = String.raw`STATUS_ERR_LINE=$(head -c 500 "$STATUS_ERR" | tr '\r\n' ' ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')`;
+/** The ExternalSecret discovery conditional, the one read of "$INV_API" besides the classifier. */
+const DISCOVERY_CONDITIONAL = `if [ "$INV_API_RC" = 0 ] && grep -qx 'externalsecrets.external-secrets.io' "$INV_API"; then`;
+
+/**
+ * The raw payload files the two classifiers read, each pinned (checkEvidenceReferences) to its
+ * mktemp and these exact whole lines, each once: its capture, its classifier invocation and the
+ * workflow's own fixed reads. A fixed table, never derived from the workflow being checked. Without
+ * it a truncation (`: > "$INV_ANNOTATED"`), a second `X=$(mktemp)` or a rewrite
+ * (`printf '[]\n' > "$LIST_OUT"`) after the capture empties the evidence: an annotation-only or
+ * label-only orphan then classifies `empty` instead of `occupied` (adoption, then deletion), and a
+ * contradictory `helm list` becomes `absent` instead of `unknown`. LIST_ERR, INV_ERR and the
+ * HISTORY_* / RB_HISTORY* files are out of scope.
+ */
+const PAYLOAD_REFERENCES = {
+  STATUS_ERR: [STATUS_CMD, EXISTENCE_CLASSIFIER, STATUS_ERR_READ],
+  LIST_OUT: [LIST_CMD, LIST_ARGS_BUILD],
+  INV_API: [DISCOVERY, DISCOVERY_CONDITIONAL, INVENTORY_CLASSIFIER],
+  INV_LABELLED: [LABELLED, INVENTORY_CLASSIFIER],
+  INV_ANNOTATED: [ANNOTATED, INVENTORY_CLASSIFIER],
+};
+
 /**
  * The allowed write sites of the classifiers' inputs (checkDecisionWrites, kind "producer input"):
  * the exit codes they are given — each its `X=0` reset and its capture line, once each — and the
@@ -644,6 +671,9 @@ export function checkRollbackTarget(deployText) {
  *   STATUS_RC, LIST_RC and LIST_ARGS — like the inventory's INV_API_RC, INV_LABEL_RC and
  *   INV_ANNOTATION_RC — are written only at their PRODUCER_WRITES sites, and each exit code's
  *   `X=0` reset directly precedes its capture line (checkResetPrecedesCapture);
+ * - the raw payload files both classifiers read (STATUS_ERR, LIST_OUT, INV_API, INV_LABELLED,
+ *   INV_ANNOTATED) are referenced only by their mktemp and their PAYLOAD_REFERENCES lines, each
+ *   once (checkEvidenceReferences; same accidental-regression contract);
  * - RELEASE_EXISTS is assigned exactly three times: `RELEASE_EXISTS=""`, the `exists)` arm and the
  *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from "$EXISTENCE_FILE", the
  *   file the classifier's stdout is redirected to (`> "$EXISTENCE_FILE"`) and that is referenced only
@@ -682,6 +712,11 @@ export function checkReleaseExistence(deployText) {
   // ...and each exit code's `X=0` reset directly precedes its exact capture line.
   for (const [name, capture] of Object.entries(EXIT_CODE_CAPTURES)) {
     for (const why of checkResetPrecedesCapture(deployText, name, capture)) fail(why);
+  }
+  // ...and the raw payload files they read are referenced only at their exact lines, so nothing
+  // truncates, rebinds or rewrites a capture before its classifier reads it.
+  for (const [name, refs] of Object.entries(PAYLOAD_REFERENCES)) {
+    for (const why of checkEvidenceReferences(deployText, name, [evidenceFile(name), ...refs.map(exactLine)])) fail(why);
   }
   if (!/^if node scripts\/release-existence\.mjs classify --release gambit --status-exit "\$STATUS_RC" \\$/m.test(codeText)) {
     fail('release existence must be classified by `node scripts/release-existence.mjs classify` from the helm status/list evidence');
