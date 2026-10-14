@@ -5,6 +5,18 @@
 import type { Pool } from 'pg';
 import { PersistenceError } from '../errors';
 
+const FENCING_FUNCTIONS=new Set([
+  'game_fencing.lock_control(uuid)',
+  'game_fencing.lock_grant(uuid)',
+  'game_fencing.validate_grant(game_fencing.grants,uuid,bigint,uuid,bytea,timestamp with time zone)',
+  'game_fencing.acquire(uuid,uuid,bigint,uuid,bytea,integer)',
+  'game_fencing.renew(uuid,uuid,bigint,uuid,bytea,integer)',
+  'game_fencing.release(uuid,uuid,bigint,uuid,bytea)',
+  'game_fencing.insert_batch(uuid,integer,jsonb,boolean)',
+  'game_fencing.append_events(uuid,uuid,bigint,uuid,bytea,integer,jsonb)',
+  'game_fencing.create_stream(uuid,uuid,jsonb)',
+]);
+
 export interface FencingPreparation {
   readonly tableOwner: string;
   readonly functionOwner: string;
@@ -63,10 +75,11 @@ export async function prepareGameFencing(pool: Pool,config: FencingPreparation):
       AND (r.rolcanlogin OR EXISTS (SELECT 1 FROM pg_catalog.pg_roles login
         WHERE login.rolcanlogin AND NOT login.rolsuper AND login.rolname <> SESSION_USER
           AND pg_catalog.pg_has_role(login.oid,r.oid,'MEMBER')))
-      AND (pg_catalog.has_table_privilege(r.oid,'game_fencing.grants','SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
-        OR pg_catalog.has_any_column_privilege(r.oid,'game_fencing.grants','SELECT,INSERT,UPDATE')
-        OR pg_catalog.has_table_privilege(r.oid,'game_fencing.control','SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
-        OR pg_catalog.has_any_column_privilege(r.oid,'game_fencing.control','SELECT,INSERT,UPDATE'))`,
+      AND (pg_catalog.has_schema_privilege(r.oid,'game_fencing','CREATE')
+        OR pg_catalog.has_table_privilege(r.oid,'game_fencing.grants','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        OR pg_catalog.has_any_column_privilege(r.oid,'game_fencing.grants','SELECT,INSERT,UPDATE,REFERENCES')
+        OR pg_catalog.has_table_privilege(r.oid,'game_fencing.control','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        OR pg_catalog.has_any_column_privilege(r.oid,'game_fencing.control','SELECT,INSERT,UPDATE,REFERENCES'))`,
       [[config.tableOwner,config.functionOwner]]);
     if (privateAccess.rowCount) throw new PersistenceError('unsafe private fencing privileges');
     await client.query('SELECT singleton FROM game_fencing.control WHERE singleton FOR UPDATE');
@@ -83,8 +96,9 @@ export async function prepareGameFencing(pool: Pool,config: FencingPreparation):
     const functions=await client.query<{ signature: string }>(`SELECT p.oid::regprocedure::text AS signature
       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
       WHERE n.nspname='game_fencing'`);
+    if (functions.rows.length!==FENCING_FUNCTIONS.size || functions.rows.some(fn=>!FENCING_FUNCTIONS.has(fn.signature)))
+      throw new PersistenceError('unexpected fencing function signature');
     for (const fn of functions.rows) {
-      if (!/^game_fencing\.[a-z_]+\([a-z_ ,.]*\)$/.test(fn.signature)) throw new PersistenceError('unexpected fencing function signature');
       await client.query(`ALTER FUNCTION ${fn.signature} OWNER TO ${executor}; REVOKE ALL ON FUNCTION ${fn.signature} FROM PUBLIC`);
       // Re-preparation/rotation also withholds previous explicit/default-ACL
       // execution on NEW functions. Legacy writer permissions are untouched.

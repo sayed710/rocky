@@ -168,6 +168,16 @@ legacy compatibility. A real PostgreSQL wire proxy drops or corrupts COMMIT
 acknowledgments; an independent connection verifies the committed event sequence.
 Final exact-head counts/reviews and publication gates belong in the PR evidence.
 
+PR #114 review corrections: preparation rejects effective TRIGGER and REFERENCES
+privileges (including column REFERENCES) on both private tables. Append retains the
+serialized batch count; caller-client creation snapshots its events before awaiting
+locks, so caller array mutation cannot corrupt result validation or player identity.
+Restricted-login trigger interference and deterministic lock-wait mutation tests
+reproduced these omissions before correction. These changes do not activate fencing.
+Preparation also refuses untrusted private-schema CREATE and unexpected function
+signatures before ownership adoption. Creation preserves typed pre-write logging
+and player-lock refusals; the caller still owns rollback before any safe retry.
+
 The unchanged real Redis/PG baseline passes its D3/D4 characterization. A separate
 future-enforcement witness intentionally fails obsolete-admitted-write rejection.
 That witness is not a passing PG-F1 gate and is not merged as a skipped regression.

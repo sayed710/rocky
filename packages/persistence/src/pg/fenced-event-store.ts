@@ -7,7 +7,7 @@ import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import type { GameEvent } from '@chess-platform/game';
 import { CURRENT_EVENT_VERSION } from '../event-store';
 import { ConcurrencyError, PersistenceError } from '../errors';
-import { lockGameCreationPlayers } from './event-store';
+import { lockGameCreationPlayers, PlayerLockBusyError } from './event-store';
 
 const MAX_EPOCH = 9223372036854775807n;
 const MAX_SEQUENCE = 2147483647;
@@ -222,12 +222,13 @@ export class PostgresFencedEventStore {
   }
 
   async append(grant: FencingGrant,expectedSeq: number,events: readonly GameEvent[],requestId: string): Promise<number> {
-    if (!requestId || !Number.isInteger(expectedSeq) || expectedSeq<0 || !events.length || expectedSeq+events.length>MAX_SEQUENCE)
+    const count=events.length;
+    if (!requestId || !Number.isInteger(expectedSeq) || expectedSeq<0 || !count || expectedSeq+count>MAX_SEQUENCE)
       throw new FenceRejectedError(requestId);
     const serialized=payload(events);
     const row=await this.transaction(requestId,grant.gameId,async client=>(await client.query(
       'SELECT game_fencing.append_events($1,$2,$3,$4,$5,$6,$7) AS head',[...grantArgs(grant),expectedSeq,serialized])).rows[0],expectedSeq);
-    if (!row || row.head!==expectedSeq+events.length) throw new FencedOutcomeUnknownError(requestId);
+    if (!row || row.head!==expectedSeq+count) throw new FencedOutcomeUnknownError(requestId);
     return row.head;
   }
 
@@ -236,7 +237,8 @@ export class PostgresFencedEventStore {
    * Caller owns projection writes, COMMIT uncertainty and client destruction.
    */
   async createOnClient(client: PoolClient,input: FencingCreationInput): Promise<number> {
-    const {gameId,databaseIncarnation,events,requestId}=input;
+    const {gameId,databaseIncarnation,requestId}=input;
+    const events=structuredClone(input.events);
     if (!requestId || !UUID.test(gameId) || !UUID.test(databaseIncarnation) || !events.length
         || events[0]?.type!=='GameCreated' || events[0].gameId!==gameId) throw new FenceRejectedError(requestId);
     try {
@@ -247,6 +249,7 @@ export class PostgresFencedEventStore {
       if (result.rows[0]?.head!==events.length-1) throw new PersistenceError('invalid staged creation result');
       return result.rows[0]!.head;
     } catch (error) {
+      if (error instanceof FenceRejectedError || error instanceof PlayerLockBusyError) throw error;
       if (sqlCode(error)) throw rejection(error,requestId,gameId,-1);
       throw new PersistenceError('protected creation failed; caller must rollback or establish transaction outcome');
     }

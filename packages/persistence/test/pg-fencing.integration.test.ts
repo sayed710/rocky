@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { Game, type GameEvent } from '@chess-platform/game';
 import { migrate, migrationsDir } from '../src/pg/migrate';
 import { PostgresEventStore } from '../src/pg/event-store';
+import { PlayerLockBusyError, lockGameCreationPlayers } from '../src/pg/event-store';
 import { withTestDatabase } from '../src/test-support/database';
 import { uuidv7 } from '../src/ids';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import { prepareGameFencing, seedGameFencing } from '../src/pg/fencing-preparation';
-import { FencingAcquireIntent, PostgresFencedEventStore, FenceRejectedError, FencedOutcomeUnknownError,
+import { FencingAcquireIntent, FencingGrant, PostgresFencedEventStore, FenceRejectedError, FencedOutcomeUnknownError,
   commitFencedTransaction } from '../src/pg/fenced-event-store';
 import { inspect } from 'node:util';
 import { createServer, connect, type Socket } from 'node:net';
@@ -483,6 +484,120 @@ test('PG-F1 preparation rejects private runtime/default-ACL read access without 
     await assert.rejects(prepareGameFencing(admin,{tableOwner:owners.tables,functionOwner:owners.functions,
       databaseIncarnation:randomUUID(),maxLeaseMs:60000}),/unsafe private fencing privileges/);
     assert.equal((await admin.query('SELECT database_incarnation::text AS id FROM game_fencing.control')).rows[0]?.id,db);
+  });
+});
+
+for (const table of ['grants','control']) for (const privilege of ['TRIGGER','REFERENCES']) {
+  test(`PG-F1 preparation refuses restricted ${privilege} on private ${table}`, { skip },async()=>{
+    await restrictedDatabase(async(admin,a,_b,db)=>{
+      const owners=(await admin.query(`SELECT pg_get_userbyid(c.relowner) AS tables,pg_get_userbyid(p.proowner) AS functions
+        FROM pg_class c,pg_proc p WHERE c.oid='game_fencing.grants'::regclass
+        AND p.oid='game_fencing.create_stream(uuid,uuid,jsonb)'::regprocedure`)).rows[0]!;
+      const login=(await a.query('SELECT session_user AS name')).rows[0]!.name;
+      await admin.query(`GRANT ${privilege} ON game_fencing.${table} TO ${login}`);
+      if(privilege==='TRIGGER') {
+        // No private SELECT/UPDATE or public CREATE needed: an executable legacy
+        // trigger function suffices to interfere with SECURITY DEFINER writes.
+        await a.query(`CREATE TRIGGER pg_f1_block_private BEFORE UPDATE ON game_fencing.${table}
+          FOR EACH ROW EXECUTE FUNCTION public.game_events_no_mutate()`);
+        const sql=table==='control'?'UPDATE game_fencing.control SET singleton=singleton':
+          'UPDATE game_fencing.grants SET epoch=epoch WHERE game_id=$1';
+        const values=table==='control'?[]:[await seed(admin)];
+        await assert.rejects(admin.query(sql,values),hasCode('P0001'));
+        await admin.query(`DROP TRIGGER pg_f1_block_private ON game_fencing.${table}`);
+      }
+      await assert.rejects(prepareGameFencing(admin,{tableOwner:owners.tables,functionOwner:owners.functions,
+        databaseIncarnation:randomUUID(),maxLeaseMs:30000}),/unsafe private fencing privileges/);
+      assert.deepEqual((await admin.query('SELECT database_incarnation::text AS id,max_lease_ms FROM game_fencing.control')).rows,
+        [{id:db,max_lease_ms:60000}]);
+      assert.equal((await a.query('SELECT has_function_privilege(session_user,$1,\'EXECUTE\') AS allowed',
+        ['game_fencing.create_stream(uuid,uuid,jsonb)'])).rows[0]?.allowed,true,'refused preparation makes no partial ACL changes');
+    });
+  });
+}
+
+test('PG-F1 append uses the original serialized batch length when a caller mutates its waiting array', { skip },async()=>{
+  await restrictedDatabase(async(admin,a,_b,db)=>{
+    const game=await seed(admin),grant=await acquire(a,game,db);
+    const single=new Pool({connectionString:a.options.connectionString,max:1});
+    const adapter=new PostgresFencedEventStore(single,{lockTimeoutMs:5000,statementTimeoutMs:10000,idleTransactionTimeoutMs:10000});
+    const pid=(await single.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid;
+    const holder=await admin.connect();
+    try {
+      await holder.query('BEGIN');await holder.query('SELECT game_id FROM game_fencing.grants WHERE game_id=$1 FOR UPDATE',[game]);
+      const events: GameEvent[]=[ready];
+      const writing=adapter.append(new FencingGrant({gameId:game,databaseIncarnation:db,epoch:grant.epoch,
+        processIncarnation:grant.process,leaseUntil:grant.expiry},grant.capability),0,events,'original-array');
+      await blocked(admin,pid);events.length=0;
+      await holder.query('ROLLBACK');
+      assert.equal(await writing,1);
+      assert.deepEqual((await admin.query('SELECT seq,payload FROM public.game_events WHERE game_id=$1 AND seq>0',[game])).rows,
+        [{seq:1,payload:ready}]);
+    }finally{await holder.query('ROLLBACK');holder.release();await single.end();}
+  });
+});
+
+test('PG-F1 caller-client creation snapshots events before waiting on the control lock', { skip },async()=>{
+  await restrictedDatabase(async(admin,a,_b,db)=>{
+    const game=randomUUID(),events=initialEvents(game),original=structuredClone(events[0]);
+    const adapter=new PostgresFencedEventStore(a,{lockTimeoutMs:5000,statementTimeoutMs:10000,idleTransactionTimeoutMs:10000});
+    const holder=await admin.connect(),client=await a.connect();
+    try {
+      await holder.query('BEGIN');await holder.query('SELECT singleton FROM game_fencing.control FOR UPDATE');
+      await client.query('BEGIN');
+      const pid=(await client.query('SELECT pg_backend_pid() AS pid')).rows[0]!.pid;
+      const writing=adapter.createOnClient(client,{gameId:game,databaseIncarnation:db,events,requestId:'original-creation'});
+      await blocked(admin,pid);events.length=0;
+      await holder.query('ROLLBACK');
+      assert.equal(await writing,0);await commitFencedTransaction(client,'original-creation');
+      assert.deepEqual((await admin.query('SELECT seq,payload FROM public.game_events WHERE game_id=$1',[game])).rows,
+        [{seq:0,payload:original}]);
+    }finally{await holder.query('ROLLBACK');await client.query('ROLLBACK');holder.release();client.release();}
+  });
+});
+
+test('PG-F1 caller-client creation retains typed pre-write logging and player-lock refusals', { skip },async()=>{
+  await restrictedDatabase(async(admin,a,_b,db)=>{
+    const game=randomUUID(),events=initialEvents(game);
+    const adapter=new PostgresFencedEventStore(a,{lockTimeoutMs:5000,statementTimeoutMs:10000,idleTransactionTimeoutMs:10000});
+    const login=(await a.query('SELECT session_user AS name')).rows[0]!.name;
+    await admin.query(`ALTER ROLE ${login} SET log_parameter_max_length=-1`);
+    const unsafe=new Pool({connectionString:a.options.connectionString,max:1}),client=await unsafe.connect();
+    try {
+      await client.query('BEGIN');
+      await assert.rejects(adapter.createOnClient(client,{gameId:game,databaseIncarnation:db,events,requestId:'logging-rejection'}),
+        error=>error instanceof FenceRejectedError && error.requestId==='logging-rejection');
+      await client.query('ROLLBACK');
+    }finally{client.release();await unsafe.end();await admin.query(`ALTER ROLE ${login} SET log_parameter_max_length=0`);}
+    const holder=await admin.connect(),writer=await a.connect();
+    try {
+      await holder.query('BEGIN');await lockGameCreationPlayers(holder,events);
+      await writer.query('BEGIN');
+      await assert.rejects(adapter.createOnClient(writer,{gameId:game,databaseIncarnation:db,events,requestId:'player-refusal'}),PlayerLockBusyError);
+      await writer.query('ROLLBACK');await holder.query('ROLLBACK');
+      assert.equal((await admin.query('SELECT 1 FROM public.game_events WHERE game_id=$1',[game])).rowCount,0);
+      await writer.query('BEGIN');
+      assert.equal(await adapter.createOnClient(writer,{gameId:game,databaseIncarnation:db,events,requestId:'fresh-creation'}),0);
+      await commitFencedTransaction(writer,'fresh-creation');
+    }finally{await holder.query('ROLLBACK');await writer.query('ROLLBACK');holder.release();writer.release();}
+  });
+});
+
+test('PG-F1 preparation refuses untrusted private CREATE and unexpected function adoption', { skip },async()=>{
+  await restrictedDatabase(async(admin,a,_b,db)=>{
+    const owners=(await admin.query(`SELECT pg_get_userbyid(c.relowner) AS tables,pg_get_userbyid(p.proowner) AS functions
+      FROM pg_class c,pg_proc p WHERE c.oid='game_fencing.grants'::regclass
+      AND p.oid='game_fencing.create_stream(uuid,uuid,jsonb)'::regprocedure`)).rows[0]!;
+    const login=(await a.query('SELECT session_user AS name')).rows[0]!.name;
+    await admin.query(`GRANT CREATE ON SCHEMA game_fencing TO ${login}`);
+    const config={tableOwner:owners.tables,functionOwner:owners.functions,databaseIncarnation:randomUUID(),maxLeaseMs:30000};
+    await assert.rejects(prepareGameFencing(admin,config),/unsafe private fencing privileges/);
+    await a.query('CREATE FUNCTION game_fencing.unexpected() RETURNS integer LANGUAGE sql AS $$SELECT 1$$');
+    await admin.query(`REVOKE CREATE ON SCHEMA game_fencing FROM ${login}`);
+    await assert.rejects(prepareGameFencing(admin,config),/unexpected fencing function signature/);
+    assert.equal((await admin.query("SELECT pg_get_userbyid(proowner) AS owner FROM pg_proc WHERE oid='game_fencing.unexpected()'::regprocedure")).rows[0]?.owner,login);
+    assert.deepEqual((await admin.query('SELECT database_incarnation::text AS id,max_lease_ms FROM game_fencing.control')).rows,
+      [{id:db,max_lease_ms:60000}]);
   });
 });
 
