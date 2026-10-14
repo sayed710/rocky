@@ -31,8 +31,10 @@
  *  (variable, key) pair, once (EVIDENCE_READS) — and its publication; any other reference fails the
  *  gate. GITHUB_OUTPUT is pinned the same way (checkOutputPublications): every reference to it, in
  *  any spelling, must be one of today's exact publication lines (OUTPUT_PUBLICATIONS), each once,
- *  so no later line can overwrite a published value. The classifier's inputs (LIST_ARGS, STATUS_RC,
- *  LIST_RC) are pinned to exact write sites (PRODUCER_WRITES, checkDecisionWrites). The decision
+ *  so no later line can overwrite a published value. The classifiers' inputs (LIST_ARGS and the
+ *  exit codes STATUS_RC, LIST_RC, INV_API_RC, INV_LABEL_RC, INV_ANNOTATION_RC) are pinned to exact
+ *  write sites (PRODUCER_WRITES, checkDecisionWrites), and each exit code's `X=0` reset must
+ *  directly precede its exact capture line (checkResetPrecedesCapture). The decision
  *  scalars read from those files (PREV_REV, SNAPSHOT_NEWEST, RELEASE_EXISTENCE, RELEASE_EXISTS,
  *  INVENTORY, DEPLOY_MARKER) are pinned the same way to a positive allowlist of write sites
  *  (checkDecisionWrites): any assignment, builtin (`read`, `printf -v`, `declare`, `unset`, ...),
@@ -321,8 +323,9 @@ function hasWriteSite(line, name) {
  * (other steps' processes, actions, the runner). This is a static check, not a shell parser: the
  * behavioural snapshot tests remain the primary guard.
  *
- * The same contract pins the classifier's producer inputs (PRODUCER_WRITES: LIST_ARGS, STATUS_RC,
- * LIST_RC), reported with `kind` "producer input".
+ * The same contract pins the classifiers' producer inputs (PRODUCER_WRITES: LIST_ARGS, STATUS_RC,
+ * LIST_RC, INV_API_RC, INV_LABEL_RC, INV_ANNOTATION_RC), reported with `kind` "producer input";
+ * checkResetPrecedesCapture adds the order of each exit code's reset and capture.
  *
  * @param {string} workflowText The workflow text (comments included; they are dropped here).
  * @param {string} name The decision variable's name.
@@ -348,6 +351,38 @@ export function checkDecisionWrites(workflowText, name, forms, kind = 'decision 
   if (offending.size > 0) found.push(`${allowed}; offending write site line(s): [${[...offending].join(' | ')}]`);
   for (const why of badCounts) found.push(`${allowed}; ${why}`);
   return found;
+}
+
+/**
+ * Order of an exit code's reset and capture: checkDecisionWrites counts `X=0` and the capture line
+ * `... || X=$?` but not their order, and a reset moved after the capture (or a second reset later)
+ * erases a failed query's exit code, so the classifier reads a failed `kubectl` / `helm` query as
+ * success (`unknown` becomes `empty`, and orphaned Helm-owned objects get adopted).
+ *
+ * Contract: in each logical-line variant of checkDecisionWrites (comments dropped, continuations
+ * joined, whitespace collapsed), every line that is exactly `NAME=0` must be immediately followed —
+ * blank lines aside, nothing else — by exactly `capture`. With checkDecisionWrites' counts (one
+ * reset, one capture) this pins the pair to adjacent lines in that order. Same scope as
+ * checkDecisionWrites: an accidental-regression guard; deliberate obfuscation is out of scope.
+ *
+ * @param {string} workflowText The workflow text (comments included; they are dropped here).
+ * @param {string} name The exit-code variable.
+ * @param {string} capture Its exact capture line.
+ * @returns {string[]} Problems (empty when every reset directly precedes the capture).
+ */
+export function checkResetPrecedesCapture(workflowText, name, capture) {
+  const found = new Set();
+  const reset = `${name}=0`;
+  for (const lines of logicalLineVariants(workflowText)) {
+    lines.forEach((line, i) => {
+      if (line !== reset) return;
+      const next = lines.slice(i + 1).find((l) => l !== '');
+      if (next !== capture) {
+        found.add(`producer input ${name}: the reset \`${reset}\` must directly precede its capture \`${capture}\` (the next code line, blank lines aside); found: \`${next ?? '<end of file>'}\``);
+      }
+    });
+  }
+  return [...found];
 }
 
 /** The allowed write sites of each decision variable (checkDecisionWrites), exactly as in deploy.yml. */
@@ -411,6 +446,9 @@ const EVIDENCE_READS = {
  */
 const STATUS_CMD = 'helm status gambit > /dev/null 2> "$STATUS_ERR" || STATUS_RC=$?';
 const LIST_CMD = `helm list --all --filter '^gambit$' -o json > "$LIST_OUT" 2> "$LIST_ERR" || LIST_RC=$?`;
+const DISCOVERY = 'kubectl api-resources --api-group=external-secrets.io -o name > "$INV_API" 2> "$INV_ERR" || INV_API_RC=$?';
+const LABELLED = 'kubectl get "$INV_KINDS" -l app.kubernetes.io/instance=gambit -o name > "$INV_LABELLED" 2>> "$INV_ERR" || INV_LABEL_RC=$?';
+const ANNOTATED = `kubectl get "$INV_KINDS" -o jsonpath='{range .items[*]}{.kind}/{.metadata.name}{"\\t"}{.metadata.annotations.meta\\.helm\\.sh/release-name}{"\\n"}{end}' > "$INV_ANNOTATED" 2>> "$INV_ERR" || INV_ANNOTATION_RC=$?`;
 const LIST_ARGS_BUILD = 'LIST_ARGS=(--list-exit "$LIST_RC" --list-stdout "$LIST_OUT")';
 const EXISTENCE_CLASSIFIER = 'if node scripts/release-existence.mjs classify --release gambit --status-exit "$STATUS_RC" ' +
   '--status-stderr "$STATUS_ERR" "${LIST_ARGS[@]}" > "$EXISTENCE_FILE" 2>> "$LIST_ERR"; then';
@@ -421,19 +459,28 @@ const INVENTORY_CLASSIFIER = 'if node scripts/recovery-ownership.mjs inventory -
 const exactLine = (line) => ({ label: line, re: new RegExp(`^${escapeRegExp(line)}$`), once: true });
 
 /**
- * The allowed write sites of the classifier's inputs (checkDecisionWrites, kind "producer input"):
- * the exit codes it is given and the array that carries the `helm list` evidence. `LIST_ARGS` in
- * `"${LIST_ARGS[@]}"` is a subscript, so the classifier line is one of its sites too.
+ * The exit codes the two classifiers are given, each with the exact capture line that sets it
+ * (`... || X=$?`). Its `X=0` reset must directly precede that capture (checkResetPrecedesCapture).
+ */
+const EXIT_CODE_CAPTURES = {
+  STATUS_RC: STATUS_CMD,
+  LIST_RC: LIST_CMD,
+  INV_API_RC: DISCOVERY,
+  INV_LABEL_RC: LABELLED,
+  INV_ANNOTATION_RC: ANNOTATED,
+};
+
+/**
+ * The allowed write sites of the classifiers' inputs (checkDecisionWrites, kind "producer input"):
+ * the exit codes they are given — each its `X=0` reset and its capture line, once each — and the
+ * array that carries the `helm list` evidence. `LIST_ARGS` in `"${LIST_ARGS[@]}"` is a subscript,
+ * so the classifier line is one of its sites too.
  */
 const PRODUCER_WRITES = {
-  STATUS_RC: [
-    { line: 'STATUS_RC=0', count: 1 },
-    { line: STATUS_CMD, count: 1 },
-  ],
-  LIST_RC: [
-    { line: 'LIST_RC=0', count: 1 },
-    { line: LIST_CMD, count: 1 },
-  ],
+  ...Object.fromEntries(Object.entries(EXIT_CODE_CAPTURES).map(([name, capture]) => [name, [
+    { line: `${name}=0`, count: 1 },
+    { line: capture, count: 1 },
+  ]])),
   LIST_ARGS: [
     { line: 'LIST_ARGS=()', count: 1 },
     { line: LIST_ARGS_BUILD, count: 1 },
@@ -594,7 +641,9 @@ export function checkRollbackTarget(deployText) {
  * - the only `helm status` is the evidence-capturing STATUS_CMD (no `>/dev/null 2>&1`, no `if helm status`);
  * - the list corroboration LIST_CMD (the only `helm list`) and the scripts/release-existence.mjs
  *   classifier are both present; the classifier is exactly EXISTENCE_CLASSIFIER and its inputs
- *   STATUS_RC, LIST_RC and LIST_ARGS are written only at their PRODUCER_WRITES sites;
+ *   STATUS_RC, LIST_RC and LIST_ARGS — like the inventory's INV_API_RC, INV_LABEL_RC and
+ *   INV_ANNOTATION_RC — are written only at their PRODUCER_WRITES sites, and each exit code's
+ *   `X=0` reset directly precedes its capture line (checkResetPrecedesCapture);
  * - RELEASE_EXISTS is assigned exactly three times: `RELEASE_EXISTS=""`, the `exists)` arm and the
  *   `absent)` arm of `case "$RELEASE_EXISTENCE" in`, whose value is read only from "$EXISTENCE_FILE", the
  *   file the classifier's stdout is redirected to (`> "$EXISTENCE_FILE"`) and that is referenced only
@@ -626,9 +675,13 @@ export function checkReleaseExistence(deployText) {
     fail(`release absence must be corroborated by exactly one \`${LIST_CMD}\` (--all lists every status, Helm v3.16.3 pkg/action/list.go), found: [${listCmds.join(' | ')}]`);
   }
   // The classifier's inputs — the exit codes and the LIST_ARGS array — are written only at their
-  // exact sites (checkDecisionWrites), so `--list-exit 0` or a reset after the capture fails.
+  // exact sites (checkDecisionWrites), so `--list-exit 0` or an extra reset fails.
   for (const [name, forms] of Object.entries(PRODUCER_WRITES)) {
     for (const why of checkDecisionWrites(deployText, name, forms, 'producer input')) fail(why);
+  }
+  // ...and each exit code's `X=0` reset directly precedes its exact capture line.
+  for (const [name, capture] of Object.entries(EXIT_CODE_CAPTURES)) {
+    for (const why of checkResetPrecedesCapture(deployText, name, capture)) fail(why);
   }
   if (!/^if node scripts\/release-existence\.mjs classify --release gambit --status-exit "\$STATUS_RC" \\$/m.test(codeText)) {
     fail('release existence must be classified by `node scripts/release-existence.mjs classify` from the helm status/list evidence');
@@ -808,9 +861,6 @@ function checkOrphanInventory(absentArm, code, lines) {
   const fail = (why) => found.push(`${DEPLOY_WORKFLOW}: ${why}`);
   const KINDS = `INV_KINDS="${BASE_INVENTORY_KINDS.join(',')}"`;
   const KINDS_ES = `INV_KINDS="$INV_KINDS,${EXTERNAL_SECRET_RESOURCE}"`;
-  const DISCOVERY = 'kubectl api-resources --api-group=external-secrets.io -o name > "$INV_API" 2> "$INV_ERR" || INV_API_RC=$?';
-  const LABELLED = 'kubectl get "$INV_KINDS" -l app.kubernetes.io/instance=gambit -o name > "$INV_LABELLED" 2>> "$INV_ERR" || INV_LABEL_RC=$?';
-  const ANNOTATED = `kubectl get "$INV_KINDS" -o jsonpath='{range .items[*]}{.kind}/{.metadata.name}{"\\t"}{.metadata.annotations.meta\\.helm\\.sh/release-name}{"\\n"}{end}' > "$INV_ANNOTATED" 2>> "$INV_ERR" || INV_ANNOTATION_RC=$?`;
   const CLASSIFY = INVENTORY_CLASSIFIER;
   const REFUSAL = 'if [ "$INVENTORY" != "empty" ]; then';
   // The arm with line continuations joined, as the shell reads it.
