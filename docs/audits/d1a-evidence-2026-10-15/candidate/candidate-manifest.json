@@ -1,0 +1,18 @@
+{
+  "baseline": "4ccf8f48869335e06ac1b1de467d2161869f8fd7",
+  "files": [
+    {
+      "file": "packages/realtime-gateway/src/authority.ts",
+      "beforeSHA256": "e6f5150b8728070abee283b01bcd85951f277637afd146e9ccde4706410ee89f",
+      "afterSHA256": "e6be6a60aef6c9feb5b78cd8b76c09f4b8dab0f8d8724e57154fccbc70ceadaf"
+    },
+    {
+      "file": "packages/realtime-gateway/src/gateway.ts",
+      "beforeSHA256": "5b4d851d9d149190df6a6d3def1d36d177ddb9f6e50fd4300f241802b354d8a7",
+      "afterSHA256": "f43e55da7be66978d84b837a73ec80b40cc1ed7ce0581b1f6da90e60379387b7"
+    }
+  ],
+  "harnessSHA256": "ad1a2aec2cb6edf32cca4e7608726fbbe3e10346533f0896b5c2193f3e312ec3",
+  "preparedAt": "2026-10-15T11:17:46.959Z",
+  "execution": "NOT_RUN"
+}

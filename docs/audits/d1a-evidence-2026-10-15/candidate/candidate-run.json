@@ -1,0 +1,120 @@
+{
+  "startedAt": "2026-10-15T11:19:35.898Z",
+  "mode": "BOUNDED_REVIEWED",
+  "runtime": {
+    "node": "v24.15.0",
+    "platform": "win32"
+  },
+  "before": {
+    "head": "dbf44d9a4207af6cf6096935693198a8a4954ff0",
+    "main": "4ccf8f48869335e06ac1b1de467d2161869f8fd7",
+    "status": ""
+  },
+  "setup": "PASS",
+  "oracleDisposition": {
+    "readyForBoundedExecution": true,
+    "scope": "S01-S05 plus existing F-controls/characterization; no C-case execution or client fix claim",
+    "candidateCodeIndependentlyReviewed": false,
+    "sources": [
+      "../../CLAUDE_D1A_HARNESS_REVIEW_2026-10-15.md",
+      "../../GEMINI_D1A_SERVER_ORACLE_REVIEW_2026-10-15.txt"
+    ],
+    "incorporated": [
+      "Independent cold state witness within S01/S02/S04/S05 preparation",
+      "Event-driven actual response hooks preserve every desired-state assertion after async server change",
+      "S03 counted as history consequence of S02, not an independent root cause",
+      "Client C02 synthetic ordering and C03 synthetic envelope remain baseline-only; candidate excludes all C-cases"
+    ],
+    "pending": [
+      "Pi client-oracle review not received; no client-oracle approval inferred",
+      "External candidate code independent review and production architecture/resource/API decision"
+    ],
+    "meaning": "Harness-owner disposition to execute an already-authorized bounded external experiment, not independent candidate clearance or production authorization"
+  },
+  "bundleSHA256": "5d5c38220ff102dc10d4389d39be988cc3b60c60c64fbac1c18a3b02dcfc52ab",
+  "patchSHA256": "656c953f5ec3cb0789defd354d0c2bb6badbf91ce9529cc042cfc21709108bd2",
+  "command": [
+    "node",
+    "--test",
+    "--test-concurrency=1",
+    "--test-reporter=tap",
+    "--test-name-pattern=^(F|S)",
+    "<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\candidate\\candidate.cjs"
+  ],
+  "testExit": 0,
+  "testSignal": null,
+  "spawnError": null,
+  "results": [
+    {
+      "id": "F01",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "F02",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "F03",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "F04",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "S01",
+      "kind": "CANDIDATE",
+      "result": "PASS"
+    },
+    {
+      "id": "S02",
+      "kind": "CANDIDATE",
+      "result": "PASS"
+    },
+    {
+      "id": "S03",
+      "kind": "CANDIDATE",
+      "result": "PASS"
+    },
+    {
+      "id": "S04",
+      "kind": "CANDIDATE",
+      "result": "PASS"
+    },
+    {
+      "id": "S05",
+      "kind": "CANDIDATE",
+      "result": "PASS"
+    },
+    {
+      "id": "F05",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "F06",
+      "kind": "CHARACTERIZATION",
+      "result": "PASS"
+    },
+    {
+      "id": "F07",
+      "kind": "CONTROL",
+      "result": "PASS"
+    }
+  ],
+  "counts": {
+    "PASS": 12
+  },
+  "parentArtifactsUnchanged": true,
+  "parentFrozenSourcesUnchanged": true,
+  "after": {
+    "head": "dbf44d9a4207af6cf6096935693198a8a4954ff0",
+    "main": "4ccf8f48869335e06ac1b1de467d2161869f8fd7",
+    "status": ""
+  },
+  "finishedAt": "2026-10-15T11:19:36.618Z"
+}
