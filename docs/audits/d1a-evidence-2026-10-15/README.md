@@ -21,6 +21,8 @@ The external candidate patch changes copied authority/gateway files to derive a 
 - `candidate/`: unapplied patch, candidate harness, design/result records, preparation manifest and actual run receipts.
 - `reviews/`: independent original-agent source/harness reviews and proposed boundary controls. Reviews are not independent execution.
 
+The [OpenCode collection summary](reviews/OPENCODE_PROVENANCE_AND_INTEGRATION_SUMMARY.md) distinguishes independently verified source bytes from recorded fingerprints, the final CLI transport failure and PR107 integration limits. The Gemini source-oracle `.txt` is a coordinator transcription of visible findings; the original desktop accessibility capture is not published.
+
 Receipts are historical observations, not current CI. Absolute workstation paths are replaced with `<ARTIFACT_ROOT>`, `<REPOSITORY>` or `<WORKSTATION>` in published text. Recorded hashes still refer to original private artifacts, not these redacted copies. Source code and the unapplied patch are copied without content changes. No credentials or conversation/session dumps are included. Compiled bundles, source maps and full copied production trees are omitted; the source manifest names the pinned Git blobs.
 
 The harnesses are archived fixtures, **not a standalone runnable package or a default test-suite addition**. Their relative `frozen-src` imports require source extraction and the original bundling configuration. No portable runner is claimed. Review the patch as text; do not apply it as a production-ready fix.
