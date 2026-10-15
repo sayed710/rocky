@@ -208,7 +208,9 @@ export function classifyOrphanInventory({
   const readable = (text) => typeof text === 'string';
 
   if (!exitOk(apiResourcesExit)) {
-    return unknown(`'kubectl api-resources --api-group=external-secrets.io' failed (exit ${apiResourcesExit}), so it is unknown whether ExternalSecrets must be inventoried`);
+    // kubectl api-resources runs full server discovery before filtering by --api-group, so this also
+    // fails when an unrelated aggregated API is unavailable. Still unknown; only the guidance says so.
+    return unknown(`'kubectl api-resources --api-group=external-secrets.io' failed (exit ${apiResourcesExit}), so it is unknown whether ExternalSecrets must be inventoried. That command runs full cluster API discovery, which fails if any aggregated API is unavailable (check 'kubectl get apiservices') as well as on missing access, connectivity or RBAC`);
   }
   if (!readable(apiResourcesStdout)) {
     return unknown('the API discovery output is missing and cannot be read');

@@ -188,6 +188,22 @@ test('any kubectl failure, or output that cannot be read exactly, is unknown', (
   }
 });
 
+test('a failed api-resources discovery stays unknown and points at unavailable aggregated APIs', () => {
+  // `kubectl api-resources --api-group=...` runs full server discovery before filtering by group, so an
+  // unavailable aggregated API in any group (e.g. metrics.k8s.io) fails it. Still fail closed; only the
+  // operator guidance changes.
+  const r = inventory({ apiResourcesExit: 1 });
+  assert.equal(r.state, 'unknown');
+  assert.deepEqual(r.objects, []);
+  assert.match(r.reason, /api-resources.*exit 1/);
+  assert.match(r.reason, /full cluster API discovery/);
+  assert.match(r.reason, /aggregated API/);
+  assert.match(r.reason, /kubectl get apiservices/);
+  assert.match(r.reason, /access, connectivity or RBAC/);
+  // The guidance is specific to discovery: other query failures keep their own reasons.
+  assert.doesNotMatch(inventory({ labelExit: 1 }).reason, /apiservices/);
+});
+
 test('ExternalSecret is inventoried exactly when its API is served', () => {
   const served = { apiResourcesStdout: `${EXTERNAL_SECRET_RESOURCE}\nsecretstores.external-secrets.io\n` };
   // Served but not queried: the inventory would miss ExternalSecrets.

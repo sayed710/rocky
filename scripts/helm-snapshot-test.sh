@@ -1557,6 +1557,13 @@ expect_inventory_unknown inventory-annotation-error 'context deadline exceeded' 
 rb_inventory api_rc 1 api_stderr 'error: unable to retrieve the complete list of server APIs: external-secrets.io/v1: the server is currently unable to handle the request'
 rb_run_ex inventory-discovery-error rolling @missing 1 "$RB_NOT_FOUND" '[]' 1
 expect_inventory_unknown inventory-discovery-error 'unable to retrieve' "a failing API discovery (ExternalSecret served?) is unknown: refused"
+# An unavailable aggregated API in an unrelated group fails the same discovery (kubectl lists every
+# group before filtering --api-group). Still refused; the error must point operators at
+# `kubectl get apiservices`, not only at access/RBAC.
+rb_inventory api_rc 1 api_stderr 'error: unable to retrieve the complete list of server APIs: metrics.k8s.io/v1beta1: the server is currently unable to handle the request'
+rb_run_ex inventory-discovery-unrelated rolling @missing 1 "$RB_NOT_FOUND" '[]' 1
+expect_inventory_unknown inventory-discovery-unrelated 'metrics.k8s.io' "a discovery failure from an unrelated aggregated API is unknown: refused, nothing changed"
+expect_inventory_unknown inventory-discovery-unrelated 'kubectl get apiservices' "the discovery refusal points operators at unavailable aggregated APIs (kubectl get apiservices)"
 rb_inventory label_stdout $'NAME READY\ngambit 1/1\n'
 rb_run_ex inventory-garbage rolling @missing 1 "$RB_NOT_FOUND" '[]' 1
 expect_inventory_unknown inventory-garbage 'cannot be read' "inventory output that cannot be read exactly is unknown: refused"
