@@ -177,10 +177,14 @@ test('rejects a changed jsonpath capture line: dropped || INV_ANNOTATION_RC=$?',
 
 // Raw classifier payload files: the files the classifiers read (STATUS_ERR, LIST_OUT, INV_API,
 // INV_LABELLED, INV_ANNOTATED) may be referenced only by their mktemp, their capture line, the
-// classifier invocation and the workflow's own fixed reads. Truncating or rebinding one after its
-// capture turns occupied evidence into empty evidence: an annotation-only orphan then classifies
-// `empty` instead of `occupied` (adoption, then deletion), and a contradictory `helm list` rewritten
-// to `[]` turns `unknown` into `absent`.
+// classifier invocation and the workflow's own fixed reads. Truncating, rebinding or rewriting a
+// capture changes only the evidence the classifier reads, not the live objects: with the other
+// channels empty, an erased annotation capture classifies `empty` instead of `occupied` (see the
+// characterisation tests below), and a contradictory `helm list` rewritten to `[]` turns `unknown`
+// into `absent`. Harmful adoption and later deletion additionally need a live object matching the
+// rendered identity with compatible Helm ownership metadata; label-only objects, and blank or
+// nonzero-exit captures that classify `unknown`, are rejected here by the reference contract, not as
+// proven adoption paths.
 const PAYLOAD_CAPTURES = {
   STATUS_ERR: STATUS_CMD,
   LIST_OUT: LIST_CMD,
@@ -242,9 +246,25 @@ test('rejects removing the sole INV_LABELLED=$(mktemp)', () => {
   ]);
 });
 
+/** The index of the one line whose trimmed text is `anchor`; fails unless there is exactly one. */
+function uniqueLineIndex(lines, anchor) {
+  const at = lines.map((l, i) => (l.trim() === anchor ? i : -1)).filter((i) => i !== -1);
+  assert.equal(at.length, 1, `expected exactly one line: ${anchor}`);
+  return at[0];
+}
+
+test('the continuation mutation refuses a missing or duplicated anchor instead of mutating another line', () => {
+  const lines = deployYml.split('\n');
+  const at = uniqueLineIndex(lines, ANNOTATED);
+  const missing = lines.filter((_, i) => i !== at);
+  const duplicated = [...lines.slice(0, at + 1), lines[at], ...lines.slice(at + 1)];
+  assert.throws(() => uniqueLineIndex(missing, ANNOTATED), /expected exactly one line/);
+  assert.throws(() => uniqueLineIndex(duplicated, ANNOTATED), /expected exactly one line/);
+});
+
 test('rejects a truncation whose file name is split across a line continuation', () => {
   const lines = deployYml.split('\n');
-  const at = lines.findIndex((l) => l.trim() === ANNOTATED);
+  const at = uniqueLineIndex(lines, ANNOTATED);
   const indent = lines[at].match(/^\s*/)[0];
   lines.splice(at + 1, 0, `${indent}: > "$INV_ANNOT\\`, `${indent}ATED"`);
   assertProblem(gates(lines.join('\n')), [referenceRule('INV_ANNOTATED'), 'offending line(s): [: > "$INV_ANNOTATED"]']);

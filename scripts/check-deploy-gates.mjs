@@ -484,9 +484,12 @@ const DISCOVERY_CONDITIONAL = `if [ "$INV_API_RC" = 0 ] && grep -qx 'externalsec
  * mktemp and these exact whole lines, each once: its capture, its classifier invocation and the
  * workflow's own fixed reads. A fixed table, never derived from the workflow being checked. Without
  * it a truncation (`: > "$INV_ANNOTATED"`), a second `X=$(mktemp)` or a rewrite
- * (`printf '[]\n' > "$LIST_OUT"`) after the capture empties the evidence: an annotation-only or
- * label-only orphan then classifies `empty` instead of `occupied` (adoption, then deletion), and a
- * contradictory `helm list` becomes `absent` instead of `unknown`. LIST_ERR, INV_ERR and the
+ * (`printf '[]\n' > "$LIST_OUT"`) after the capture changes the evidence the classifier reads (not
+ * the live objects): an orphan seen only in that capture can then classify `empty` instead of
+ * `occupied`, and a contradictory `helm list` becomes `absent` instead of `unknown`. Adoption and
+ * later deletion are possible only where a live object matches the rendered identity and carries
+ * compatible Helm ownership metadata; label-only objects, and blank or nonzero-exit captures that
+ * classify `unknown`, are rejected by this contract without being proven adoption paths. LIST_ERR, INV_ERR and the
  * HISTORY_* / RB_HISTORY* files are out of scope.
  */
 const PAYLOAD_REFERENCES = {
