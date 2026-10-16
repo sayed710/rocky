@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-13 — R-01 PR #112 integration: owner-merged R-02/F4 #113 incorporated; both milestone histories preserved; integrated local gates pass; renewed exact-head gates pending; Qodo requirement-gap result unverified; D1/D2 remain open._
+_Last updated: 2026-10-16 — tracker merge-state reconciliation: #111/#113/#112 verified merged at main 4ccf8f4; historical findings retained; documentation checks complete; full local publication gates and independent review remain separate; not published._
+
+Prior: _Last updated: 2026-10-13 — R-01 PR #112 integration: owner-merged R-02/F4 #113 incorporated; both milestone histories preserved; integrated local gates pass; renewed exact-head gates pending; Qodo requirement-gap result unverified; D1/D2 remain open._
 
 Prior: _Last updated: 2026-10-13 — R-01 revision foundation: Qodo/Greptile Crazyhouse and prefix replay findings reproduced and corrected; foundation 15/15 GREEN; renewed full local and exact-head gates pending; D1/D2 remain open._
 
@@ -5585,3 +5587,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Only the synchronous registry release hook retires the released router stale/generation debt; pending reloads, successor generations, D3 immutable tickets, D4 busy slots, F3 consumer instance isolation, R-03 exact identity/unknown outcomes and R-04 authorization/cleanup remain intact. No eviction policy, command replay, queue clearing, sweep or new service. See [F4 proof and limits](audits/R02_F4_ABANDONED_CLAIM_METADATA_2026-10-13.md).
 - Corrected focused 80/80; clean Linux Redis/PG gateway 185/185; renewed full build/lint and 19-workspace tests 4,164/4,164; PG persistence/API/backup 210/109/2; scripts/load 333/86; actual Nginx 8+12; POSIX API/load 2+1; eight guards and root/gateway production audits pass. Positive counted suites have zero failures/skips/cancellations/TODOs. Frozen Gemini 3.8 Flash High/high pre/post reviews complete with no post-fix actionable code findings; first contaminated pre-review fingerprint is disclosed, not credited.
 - Final committed-head independent review and published-head CI/Qodo/Greptile/thread/equality gates remain separate and pending at this source checkpoint. F4 is not closed before owner merge. F1/F2 policies, R-01 revision/D1/D2, PostgreSQL fencing, Helm #107, deployed/load/heap certification and deferred P2/P3 statuses remain unchanged. No merge/deployment authorized.
+
+### 2026-10-16 — permanent tracker merge-state reconciliation
+
+- Fresh fetched origin/main, live remote main and GitHub main agreed on `4ccf8f48869335e06ac1b1de467d2161869f8fd7`. GitHub merge records and ancestry confirm #111/F3 (`bf0ce91fae99e06daae8348a913c5632c815e94b`, 2026-10-13 14:01:17 UTC), #113/F4 (`557eff02379feef7ecda421db16479e0bfbe681e`, 15:42:13 UTC) and #112/revision foundation (`4ccf8f48869335e06ac1b1de467d2161869f8fd7`, 22:13:35 UTC).
+- [Permanent tracker](audits/OPEN_FINDINGS_TRACKER.md) now distinguishes those merged deliveries from dated prior pending/active checkpoints. All 15 stable IDs, original finding histories, residual risks and deferred severity/policy dispositions remain. Current source inspection is not runtime revalidation; D1/D2 recovery, client ordering, F1/F2 policy, PostgreSQL fencing and rollout are not closed by these merges.
+- Documentation preparation passed 91/91 consistency/link/scope/history checks and the existing 162-ADR reference guard; no runtime suite ran in that preparation. Tracker SHA-256 `70f70491e7adf229540d9b804ffce0ad5bfecf063f2ce66017d5d4853405e70f` remains fixed for independent static review. This entry records only completed documentation evidence, not forthcoming full build/lint/test results or a review approval. Changes remain uncommitted/unpushed; publication and root review of this metadata are separate gates. No version bump, source/workflow/service change or new policy decision.
