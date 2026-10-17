@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Game, type GameEvent } from '@chess-platform/game';
-import { migrate, migrationsDir, readMigrationSql } from '../src/pg/migrate';
+import { migrate, migrationsDir, missingMigrations, migrationChecksum, readMigrationSql } from '../src/pg/migrate';
 import { PostgresEventStore } from '../src/pg/event-store';
 import { PlayerLockBusyError, lockGameCreationPlayers } from '../src/pg/event-store';
 import { withTestDatabase } from '../src/test-support/database';
@@ -44,7 +44,7 @@ test('PG-F1 migration supplies an inactive protected boundary without changing l
 });
 
 /** Authenticated logins, never SET ROLE as a stand-in for authentication. */
-async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: string) => Promise<void>, dir = migrationsDir()): Promise<void> {
+async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: string) => Promise<void>, dir = migrationsDir(), historicalDefaultAcl = false): Promise<void> {
   const suffix = randomBytes(8).toString('hex');
   const owner = `pgf1_owner_${suffix}`, executor = `pgf1_exec_${suffix}`;
   const alice = `pgf1_a_${suffix}`, bob = `pgf1_b_${suffix}`;
@@ -55,9 +55,18 @@ async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: strin
     for (const name of names) await cluster.query(`CREATE ROLE ${name} NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
       ${name === alice || name === bob ? `LOGIN PASSWORD '${password}'` : 'NOLOGIN'}`);
     await withTestDatabase(async ({ pool, connectionString: url }) => {
+      if (historicalDefaultAcl) await pool.query(`ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO ${alice}`);
       await migrate(pool, dir);
+      const defaultFunctions = historicalDefaultAcl ? (await pool.query<{ signature: string }>(
+        `SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+         WHERE n.nspname='game_fencing' AND has_function_privilege($1,p.oid,'EXECUTE')`,[alice])).rows : [];
+      if (historicalDefaultAcl) assert.equal(defaultFunctions.length,9);
       const db = randomUUID();
       await prepareGameFencing(pool,{tableOwner:owner,functionOwner:executor,databaseIncarnation:db,maxLeaseMs:60000});
+      // Preparation strips named/default ACLs. Deliberately restore the actual
+      // migration-default exposure to model an already-prepared historical database
+      // without relying on ACL cleanup as the helper security boundary.
+      for (const fn of defaultFunctions) await pool.query(`GRANT EXECUTE ON FUNCTION ${fn.signature} TO ${alice}`);
       await pool.query(`GRANT USAGE ON SCHEMA game_fencing TO ${alice},${bob};
         GRANT SELECT ON public.game_events TO ${alice},${bob};`);
       const functions = await pool.query<{ signature: string; proname: string }>(
@@ -208,53 +217,110 @@ async function functionRights(admin: Pool) {
      FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='game_fencing' ORDER BY p.oid`)).rows;
 }
 
-test('PG-F1 non-owner migration succeeds on a historically prepared 0050 database', { skip }, async () => {
+for (const access of ['blanket grant', 'migration default ACL'] as const) {
+test(`PG-F1 prepared 0050 upgrade fails closed for migration login and succeeds for trusted installer with ${access}`, { skip }, async (t) => {
   const earlier=await mkdtemp(join(tmpdir(),'pg-f1-through-0050-'));
   const migrator=`pgf1_migrator_${randomBytes(8).toString('hex')}`;
+  const password=randomBytes(24).toString('hex');
   const cluster=new Pool({connectionString});
   try {
     for (const name of await readdir(migrationsDir()))
       if (/^\d{4}_.*\.sql$/.test(name) && name<'0051') await copyFile(join(migrationsDir(),name),join(earlier,name));
-    await cluster.query(`CREATE ROLE ${migrator} NOLOGIN NOSUPERUSER NOINHERIT`);
+    await cluster.query(`CREATE ROLE ${migrator} LOGIN PASSWORD '${password}' NOSUPERUSER NOINHERIT
+      NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
+    // restrictedDatabase's provisioning superuser applies 0001–0050 (including vector),
+    // then acts as the trusted installer for prepareGameFencing. Its two protected
+    // owners are distinct NOLOGIN roles; a is a separately authenticated runtime LOGIN.
     await restrictedDatabase(async(admin,a,_b,db)=>{
       const config=await preparationConfig(admin,db);
-      await admin.query(`GRANT USAGE ON SCHEMA game_fencing TO ${migrator}`);
-      // Recreate the historical prepared 0050 state, even with a hardened installer.
+      const installer=(await admin.query('SELECT session_user AS name,rolsuper FROM pg_roles WHERE rolname=session_user')).rows[0]!;
+      assert.equal(installer.rolsuper,true,'this fixture uses superuser installation credentials');
+      const database=(await admin.query('SELECT current_database() AS name')).rows[0]!.name;
+      // The runner's ledger preamble needs public CREATE and ledger ownership.
+      // Database ownership supplies that ordinary DDL authority, not ownership
+      // of either protected table or any executor-owned function.
+      await admin.query(`ALTER DATABASE ${database} OWNER TO ${migrator};
+        GRANT USAGE ON SCHEMA game_fencing TO ${migrator};
+        ALTER TABLE public.schema_migrations OWNER TO ${migrator}`);
+      // Recreate historical helper modes after the current defensive installer.
+      // Neither preparation nor a protected-role membership is used to bypass 0051.
       for (const signature of helperSignatures) await admin.query(`ALTER FUNCTION ${signature} SECURITY DEFINER`);
       const game=await seed(admin),grant=await acquire(a,game,db);
       const before=await functionRights(admin);
+      assert.equal(before.length,9);
+      assert.ok(before.every(fn=>fn.prosecdef));
       const control=(await admin.query('SELECT * FROM game_fencing.control')).rows;
       const grants=(await admin.query('SELECT * FROM game_fencing.grants')).rows;
-      const client=await admin.connect();
+      const tables=async()=> (await admin.query(`SELECT c.oid,c.relowner,c.relacl FROM pg_class c
+        WHERE c.oid IN ('game_fencing.control'::regclass,'game_fencing.grants'::regclass,'public.game_events'::regclass)
+        ORDER BY c.oid`)).rows;
+      const tableRights=await tables();
+      const target=new URL(connectionString!); target.pathname=(await admin.query('SELECT current_database() AS name')).rows[0]!.name;
+      target.username=migrator; target.password=password;
+      const migrationLogin=new Pool({connectionString:target.toString(),max:3});
       try {
-        await client.query('BEGIN');
-        await client.query(`SET LOCAL ROLE ${migrator}`);
-        const rights=(await client.query(`SELECT current_user,rolsuper,pg_has_role(current_user,$1,'MEMBER') AS member
-          FROM pg_roles WHERE rolname=current_user`,[config.functionOwner])).rows[0]!;
-        assert.equal(rights.current_user,migrator); assert.equal(rights.rolsuper,false); assert.equal(rights.member,false);
-        await client.query(readMigrationSql(migrationsDir(),'0051_non_escalating_fencing_helpers.sql'));
-        await client.query('COMMIT');
-      } finally { await client.query('ROLLBACK'); client.release(); }
-      assert.deepEqual(await functionRights(admin),before,'skipped helpers retain DEFINER, executor ownership, ACLs and paths');
-      assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows,control);
-      assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows,grants);
-      await prepareGameFencing(admin,config);
-      for (const fn of await functionRights(admin)) {
-        assert.equal(fn.prosecdef,entrypointSignatures.includes(fn.signature));
-        assert.equal(fn.proowner,before.find(old=>old.signature===fn.signature)?.proowner);
-      }
-      assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows,control);
-      assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows,grants);
-      const login=(await a.query('SELECT session_user AS name')).rows[0]!.name;
-      await admin.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA game_fencing TO ${login}`);
-      await assert.rejects(a.query('SELECT game_fencing.insert_batch($1,0,$2,false)',[game,batch([ready])]),hasCode('42501'));
-      assert.equal(await append(a,grant),1);
-    },earlier);
+        const assertUnprivileged=async()=>{
+          const rights=(await migrationLogin.query(`SELECT session_user,rolsuper,
+            pg_has_role(current_user,$1,'MEMBER') AS executor,pg_has_role(current_user,$2,'MEMBER') AS owner
+            FROM pg_roles WHERE rolname=current_user`,[config.functionOwner,config.tableOwner])).rows[0]!;
+          assert.equal(rights.session_user,migrator); assert.equal(rights.rolsuper,false);
+          assert.equal(rights.executor,false); assert.equal(rights.owner,false);
+          for (const role of [config.functionOwner,config.tableOwner])
+            await assert.rejects(migrationLogin.query(`SET ROLE ${role}`),hasCode('42501'));
+        };
+        await assertUnprivileged();
+        assert.deepEqual(await missingMigrations(migrationLogin,migrationsDir()),[51]);
+        await assert.rejects(migrate(migrationLogin,migrationsDir()),error=>{
+          assert.ok(error instanceof Error);
+          assert.match(error.message,/must be owner of function/);
+          t.diagnostic(`ordinary migration rejection: ${error.message}`);
+          return true;
+        });
+        assert.equal((await admin.query('SELECT * FROM schema_migrations WHERE version=51')).rowCount,0);
+        assert.deepEqual(await missingMigrations(migrationLogin,migrationsDir()),[51]);
+        assert.deepEqual(await functionRights(admin),before,'failure preserves all modes, owners, ACLs and paths');
+        assert.deepEqual(await tables(),tableRights);
+        assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows,control);
+        assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows,grants);
+
+        assert.equal(await migrate(admin,migrationsDir()),1,'same trusted installer credentials apply pending 0051');
+        const checksum=migrationChecksum(readMigrationSql(migrationsDir(),'0051_non_escalating_fencing_helpers.sql'));
+        assert.equal(checksum,'1827a4ceb64ba8a10600693e2780eac132637608120b10cbde31c66148338b83');
+        assert.deepEqual((await admin.query('SELECT version,name,checksum,state FROM schema_migrations WHERE version=51')).rows,
+          [{version:51,name:'0051_non_escalating_fencing_helpers.sql',checksum,state:'applied'}]);
+        const after=await functionRights(admin);
+        assert.deepEqual(after,before.map(fn=>({...fn,prosecdef:entrypointSignatures.includes(fn.signature)})));
+        assert.ok(after.every(fn=>fn.proconfig.includes('search_path=pg_catalog, public, pg_temp')));
+        assert.deepEqual(await tables(),tableRights);
+        assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows,control);
+        assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows,grants);
+        assert.deepEqual(await missingMigrations(migrationLogin,migrationsDir()),[]);
+        assert.equal(await migrate(migrationLogin,migrationsDir()),0);
+        await assertUnprivileged();
+        t.diagnostic(`installer ${installer.name}: applied 0051; ledger 51 applied ${checksum}; ordinary login: 0 pending, 0 applied`);
+
+        const login=(await a.query('SELECT session_user AS name')).rows[0]!.name;
+        if (access === 'blanket grant') await admin.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA game_fencing TO ${login}`);
+        for (const signature of helperSignatures)
+          assert.equal((await admin.query("SELECT has_function_privilege($1,$2,'EXECUTE') AS allowed",[login,signature])).rows[0]?.allowed,true);
+        await assert.rejects(a.query('SELECT game_fencing.insert_batch($1,0,$2,false)',[game,batch([ready])]),hasCode('42501'));
+        await assert.rejects(a.query('SELECT * FROM game_fencing.lock_grant($1)',[game]),hasCode('42501'));
+        await assert.rejects(a.query('SELECT * FROM game_fencing.lock_control($1)',[db]),hasCode('PFG01'));
+        assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows,grants);
+        assert.equal(await append(a,grant),1);
+        const fresh=randomUUID();
+        assert.equal((await a.query('SELECT game_fencing.create_stream($1,$2,$3) AS head',[fresh,db,batch(initialEvents(fresh))])).rows[0]?.head,0);
+      } finally { await migrationLogin.end(); }
+    },earlier,access === 'migration default ACL');
   } finally {
-    await cluster.query(`DROP ROLE IF EXISTS ${migrator}`); await cluster.end();
-    await rm(earlier,{recursive:true,force:true});
+    try { await cluster.query(`DROP ROLE IF EXISTS ${migrator}`); }
+    finally {
+      try { await cluster.end(); }
+      finally { await rm(earlier,{recursive:true,force:true}); }
+    }
   }
 });
+}
 
 test('PG-F1 preparation enforces invoker rights on all four historical helpers', { skip }, async()=>{
   await restrictedDatabase(async(admin,_a,_b,db)=>{

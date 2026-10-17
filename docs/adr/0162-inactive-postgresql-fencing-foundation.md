@@ -245,3 +245,40 @@ Real PostgreSQL regression coverage exercises a non-owner/non-member migration,
 unchanged skipped helpers, re-preparation, direct-helper 42501 denial, legitimate
 append and transactional refusal of each INVOKER entrypoint. Migration 0050 is
 unchanged; no 0052, activation, deployment or PG-F2 work is introduced.
+
+## Amendment — 2026-10-17: fail-closed prepared-database upgrade
+
+The `ad32764` conditional variant is withdrawn. It could skip every ALTER and
+still let `migrate()` claim 0051 as applied while historical helpers remained
+SECURITY DEFINER. This supersedes the preceding owner-safe upgrade amendment.
+0051 is restored to its published `898ce1b` bytes, Git blob
+`de8e06df7836900fc8cf8a82dc88519ca85a9382`, canonical SHA-256
+`1827a4ceb64ba8a10600693e2780eac132637608120b10cbde31c66148338b83`:
+four unconditional `ALTER FUNCTION ... SECURITY INVOKER` statements.
+
+On an already-prepared database, pending 0051 must be applied with the same
+trusted installer credentials used for `prepareGameFencing`, through the existing
+`migrate()` runner. These must be superuser or otherwise owner-capable installation
+credentials able to alter the executor-owned functions; ordinary migration logins
+must not receive membership in the protected executor or table-owner roles.
+Preparation's four-helper INVOKER enforcement and five-entrypoint DEFINER check
+remain defence in depth, not a workaround for non-owner migrations.
+
+The regression fixture's provisioning superuser applies 0001–0050, including
+`CREATE EXTENSION vector`, and performs preparation and the authorized upgrade.
+Distinct authenticated migration and runtime logins have no protected membership;
+the migration login owns only the disposable database and migration ledger so the
+runner can perform its ordinary DDL preamble. The test restores historical helper
+DEFINER modes after defensive preparation. For the default-ACL control it also
+re-exposes the actual migration-default EXECUTE grants stripped by preparation;
+the blanket-grant control supplies EXECUTE explicitly. These are disposable test
+exposures, not runtime enrollment or operational instructions.
+
+An ordinary migration login fails closed with `must be owner of function`:
+0051's transactional SQL fails before its ledger INSERT, and rollback leaves no
+0051 ledger claim and preserves helper modes, ownership, ACLs, search paths,
+control and lease state. The trusted installer then applies 0051 with its canonical
+checksum, leaving four INVOKER helpers and five DEFINER entrypoints. Afterwards
+the ordinary login sees 0 pending and applies 0, without protected membership.
+0050 remains unchanged. No new framework, ledger-only repair, activation,
+deployment or PG-F2 authorization is introduced.
