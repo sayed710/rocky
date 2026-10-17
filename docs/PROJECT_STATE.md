@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-17 — PR #114 additive 0051 internal-helper hardening; real-login blanket/default-ACL RED reproduced; final local verification recorded separately; PG-F1 remains inactive and PG-F2 unauthorized._
+_Last updated: 2026-10-17 — PR #114 owner-safe 0051 upgrade and trusted preparation helper enforcement; real PostgreSQL ownership/enforcement RED reproduced; final local verification recorded separately; PG-F1 remains inactive and PG-F2 unauthorized._
+
+Prior: _Last updated: 2026-10-17 — PR #114 additive 0051 internal-helper hardening; real-login blanket/default-ACL RED reproduced; final local verification recorded separately; PG-F1 remains inactive and PG-F2 unauthorized._
 
 Prior: _Last updated: 2026-10-17 — PR #114 normal integration of owner-merged #116/#117 at b6460c2; both histories retained; integrated local gates pending; PG-F1 remains inactive and PG-F2 unauthorized._
 
@@ -5630,3 +5632,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - Reproduced direct unauthorized `insert_batch` success through authenticated restricted logins with blanket EXECUTE and with migration-time named default ACLs, before preparation.
 - Added only migration `0051_non_escalating_fencing_helpers.sql`: four internal helpers become SECURITY INVOKER, while five authority-checking entrypoints retain SECURITY DEFINER and all signatures/search paths remain intact. No preparation changes or ACL churn needed.
 - Added denial/state-preservation and post-preparation rerun coverage. Final command results belong to the local verification receipt; no activation, runtime enrollment, legacy privilege change, deployment or PG-F2 authorization is implied.
+
+### 2026-10-17 — PR #114 owner-safe helper hardening follow-up (inactive PG-F1)
+
+- Real PostgreSQL reproduced `must be owner of function game_fencing.lock_control` when a non-superuser/non-member migration role applied 0051 after preparation transferred ownership. Separate RED showed preparation left historical helpers DEFINER and accepted all five INVOKER entrypoints.
+- Revised unreleased 0051 in place: exact-signature owner/USAGE/superuser checks skip unauthorized ALTERs with an operator NOTICE to re-run trusted preparation. Preparation enforces four INVOKER helpers and refuses any non-DEFINER entrypoint with PersistenceError inside its existing transaction; the allowlist and revoke loop are unchanged. This supersedes the preceding entry's "No preparation changes" claim.
+- Added prepared-0050 upgrade, skipped-state/ownership/ACL preservation, re-preparation, direct-helper denial, legitimate append and five-entrypoint rollback coverage. Exact GREEN counts and final gate results are recorded in the local verification receipt, not presumed here. 0050 is unchanged; no 0052, activation, runtime grants, deployment or PG-F2 authorization.

@@ -17,6 +17,13 @@ const FENCING_FUNCTIONS=new Set([
   'game_fencing.create_stream(uuid,uuid,jsonb)',
 ]);
 
+const FENCING_HELPERS=new Set([
+  'game_fencing.lock_control(uuid)',
+  'game_fencing.lock_grant(uuid)',
+  'game_fencing.validate_grant(game_fencing.grants,uuid,bigint,uuid,bytea,timestamp with time zone)',
+  'game_fencing.insert_batch(uuid,integer,jsonb,boolean)',
+]);
+
 export interface FencingPreparation {
   readonly tableOwner: string;
   readonly functionOwner: string;
@@ -99,11 +106,16 @@ export async function prepareGameFencing(pool: Pool,config: FencingPreparation):
       GRANT SELECT,INSERT ON public.game_events TO ${executor};
       GRANT SELECT,INSERT,UPDATE,DELETE ON public.pregame_deadlines,public.flag_deadlines TO ${executor};
       GRANT EXECUTE ON FUNCTION public.flag_deadline_ms(uuid,jsonb),public.flag_deadline_number(jsonb) TO ${executor};`);
-    const functions=await client.query<{ signature: string }>(`SELECT p.oid::regprocedure::text AS signature
+    const functions=await client.query<{ signature: string; prosecdef: boolean }>(`SELECT p.oid::regprocedure::text AS signature,p.prosecdef
       FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
       WHERE n.nspname='game_fencing'`);
     if (functions.rows.length!==FENCING_FUNCTIONS.size || functions.rows.some(fn=>!FENCING_FUNCTIONS.has(fn.signature)))
       throw new PersistenceError('unexpected fencing function signature');
+    // The exact allowlist has four helpers and five privileged entrypoints.
+    if (functions.rows.some(fn=>!FENCING_HELPERS.has(fn.signature) && !fn.prosecdef))
+      throw new PersistenceError('fencing entrypoints must be SECURITY DEFINER');
+    for (const signature of FENCING_HELPERS)
+      await client.query(`ALTER FUNCTION ${signature} SECURITY INVOKER`);
     for (const fn of functions.rows) {
       await client.query(`ALTER FUNCTION ${fn.signature} OWNER TO ${executor}; REVOKE ALL ON FUNCTION ${fn.signature} FROM PUBLIC`);
       // Re-preparation/rotation also withholds previous explicit/default-ACL

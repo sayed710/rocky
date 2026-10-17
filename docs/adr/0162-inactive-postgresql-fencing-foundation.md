@@ -221,3 +221,27 @@ helper EXECUTE. Existing preparation still removes named/default EXECUTE ACLs.
 The original 0050 bytes, control/incarnation/lease state and legacy privileges
 are unchanged. This forward-only security fix must not be rolled back by
 restoring helper escalation. PG-F1 stays inactive; PG-F2 is not authorized.
+
+## Amendment — 2026-10-17: owner-safe prepared-database upgrade
+
+This supersedes the preceding amendment's unconditional ALTER and "no preparation
+change" claims. Preparation transfers function ownership to the dedicated NOLOGIN
+executor, which has no untrusted members. A non-superuser migration role therefore
+cannot ALTER those functions: the original 0051 blocked an already-prepared upgrade.
+
+Unreleased 0051 now checks the exact four helper regprocedure signatures in a DO
+block with a pinned transaction-local search path. It alters each helper only if
+current_user owns it, has USAGE of its owner role, or is a superuser. Otherwise it
+emits a NOTICE directing the operator to re-run trusted `prepareGameFencing`.
+Skipping preserves the helper's existing security mode, ownership, ACLs and state;
+it does not itself harden a historically prepared DEFINER helper.
+
+Inside its existing transaction, preparation now enforces SECURITY INVOKER on
+exactly those four helpers and verifies SECURITY DEFINER on all five entrypoints.
+An invalid entrypoint raises PersistenceError and rolls back preparation. The
+nine-signature allowlist and existing revoke loop remain unchanged. Re-preparation
+still withholds runtime execution; any later enrollment remains separately authorized.
+Real PostgreSQL regression coverage exercises a non-owner/non-member migration,
+unchanged skipped helpers, re-preparation, direct-helper 42501 denial, legitimate
+append and transactional refusal of each INVOKER entrypoint. Migration 0050 is
+unchanged; no 0052, activation, deployment or PG-F2 work is introduced.
