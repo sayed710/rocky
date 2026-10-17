@@ -32,6 +32,11 @@ function roleName(value: string): string {
   return `"${value}"`;
 }
 
+function catalogRoleName(value: string): string {
+  if (!value || value.includes('\0')) throw new PersistenceError('invalid fencing catalog role');
+  return `"${value.replace(/"/g,'""')}"`;
+}
+
 /** Backfill is explicit: legacy games created after migration remain unseeded
  * until this is rerun. ON CONFLICT never resets a live or released epoch.
  */
@@ -106,7 +111,7 @@ export async function prepareGameFencing(pool: Pool,config: FencingPreparation):
       const grantees=await client.query<{ role: string }>(`SELECT DISTINCT pg_get_userbyid(a.grantee) AS role
         FROM pg_catalog.pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a
         WHERE p.oid=$1::regprocedure AND a.grantee<>0 AND a.grantee<>p.proowner`,[fn.signature]);
-      for (const grantee of grantees.rows) await client.query(`REVOKE ALL ON FUNCTION ${fn.signature} FROM ${roleName(grantee.role)}`);
+      for (const grantee of grantees.rows) await client.query(`REVOKE ALL ON FUNCTION ${fn.signature} FROM ${catalogRoleName(grantee.role)}`);
     }
     const result=await client.query(`UPDATE game_fencing.control SET database_incarnation=$1,max_lease_ms=$2
       WHERE singleton AND NOT enforced`,[config.databaseIncarnation,config.maxLeaseMs]);

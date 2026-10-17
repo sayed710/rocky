@@ -254,6 +254,29 @@ test('PG-F1 controlled preparation works with safe existing NOLOGIN owners and r
   });
 });
 
+test('PG-F1 preparation revokes explicit function grants from quoted catalog roles', { skip }, async()=>{
+  await restrictedDatabase(async(admin,_a,_b,db)=>{
+    const role=`PgF1-Quoted "Role" ${randomBytes(8).toString('hex')}`;
+    const quotedRole=`"${role.replace(/"/g,'""')}"`;
+    const owners=(await admin.query(`SELECT pg_get_userbyid(c.relowner) AS tables,pg_get_userbyid(p.proowner) AS functions
+      FROM pg_class c,pg_proc p WHERE c.oid='game_fencing.grants'::regclass
+      AND p.oid='game_fencing.create_stream(uuid,uuid,jsonb)'::regprocedure`)).rows[0]!;
+    await admin.query(`CREATE ROLE ${quotedRole} NOLOGIN`);
+    try {
+      await admin.query(`GRANT EXECUTE ON FUNCTION game_fencing.lock_control(uuid) TO ${quotedRole}`);
+      assert.equal((await admin.query("SELECT has_function_privilege($1,'game_fencing.lock_control(uuid)','EXECUTE') AS allowed",
+        [role])).rows[0]?.allowed,true);
+      await assert.doesNotReject(prepareGameFencing(admin,{tableOwner:owners.tables,functionOwner:owners.functions,
+        databaseIncarnation:db,maxLeaseMs:60000}));
+      assert.equal((await admin.query("SELECT has_function_privilege($1,'game_fencing.lock_control(uuid)','EXECUTE') AS allowed",
+        [role])).rows[0]?.allowed,false);
+    } finally {
+      await admin.query(`REVOKE ALL ON FUNCTION game_fencing.lock_control(uuid) FROM ${quotedRole}`);
+      await admin.query(`DROP ROLE ${quotedRole}`);
+    }
+  });
+});
+
 test('PG-F1 create-only rejects a mismatched durable GameCreated identity atomically', { skip }, async()=>{
   await restrictedDatabase(async(admin,a,_b,db)=>{
     const game=randomUUID(),wrong=randomUUID();
