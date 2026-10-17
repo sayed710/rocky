@@ -66,16 +66,6 @@ export const KNOWN_HISTORICAL_PROCEDURAL_MIGRATIONS = new Map([
       expectedDoCount: 1,
     },
   ],
-  [
-    // Reviewed for ADR-0162: the single DO block only conditionally runs ALTER FUNCTION ... SECURITY INVOKER
-    // on four game_fencing helpers; it creates, alters or drops no variant or other table schema,
-    // and nothing the replay models.
-    '0051_non_escalating_fencing_helpers.sql',
-    {
-      sha256: '12895708c4f7be4fa0fe3afe94610e8f41961a33cb1b295168265cce9cd6fd93',
-      expectedDoCount: 1,
-    },
-  ],
 ]);
 
 /**
