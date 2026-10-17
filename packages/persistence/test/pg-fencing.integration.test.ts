@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Game, type GameEvent } from '@chess-platform/game';
-import { migrate, migrationsDir } from '../src/pg/migrate';
+import { migrate, migrationsDir, readMigrationSql } from '../src/pg/migrate';
 import { PostgresEventStore } from '../src/pg/event-store';
 import { PlayerLockBusyError, lockGameCreationPlayers } from '../src/pg/event-store';
 import { withTestDatabase } from '../src/test-support/database';
@@ -160,6 +160,26 @@ async function blocked(admin: Pool,pid: number): Promise<void> {
     await new Promise<void>(resolve=>setImmediate(resolve));
   }
 }
+
+test('PG-F1 helper hardening reruns after preparation without changing state or entrypoints', { skip }, async () => {
+  await restrictedDatabase(async (admin, a, _b, db) => {
+    const game = await seed(admin), grant = await acquire(a, game, db);
+    const control = (await admin.query('SELECT * FROM game_fencing.control')).rows;
+    const grants = (await admin.query('SELECT * FROM game_fencing.grants')).rows;
+    const sql = readMigrationSql(migrationsDir(), '0051_non_escalating_fencing_helpers.sql');
+    await admin.query(sql); await admin.query(sql);
+    assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows, control);
+    assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows, grants);
+    const functions = await admin.query<{ proname: string; prosecdef: boolean; proconfig: string[] }>(
+      `SELECT proname,prosecdef,proconfig FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='game_fencing'`);
+    assert.equal(functions.rowCount, 9);
+    for (const fn of functions.rows) {
+      assert.equal(fn.prosecdef, ['acquire', 'renew', 'release', 'append_events', 'create_stream'].includes(fn.proname));
+      assert.ok(fn.proconfig.includes('search_path=pg_catalog, public, pg_temp'));
+    }
+    assert.equal(await append(a, grant), 1);
+  });
+});
 
 test('PG-F1 real logins: concurrent acquisition, epoch monotonicity, stale and forged grants', { skip }, async () => {
   await restrictedDatabase(async(admin,a,b,db)=>{
@@ -512,7 +532,7 @@ test('PG-F1 upgrade from 0049 preserves every old checksum and populated event/p
       const events=(await pool.query('SELECT * FROM public.game_events WHERE game_id=$1 ORDER BY seq',[game])).rows;
       const projections=(await pool.query('SELECT * FROM public.games WHERE id=$1',[game])).rows;
       const checksums=(await pool.query('SELECT version,checksum FROM public.schema_migrations ORDER BY version')).rows;
-      assert.equal(await migrate(pool,dir),1);
+      assert.equal(await migrate(pool,dir),2);
       assert.deepEqual((await pool.query('SELECT * FROM public.game_events WHERE game_id=$1 ORDER BY seq',[game])).rows,events);
       assert.deepEqual((await pool.query('SELECT * FROM public.games WHERE id=$1',[game])).rows,projections);
       assert.deepEqual((await pool.query('SELECT version,checksum FROM public.schema_migrations WHERE version<50 ORDER BY version')).rows,checksums);
@@ -532,7 +552,9 @@ test('PG-F1 rejects a SECURITY DEFINER accidentally owned by the private table o
     const game=await seed(admin),grant=await acquire(a,game,db);
     const owner=(await admin.query("SELECT pg_get_userbyid(relowner) AS name FROM pg_class WHERE oid='game_fencing.grants'::regclass")).rows[0]!.name;
     const executor=(await admin.query("SELECT pg_get_userbyid(proowner) AS name FROM pg_proc WHERE oid='game_fencing.append_events(uuid,uuid,bigint,uuid,bytea,integer,jsonb)'::regprocedure")).rows[0]!.name;
-    await admin.query(`ALTER FUNCTION game_fencing.lock_control(uuid) OWNER TO ${owner}`);
+    // Deliberately recreate the unsafe DEFINER configuration after 0051.
+    await admin.query(`ALTER FUNCTION game_fencing.lock_control(uuid) SECURITY DEFINER;
+      ALTER FUNCTION game_fencing.lock_control(uuid) OWNER TO ${owner}`);
     await admin.query(`GRANT EXECUTE ON FUNCTION game_fencing.lock_control(uuid) TO ${executor}`);
     await assert.rejects(append(a,grant),hasCode('PFG01'));
   });

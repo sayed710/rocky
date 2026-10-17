@@ -202,3 +202,22 @@ PG-F1 changes neither. No maintenance bypass or active-owner stealing is introdu
 
 **PG-F1 is additive infrastructure only. Its merge does not establish active
 writer fencing, close R-01-LATE-APPEND, or certify multi-gateway production safety.**
+
+## Amendment — 2026-10-17: non-escalating internal helpers
+
+Migration `0051_non_escalating_fencing_helpers.sql` supersedes the blanket
+SECURITY DEFINER description above for `lock_control`, `lock_grant`,
+`validate_grant` and `insert_batch` only: they now use SECURITY INVOKER.
+A restricted authenticated caller with blanket or migration-default EXECUTE
+cannot use the helpers to inherit owner table privileges, insert events or read
+grant verifiers. The five public authority-checking entrypoints remain SECURITY
+DEFINER; nested helpers therefore retain their trusted owner's privileges.
+Even the pure validator needs no escalation. No helper remains DEFINER.
+
+Four idempotent ALTER statements preserve signatures, pinned search paths,
+ownership and ACLs before or after explicit preparation. No preparation change
+or additional ACL cleanup is required: denial no longer depends on withholding
+helper EXECUTE. Existing preparation still removes named/default EXECUTE ACLs.
+The original 0050 bytes, control/incarnation/lease state and legacy privileges
+are unchanged. This forward-only security fix must not be rolled back by
+restoring helper escalation. PG-F1 stays inactive; PG-F2 is not authorized.

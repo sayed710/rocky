@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-17 — PR #114 normal integration of owner-merged #116/#117 at b6460c2; both histories retained; integrated local gates pending; PG-F1 remains inactive and PG-F2 unauthorized._
+_Last updated: 2026-10-17 — PR #114 additive 0051 internal-helper hardening; real-login blanket/default-ACL RED reproduced; final local verification recorded separately; PG-F1 remains inactive and PG-F2 unauthorized._
+
+Prior: _Last updated: 2026-10-17 — PR #114 normal integration of owner-merged #116/#117 at b6460c2; both histories retained; integrated local gates pending; PG-F1 remains inactive and PG-F2 unauthorized._
 
 Prior: _Last updated: 2026-10-16 — tracker merge-state reconciliation: #111/#113/#112 verified merged at main 4ccf8f4; historical findings retained; documentation checks complete; full local publication gates and independent review remain separate; not published._
 
@@ -5622,3 +5624,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 
 - Integrated owner-merged #116 (CI package-gate dependency coverage) and #117 (permanent tracker reconciliation) from pinned `origin/main` `b6460c27fc9bd162f1706e436214b5455061094e` with a normal merge. Retained both complete milestone histories in chronological order and both prior header values. The tracker retains all 15 stable IDs and the inactive PG-F1 candidate alongside main's merged-delivery reconciliation.
 - Integrated-tree build, lint, hermetic/tooling and real PostgreSQL gates are pending at this merge checkpoint. No runtime activation, privilege deployment, PG-F2 work or closure of R-01-LATE-APPEND is implied; external CI/review and owner merge remain separate.
+
+### 2026-10-17 — PR #114 internal-helper hardening (inactive PG-F1)
+
+- Reproduced direct unauthorized `insert_batch` success through authenticated restricted logins with blanket EXECUTE and with migration-time named default ACLs, before preparation.
+- Added only migration `0051_non_escalating_fencing_helpers.sql`: four internal helpers become SECURITY INVOKER, while five authority-checking entrypoints retain SECURITY DEFINER and all signatures/search paths remain intact. No preparation changes or ACL churn needed.
+- Added denial/state-preservation and post-preparation rerun coverage. Final command results belong to the local verification receipt; no activation, runtime enrollment, legacy privilege change, deployment or PG-F2 authorization is implied.
