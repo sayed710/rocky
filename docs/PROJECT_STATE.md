@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-14 — PG-F1 preparation search-path correction: genuine Qodo RED, focused 32/32 GREEN; renewed full and exact-head gates pending; Actions billing-blocked; inactive foundation remains HOLD._
+_Last updated: 2026-10-17 — PR #114 normal integration of owner-merged #116/#117 at b6460c2; both histories retained; integrated local gates pending; PG-F1 remains inactive and PG-F2 unauthorized._
+
+Prior: _Last updated: 2026-10-16 — tracker merge-state reconciliation: #111/#113/#112 verified merged at main 4ccf8f4; historical findings retained; documentation checks complete; full local publication gates and independent review remain separate; not published._
+
+Prior: _Last updated: 2026-10-14 — PG-F1 preparation search-path correction: genuine Qodo RED, focused 32/32 GREEN; renewed full and exact-head gates pending; Actions billing-blocked; inactive foundation remains HOLD._
 
 Prior: _Last updated: 2026-10-14 — PG-F1 PR #114 review corrections: private privilege/function-adoption checks and caller-array/typed-error preservation; focused 31/31; renewed final gates pending; Actions billing-blocked; inactive foundation remains HOLD._
 
@@ -5608,3 +5612,13 @@ Addresses four blocking review findings identified by ChatGPT independent review
 
 - Published `bad937bd280d4fa65f13458881d50102c3d4fe96` passed matching-source local build/lint, hermetic 4,181, PostgreSQL persistence/API 240/109, real Redis/PG gateway 185 and backup/restore 2. Exact-head Gemini static review reported zero actionable findings, and fresh Greptile reviewed all ten files with zero comments. A fresh Qodo review nevertheless found a valid catalog-representation mismatch: `regprocedure::text` omits schema qualification when the trusted caller includes `game_fencing` on its search path. That review supersedes the earlier zero-finding claims; Qodo remains Bugs=1/Rules=0, with current Requirement Gaps unverified.
 - Real PostgreSQL reproduced the legitimate installer failure before the fix. Preparation now sets only a transaction-local trusted `pg_catalog, public, pg_temp` path, retaining the exact nine-function allowlist. Focused GREEN is 32/32, including caller-path restoration after COMMIT/ROLLBACK, unknown-function refusal and runtime execution withholding. A later malformed-JSON test fixture failure is recorded separately, not behavioral credit. Migration 0050, historical checksums, legacy writers and inactivity remain unchanged. Renewed full/post-fix/exact-published-head and bot gates are required before owner merge; Actions billing remains blocked and the recommendation remains HOLD.
+### 2026-10-16 — permanent tracker merge-state reconciliation
+
+- Fresh fetched origin/main, live remote main and GitHub main agreed on `4ccf8f48869335e06ac1b1de467d2161869f8fd7`. GitHub merge records and ancestry confirm #111/F3 (`bf0ce91fae99e06daae8348a913c5632c815e94b`, 2026-10-13 14:01:17 UTC), #113/F4 (`557eff02379feef7ecda421db16479e0bfbe681e`, 15:42:13 UTC) and #112/revision foundation (`4ccf8f48869335e06ac1b1de467d2161869f8fd7`, 22:13:35 UTC).
+- [Permanent tracker](audits/OPEN_FINDINGS_TRACKER.md) now distinguishes those merged deliveries from dated prior pending/active checkpoints. All 15 stable IDs, original finding histories, residual risks and deferred severity/policy dispositions remain. Current source inspection is not runtime revalidation; D1/D2 recovery, client ordering, F1/F2 policy, PostgreSQL fencing and rollout are not closed by these merges.
+- Documentation preparation passed 91/91 consistency/link/scope/history checks and the existing 162-ADR reference guard; no runtime suite ran in that preparation. Tracker SHA-256 `70f70491e7adf229540d9b804ffce0ad5bfecf063f2ce66017d5d4853405e70f` remains fixed for independent static review. This entry records only completed documentation evidence, not forthcoming full build/lint/test results or a review approval. Changes remain uncommitted/unpushed; publication and root review of this metadata are separate gates. No version bump, source/workflow/service change or new policy decision.
+
+### 2026-10-17 — PR #114 normal main integration
+
+- Integrated owner-merged #116 (CI package-gate dependency coverage) and #117 (permanent tracker reconciliation) from pinned `origin/main` `b6460c27fc9bd162f1706e436214b5455061094e` with a normal merge. Retained both complete milestone histories in chronological order and both prior header values. The tracker retains all 15 stable IDs and the inactive PG-F1 candidate alongside main's merged-delivery reconciliation.
+- Integrated-tree build, lint, hermetic/tooling and real PostgreSQL gates are pending at this merge checkpoint. No runtime activation, privilege deployment, PG-F2 work or closure of R-01-LATE-APPEND is implied; external CI/review and owner merge remain separate.

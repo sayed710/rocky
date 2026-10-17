@@ -1,6 +1,15 @@
 # Rookzen — permanent open findings tracker
 
-Verified status checkpoint: **2026-10-13 (Africa/Cairo)**. Repository: `sayed710/rocky`.
+Verified merge/source checkpoint: **2026-10-16 (Africa/Cairo)**. Repository: `sayed710/rocky`.
+Fetched `origin/main`, live remote main and GitHub `commits/main` agreed on
+`4ccf8f48869335e06ac1b1de467d2161869f8fd7` during the 01:36 UTC read-only check.
+Merge records and ancestry establish #111, #113 and #112 on this main. Only
+**R-01-REV, R-02-F3 and R-02-F4** are reconciled below; this documentation task ran
+no runtime revalidation and makes no new deployment, recovery or policy acceptance.
+Other finding details retain their named historical baselines, not a new runtime
+reproduction. This remains a dated checkpoint, not a live dashboard.
+
+Prior verified status checkpoint: **2026-10-13 (Africa/Cairo)**. Repository: `sayed710/rocky`.
 Fetched `origin/main`, GitHub `commits/main` and remote main agreed on
 `9dda14b4775157d035201a9fee3e536b022543f7` (owner-merged #109). This is a dated
 checkpoint, not a live dashboard or a claim that all defects have been found.
@@ -42,7 +51,8 @@ read for this checkpoint; they are not independent attestation of their conclusi
 | E-R01 | Recovered `R01-verification-report.md`, 2026-10-12, baseline `84b3d9d253dffcedab601967d2814600f6234cf5`; SHA256 `1df756f3a35797330a5f3023b504f96290eb9a7e49eb984a449a622ecebfa1ba`. Two independent gateway instances in one Node process, real Redis 7.4.9 / PostgreSQL 16.14 / loopback WebSockets; selected EventLog and subscriber timing controlled. Six expected-invariant REDs on saved observations, including one conditional direct-claim diagnostic; not six production defects. Original separate external R-01 report was missing; this report established fresh D1–D4 evidence. No process kill, deployed partition or browser rendering certification. |
 | E-DESIGN | Recovered `R01-remediation-design-gate.md`, 2026-10-12, same baseline; SHA256 `f2a41389be360e509dda4ad8569355737f66aa7ac934692138e594adb381be99`. Owner accepted D1–D4 for planning. Proposed sequence: D4 → D3 → revision → recovery → draw; F1/F2 separately staged. Independent Gemini review was static planning review, not implementation GREEN. Proposed API/file/migration names remain provisional. |
 | E-R02 | Recovered `r02-evidence/REPORT.md`, 2026-10-13, baseline `dd7fec5751f1501e10659a66ed940d5c5b2ceacb`; SHA256 `f7bb80365fce7e6daf37ed0ebb30f716529dceb2e479277bb1282c9d3ef2cb6e`. Final `run-final.log` SHA256 `f88c1eb30a0a4336f9309e4411e8ec78e95c4f1e43150fbc8364a805559f7876`: **12 tests, 8 passing controls/characterizations, 4 intentional REDs, exit 1, zero skips/cancellations**. Production modules unchanged; real Redis/PG, controlled I/O, in-memory gateway transport/PubSub. Original separate R-02 report unavailable; owner selected supplied brief for reproduction. No full CI, heap/OOM measurement, deployed load, real DB outage or process partition. Services cleaned up; replay needs fresh isolated services. |
-| E-MAIN | [Current source checkpoint](https://github.com/sayed710/rocky/tree/9dda14b4775157d035201a9fee3e536b022543f7), [PROJECT_STATE checkpoint](https://github.com/sayed710/rocky/blob/9dda14b4775157d035201a9fee3e536b022543f7/docs/PROJECT_STATE.md). PROJECT_STATE still contains pre-merge delivery checkpoints; GitHub merge records below supersede their pending-merge wording. This PR does not edit PROJECT_STATE. |
+| E-MAIN | [Prior 2026-10-13 source checkpoint](https://github.com/sayed710/rocky/tree/9dda14b4775157d035201a9fee3e536b022543f7), [PROJECT_STATE checkpoint](https://github.com/sayed710/rocky/blob/9dda14b4775157d035201a9fee3e536b022543f7/docs/PROJECT_STATE.md). PROJECT_STATE still contains pre-merge delivery checkpoints; GitHub merge records below supersede their pending-merge wording. This PR does not edit PROJECT_STATE. |
+| E-MAIN-20261016 | [Observed main](https://github.com/sayed710/rocky/tree/4ccf8f48869335e06ac1b1de467d2161869f8fd7), [read-only PROJECT_STATE](https://github.com/sayed710/rocky/blob/4ccf8f48869335e06ac1b1de467d2161869f8fd7/docs/PROJECT_STATE.md). Live GitHub merge metadata and local ancestry were checked for [#111](https://github.com/sayed710/rocky/pull/111), [#113](https://github.com/sayed710/rocky/pull/113) and [#112](https://github.com/sayed710/rocky/pull/112). The three entries below distinguish merge state from historical validation/delivery evidence; no suite or runtime experiment was rerun here. |
 
 Raw provenance locations, for recovery only: E-R01/E-DESIGN were read from
 `C:/Users/hp/.codex/visualizations/2026/10/12/01a130aa-cb4f-7f51-87e8-e6951f6c2a5e/r01-audit/`;
@@ -50,13 +60,22 @@ E-R02 from `C:/Users/hp/rocky-r02-red-20261013/r02-evidence/`.
 These are not contributor-accessible links. The durable record is this summary plus
 the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
 
-## Status index
+## Status index — merge-state reconciliation at 2026-10-16
+
+Only the three reconciled rows supersede their prior pending/active assignments.
+Other classifications and allocations remain the prior evidence/triage record.
+At this checkpoint [#107](https://github.com/sayed710/rocky/pull/107),
+[#114](https://github.com/sayed710/rocky/pull/114), draft
+[#115](https://github.com/sayed710/rocky/pull/115) and
+[#116](https://github.com/sayed710/rocky/pull/116) remain **OPEN**. Inactive PG-F1
+infrastructure and draft D1 evidence are not runtime closure; #116's CI fix is not
+in main until owner merge. No launch-priority or product-policy decision is made.
 
 | Stable ID | Classification / current state | Qualified relevance | Assignment |
 |---|---|---|---|
 | R-01-D4 | Completed fix: #108 merged | Historical P2 hydration correctness | Completed PR1; no active assignee |
 | R-01-D3 | Completed queued-admission fix: #109 merged | Historical P1 obsolete queued execution | Completed PR2; residual risk below |
-| R-01-REV | Pending contract groundwork | Prerequisite for multi-gateway recovery; no separate measured severity | Unassigned |
+| R-01-REV | Additive revision foundation merged: #112 | Contract prerequisite delivered; D1/D2 and rollout not closed | Merged delivery; no active foundation assignee |
 | R-01-D1 | Confirmed at historical baseline; pending, current source gap retained | Recommended P1 recovery correctness | Unassigned |
 | R-01-D2 | Confirmed at historical baseline; pending, current source gap retained | Recommended P1 distributed draw behavior | Unassigned |
 | R-01-LATE-APPEND | Accepted intermediate D3 limitation; unresolved production risk | Strong fence required before public multi-gateway production | Unassigned; owner policy |
@@ -64,8 +83,8 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
 | PG-F2 | Future mandatory all-writer enforcement | Production safety / rollout gate | Unassigned; owner enforcement choice |
 | R-02-F1 | Observed terminal retention; policy pending | Reported P1 operational concern, no retirement SLA | Owner policy; implementation unassigned |
 | R-02-F2 | Observed cumulative cache residency; policy pending | Reported P2 capacity concern, no measured heap leak | Owner policy; implementation unassigned |
-| R-02-F3 | Confirmed defect on dd7fec5; separate remediation active, not closed | Reported P2 lifecycle correctness | Separate F3 agent; worktree branch verified below |
-| R-02-F4 | Reproduced on bf0ce91; F4 candidate locally GREEN, owner review/merge pending | Reported P3 metadata retention, bytes/frequency unmeasured | Codex 1; separate F4-only PR |
+| R-02-F3 | Consumer instance-lifecycle fix merged: #111 | Reported P2 lifecycle correctness; bounded fix evidence below | Merged delivery; no active F3 assignee |
+| R-02-F4 | Abandoned claim metadata fix merged: #113 | Reported P3 metadata retention, bytes/frequency still unmeasured | Merged delivery; no active F4 assignee |
 | DEPLOY-107 | Implementation PR open; delivery gates pending | Recovery safety within deployment scope | Existing #107 implementer; no reassignment |
 | HIST-WIN-WORKER | Historical failure; cause unknown | Diagnostic follow-up, not newly mandatory launch work | Unassigned |
 | HIST-CHROMIUM | Historical failed invocations; cause unresolved | Preserve provenance; later passes do not prove repair | Unassigned |
@@ -110,6 +129,28 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
   Assigned PR2 completed; no active assignee. **R-01-LATE-APPEND remains open below.**
 
 ## R-01-REV — durable presentation revision contract
+
+- **2026-10-16 merge/source reconciliation:** [#112](https://github.com/sayed710/rocky/pull/112)
+  merged 2026-10-13 **22:13:35 UTC**, merge
+  `4ccf8f48869335e06ac1b1de467d2161869f8fd7`, final PR head
+  `dbf44d9a4207af6cf6096935693198a8a4954ff0`. The additive foundation is in observed
+  main, not pending implementation. [ADR-0161](../adr/0161-durable-state-revision-foundation.md),
+  [server protocol at observed main](https://github.com/sayed710/rocky/blob/4ccf8f48869335e06ac1b1de467d2161869f8fd7/packages/realtime-gateway/src/protocol.ts)
+  and [web codec at observed main](https://github.com/sayed710/rocky/blob/4ccf8f48869335e06ac1b1de467d2161869f8fd7/packages/web/src/net/ws-protocol.ts)
+  establish durable `stateRevision` stamps and legacy/revisioned validation.
+  The ADR and [published-head delivery record](https://github.com/sayed710/rocky/pull/112)
+  preserve historical RED/GREEN and exact-head review provenance; this task did not
+  rerun them. The [later provider-evidence checkpoint](https://github.com/sayed710/rocky/pull/112#issuecomment-6154983626)
+  still records missing final-head Requirement Gaps evidence after specification
+  connection. Merge status alone does not establish that result or an owner waiver.
+- **Retained boundary:** foundation merge does **not** close D1 coherent recovery,
+  D2 draw fanout, client stale-state rejection/replay, PostgreSQL fencing or rollout.
+  [GameSync at observed main](https://github.com/sayed710/rocky/blob/4ccf8f48869335e06ac1b1de467d2161869f8fd7/packages/web/src/net/game-sync.ts)
+  still applies snapshots without revision ordering; this is source inspection, not
+  new execution of the historical client REDs. No new foundation assignee or
+  permission to repeat the increment is implied.
+
+**Prior 2026-10-13 planning/source checkpoint (merge-state wording superseded):**
 
 - **State / severity:** pending groundwork; no revision-specific runtime RED was
   previously executed. E-DESIGN proposes `stateRevision` from durable
@@ -275,6 +316,23 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
 
 ## R-02-F3 — consumer stop/restart instance identity race
 
+- **2026-10-16 merge/source reconciliation:** [#111](https://github.com/sayed710/rocky/pull/111)
+  merged 2026-10-13 **14:01:17 UTC**, merge
+  `bf0ce91fae99e06daae8348a913c5632c815e94b`, final PR head
+  `79a254b7b8e6f3cc0a9767813a20a81d2f026110`. The bounded consumer-instance repair is
+  in observed main. [Merged F3 audit](R02_F3_CONSUMER_IDENTITY_2026-10-13.md) and
+  [final exact-head handoff](https://github.com/sayed710/rocky/pull/111#issuecomment-6145604418)
+  retain permanent RED-to-GREEN schedules, local gates and delivery limitations.
+  [Consumer at observed main](https://github.com/sayed710/rocky/blob/4ccf8f48869335e06ac1b1de467d2161869f8fd7/services/gateway/src/command-forwarder.ts#L688-L715)
+  now compares the captured connection with the current instance; the prior
+  membership-only source statement below is historical, not current code.
+- **Retained boundary:** this is merged consumer-lifecycle remediation, not terminal
+  retirement/cache policy (F1/F2), deployed load/long-duration memory certification,
+  recovery or fencing. Historical failed runs and review limits remain in the audit;
+  no runtime suite was rerun here and no active F3 assignment is retained.
+
+**Prior 2026-10-13 defect/allocation checkpoint (merge-state wording superseded):**
+
 - **State / severity:** confirmed on dd7fec5, reported P2; **three intentional REDs**,
   not passing CI. A stopped BLPOP connection's rejection arrives after B replaces
   its game ID; membership-only guards let A loop again. Five replacements left five
@@ -293,6 +351,23 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
   permanent RED→GREEN tests and exact-head review preserving D3, R-03 and R-04.
 
 ## R-02-F4 — abandoned claim/reload metadata after release
+
+- **2026-10-16 merge/source reconciliation:** [#113](https://github.com/sayed710/rocky/pull/113)
+  merged 2026-10-13 **15:42:13 UTC**, merge
+  `557eff02379feef7ecda421db16479e0bfbe681e`, final PR head
+  `7c69bbde0a6e743503a97ced53fd7d1b60b3ff5d`; it is an ancestor of observed main
+  and was integrated before #112 merged. [Merged F4 audit](R02_F4_ABANDONED_CLAIM_METADATA_2026-10-13.md)
+  and [final exact-head handoff](https://github.com/sayed710/rocky/pull/113#issuecomment-6148647216)
+  retain the baseline REDs, corrected bounded tests and exact-head delivery evidence.
+  [Release hook at observed main](https://github.com/sayed710/rocky/blob/4ccf8f48869335e06ac1b1de467d2161869f8fd7/services/gateway/src/command-forwarder.ts#L290-L296)
+  retires released stale/generation debt before stopping the consumer; pending
+  promises and successor identity guards remain separate.
+- **Retained boundary:** merged process-local metadata retirement does not establish
+  bytes/heap/frequency/load bounds, F1/F2 policy, D1/D2 recovery, deployed partitions
+  or durable fencing. No runtime test was rerun here. The candidate/pending-merge
+  statements below are dated history, not current F4 status or an active assignment.
+
+**Prior 2026-10-13 reproduction/candidate checkpoint (merge-state wording superseded):**
 
 - **2026-10-13 current-main revalidation:** after owner merges #110/#111, baseline
   `bf0ce91fae99e06daae8348a913c5632c815e94b` reproduced the defect before production
@@ -383,7 +458,12 @@ the pinned repository/PR evidence, with the raw-archive gap explicitly retained.
   No invented browser/worker fix or new launch requirement. Root-cause closure needs
   reproducible attribution plus verification; retained failed runs receive no pass credit.
 
-## Read-only recommendation — next revision-contract increment
+## Prior read-only recommendation — revision-contract increment (2026-10-13)
+
+Retained planning history only: #112 has since merged the additive foundation.
+This is not a current recommendation to reimplement it, activate recovery or assign
+another worker. D1/D2 and the boundaries above remain separate; no next task is
+authorized by this document.
 
 Start with **R-01-REV**, after freshly verifying owner-merged main and active F3/F4
 heads. #106 is merged at `dd7fec5`; #108/#109 satisfy the planned prerequisite order.
@@ -423,8 +503,17 @@ dated records. Historical P0/required-P1 closure is not a statement that later R
 defects cannot exist. Deferred P2/P3 recommendations keep their historical disposition;
 opening a new launch requirement needs current evidence and owner triage.
 
+**Prior evidence-debt checkpoint (2026-10-13):**
+
 Unresolved evidence debt: public archive of original R-01/R-02 raw bundles, original
 external numbered reports, fresh runtime revalidation of D1/D2/F1–F4 after #109,
 strong-fence enforcement/role/rollout proof, and exact-final-head #107 independent
 review. Conditional direct-registry consumer freshness remains a component diagnostic
 with production reachability unverified; it is not silently counted as another defect.
+
+**2026-10-16 reconciliation limit:** #111/#113 now supply the subsequent bounded
+F3/F4 repair records linked above; that does not erase the original R-01/R-02 raw
+archive/external-report gap. D1/D2, F1/F2, strong-fence enforcement/rollout and the
+historical Windows/browser causes are not closed by these merges. Draft #115 is
+evidence work, not D1 closure. No historical P2/P3 recommendation becomes a launch
+requirement, and no owner policy or runtime acceptance is inferred here.
