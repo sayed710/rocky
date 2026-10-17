@@ -83,6 +83,47 @@ async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: strin
   }
 }
 
+for (const access of ['blanket grant', 'migration default ACL'] as const) {
+  test(`PG-F1 direct helpers cannot escalate a restricted login with ${access}`, { skip }, async () => {
+    const role = `pgf1_direct_${randomBytes(8).toString('hex')}`;
+    const password = randomBytes(24).toString('hex');
+    const cluster = new Pool({ connectionString });
+    try {
+      await cluster.query(`CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
+      await withTestDatabase(async ({ pool: admin, connectionString: url }) => {
+        if (access === 'migration default ACL')
+          await admin.query(`ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO ${role}`);
+        await migrate(admin, migrationsDir());
+        await admin.query(`GRANT USAGE ON SCHEMA game_fencing TO ${role}`);
+        if (access === 'blanket grant')
+          await admin.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA game_fencing TO ${role}`);
+        const target = new URL(url); target.username = role; target.password = password;
+        const login = new Pool({ connectionString: target.toString() });
+        try {
+          assert.equal((await login.query('SELECT session_user')).rows[0]?.session_user, role);
+          for (const table of ['public.game_events', 'game_fencing.grants', 'game_fencing.control']) {
+            assert.equal((await admin.query("SELECT has_table_privilege($1,$2,'SELECT,INSERT,UPDATE,DELETE') AS allowed", [role, table])).rows[0]?.allowed, false);
+          }
+          const game = randomUUID();
+          const before = (await admin.query('SELECT * FROM game_fencing.control')).rows;
+          await assert.rejects(login.query('SELECT game_fencing.insert_batch($1,-1,$2,true)',
+            [game, batch(initialEvents(game))]), hasCode('42501'), 'direct insert_batch must deny unauthorized insertion');
+          assert.equal((await admin.query('SELECT 1 FROM public.game_events WHERE game_id=$1', [game])).rowCount, 0);
+          await admin.query('INSERT INTO game_fencing.grants(game_id) VALUES($1)', [game]);
+          const grants = (await admin.query('SELECT * FROM game_fencing.grants')).rows;
+          await assert.rejects(login.query('SELECT * FROM game_fencing.lock_grant($1)', [game]), hasCode('42501'));
+          await assert.rejects(login.query('SELECT * FROM game_fencing.lock_control($1)', [randomUUID()]), hasCode('PFG01'));
+          assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows, grants);
+          assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows, before);
+        } finally { await login.end(); }
+      }, { connectionString, max: 4 });
+    } finally {
+      await cluster.query(`DROP ROLE IF EXISTS ${role}`);
+      await cluster.end();
+    }
+  });
+}
+
 type Grant = { game: string; db: string; epoch: string; process: string; capability: Buffer; expiry: string };
 function initialEvents(gameId: string) {
   return Game.create({ gameId, at: 1000, rated: false, players: { white: 'a', black: 'b' },
