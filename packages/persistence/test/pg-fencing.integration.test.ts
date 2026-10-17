@@ -9,6 +9,7 @@ import { uuidv7 } from '../src/ids';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import { prepareGameFencing, seedGameFencing } from '../src/pg/fencing-preparation';
+import { PersistenceError } from '../src/errors';
 import { FencingAcquireIntent, FencingGrant, PostgresFencedEventStore, FenceRejectedError, FencedOutcomeUnknownError,
   commitFencedTransaction } from '../src/pg/fenced-event-store';
 import { inspect } from 'node:util';
@@ -43,7 +44,7 @@ test('PG-F1 migration supplies an inactive protected boundary without changing l
 });
 
 /** Authenticated logins, never SET ROLE as a stand-in for authentication. */
-async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: string) => Promise<void>): Promise<void> {
+async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: string) => Promise<void>, dir = migrationsDir()): Promise<void> {
   const suffix = randomBytes(8).toString('hex');
   const owner = `pgf1_owner_${suffix}`, executor = `pgf1_exec_${suffix}`;
   const alice = `pgf1_a_${suffix}`, bob = `pgf1_b_${suffix}`;
@@ -54,7 +55,7 @@ async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: strin
     for (const name of names) await cluster.query(`CREATE ROLE ${name} NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
       ${name === alice || name === bob ? `LOGIN PASSWORD '${password}'` : 'NOLOGIN'}`);
     await withTestDatabase(async ({ pool, connectionString: url }) => {
-      await migrate(pool, migrationsDir());
+      await migrate(pool, dir);
       const db = randomUUID();
       await prepareGameFencing(pool,{tableOwner:owner,functionOwner:executor,databaseIncarnation:db,maxLeaseMs:60000});
       await pool.query(`GRANT USAGE ON SCHEMA game_fencing TO ${alice},${bob};
@@ -180,6 +181,103 @@ test('PG-F1 helper hardening reruns after preparation without changing state or 
     assert.equal(await append(a, grant), 1);
   });
 });
+
+const helperSignatures = [
+  'game_fencing.lock_control(uuid)',
+  'game_fencing.lock_grant(uuid)',
+  'game_fencing.validate_grant(game_fencing.grants,uuid,bigint,uuid,bytea,timestamp with time zone)',
+  'game_fencing.insert_batch(uuid,integer,jsonb,boolean)',
+];
+const entrypointSignatures = [
+  'game_fencing.acquire(uuid,uuid,bigint,uuid,bytea,integer)',
+  'game_fencing.renew(uuid,uuid,bigint,uuid,bytea,integer)',
+  'game_fencing.release(uuid,uuid,bigint,uuid,bytea)',
+  'game_fencing.append_events(uuid,uuid,bigint,uuid,bytea,integer,jsonb)',
+  'game_fencing.create_stream(uuid,uuid,jsonb)',
+];
+async function preparationConfig(admin: Pool, db: string) {
+  const owners=(await admin.query(`SELECT pg_get_userbyid(c.relowner) AS tables,pg_get_userbyid(p.proowner) AS functions
+    FROM pg_class c,pg_proc p WHERE c.oid='game_fencing.grants'::regclass
+    AND p.oid='game_fencing.create_stream(uuid,uuid,jsonb)'::regprocedure`)).rows[0]!;
+  return {tableOwner:owners.tables,functionOwner:owners.functions,databaseIncarnation:db,maxLeaseMs:60000};
+}
+
+async function functionRights(admin: Pool) {
+  return (await admin.query<{ signature: string; prosecdef: boolean; proowner: number; proacl: string[]; proconfig: string[] }>(
+    `SELECT p.oid::regprocedure::text AS signature,prosecdef,proowner,proacl,proconfig
+     FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='game_fencing' ORDER BY p.oid`)).rows;
+}
+
+test('PG-F1 non-owner migration succeeds on a historically prepared 0050 database', { skip }, async () => {
+  const earlier=await mkdtemp(join(tmpdir(),'pg-f1-through-0050-'));
+  const migrator=`pgf1_migrator_${randomBytes(8).toString('hex')}`;
+  const cluster=new Pool({connectionString});
+  try {
+    for (const name of await readdir(migrationsDir()))
+      if (/^\d{4}_.*\.sql$/.test(name) && name<'0051') await copyFile(join(migrationsDir(),name),join(earlier,name));
+    await cluster.query(`CREATE ROLE ${migrator} NOLOGIN NOSUPERUSER NOINHERIT`);
+    await restrictedDatabase(async(admin,a,_b,db)=>{
+      const config=await preparationConfig(admin,db);
+      await admin.query(`GRANT USAGE ON SCHEMA game_fencing TO ${migrator}`);
+      // Recreate the historical prepared 0050 state, even with a hardened installer.
+      for (const signature of helperSignatures) await admin.query(`ALTER FUNCTION ${signature} SECURITY DEFINER`);
+      const game=await seed(admin),grant=await acquire(a,game,db);
+      const before=await functionRights(admin);
+      const control=(await admin.query('SELECT * FROM game_fencing.control')).rows;
+      const grants=(await admin.query('SELECT * FROM game_fencing.grants')).rows;
+      const client=await admin.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${migrator}`);
+        const rights=(await client.query(`SELECT current_user,rolsuper,pg_has_role(current_user,$1,'MEMBER') AS member
+          FROM pg_roles WHERE rolname=current_user`,[config.functionOwner])).rows[0]!;
+        assert.equal(rights.current_user,migrator); assert.equal(rights.rolsuper,false); assert.equal(rights.member,false);
+        await client.query(readMigrationSql(migrationsDir(),'0051_non_escalating_fencing_helpers.sql'));
+        await client.query('COMMIT');
+      } finally { await client.query('ROLLBACK'); client.release(); }
+      assert.deepEqual(await functionRights(admin),before,'skipped helpers retain DEFINER, executor ownership, ACLs and paths');
+      assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows,control);
+      assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows,grants);
+      await prepareGameFencing(admin,config);
+      for (const fn of await functionRights(admin)) {
+        assert.equal(fn.prosecdef,entrypointSignatures.includes(fn.signature));
+        assert.equal(fn.proowner,before.find(old=>old.signature===fn.signature)?.proowner);
+      }
+      assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows,control);
+      assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows,grants);
+      const login=(await a.query('SELECT session_user AS name')).rows[0]!.name;
+      await admin.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA game_fencing TO ${login}`);
+      await assert.rejects(a.query('SELECT game_fencing.insert_batch($1,0,$2,false)',[game,batch([ready])]),hasCode('42501'));
+      assert.equal(await append(a,grant),1);
+    },earlier);
+  } finally {
+    await cluster.query(`DROP ROLE IF EXISTS ${migrator}`); await cluster.end();
+    await rm(earlier,{recursive:true,force:true});
+  }
+});
+
+test('PG-F1 preparation enforces invoker rights on all four historical helpers', { skip }, async()=>{
+  await restrictedDatabase(async(admin,_a,_b,db)=>{
+    for (const signature of helperSignatures) await admin.query(`ALTER FUNCTION ${signature} SECURITY DEFINER`);
+    await prepareGameFencing(admin,await preparationConfig(admin,db));
+    for (const fn of await functionRights(admin)) assert.equal(fn.prosecdef,entrypointSignatures.includes(fn.signature),fn.signature);
+  });
+});
+
+for (const signature of entrypointSignatures) {
+  test(`PG-F1 preparation refuses SECURITY INVOKER entrypoint ${signature}`, { skip }, async()=>{
+    await restrictedDatabase(async(admin,a,_b,db)=>{
+      const config=await preparationConfig(admin,db);
+      await admin.query(`ALTER FUNCTION ${signature} SECURITY INVOKER`);
+      const before=await functionRights(admin);
+      await assert.rejects(prepareGameFencing(admin,{...config,databaseIncarnation:randomUUID()}),PersistenceError);
+      assert.deepEqual(await functionRights(admin),before,'refusal rolls back ownership and ACL changes');
+      assert.equal((await admin.query('SELECT database_incarnation::text AS id FROM game_fencing.control')).rows[0]?.id,db);
+      const login=(await a.query('SELECT session_user AS name')).rows[0]!.name;
+      assert.equal((await admin.query("SELECT has_function_privilege($1,$2,'EXECUTE') AS allowed",[login,signature])).rows[0]?.allowed,true);
+    });
+  });
+}
 
 test('PG-F1 real logins: concurrent acquisition, epoch monotonicity, stale and forged grants', { skip }, async () => {
   await restrictedDatabase(async(admin,a,b,db)=>{
