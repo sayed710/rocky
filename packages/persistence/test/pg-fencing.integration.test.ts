@@ -44,7 +44,7 @@ test('PG-F1 migration supplies an inactive protected boundary without changing l
 });
 
 /** Authenticated logins, never SET ROLE as a stand-in for authentication. */
-async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: string) => Promise<void>, dir = migrationsDir(), historicalDefaultAcl = false): Promise<void> {
+async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: string) => Promise<void>, dir = migrationsDir(), historicalDefaultAcl = false, seedThrough0050 = false): Promise<void> {
   const suffix = randomBytes(8).toString('hex');
   const owner = `pgf1_owner_${suffix}`, executor = `pgf1_exec_${suffix}`;
   const alice = `pgf1_a_${suffix}`, bob = `pgf1_b_${suffix}`;
@@ -57,6 +57,30 @@ async function restrictedDatabase(run: (admin: Pool, a: Pool, b: Pool, db: strin
     await withTestDatabase(async ({ pool, connectionString: url }) => {
       if (historicalDefaultAcl) await pool.query(`ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO ${alice}`);
       await migrate(pool, dir);
+      // Faithfully reproduce an already-0050 database WITHOUT the runner's refused
+      // 0050-alone path: `dir` applied 0001..0049, so execute the real published
+      // 0050 SQL and its truthful ledger row (canonical checksum) in one
+      // transaction. This is the narrow, documented historical fixture — no
+      // production opt-out flag, synthetic ledger-only row or skipped check.
+      if (seedThrough0050) {
+        const sql = readMigrationSql(migrationsDir(), '0050_inactive_game_fencing.sql');
+        const seedClient = await pool.connect();
+        try {
+          await seedClient.query('BEGIN');
+          await seedClient.query(sql);
+          await seedClient.query(
+            `INSERT INTO schema_migrations (version, name, checksum, state)
+               VALUES (50, '0050_inactive_game_fencing.sql', $1, 'applied')`,
+            [migrationChecksum(sql)],
+          );
+          await seedClient.query('COMMIT');
+        } catch (err) {
+          await seedClient.query('ROLLBACK').catch(() => undefined);
+          throw err;
+        } finally {
+          seedClient.release();
+        }
+      }
       const defaultFunctions = historicalDefaultAcl ? (await pool.query<{ signature: string }>(
         `SELECT p.oid::regprocedure::text AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
          WHERE n.nspname='game_fencing' AND has_function_privilege($1,p.oid,'EXECUTE')`,[alice])).rows : [];
@@ -225,12 +249,14 @@ test(`PG-F1 prepared 0050 upgrade fails closed for migration login and succeeds 
   const cluster=new Pool({connectionString});
   try {
     for (const name of await readdir(migrationsDir()))
-      if (/^\d{4}_.*\.sql$/.test(name) && name<'0051') await copyFile(join(migrationsDir(),name),join(earlier,name));
+      if (/^\d{4}_.*\.sql$/.test(name) && name<'0050') await copyFile(join(migrationsDir(),name),join(earlier,name));
     await cluster.query(`CREATE ROLE ${migrator} LOGIN PASSWORD '${password}' NOSUPERUSER NOINHERIT
       NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
-    // restrictedDatabase's provisioning superuser applies 0001–0050 (including vector),
-    // then acts as the trusted installer for prepareGameFencing. Its two protected
-    // owners are distinct NOLOGIN roles; a is a separately authenticated runtime LOGIN.
+    // restrictedDatabase's provisioning superuser applies 0001–0049 (including vector)
+    // through the runner, then seeds the historical 0050 state (real 0050 SQL + truthful
+    // ledger row) because the runner now refuses to apply 0050 without 0051, then acts
+    // as the trusted installer for prepareGameFencing. Its two protected owners are
+    // distinct NOLOGIN roles; a is a separately authenticated runtime LOGIN.
     await restrictedDatabase(async(admin,a,_b,db)=>{
       const config=await preparationConfig(admin,db);
       const installer=(await admin.query('SELECT session_user AS name,rolsuper FROM pg_roles WHERE rolname=session_user')).rows[0]!;
@@ -311,7 +337,7 @@ test(`PG-F1 prepared 0050 upgrade fails closed for migration login and succeeds 
         const fresh=randomUUID();
         assert.equal((await a.query('SELECT game_fencing.create_stream($1,$2,$3) AS head',[fresh,db,batch(initialEvents(fresh))])).rows[0]?.head,0);
       } finally { await migrationLogin.end(); }
-    },earlier,access === 'migration default ACL');
+    },earlier,access === 'migration default ACL',true);
   } finally {
     try { await cluster.query(`DROP ROLE IF EXISTS ${migrator}`); }
     finally {

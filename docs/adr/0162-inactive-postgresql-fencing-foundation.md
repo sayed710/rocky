@@ -282,3 +282,56 @@ checksum, leaving four INVOKER helpers and five DEFINER entrypoints. Afterwards
 the ordinary login sees 0 pending and applies 0, without protected membership.
 0050 remains unchanged. No new framework, ledger-only repair, activation,
 deployment or PG-F2 authorization is introduced.
+
+## Amendment — 2026-10-18: atomic application of the fencing pair
+
+The preceding amendments harden the helpers and keep an ordinary migration login
+from fabricating a 0051 ledger row, but they do not address *when* 0050 and 0051
+reach a database. The runner in `packages/persistence/src/pg/migrate.ts` applies
+every migration in its own transaction, committing each before the next begins.
+Applied that way, the committed-0050 / pre-0051 state is visible to any other
+connection, and in that window a role holding EXECUTE on
+`game_fencing.insert_batch` (named or migration-default ACL) plus schema USAGE —
+but no `game_events` INSERT and no owner membership — can call the SECURITY
+DEFINER helper directly and persist events it has no privilege to write. That
+exposure was demonstrated against the unmodified runner in disposable PostgreSQL
+16.14 and reproduced RED against the branch-HEAD runner here.
+
+The runner now coalesces **only** migrations 0050 and 0051 — matched by version
+and published filename — into a single transaction **when both are pending in the
+same run**: their SQL and both ledger rows commit together, or neither does. No
+other connection ever observes the intermediate state (a separate connection sees
+neither version in `schema_migrations` and no `game_fencing` schema until commit),
+and after commit the helper is SECURITY INVOKER. This is deliberately narrow: it
+is not a general cross-migration batch, it changes **no** migration bytes (0050
+canonical SHA-256 `f2f0e83d1074aa4021117191e93796b19b11f5b24ad0868c5a71e701e189ce3b`,
+0051 `1827a4ceb64ba8a10600693e2780eac132637608120b10cbde31c66148338b83`), it writes
+each migration's own canonical checksum, and it leaves every other migration, the
+online-index path, checksum immutability and transaction cleanup unchanged. A
+failure anywhere in the group rolls back both migrations and both ledger rows; a
+clean retry then applies the pair. Pending 0050 without 0051, renamed or nontransactional
+fencing members, and impossible/pending fencing ledger states fail closed before
+fencing SQL. An already-0050 database also refuses a tree missing 0051 rather
+than falsely reporting zero work with historical DEFINER helpers still installed.
+A legitimate already-applied 0050 with pending canonical 0051 retains
+the ordinary trusted-installer path. Historical tests first apply 0001–0049 and
+then execute the actual published 0050 SQL plus its truthful canonical ledger row
+in one test-only transaction; there is no production opt-out or ledger-only witness.
+
+This does not and cannot retroactively close the window on a database that already
+committed 0050 under an earlier runner — that exposure is historical. For such a
+database the fail-closed operational upgrade path is: **first** isolate or drain
+every untrusted writer that could reach `game_fencing.insert_batch` (a human,
+infrastructure-level step — role/network isolation; the runner neither performs
+nor proves it, and no boolean acknowledgement or advisory lock is evidence of
+network isolation), **then** apply 0051 with trusted installer credentials through
+`migrate()`. An ordinary migration login fails closed ("must be owner of function")
+and writes no 0051 ledger row; the trusted installer leaves four INVOKER helpers
+and five DEFINER entrypoints. The runner makes no automatic ACL, credential,
+network or deployment change, adds no runtime grant, and does not activate fencing.
+Regression evidence: `packages/persistence/test/pg-fencing-atomic.integration.test.ts`
+(window closure, all-or-nothing rollback and retry, named/default-ACL and
+no-USAGE/no-EXECUTE controls, fail-closed malformed/missing-pair negatives,
+actual restricted helper calls during the pause, exact ledger checksums, injected
+SQL/ledger/before-COMMIT rollback and assertion-failure cleanup). 0050
+and 0051 SQL are unchanged; PG-F1 stays inactive and PG-F2 is not authorized.
