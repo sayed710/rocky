@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { WsClient } from '../src/net/ws-client.js';
-import { GameSync } from '../src/net/game-sync.js';
+import { GameSync, isStateRevision } from '../src/net/game-sync.js';
 import { AuthoritativeMoveOracle } from '../src/net/authoritative-oracle.js';
 import type { LegalMoves, StateView, WsColor } from '../src/net/ws-protocol.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
@@ -655,3 +655,766 @@ test('a move broadcast whose serverTs is not a number does not become a clock an
   assert.equal(sync.getState().ply, 1, 'the move itself still applies');
   assert.equal(sync.getState().turnStartedAt, null);
 });
+
+// ── Ordering regression tests (RZ-GAMESYNC-ORDERING-20261018-34) ───────────
+
+test('regression: stale revisioned snapshot ply 2 -> 0 does not replace newer confirmed state', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  // Initial join at revision 0, ply 0
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+  assert.equal(sync.getState().ply, 0);
+
+  // Move 1 at revision 1, ply 1
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: { e7: ['e5'] },
+  });
+  assert.equal(sync.getState().ply, 1);
+
+  // Move 2 at revision 2, ply 2
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 2,
+    ply: 2,
+    uci: 'e7e5',
+    san: 'e5',
+    by: 'b',
+    fenHash: 'h2',
+    clock: { w: 59_000, b: 59_000 },
+    serverTs: 2_000,
+    legalMoves: { g1: ['f3'] },
+  });
+  assert.equal(sync.getState().ply, 2);
+  assert.equal(sync.getState().moves.length, 2);
+
+  // Stale snapshot arrives with revision 0, ply 0 (e.g. from delayed state broadcast or stale replica)
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Newer confirmed state at ply 2 must NOT be replaced by stale snapshot at ply 0
+  assert.equal(sync.getState().ply, 2, 'stale snapshot must not roll back ply');
+  assert.equal(sync.getState().moves.length, 2, 'stale snapshot must not erase confirmed moves');
+});
+
+test('regression: stale resumed snapshot does not reopen a terminal game', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  // Initial join at revision 0, ply 0
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Move 1 at revision 1, ply 1
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: { e7: ['e5'] },
+  });
+
+  // Terminal ending at revision 2
+  factory.last.emit({
+    t: 'ended',
+    gameId: 'g1',
+    stateRevision: 2,
+    result: '1-0',
+    termination: 'resignation',
+    winner: 'w',
+    serverTs: 2_000,
+  });
+
+  assert.equal(sync.getState().status?.over, true, 'game must be over');
+  assert.deepEqual(sync.getState().legalMoves, {}, 'legal moves must be empty when over');
+
+  // Stale resumed message arrives with older snapshot (revision 0, status not over)
+  factory.last.emit({
+    t: 'resumed',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w', [], { e2: ['e4'] }), ready: null, stateRevision: 0 },
+    missed: [],
+  });
+
+  // Terminal state must NOT be reopened
+  assert.equal(sync.getState().status?.over, true, 'stale resumed snapshot must not reopen terminal game');
+  assert.deepEqual(sync.getState().legalMoves, {}, 'stale resumed snapshot must not restore legal moves');
+  assert.equal(sync.submitMove('e2e4'), null, 'command admission must be blocked on terminal game');
+});
+
+test('observed floor is newer than snapshot after live events (move and ready)', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  // Joined at revision 0
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: { w: false, b: false }, stateRevision: 0 },
+  });
+  assert.equal(sync.stateRevision, 0);
+
+  // Live ready event advances floor to revision 1
+  factory.last.emit({
+    t: 'ready',
+    gameId: 'g1',
+    stateRevision: 1,
+    ready: { w: true, b: false },
+    serverTs: 1_000,
+  });
+  assert.equal(sync.stateRevision, 1);
+  assert.deepEqual(sync.getState().ready, { w: true, b: false });
+
+  // Stale snapshot with revision 0 arriving after live ready must be rejected
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: { w: false, b: false }, stateRevision: 0 },
+  });
+  assert.equal(sync.stateRevision, 1);
+  assert.deepEqual(sync.getState().ready, { w: true, b: false }, 'readiness preserved against older snapshot');
+
+  // Live move event advances floor to revision 2, ply 1
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 2,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 2_000,
+    legalMoves: { e7: ['e5'] },
+  });
+  assert.equal(sync.stateRevision, 2);
+  assert.equal(sync.getState().ply, 1);
+
+  // Stale snapshot at revision 1 arriving after live move must be rejected
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: { w: true, b: false }, stateRevision: 1 },
+  });
+  assert.equal(sync.stateRevision, 2);
+  assert.equal(sync.getState().ply, 1);
+  assert.equal(sync.getState().moves.length, 1);
+});
+
+test('dropping stale snapshot preserves pending move and outcomeUnknown notice', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 1 },
+  });
+
+  const pending = sync.submitMove('e2e4');
+  assert.ok(pending);
+
+  // Gateway emits outcomeUnknown for the move intent
+  factory.last.emit({
+    t: 'outcomeUnknown',
+    code: 'outcome_unknown',
+    gameId: 'g1',
+    ref: pending.clientSeq,
+    requestId: 'req-uncertain',
+    message: 'Command outcome unknown.',
+  });
+  assert.deepEqual(sync.getState().pending, pending);
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+
+  // Stale snapshot arriving from a replica at revision 0
+  // Dropping it MUST NOT clear pending move, pending action, or outcomeUnknown notice!
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Pending intent and uncertainty notice are intact
+  assert.deepEqual(sync.getState().pending, pending, 'pending move must be preserved when snapshot dropped');
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown', 'uncertainty notice must be preserved');
+
+  // Exact confirmation receipt settles uncertainty
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'req-uncertain' });
+  assert.equal(sync.getState().lastReject, null);
+});
+
+test('equal-revision joined reauthorizes connection without clearing uncertain commands or overwriting state', () => {
+  const { factory, scheduler, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Move 1 played
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: { e7: ['e5'] },
+  });
+
+  // An action is submitted and outcome is uncertain
+  assert.equal(sync.offerDraw(), true);
+  factory.last.emit({
+    t: 'outcomeUnknown',
+    code: 'outcome_unknown',
+    gameId: 'g1',
+    ref: null,
+    requestId: 'draw-req',
+    action: 'offerDraw',
+    message: 'Outcome unknown',
+  });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+  assert.equal(sync.stateRevision, 1);
+
+  // Connection drop
+  factory.last.serverClose(1006, '', false);
+  assert.equal(sync.getState().connected, false);
+
+  // Reconnect opens socket #2
+  scheduler.runNext();
+  factory.last.open();
+  assert.equal(sync.getState().connected, false, 'reopened socket awaits server join acknowledgment');
+
+  // Server sends joined with EQUAL revision (stateRevision: 1)
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(1, 'b', [{ ply: 1, uci: 'e2e4', san: 'e4', by: 'w' }]), ready: null, stateRevision: 1 },
+  });
+
+  // Transport is reauthorized
+  assert.equal(sync.getState().connected, true, 'equal-revision join must reauthorize connection');
+  assert.equal(sync.getState().role, 'white');
+  assert.equal(sync.getState().myColor, 'w');
+
+  // But uncertain command is NOT claimed as completed
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown', 'equal-revision join cannot settle uncertain commands');
+  assert.equal(sync.stateRevision, 1);
+});
+
+test('equal-revision snapshot and duplicate live events are dropped without loops', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Move 1
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: { e7: ['e5'] },
+  });
+  assert.equal(sync.stateRevision, 1);
+
+  const sentBefore = factory.last.sent.length;
+
+  // Duplicate move 1 broadcast with equal revision 1 arrives
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: { e7: ['e5'] },
+  });
+
+  // Duplicate must be dropped before ply gap logic — no resume request sent!
+  assert.equal(factory.last.sent.length, sentBefore, 'duplicate move must not trigger resume broadcast loop');
+  assert.equal(sync.getState().ply, 1);
+
+  // Equal-revision state snapshot arrives
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(1, 'b', [{ ply: 1, uci: 'e2e4', san: 'e4', by: 'w' }]), ready: null, stateRevision: 1 },
+  });
+  assert.equal(sync.stateRevision, 1);
+
+  // Equal-revision ended broadcast
+  factory.last.emit({
+    t: 'ended',
+    gameId: 'g1',
+    stateRevision: 1,
+    result: '1-0',
+    termination: 'resignation',
+    winner: 'w',
+    serverTs: 2_000,
+  });
+  // Since floor is already 1, equal-revision ended is dropped
+  assert.equal(sync.getState().status?.over, false);
+});
+
+test('newer same-ply terminal and draw transitions protect status, legalMoves, and command admission', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  // Initial join at revision 0, ply 0
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Move 1: revision 1, ply 1
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: { e7: ['e5'] },
+  });
+
+  // Move 2: revision 2, ply 2 (black to move)
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 2,
+    ply: 2,
+    uci: 'e7e5',
+    san: 'e5',
+    by: 'b',
+    fenHash: 'h2',
+    clock: { w: 59_000, b: 59_000 },
+    serverTs: 2_000,
+    legalMoves: { g1: ['f3'] },
+  });
+  assert.equal(sync.getState().status?.over, false);
+  assert.notDeepEqual(sync.getState().legalMoves, {});
+
+  // At the SAME ply 2, an agreement draw occurs at revision 3
+  factory.last.emit({
+    t: 'ended',
+    gameId: 'g1',
+    stateRevision: 3,
+    result: '1/2-1/2',
+    termination: 'agreement',
+    winner: null,
+    serverTs: 3_000,
+  });
+
+  assert.equal(sync.stateRevision, 3);
+  assert.deepEqual(sync.getState().status, {
+    over: true,
+    result: '1/2-1/2',
+    termination: 'agreement',
+    winner: null,
+  });
+  assert.deepEqual(sync.getState().legalMoves, {});
+  assert.equal(sync.submitMove('g1f3'), null, 'submitMove must reject when game over');
+  assert.equal(sync.offerDraw(), false, 'actions must reject when game over');
+  assert.equal(sync.resign(), false, 'resign must reject when game over');
+
+  // Stale snapshot arrives at ply 2 with revision 2 (before the draw was agreed)
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: {
+      ...stateView(2, 'w', [
+        { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+        { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' },
+      ], { g1: ['f3'] }),
+      ready: null,
+      stateRevision: 2,
+    },
+  });
+
+  // Terminal status, result, legalMoves, and command admission are completely protected!
+  const finalStatus = sync.getState().status;
+  assert.ok(finalStatus && finalStatus.over);
+  assert.equal(finalStatus.result, '1/2-1/2');
+  assert.deepEqual(sync.getState().legalMoves, {});
+  assert.equal(sync.submitMove('g1f3'), null);
+});
+
+test('stale ended, move, and ready broadcasts are dropped and never trigger loops', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  // Joined at revision 0
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: { w: false, b: false }, stateRevision: 0 },
+  });
+
+  // Advances to revision 5 through live events
+  factory.last.emit({ t: 'ready', gameId: 'g1', stateRevision: 1, ready: { w: true, b: false }, serverTs: 1 });
+  factory.last.emit({ t: 'ready', gameId: 'g1', stateRevision: 2, ready: { w: true, b: true }, serverTs: 2 });
+  factory.last.emit({
+    t: 'move', gameId: 'g1', stateRevision: 3, ply: 1, uci: 'e2e4', san: 'e4',
+    by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 3, legalMoves: { e7: ['e5'] },
+  });
+  factory.last.emit({
+    t: 'move', gameId: 'g1', stateRevision: 4, ply: 2, uci: 'e7e5', san: 'e5',
+    by: 'b', fenHash: 'h2', clock: { w: 59_000, b: 59_000 }, serverTs: 4, legalMoves: { g1: ['f3'] },
+  });
+  factory.last.emit({
+    t: 'move', gameId: 'g1', stateRevision: 5, ply: 3, uci: 'g1f3', san: 'Nf3',
+    by: 'w', fenHash: 'h3', clock: { w: 58_000, b: 59_000 }, serverTs: 5, legalMoves: { b8: ['c6'] },
+  });
+  assert.equal(sync.stateRevision, 5);
+  assert.equal(sync.getState().ply, 3);
+
+  const sentCount = factory.last.sent.length;
+
+  // Stale move broadcast arrives with revision 2 (ply 1)
+  factory.last.emit({
+    t: 'move', gameId: 'g1', stateRevision: 2, ply: 1, uci: 'e2e4', san: 'e4',
+    by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 3, legalMoves: {},
+  });
+  assert.equal(factory.last.sent.length, sentCount, 'stale move must not trigger resume loop');
+  assert.equal(sync.getState().ply, 3);
+
+  // Stale ready broadcast arrives with revision 1
+  factory.last.emit({ t: 'ready', gameId: 'g1', stateRevision: 1, ready: { w: false, b: false }, serverTs: 1 });
+  assert.deepEqual(sync.getState().ready, { w: true, b: true }, 'stale ready broadcast must not regress readiness');
+
+  // Stale ended broadcast arrives with revision 4
+  factory.last.emit({
+    t: 'ended', gameId: 'g1', stateRevision: 4, result: '0-1', termination: 'timeout', winner: 'b', serverTs: 4,
+  });
+  assert.equal(sync.getState().status?.over, false, 'stale ended broadcast must not end game prematurely');
+});
+
+test('reconnect with stale join snapshot preserves known floor and state while reauthorizing', () => {
+  const { factory, scheduler, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  // Joined at revision 0
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Move 1 at revision 1, ply 1
+  factory.last.emit({
+    t: 'move', gameId: 'g1', stateRevision: 1, ply: 1, uci: 'e2e4', san: 'e4',
+    by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 1_000, legalMoves: { e7: ['e5'] },
+  });
+  assert.equal(sync.stateRevision, 1);
+  assert.equal(sync.getState().ply, 1);
+
+  // Connection dropped unexpectedly
+  factory.last.serverClose(1006, '', false);
+  assert.equal(sync.getState().connected, false);
+
+  // Reconnect opens socket #2
+  scheduler.runNext();
+  factory.last.open();
+
+  // Server replies to join with a stale cached snapshot at revision 0, ply 0
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Reauthorization succeeded
+  assert.equal(sync.getState().connected, true, 'connection must be reauthorized');
+  assert.equal(sync.getState().role, 'white');
+  assert.equal(sync.getState().myColor, 'w');
+
+  // Stale snapshot was rejected: known state is preserved!
+  assert.equal(sync.stateRevision, 1, 'observed floor must remain at 1');
+  assert.equal(sync.getState().ply, 1, 'ply must remain at 1');
+  assert.equal(sync.getState().moves.length, 1, 'moves must remain at 1');
+});
+
+test('genuine reconnect preserves floor, pending move, and uncertainty notice across socket drop', () => {
+  const { factory, scheduler, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  // Advance to revision 1 with confirmed move
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: { e7: ['e5'] },
+  });
+
+  // Advance to revision 2 with Black's move
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 2,
+    ply: 2,
+    uci: 'e7e5',
+    san: 'e5',
+    by: 'b',
+    fenHash: 'h2',
+    clock: { w: 59_000, b: 59_000 },
+    serverTs: 2_000,
+    legalMoves: { g1: ['f3'] },
+  });
+  assert.equal(sync.stateRevision, 2);
+  assert.equal(sync.getState().ply, 2);
+  assert.equal(sync.getState().turn, 'w');
+
+  // Submit a pending move and receive an outcomeUnknown notice
+  const pending = sync.submitMove('g1f3');
+  assert.ok(pending);
+  factory.last.emit({
+    t: 'outcomeUnknown',
+    code: 'outcome_unknown',
+    gameId: 'g1',
+    ref: pending.clientSeq,
+    requestId: 'req-reconnect-uncertain',
+    message: 'Unknown move outcome.',
+  });
+  assert.deepEqual(sync.getState().pending, pending);
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+
+  // Genuine socket drop (e.g. 1006 abnormal closure)
+  factory.last.serverClose(1006, '', false);
+  assert.equal(sync.getState().connected, false);
+
+  // Scheduler advances and reconnects socket #2
+  scheduler.runNext();
+  factory.last.open();
+
+  // Reconnected socket delivers join response with stale cached snapshot at revision 1
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(1, 'b'), ready: null, stateRevision: 1 },
+  });
+
+  // Authorization is re-established
+  assert.equal(sync.getState().connected, true, 'connection must be reauthorized on reconnect');
+  assert.equal(sync.getState().role, 'white');
+  assert.equal(sync.getState().myColor, 'w');
+
+  // Revision floor, state, pending move, and uncertainty notice are all preserved!
+  assert.equal(sync.stateRevision, 2, 'revision floor must be preserved across reconnect');
+  assert.equal(sync.getState().ply, 2, 'ply must remain at 2');
+  assert.deepEqual(sync.getState().pending, pending, 'pending move must be preserved across stale join snapshot');
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown', 'uncertainty notice must remain visible');
+
+  // Exact confirmation receipt settles the uncertainty without resending or claiming unproved state
+  factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'req-reconnect-uncertain' });
+  assert.equal(sync.getState().lastReject, null, 'exact receipt clears uncertainty notice');
+});
+
+test('pure legacy gateway behavior remains fully functional without revisions', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  // All-legacy gateway emits frames without stateRevision
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: stateView(0, 'w'),
+  });
+  assert.equal(sync.stateRevision, null, 'stateRevisionFloor must be null for pure legacy');
+  assert.equal(sync.getState().connected, true);
+  assert.equal(sync.getState().ply, 0);
+
+  // Legacy move applies
+  factory.last.emit({
+    t: 'move', gameId: 'g1', ply: 1, uci: 'e2e4', san: 'e4',
+    by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 1_000, legalMoves: { e7: ['e5'] },
+  });
+  assert.equal(sync.getState().ply, 1);
+
+  // Duplicate legacy move is dropped before ply gap
+  const sentCount = factory.last.sent.length;
+  factory.last.emit({
+    t: 'move', gameId: 'g1', ply: 1, uci: 'e2e4', san: 'e4',
+    by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 1_000, legalMoves: { e7: ['e5'] },
+  });
+  assert.equal(factory.last.sent.length, sentCount, 'duplicate legacy move does not loop');
+
+  // Legacy gap triggers resume
+  factory.last.emit({
+    t: 'move', gameId: 'g1', ply: 3, uci: 'g1f3', san: 'Nf3',
+    by: 'w', fenHash: 'h3', clock: { w: 58_000, b: 59_000 }, serverTs: 2_000, legalMoves: {},
+  });
+  assert.equal(factory.last.sent.length, sentCount + 1, 'gap triggers resume');
+  assert.deepEqual(JSON.parse(factory.last.sent.at(-1)!), { t: 'resume', gameId: 'g1', lastPly: 1 });
+
+  // Legacy ended ends game
+  factory.last.emit({
+    t: 'ended', gameId: 'g1', result: '1-0', termination: 'checkmate', winner: 'w', serverTs: 3_000,
+  });
+  assert.equal(sync.getState().status?.over, true);
+});
+
+test('revisioned to legacy mixed frames: failclosed policy rejects un-stamped frames once revisioned state observed', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  // Joined with revisioned state
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+  assert.equal(sync.stateRevision, 0);
+
+  // Move 1 with revision 1, ply 1
+  factory.last.emit({
+    t: 'move', gameId: 'g1', stateRevision: 1, ply: 1, uci: 'e2e4', san: 'e4',
+    by: 'w', fenHash: 'h1', clock: { w: 59_000, b: 60_000 }, serverTs: 1_000, legalMoves: { e7: ['e5'] },
+  });
+  assert.equal(sync.stateRevision, 1);
+  assert.equal(sync.getState().ply, 1);
+
+  // Now, un-stamped (legacy) frames arrive from an old proxy or downgraded server
+  // 1. Un-stamped move: FAILCLOSED (dropped)
+  factory.last.emit({
+    t: 'move', gameId: 'g1', ply: 2, uci: 'e7e5', san: 'e5',
+    by: 'b', fenHash: 'h2', clock: { w: 59_000, b: 59_000 }, serverTs: 2_000, legalMoves: {},
+  });
+  assert.equal(sync.getState().ply, 1, 'un-stamped move must be rejected in revisioned mode');
+
+  // 2. Un-stamped ready: merges readiness monotonically (safe under R-03) without altering revision floor
+  factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: true, b: true }, serverTs: 2_000 });
+  assert.deepEqual(sync.getState().ready, { w: true, b: true }, 'monotonic readiness is merged');
+  assert.equal(sync.stateRevision, 1, 'un-stamped ready must not alter revision floor');
+
+  // 3. Un-stamped ended: FAILCLOSED (dropped)
+  factory.last.emit({ t: 'ended', gameId: 'g1', result: '1-0', termination: 'resignation', winner: 'w', serverTs: 2_000 });
+  assert.equal(sync.getState().status?.over, false, 'un-stamped ended must be rejected in revisioned mode');
+
+  // 4. Un-stamped state snapshot: FAILCLOSED (dropped)
+  factory.last.emit({
+    t: 'state', gameId: 'g1', state: stateView(2, 'w'),
+  });
+  assert.equal(sync.getState().ply, 1, 'un-stamped state snapshot must be rejected in revisioned mode');
+
+  // 5. Un-stamped resumed snapshot: FAILCLOSED (dropped)
+  factory.last.emit({
+    t: 'resumed', gameId: 'g1', state: stateView(2, 'w'), missed: [],
+  });
+  assert.equal(sync.getState().ply, 1, 'un-stamped resumed snapshot must be rejected in revisioned mode');
+
+  // 6. Un-stamped joined: preserves authorization/role but rejects data snapshot
+  factory.last.emit({
+    t: 'joined', gameId: 'g1', role: 'black', state: stateView(0, 'w'),
+  });
+  assert.equal(sync.getState().connected, true);
+  assert.equal(sync.getState().role, 'black', 'role updated from joined authorization');
+  assert.equal(sync.getState().myColor, 'b', 'color updated from joined authorization');
+  assert.equal(sync.getState().ply, 1, 'un-stamped data snapshot must not roll back state');
+  assert.equal(sync.stateRevision, 1, 'ordering floor never downgraded');
+});
+
+test('isStateRevision type guard correctly validates bounds and numeric types without as any', () => {
+  for (const valid of [0, 1, 100, 2_147_483_647]) {
+    assert.equal(isStateRevision(valid), true);
+  }
+  for (const invalid of [-1, 0.5, '1', null, undefined, {}, [], 2_147_483_648, Number.MAX_SAFE_INTEGER]) {
+    assert.equal(isStateRevision(invalid), false);
+  }
+});
+
+
+

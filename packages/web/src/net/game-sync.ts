@@ -35,6 +35,14 @@ import type {
 } from './ws-protocol.js';
 import { colorForRole, opposite } from './ws-protocol.js';
 
+/** PostgreSQL INTEGER limit (0..2147483647), matching ADR-0161 durable stateRevision. */
+const MAX_STATE_REVISION = 2_147_483_647;
+
+/** Validate whether a value is a valid committed stateRevision sequence number. */
+export function isStateRevision(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_STATE_REVISION;
+}
+
 export interface PresenceInfo {
   readonly white: boolean;
   readonly black: boolean;
@@ -188,6 +196,13 @@ export class GameSync {
   private readonly listeners = new Set<GameSyncListener>();
   private unsubscribe: (() => void) | null = null;
   private reconnectLastPly: number | null = null;
+  /**
+   * Highest committed stateRevision observed for this game across snapshots
+   * (joined/state/resumed) and live events (move/ready/ended).
+   * Initialized to `null` (legacy mode). Once observed, un-stamped frames are
+   * rejected (failclosed) to prevent silent ordering downgrades.
+   */
+  private stateRevisionFloor: number | null = null;
 
   constructor(client: WsClient, options: GameSyncOptions) {
     this.client = client;
@@ -203,6 +218,11 @@ export class GameSync {
 
   getState(): GameSyncState {
     return this.state;
+  }
+
+  /** The highest confirmed stateRevision observed so far, or null in legacy mode. */
+  get stateRevision(): number | null {
+    return this.stateRevisionFloor;
   }
 
   /** Estimated clock skew (ms; serverClock - clientClock) from the WebSocket client. */
@@ -489,6 +509,41 @@ export class GameSync {
     });
   }
 
+  /**
+   * Evaluates the ordering freshness of an incoming StateView snapshot against our observed floor.
+   *
+   * Ordering invariants (ADR-0161 / RZ-GAMESYNC-ORDERING-20261018-34):
+   * 1. Monotonic stateRevision: If the snapshot carries a valid stateRevision:
+   *    - Strictly greater than floor -> 'newer'.
+   *    - Equal to floor -> 'equal'.
+   *    - Strictly less than floor -> 'stale'.
+   * 2. Failclosed against silent legacy downgrades: Once revisioned state has been observed
+   *    (`this.stateRevisionFloor !== null`), subsequent snapshots lacking `stateRevision` are
+   *    classified as 'stale' (failclosed) so un-stamped frames cannot downgrade ordering guarantees.
+   * 3. Pure legacy compatibility: If no revision has ever been observed (`this.stateRevisionFloor === null`),
+   *    snapshots from legacy gateways are classified as 'newer'.
+   * 4. Terminal monotonicity: A terminal game (`status.over === true`) cannot be reopened by an
+   *    active (`over: false`) snapshot regardless of protocol mode -> always 'stale'.
+   */
+  private snapshotFreshness(view: StateView): 'newer' | 'equal' | 'stale' {
+    if (this.state.status?.over && !view.status.over) {
+      return 'stale';
+    }
+    if (isStateRevision(view.stateRevision)) {
+      if (this.stateRevisionFloor === null) return 'newer';
+      if (view.stateRevision > this.stateRevisionFloor) return 'newer';
+      if (view.stateRevision === this.stateRevisionFloor) return 'equal';
+      return 'stale';
+    }
+    // Snapshot has no stateRevision:
+    if (this.stateRevisionFloor !== null) {
+      // Failclosed: revisioned state already observed; missing stamps must not silently downgrade ordering guarantees.
+      return 'stale';
+    }
+    // All-legacy gateway:
+    return 'newer';
+  }
+
   private handleMessage(msg: ServerMessage): void {
     if ('gameId' in msg && msg.gameId !== this.gameId) return;
     if (msg.t !== 'joined' && msg.t !== 'reject' && !this.state.connected) return;
@@ -510,20 +565,101 @@ export class GameSync {
         const reconnectPly = this.reconnectLastPly;
         this.reconnectLastPly = null;
         this.joined = true;
-        this.applySnapshot(msg.state, msg.role);
+
+        const freshness = this.snapshotFreshness(msg.state);
+        if (freshness === 'newer') {
+          this.applySnapshot(msg.state, msg.role);
+        } else if (freshness === 'equal') {
+          // Equal-revision join reauthorizes the connection and reconciles the input gate without
+          // claiming uncertain command completion.
+          const myColor = msg.role ? colorForRole(msg.role) : this.state.myColor;
+          this.patch({
+            role: msg.role,
+            myColor,
+            snapshot: msg.state,
+            moves: msg.state.moves,
+            ply: msg.state.ply,
+            turn: msg.state.turn,
+            clock: msg.state.clock,
+            turnStartedAt: clockAnchor(msg.state.turnStartedAt),
+            status: msg.state.status,
+            drawOffer: msg.state.drawOffer,
+            fenHash: msg.state.fenHash,
+            ready: msg.state.ready === undefined ? this.state.ready : readyView(msg.state.ready),
+            legalMoves: msg.state.legalMoves,
+            pending: null,
+            pendingAction: null,
+            lastReject: this.commandNotice(),
+            connected: true,
+            recoveryAvailable: false,
+          });
+        } else {
+          // Stale snapshot:
+          // Preserve legitimate join/reconnect authorization and role establishment without
+          // overwriting newer local state, clearing pending intent, or claiming command completion.
+          const myColor = msg.role ? colorForRole(msg.role) : this.state.myColor;
+          this.patch({
+            role: msg.role,
+            myColor,
+            lastReject: this.commandNotice(),
+            connected: true,
+            recoveryAvailable: false,
+          });
+        }
         if (reconnectPly !== null && reconnectPly < msg.state.ply) {
           this.client.send({ t: 'resume', gameId: this.gameId, lastPly: reconnectPly });
         }
         break;
       }
-      case 'state':
-        this.applySnapshot(msg.state, this.state.role);
+      case 'state': {
+        const freshness = this.snapshotFreshness(msg.state);
+        if (freshness === 'newer') {
+          this.applySnapshot(msg.state, this.state.role);
+        } else if (freshness === 'equal') {
+          // Reconcile position and release optimistic input without claiming uncertain command completion
+          this.patch({
+            snapshot: msg.state,
+            moves: msg.state.moves,
+            ply: msg.state.ply,
+            turn: msg.state.turn,
+            clock: msg.state.clock,
+            turnStartedAt: clockAnchor(msg.state.turnStartedAt),
+            status: msg.state.status,
+            drawOffer: msg.state.drawOffer,
+            fenHash: msg.state.fenHash,
+            ready: msg.state.ready === undefined ? this.state.ready : readyView(msg.state.ready),
+            legalMoves: msg.state.legalMoves,
+            pending: null,
+            pendingAction: null,
+            lastReject: this.commandNotice(),
+          });
+        }
         break;
-      case 'resumed':
-        // The snapshot is complete and authoritative; `missed` is only needed for
-        // move-by-move animation, which is a UI concern (deferred to that increment).
-        this.applySnapshot(msg.state, this.state.role);
+      }
+      case 'resumed': {
+        const freshness = this.snapshotFreshness(msg.state);
+        if (freshness === 'newer') {
+          this.applySnapshot(msg.state, this.state.role);
+        } else if (freshness === 'equal') {
+          this.patch({
+            snapshot: msg.state,
+            moves: msg.state.moves,
+            ply: msg.state.ply,
+            turn: msg.state.turn,
+            clock: msg.state.clock,
+            turnStartedAt: clockAnchor(msg.state.turnStartedAt),
+            status: msg.state.status,
+            drawOffer: msg.state.drawOffer,
+            fenHash: msg.state.fenHash,
+            ready: msg.state.ready === undefined ? this.state.ready : readyView(msg.state.ready),
+            legalMoves: msg.state.legalMoves,
+            pending: null,
+            pendingAction: null,
+            lastReject: this.commandNotice(),
+          });
+        }
         break;
+      }
       case 'move':
         this.applyMove(msg);
         break;
@@ -536,6 +672,16 @@ export class GameSync {
       case 'ready':
         // Readiness only grows, so merging keeps a late or reordered broadcast from undoing a seat.
         if (msg.gameId !== this.gameId) break;
+        if (isStateRevision(msg.stateRevision)) {
+          if (this.stateRevisionFloor !== null && msg.stateRevision < this.stateRevisionFloor) {
+            // Stale ready broadcast: drop without altering floor or state
+            break;
+          }
+          this.stateRevisionFloor = Math.max(this.stateRevisionFloor ?? 0, msg.stateRevision);
+        }
+        // Readiness is strictly monotonic (boolean OR) and already-safe (R-03); it never rolls back
+        // position or ordering guarantees. Un-stamped ready frames safely merge readiness without
+        // advancing or downgrading the state revision floor.
         this.reconcileUncertainty(msg.ready, false);
         this.patch({ ready: mergeReady(this.state.ready, readyView(msg.ready)), lastReject: this.commandNotice() });
         break;
@@ -575,6 +721,9 @@ export class GameSync {
   }
 
   private applySnapshot(view: StateView, role: Role | null): void {
+    if (isStateRevision(view.stateRevision)) {
+      this.stateRevisionFloor = Math.max(this.stateRevisionFloor ?? 0, view.stateRevision);
+    }
     const myColor = role ? colorForRole(role) : this.state.myColor;
     // A position/draw state cannot identify which request produced it. Only
     // terminal state or monotonic durable readiness safely settles the intent.
@@ -609,10 +758,30 @@ export class GameSync {
   }
 
   private applyMove(msg: MoveBroadcast): void {
+    if (isStateRevision(msg.stateRevision)) {
+      if (this.stateRevisionFloor !== null && msg.stateRevision <= this.stateRevisionFloor) {
+        // Stale or duplicate move broadcast: drop before ply gap logic so stale broadcasts don't loop
+        return;
+      }
+    } else if (this.stateRevisionFloor !== null) {
+      // Failclosed: missing stamp after revisioned state observed
+      return;
+    } else {
+      // All-legacy gateway: drop duplicate or lower ply before ply gap logic
+      if (msg.ply <= this.state.ply) {
+        return;
+      }
+    }
+    if (this.state.status?.over) {
+      return;
+    }
     if (msg.ply !== this.state.ply + 1) {
       // Sequence gap — we missed at least one broadcast. Ask the server to resync.
       this.client.send({ t: 'resume', gameId: this.gameId, lastPly: this.state.ply });
       return;
+    }
+    if (isStateRevision(msg.stateRevision)) {
+      this.stateRevisionFloor = Math.max(this.stateRevisionFloor ?? 0, msg.stateRevision);
     }
     const move: MoveView = { ply: msg.ply, uci: msg.uci, san: msg.san, by: msg.by };
     const pending = this.state.pending;
@@ -636,6 +805,16 @@ export class GameSync {
   }
 
   private applyEnded(msg: EndedBroadcast): void {
+    if (isStateRevision(msg.stateRevision)) {
+      if (this.stateRevisionFloor !== null && msg.stateRevision <= this.stateRevisionFloor) {
+        // Stale or duplicate ended broadcast
+        return;
+      }
+      this.stateRevisionFloor = Math.max(this.stateRevisionFloor ?? 0, msg.stateRevision);
+    } else if (this.stateRevisionFloor !== null) {
+      // Failclosed: missing stamp after revisioned state observed
+      return;
+    }
     this.reconcileUncertainty(null, true);
     this.latestCommandReject = null;
     this.rejectDuringUncertainty = false;
