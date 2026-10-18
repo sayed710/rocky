@@ -45,6 +45,27 @@ export function findDeployedRevision(history) {
   return deployed;
 }
 
+/**
+ * Returns the newest revision in `helm history -o json` (Helm lists it last), exactly as written.
+ *
+ * Canary and blue/green refuse to deploy unless this is the deployed revision: the release must not
+ * have a failed or pending revision on top before a progressive deploy builds on it. This is only
+ * that gate's comparand; it is never a rollback target (see lib/rollback-revision.mjs).
+ *
+ * @param {unknown} history Parsed `helm history <release> -o json` output.
+ * @returns {string} The last entry's revision: a JSON number as printed, or an all-digit string.
+ * @throws {Error} When the history is not a non-empty list or the last revision is unreadable.
+ */
+export function findNewestRevision(history) {
+  if (!Array.isArray(history) || history.length === 0) {
+    throw new Error('helm history output is not a non-empty JSON array');
+  }
+  const revision = history[history.length - 1]?.revision;
+  if (typeof revision === 'number') return String(revision);
+  if (typeof revision === 'string' && /^[0-9]+$/.test(revision)) return revision;
+  throw new Error(`the newest helm history entry has no readable revision: ${JSON.stringify(revision)}`);
+}
+
 function requiredTag(values, component) {
   const tag = values?.images?.[component]?.tag;
   const text = typeof tag === 'string' ? tag : '';

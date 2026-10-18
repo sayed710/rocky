@@ -1,0 +1,302 @@
+/**
+ * Tests for the step-output publications and the producer inputs in gates 10 and 11 of the
+ * deployment gate check.
+ *
+ * $GITHUB_OUTPUT is last-value-wins: a second `prev_revision=` (or `release_exists=`) line appended
+ * after the legitimate one silently replaces the verified rollback target, however `$GITHUB_OUTPUT`
+ * is spelled (`"${GITHUB_OUTPUT}"`, unquoted) and whatever file is copied into it. Every reference
+ * to GITHUB_OUTPUT must therefore be one of deploy.yml's exact publication lines, each once.
+ *
+ * The release-existence classifier's verdict is only as good as its inputs: `--status-stderr`
+ * naming the wrong file, a dropped `"${LIST_ARGS[@]}"` or `--list-exit 0` turns a failed
+ * `helm list` into "absent". The classifier and inventory invocations are pinned to their exact
+ * lines, and LIST_ARGS and the five exit codes (STATUS_RC, LIST_RC, INV_API_RC, INV_LABEL_RC,
+ * INV_ANNOTATION_RC) to their exact write sites; each exit code's `X=0` reset must directly precede
+ * its exact capture line, so a reset moved after the capture (erasing a failed query's exit code)
+ * fails the gate.
+ *
+ * The raw payload files the classifiers read (STATUS_ERR, LIST_OUT, INV_API, INV_LABELLED,
+ * INV_ANNOTATED) are pinned to their exact references: a truncation (`: > "$INV_ANNOTATED"`),
+ * a rebinding (a second `X=$(mktemp)`) or a rewrite (`printf '[]\n' > "$LIST_OUT"`) after the
+ * capture fails the gate, since it would turn an occupied namespace into `empty`.
+ *
+ * Each case mutates the real deploy.yml text in memory (never the file).
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+import { checkReleaseExistence, checkRollbackTarget } from '../check-deploy-gates.mjs';
+import { BASE_INVENTORY_KINDS, classifyOrphanInventory } from '../lib/recovery-ownership.mjs';
+
+const deployYml = readFileSync(new URL('../../.github/workflows/deploy.yml', import.meta.url), 'utf8').replace(/\r/g, '');
+
+/** Both gates (10: rollback target and step outputs; 11: release existence and its producers). */
+const gates = (text) => [...checkRollbackTarget(text), ...checkReleaseExistence(text)];
+
+/** Inserts `line` right after the one line whose trimmed text is `anchor`, at the same indentation. */
+function insertAfter(anchor, line, text = deployYml) {
+  const lines = text.split('\n');
+  const at = lines.map((l, i) => (l.trim() === anchor ? i : -1)).filter((i) => i !== -1);
+  assert.equal(at.length, 1, `expected exactly one line: ${anchor}`);
+  const indent = lines[at[0]].match(/^\s*/)[0];
+  lines.splice(at[0] + 1, 0, `${indent}${line}`);
+  return lines.join('\n');
+}
+
+/** Replaces the one occurrence of `from` in deploy.yml with `to`. */
+function replaceOnce(from, to) {
+  assert.equal(deployYml.split(from).length, 2, `expected exactly one occurrence of: ${from}`);
+  return deployYml.replace(from, () => to);
+}
+
+const PUBLISH_PREV_REV = 'echo "prev_revision=$PREV_REV" >> "$GITHUB_OUTPUT"';
+const PUBLISH_RELEASE_EXISTS = 'echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"';
+const PUBLISH_REFUSAL = 'echo "rollback_refusal=$ROLLBACK_REFUSAL" >> "$GITHUB_OUTPUT"';
+const PUBLISH_RESOLVED = 'cat "$RESOLVED" >> "$GITHUB_OUTPUT"';
+
+const STATUS_CMD = 'helm status gambit > /dev/null 2> "$STATUS_ERR" || STATUS_RC=$?';
+const LIST_CMD = `helm list --all --filter '^gambit$' -o json > "$LIST_OUT" 2> "$LIST_ERR" || LIST_RC=$?`;
+const LIST_ARGS_BUILD = 'LIST_ARGS=(--list-exit "$LIST_RC" --list-stdout "$LIST_OUT")';
+const CLASSIFIER = 'if node scripts/release-existence.mjs classify --release gambit --status-exit "$STATUS_RC" ' +
+  '--status-stderr "$STATUS_ERR" "${LIST_ARGS[@]}" > "$EXISTENCE_FILE" 2>> "$LIST_ERR"; then';
+
+const outputRule = '"$GITHUB_OUTPUT" may only be referenced in its allowed forms [';
+const referenceRule = (file) => `"$${file}" may only be referenced in its allowed forms [`;
+const writeRule = (name) => `${name} may only be written in its allowed forms [`;
+
+/** Asserts some problem contains every one of `parts`. */
+function assertProblem(problems, parts) {
+  assert.ok(
+    problems.some((p) => parts.every((part) => p.includes(part))),
+    `no problem containing all of [${parts.join(' ; ')}]: ${problems.join(' | ')}`,
+  );
+}
+
+test('the real deploy.yml passes gates 10 and 11 with the pinned publications and producer inputs', () => {
+  assert.deepEqual(gates(deployYml), []);
+});
+
+test('the real deploy.yml with CRLF line endings passes gates 10 and 11', () => {
+  assert.deepEqual(gates(deployYml.replace(/\n/g, '\r\n')), []);
+});
+
+// Publications: every reference to GITHUB_OUTPUT, in any spelling, must be one exact allowed line.
+for (const [anchor, inserted] of [
+  [PUBLISH_PREV_REV, 'echo "prev_revision=5" >> "${GITHUB_OUTPUT}"'],
+  [PUBLISH_RELEASE_EXISTS, 'echo "release_exists=false" >> $GITHUB_OUTPUT'],
+  [PUBLISH_RESOLVED, 'cat "$HISTORY_FILE" >> "$GITHUB_OUTPUT"'],
+]) {
+  test(`rejects an unlisted step-output publication: ${inserted}`, () => {
+    assertProblem(gates(insertAfter(anchor, inserted)), [outputRule, `offending line(s): [${inserted}]`, anchor]);
+  });
+}
+
+test(`rejects a duplicated allowed publication: ${PUBLISH_REFUSAL}`, () => {
+  assertProblem(gates(insertAfter(PUBLISH_REFUSAL, PUBLISH_REFUSAL)), [
+    outputRule,
+    `\`${PUBLISH_REFUSAL}\` must appear exactly once, found 2`,
+  ]);
+});
+
+// The classifier invocation is one exact line (its continuation joined).
+for (const [from, to] of [
+  ['--status-stderr "$STATUS_ERR"', '--status-stderr "$LIST_ERR"'],
+  [' "${LIST_ARGS[@]}"', ''],
+]) {
+  test(`rejects a changed classifier invocation: ${JSON.stringify(from)} -> ${JSON.stringify(to)}`, () => {
+    const mutated = CLASSIFIER.replace(from, to);
+    assertProblem(gates(replaceOnce(from, to)), [referenceRule('EXISTENCE_FILE'), `offending line(s): [${mutated}]`, CLASSIFIER]);
+  });
+}
+
+test('rejects --list-exit 0 in the LIST_ARGS array', () => {
+  const mutated = LIST_ARGS_BUILD.replace('--list-exit "$LIST_RC"', '--list-exit 0');
+  assertProblem(gates(replaceOnce(LIST_ARGS_BUILD, mutated)), [writeRule('LIST_ARGS'), `offending write site line(s): [${mutated}]`, LIST_ARGS_BUILD]);
+});
+
+test('rejects an extra STATUS_RC write: STATUS_RC=1', () => {
+  assertProblem(gates(insertAfter(STATUS_CMD, 'STATUS_RC=1')), [writeRule('STATUS_RC'), 'offending write site line(s): [STATUS_RC=1]', STATUS_CMD]);
+});
+
+test('rejects LIST_RC=0 inserted after the list call', () => {
+  assertProblem(gates(insertAfter(LIST_CMD, 'LIST_RC=0')), [writeRule('LIST_RC'), '`LIST_RC=0` must appear exactly 1 time(s), found 2']);
+});
+
+test('rejects LIST_ARGS=() inserted after the array build', () => {
+  assertProblem(gates(insertAfter(LIST_ARGS_BUILD, 'LIST_ARGS=()')), [writeRule('LIST_ARGS'), '`LIST_ARGS=()` must appear exactly 1 time(s), found 2']);
+});
+
+test('rejects a changed inventory classifier input: --label-exit 0', () => {
+  const problems = gates(replaceOnce('--label-exit "$INV_LABEL_RC"', '--label-exit 0'));
+  assertProblem(problems, [referenceRule('INV_VERDICT'), '--label-exit 0 --label-stdout "$INV_LABELLED"']);
+});
+
+// Exit-code resets: each `X=0` must directly precede its exact capture `... || X=$?`. A reset after
+// the capture erases a failed query's exit code, and the classifier then reads `unknown` as `empty`
+// (or a failed `helm status` / `helm list` as success).
+const DISCOVERY = 'kubectl api-resources --api-group=external-secrets.io -o name > "$INV_API" 2> "$INV_ERR" || INV_API_RC=$?';
+const LABELLED = 'kubectl get "$INV_KINDS" -l app.kubernetes.io/instance=gambit -o name > "$INV_LABELLED" 2>> "$INV_ERR" || INV_LABEL_RC=$?';
+const ANNOTATED = `kubectl get "$INV_KINDS" -o jsonpath='{range .items[*]}{.kind}/{.metadata.name}{"\\t"}{.metadata.annotations.meta\\.helm\\.sh/release-name}{"\\n"}{end}' > "$INV_ANNOTATED" 2>> "$INV_ERR" || INV_ANNOTATION_RC=$?`;
+const INVENTORY_CLASSIFIER_LAST = '--annotation-exit "$INV_ANNOTATION_RC" --annotation-stdout "$INV_ANNOTATED" > "$INV_VERDICT" 2>> "$INV_ERR"; then';
+const resetRule = (name) => `the reset \`${name}=0\` must directly precede its capture`;
+
+/** Moves the one line whose trimmed text is `line` to just after the one line `anchor`. */
+function moveAfter(line, anchor) {
+  const lines = deployYml.split('\n');
+  const at = lines.map((l, i) => (l.trim() === line ? i : -1)).filter((i) => i !== -1);
+  assert.equal(at.length, 1, `expected exactly one line: ${line}`);
+  lines.splice(at[0], 1);
+  return insertAfter(anchor, line, lines.join('\n'));
+}
+
+for (const [name, capture] of [
+  ['INV_ANNOTATION_RC', ANNOTATED],
+  ['INV_LABEL_RC', LABELLED],
+  ['INV_API_RC', DISCOVERY],
+  ['STATUS_RC', STATUS_CMD],
+  ['LIST_RC', LIST_CMD],
+]) {
+  test(`rejects ${name}=0 moved after its capture`, () => {
+    assertProblem(gates(moveAfter(`${name}=0`, capture)), [`producer input ${name}`, resetRule(name), capture]);
+  });
+}
+
+test('rejects an extra INV_ANNOTATION_RC=0 inserted after the inventory classifier call', () => {
+  const problems = gates(insertAfter(INVENTORY_CLASSIFIER_LAST, 'INV_ANNOTATION_RC=0'));
+  assertProblem(problems, [writeRule('INV_ANNOTATION_RC'), '`INV_ANNOTATION_RC=0` must appear exactly 1 time(s), found 2']);
+  assertProblem(problems, [resetRule('INV_ANNOTATION_RC'), 'found: `INVENTORY=$(sed']);
+});
+
+test('rejects a changed jsonpath capture line: dropped || INV_ANNOTATION_RC=$?', () => {
+  const mutated = ANNOTATED.replace(' || INV_ANNOTATION_RC=$?', '');
+  const problems = gates(replaceOnce(ANNOTATED, mutated));
+  assertProblem(problems, [resetRule('INV_ANNOTATION_RC'), ANNOTATED, `found: \`${mutated}\``]);
+  assertProblem(problems, [writeRule('INV_ANNOTATION_RC'), `\`${ANNOTATED}\` must appear exactly 1 time(s), found 0`]);
+});
+
+// Raw classifier payload files: the files the classifiers read (STATUS_ERR, LIST_OUT, INV_API,
+// INV_LABELLED, INV_ANNOTATED) may be referenced only by their mktemp, their capture line, the
+// classifier invocation and the workflow's own fixed reads. Truncating, rebinding or rewriting a
+// capture changes only the evidence the classifier reads, not the live objects: with the other
+// channels empty, an erased annotation capture classifies `empty` instead of `occupied` (see the
+// characterisation tests below), and a contradictory `helm list` rewritten to `[]` turns `unknown`
+// into `absent`. Harmful adoption and later deletion additionally need a live object matching the
+// rendered identity with compatible Helm ownership metadata; label-only objects, and blank or
+// nonzero-exit captures that classify `unknown`, are rejected here by the reference contract, not as
+// proven adoption paths.
+const PAYLOAD_CAPTURES = {
+  STATUS_ERR: STATUS_CMD,
+  LIST_OUT: LIST_CMD,
+  INV_API: DISCOVERY,
+  INV_LABELLED: LABELLED,
+  INV_ANNOTATED: ANNOTATED,
+};
+
+for (const [file, capture] of Object.entries(PAYLOAD_CAPTURES)) {
+  test(`rejects truncation of "$${file}" right after its capture: : > "$${file}"`, () => {
+    const inserted = `: > "$${file}"`;
+    assertProblem(gates(insertAfter(capture, inserted)), [referenceRule(file), `offending line(s): [${inserted}]`]);
+  });
+
+  test(`rejects a second ${file}=$(mktemp) right after its capture`, () => {
+    assertProblem(gates(insertAfter(capture, `${file}=$(mktemp)`)), [
+      referenceRule(file),
+      `\`${file}=$(mktemp)\` must appear exactly once, found 2`,
+    ]);
+  });
+}
+
+const DISCOVERY_CONDITIONAL = `if [ "$INV_API_RC" = 0 ] && grep -qx 'externalsecrets.external-secrets.io' "$INV_API"; then`;
+
+/** Inserts `line` right before the one line whose trimmed text is `anchor`, at the same indentation. */
+function insertBefore(anchor, line, text = deployYml) {
+  const lines = text.split('\n');
+  const at = lines.map((l, i) => (l.trim() === anchor ? i : -1)).filter((i) => i !== -1);
+  assert.equal(at.length, 1, `expected exactly one line: ${anchor}`);
+  const indent = lines[at[0]].match(/^\s*/)[0];
+  lines.splice(at[0], 0, `${indent}${line}`);
+  return lines.join('\n');
+}
+
+test('rejects truncation of "$INV_API" inserted before the discovery conditional', () => {
+  const inserted = ': > "$INV_API"';
+  assertProblem(gates(insertBefore(DISCOVERY_CONDITIONAL, inserted)), [referenceRule('INV_API'), `offending line(s): [${inserted}]`]);
+});
+
+test('rejects truncation of "$INV_API" after the discovery conditional, before the inventory classifier', () => {
+  const inserted = ': > "$INV_API"';
+  assertProblem(gates(insertBefore('INV_LABEL_RC=0', inserted)), [referenceRule('INV_API'), `offending line(s): [${inserted}]`]);
+});
+
+test(`rejects rewriting the helm list output: printf '[]\\n' > "$LIST_OUT"`, () => {
+  const inserted = String.raw`printf '[]\n' > "$LIST_OUT"`;
+  assertProblem(gates(insertAfter(LIST_CMD, inserted)), [referenceRule('LIST_OUT'), `offending line(s): [${inserted}]`]);
+});
+
+test('rejects an ordinary alias of a payload file: ALIAS="$INV_ANNOTATED"', () => {
+  const inserted = 'ALIAS="$INV_ANNOTATED"';
+  assertProblem(gates(insertAfter(ANNOTATED, inserted)), [referenceRule('INV_ANNOTATED'), `offending line(s): [${inserted}]`]);
+});
+
+test('rejects removing the sole INV_LABELLED=$(mktemp)', () => {
+  assertProblem(gates(replaceOnce('INV_LABELLED=$(mktemp)\n', '')), [
+    referenceRule('INV_LABELLED'),
+    '`INV_LABELLED=$(mktemp)` must appear exactly once, found 0',
+  ]);
+});
+
+/** The index of the one line whose trimmed text is `anchor`; fails unless there is exactly one. */
+function uniqueLineIndex(lines, anchor) {
+  const at = lines.map((l, i) => (l.trim() === anchor ? i : -1)).filter((i) => i !== -1);
+  assert.equal(at.length, 1, `expected exactly one line: ${anchor}`);
+  return at[0];
+}
+
+test('the continuation mutation refuses a missing or duplicated anchor instead of mutating another line', () => {
+  const lines = deployYml.split('\n');
+  const at = uniqueLineIndex(lines, ANNOTATED);
+  const missing = lines.filter((_, i) => i !== at);
+  const duplicated = [...lines.slice(0, at + 1), lines[at], ...lines.slice(at + 1)];
+  assert.throws(() => uniqueLineIndex(missing, ANNOTATED), /expected exactly one line/);
+  assert.throws(() => uniqueLineIndex(duplicated, ANNOTATED), /expected exactly one line/);
+});
+
+test('rejects a truncation whose file name is split across a line continuation', () => {
+  const lines = deployYml.split('\n');
+  const at = uniqueLineIndex(lines, ANNOTATED);
+  const indent = lines[at].match(/^\s*/)[0];
+  lines.splice(at + 1, 0, `${indent}: > "$INV_ANNOT\\`, `${indent}ATED"`);
+  assertProblem(gates(lines.join('\n')), [referenceRule('INV_ANNOTATED'), 'offending line(s): [: > "$INV_ANNOTATED"]']);
+});
+
+test('INV_ANNOTATED_OLD is another variable: printf x > "$INV_ANNOTATED_OLD" adds no payload-reference problem', () => {
+  const problems = gates(insertAfter(ANNOTATED, 'printf x > "$INV_ANNOTATED_OLD"'));
+  assert.ok(!problems.some((p) => p.includes(referenceRule('INV_ANNOTATED'))), problems.join(' | '));
+  assert.deepEqual(problems, []);
+});
+
+// Behavioural characterisation, through the real library: why the payload files must not be truncated.
+const annotationOnly = (overrides) => classifyOrphanInventory({
+  release: 'gambit',
+  kinds: BASE_INVENTORY_KINDS.join(','),
+  apiResourcesExit: 0,
+  apiResourcesStdout: '',
+  labelExit: 0,
+  labelStdout: '',
+  annotationExit: 0,
+  annotationStdout: 'ConfigMap/gambit-config\tgambit\n',
+  ...overrides,
+});
+
+test('an annotation-only orphan classifies occupied', () => {
+  assert.equal(annotationOnly({}).state, 'occupied');
+});
+
+test('the same inventory with its annotation output truncated classifies empty', () => {
+  assert.equal(annotationOnly({ annotationStdout: '' }).state, 'empty');
+});
+
+test('a failed annotation query with empty output classifies unknown', () => {
+  assert.equal(annotationOnly({ annotationExit: 1, annotationStdout: '' }).state, 'unknown');
+});

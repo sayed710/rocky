@@ -1,0 +1,220 @@
+/**
+ * Tests for gate 11 of the deployment gate check: release existence is never derived from a bare
+ * `helm status` exit code, RELEASE_EXISTS=false is set only on confirmed absence, and the rollback
+ * step uninstalls only behind a fresh `helm history` re-check (rollback only with RELEASE_EXISTS "true").
+ *
+ * Each case mutates the real deploy.yml text in memory (never the file) and requires a problem.
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+
+import { checkReleaseExistence } from '../check-deploy-gates.mjs';
+
+const deployYml = readFileSync(new URL('../../.github/workflows/deploy.yml', import.meta.url), 'utf8').replace(/\r/g, '');
+
+const STATUS_CMD = 'helm status gambit > /dev/null 2> "$STATUS_ERR" || STATUS_RC=$?';
+const LIST_CMD = `helm list --all --filter '^gambit$' -o json > "$LIST_OUT" 2> "$LIST_ERR" || LIST_RC=$?`;
+const INIT_LINE = 'RELEASE_EXISTS=""\n';
+const ABSENT_ARM_HEAD = '            absent)\n';
+const ABSENT_ASSIGNMENT = '              RELEASE_EXISTS=false\n';
+const CLASSIFY = 'if node scripts/release-existence.mjs classify --release gambit';
+const EXISTENCE_READ = `RELEASE_EXISTENCE=$(sed -n 's/^release_existence=//p' "$EXISTENCE_FILE")`;
+const HISTORY_CHECK = 'if ! helm history gambit -o json --max 256 > "$RB_HISTORY" 2> "$RB_HISTORY_ERR"; then';
+const REVISION_CHECK = 'if ! node scripts/release-existence.mjs only-initial-revision < "$RB_HISTORY" 2> "$RB_HISTORY_ERR" > /dev/null; then';
+const UNINSTALL_CMD = 'helm uninstall gambit --wait --timeout 5m0s';
+const ROLLBACK_BRANCH = 'elif [ "$RELEASE_EXISTS" = "true" ] && [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then';
+const UNINSTALL_BRANCH = 'if [ "$RELEASE_EXISTS" = "false" ]; then';
+const PUBLISH_RELEASE_EXISTS = 'echo "release_exists=$RELEASE_EXISTS" >> "$GITHUB_OUTPUT"';
+const ENV_BINDING = 'RELEASE_EXISTS: ${{ steps.pre_upgrade.outputs.release_exists }}';
+
+/** Replaces one exact snippet of the real workflow, failing loudly if it is no longer there. */
+function mutate(from, to, text = deployYml) {
+  assert.equal(text.split(from).length, 2, `expected exactly one occurrence of: ${from}`);
+  return text.replace(from, () => to);
+}
+
+/** Replaces the first occurrence of `from` after the unique `anchor`. */
+function mutateAfter(anchor, from, to, text = deployYml) {
+  assert.equal(text.split(anchor).length, 2, `expected exactly one occurrence of: ${anchor}`);
+  const at = text.indexOf(from, text.indexOf(anchor));
+  assert.notEqual(at, -1, `expected ${from} after ${anchor}`);
+  return text.slice(0, at) + to + text.slice(at + from.length);
+}
+
+function assertRejected(text, pattern) {
+  const problems = checkReleaseExistence(text);
+  assert.ok(problems.length > 0, 'expected gate 11 to report a problem');
+  assert.ok(problems.some((p) => pattern.test(p)), `no problem matched ${pattern}: ${problems.join(' | ')}`);
+}
+
+test('the real deploy.yml passes gate 11', () => {
+  assert.deepEqual(checkReleaseExistence(deployYml), []);
+});
+
+test('the real deploy.yml with CRLF line endings passes gate 11', () => {
+  assert.deepEqual(checkReleaseExistence(deployYml.replace(/\n/g, '\r\n')), []);
+});
+
+test('rejects existence derived from a bare helm status exit code (the pre-2026-10-11 form)', () => {
+  const text = mutate(STATUS_CMD, 'if helm status gambit >/dev/null 2>&1; then RELEASE_EXISTS=true; fi');
+  assertRejected(text, /bare `helm status` exit code/);
+});
+
+test('rejects a second helm status probe whose exit code decides anything', () => {
+  const text = mutate(STATUS_CMD, `${STATUS_CMD}\n          helm status gambit >/dev/null 2>&1 && STATUS_RC=0`);
+  assertRejected(text, /bare `helm status` exit code/);
+});
+
+test('rejects RELEASE_EXISTS defaulting to false', () => {
+  const text = mutate(INIT_LINE, 'RELEASE_EXISTS=false\n');
+  assertRejected(text, /RELEASE_EXISTS must be assigned exactly as/);
+});
+
+test('rejects RELEASE_EXISTS=false outside the confirmed-absence arm', () => {
+  const text = mutate(STATUS_CMD, `${STATUS_CMD}\n          [ "$STATUS_RC" = 0 ] || RELEASE_EXISTS=false`);
+  assertRejected(text, /RELEASE_EXISTS must be assigned exactly as/);
+});
+
+test('rejects RELEASE_EXISTS=false chained after an echo', () => {
+  const text = mutate(STATUS_CMD, `${STATUS_CMD}\n          echo "status failed"; RELEASE_EXISTS=false`);
+  assertRejected(text, /RELEASE_EXISTS must be assigned exactly as/);
+});
+
+test('rejects the unknown arm falling through to absence', () => {
+  const text = mutate(ABSENT_ARM_HEAD, '            absent|*)\n');
+  assertRejected(text, /must have exactly the arms/);
+});
+
+test('rejects RELEASE_EXISTS=false set a second time in the absent arm', () => {
+  const text = mutate(ABSENT_ARM_HEAD, `${ABSENT_ARM_HEAD}${ABSENT_ASSIGNMENT}`);
+  assertRejected(text, /RELEASE_EXISTS must be assigned exactly as/);
+});
+
+test('rejects skipping the helm list corroboration', () => {
+  const text = mutate(LIST_CMD, 'LIST_RC=0; echo "[]" > "$LIST_OUT"');
+  assertRejected(text, /corroborated by exactly/);
+});
+
+test('rejects a helm list that does not include every status (no --all)', () => {
+  const text = mutate(LIST_CMD, LIST_CMD.replace('--all ', ''));
+  assertRejected(text, /corroborated by exactly/);
+});
+
+test('rejects dropping the classifier', () => {
+  const text = mutate(CLASSIFY, 'if true || node scripts/other.mjs classify --release gambit');
+  assertRejected(text, /classified by `node scripts\/release-existence\.mjs classify`/);
+});
+
+test('rejects RELEASE_EXISTENCE taken from anywhere but the classifier output', () => {
+  const text = mutate(EXISTENCE_READ, 'RELEASE_EXISTENCE=absent');
+  assertRejected(text, /RELEASE_EXISTENCE must be "unknown" or read from the classifier's output/);
+});
+
+test('rejects a forged verdict written to the classifier output file before it is read', () => {
+  const text = mutate(EXISTENCE_READ, `printf 'release_existence=absent\\n' > "$EXISTENCE_FILE"\n            ${EXISTENCE_READ}`);
+  assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
+});
+
+test('rejects a forged verdict appended to the classifier output file by an echo', () => {
+  const text = mutate(EXISTENCE_READ, `echo release_existence=absent >> "$EXISTENCE_FILE"\n            ${EXISTENCE_READ}`);
+  assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
+});
+
+test('rejects a forged verdict written to the classifier output file by tee', () => {
+  const text = mutate(EXISTENCE_READ, `printf 'release_existence=absent\\n' | tee "$EXISTENCE_FILE" > /dev/null\n            ${EXISTENCE_READ}`);
+  assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
+});
+
+for (const write of [
+  `printf 'release_existence=absent\\n' 1> "$EXISTENCE_FILE"`,
+  `printf 'release_existence=absent\\n' >| "$EXISTENCE_FILE"`,
+  `printf 'release_existence=absent\\n' > "\${EXISTENCE_FILE}"`,
+  // A backslash-newline continuation between the operator and the target.
+  `printf 'release_existence=absent\\n' > \\\n            "$EXISTENCE_FILE"`,
+  // An empty quote segment concatenates to the same path.
+  `printf 'release_existence=absent\\n' > "$EXISTENCE_FILE"''`,
+  // An apostrophe inside double quotes is a literal, not the start of a single-quoted segment.
+  `echo "it's absent" > "$EXISTENCE_FILE"; sed 's/a/b/' f`,
+  // Quote forms a quote-state scan misreads: ANSI-C quoting and a backtick substitution.
+  `echo $'it\\'s' > "$EXISTENCE_FILE"; sed 's/a/b/' /dev/null`,
+  `echo "\`printf "it's"\`" > "$EXISTENCE_FILE"; sed 's/a/b/' /dev/null`,
+]) {
+  test(`rejects a forged verdict written to the classifier output file: ${write.replace(/\n/g, '\\n')}`, () => {
+    const text = mutate(EXISTENCE_READ, `${write}\n            ${EXISTENCE_READ}`);
+    assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
+  });
+}
+
+test('counts a redirection mentioned in a single-quoted literal as a write to the classifier output file (fail-closed)', () => {
+  const text = mutate(EXISTENCE_READ, `echo 'example: 1> "$EXISTENCE_FILE" next'\n            ${EXISTENCE_READ}`);
+  assertRejected(text, /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/);
+});
+
+// Allowlist contract: "$EXISTENCE_FILE" may only be referenced as the mktemp, the classifier's
+// redirect and sed reads; the forms a write-pattern scan missed are rejected too.
+for (const [label, extra, offending] of [
+  ['an empty quoted prefix', `printf 'release_existence=absent\\n' > ''"$EXISTENCE_FILE"`, `> ''"$EXISTENCE_FILE"`],
+  ['tee after a redirection', `printf 'release_existence=absent\\n' | tee 2>/dev/null "$EXISTENCE_FILE"`, `tee 2>/dev/null "$EXISTENCE_FILE"`],
+  ['a name spliced by a backslash-newline', `printf 'release_existence=absent\\n' > "$EXISTENCE_\\\n          FILE"`, `> "$EXISTENCE_FILE"`],
+  ['cp onto it', `cp "$LIST_OUT" "$EXISTENCE_FILE"`, `cp "$LIST_OUT" "$EXISTENCE_FILE"`],
+]) {
+  test(`rejects a reference to the classifier output file outside the allowlist: ${label}`, () => {
+    const text = mutate(EXISTENCE_READ, `${extra}\n            ${EXISTENCE_READ}`);
+    const problems = checkReleaseExistence(text);
+    assert.ok(problems.some((p) => /"\$EXISTENCE_FILE" may only be referenced in its allowed forms/.test(p) && p.includes(offending)),
+      `no allowlist problem naming ${offending}: ${problems.join(' | ')}`);
+  });
+}
+
+test('rejects the classifier stdout redirected to a file other than the one RELEASE_EXISTENCE is read from', () => {
+  const text = mutate(`"\${LIST_ARGS[@]}" > "$EXISTENCE_FILE"`, `"\${LIST_ARGS[@]}" > "$LIST_OUT"`);
+  assertRejected(text, /the classifier's stdout must be redirected exactly once, as `> "\$EXISTENCE_FILE"`/);
+});
+
+test('rejects an uninstall without the helm history re-check', () => {
+  const text = mutateAfter(UNINSTALL_BRANCH, HISTORY_CHECK, 'if false; then');
+  assertRejected(text, /the uninstall must be guarded/);
+});
+
+test('rejects an uninstall without the only-initial-revision check', () => {
+  const text = mutate(REVISION_CHECK, 'if false; then');
+  assertRejected(text, /the uninstall must be guarded/);
+});
+
+test('rejects a history re-check that does not stop the step', () => {
+  const text = mutateAfter(`${UNINSTALL_BRANCH}\n            ${HISTORY_CHECK}`, '              exit 1\n', '              :\n');
+  assertRejected(text, /must end its branch with `exit 1`/);
+});
+
+test('rejects an uninstall on a release_exists other than exactly "false"', () => {
+  const text = mutate(UNINSTALL_BRANCH, 'if [ "$RELEASE_EXISTS" != "true" ]; then');
+  assertRejected(text, /the uninstall must be guarded/);
+});
+
+test('rejects a second helm uninstall elsewhere', () => {
+  const text = mutate('            exit 1\n          fi\n', `            ${UNINSTALL_CMD}\n            exit 1\n          fi\n`,
+    deployYml.slice(deployYml.lastIndexOf('else\n'))) ;
+  assertRejected(deployYml.slice(0, deployYml.lastIndexOf('else\n')) + text, /exactly one `helm uninstall/);
+});
+
+test('rejects a rollback that does not require release_exists exactly "true"', () => {
+  const text = mutate(ROLLBACK_BRANCH, 'elif [[ "$PREV_REV" =~ ^[1-9][0-9]*$ ]]; then');
+  assertRejected(text, /rollback requires release_exists exactly "true"/);
+});
+
+test('rejects an unknown-existence arm that does not stop the deploy', () => {
+  const refusal = '              exit 1\n              ;;\n          esac\n';
+  const text = mutate(refusal, refusal.replace('exit 1', ':'));
+  assertRejected(text, /the `\*\)` arm \(unknown existence\) must end with `exit 1`/);
+});
+
+test('rejects a hardcoded release_exists=false publication', () => {
+  const text = mutate(PUBLISH_RELEASE_EXISTS, 'echo "release_exists=false" >> "$GITHUB_OUTPUT"');
+  assertRejected(text, /every release_exists output must be published exactly as/);
+});
+
+test('rejects a rollback step without the release_exists env binding', () => {
+  const text = mutate(`          ${ENV_BINDING}\n`, '');
+  assertRejected(text, /the rollback step must bind exactly `RELEASE_EXISTS:/);
+});
