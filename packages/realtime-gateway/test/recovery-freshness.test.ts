@@ -1467,7 +1467,7 @@ test('U1: join an unknown game id is rejected unknown_game and subscriberCount r
   assert.equal(reject.code, 'unknown_game');
 });
 
-test('H1: spectator J1 paused on cold edge before load reaches rev N+1 after J2 completes at N and writer commits N+1', async () => {
+test('H1: coalesced hydration, commit BEFORE J1 joins', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -1478,46 +1478,46 @@ test('H1: spectator J1 paused on cold edge before load reaches rev N+1 after J2 
   const gameId = 'game-h1';
   await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
 
-  // Arm existsGate; spectator J1 joins E; wait for the gate.
+  // Arm nextLoadGate (pauses AFTER the inner snapshot).
   const gate = createGate();
-  deferredLog.existsGate = gate;
+  deferredLog.nextLoadGate = gate;
 
-  const j1 = new InMemoryConnection('j1');
-  gateway.handleConnection(j1);
-  void deferredLog.exists(gameId).then(() => j1.deliver({ t: 'join', gameId }));
-  await awaitGate(gate, 'J1 exists');
-
-  // A second spectator J2 joins E and completes (E is now resident at rev N = 0).
+  // Spectator J2 joins E; wait until the gate is entered (E's hydration snapshot is fixed at rev N).
   const j2 = new InMemoryConnection('j2');
   gateway.handleConnection(j2);
   j2.deliver({ t: 'join', gameId });
-  await flush();
-  assert.ok(j2.last('joined'));
-  assert.equal(j2.last('joined')!.state.stateRevision, 0);
+  await awaitGate(gate, 'J2 hydration snapshot');
 
-  // The writer commits one move (rev N+1 = 1; E's resident stays at N = 0).
+  // The writer commits one move (rev N+1) NOW, before J1 exists.
   await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
 
-  // Release J1.
+  // Then spectator J1 joins E (its buffer starts after that commit; its ensureLoaded coalesces onto J2's gated hydration).
+  const j1 = new InMemoryConnection('j1');
+  gateway.handleConnection(j1);
+  j1.deliver({ t: 'join', gameId });
+
+  // Release the gate; drain.
   gate.release.resolve();
   await flush();
 
-  // J1 must end with stateRevision N+1: its joined.state.stateRevision === N+1,
-  // or joined N followed by exactly one move N+1. Assert the final position via the last frames.
+  // Expect: J1's joined.state.stateRevision === N+1 (it must take a fresh recovery read, because the
+  // resident record's load began before J1's buffer), and J1 receives no move N+1 frame afterwards
+  // (it is already in the snapshot). J2 may get joined N followed by move N+1.
   const j1Joined = j1.last('joined');
   assert.ok(j1Joined, 'J1 must have received joined');
+  assert.equal(j1Joined.state.stateRevision, 1, 'J1 must take fresh recovery read at rev N+1');
+  assert.equal(j1Joined.state.ply, 1);
   const j1Moves = j1.sent.filter((m) => m.t === 'move');
-  const finalRev = j1Joined.state.stateRevision === 1 ? 1 : (j1Moves.length === 1 ? j1Moves[0]!.stateRevision : 0);
-  assert.equal(finalRev, 1, 'J1 must reach stateRevision 1');
-  if (j1Joined.state.stateRevision === 1) {
-    assert.equal(j1Joined.state.ply, 1);
-  } else {
-    assert.equal(j1Moves.length, 1);
-    assert.equal(j1Moves[0]!.ply, 1);
-  }
+  assert.equal(j1Moves.length, 0, 'J1 receives no move N+1 frame afterwards (already in snapshot)');
+
+  const j2Joined = j2.last('joined');
+  assert.ok(j2Joined, 'J2 must have received joined');
+  const j2Moves = j2.sent.filter((m) => m.t === 'move');
+  const j2Rev = j2Joined.state.stateRevision === 1 ? 1 : (j2Moves.length === 1 ? j2Moves[0]!.stateRevision : 0);
+  assert.equal(j2Rev, 1, 'J2 must reach stateRevision 1');
 });
 
-test('H2 (coalescing): cold edge coalescing join reaches rev N+1 when writer commits after snapshot', async () => {
+test('H2: coalesced hydration, commit BEFORE resume', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -1528,40 +1528,43 @@ test('H2 (coalescing): cold edge coalescing join reaches rev N+1 when writer com
   const gameId = 'game-h2';
   await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
 
-  // Arm nextLoadGate (after-snapshot) and let J2 join first so its hydration load is gated holding a snapshot at rev N.
+  // An already-joined spectator R on E.
+  const r = new InMemoryConnection('r');
+  gateway.handleConnection(r);
+  r.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(r.last('joined'));
+  assert.equal(r.last('joined')!.state.stateRevision, 0);
+
+  // E then evicted so the next request hydrates cold.
+  edge.evict(gameId);
+  assert.equal(edge.has(gameId), false);
+
+  // Arm nextLoadGate.
   const gate = createGate();
   deferredLog.nextLoadGate = gate;
 
+  // Spectator J2 joins (hydration gated at rev N).
   const j2 = new InMemoryConnection('j2');
   gateway.handleConnection(j2);
   j2.deliver({ t: 'join', gameId });
   await awaitGate(gate, 'J2 hydration snapshot');
 
-  // Then J1 joins (its buffer starts after that snapshot).
-  const j1 = new InMemoryConnection('j1');
-  gateway.handleConnection(j1);
-  j1.deliver({ t: 'join', gameId });
-  await flush();
-
-  // The writer commits rev N+1.
+  // Writer commits N+1.
   await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
 
-  // Release.
+  // R sends resume lastPly 0 (its marker is taken after the gated load began).
+  r.deliver({ t: 'resume', gameId, lastPly: 0 });
+
+  // Release; drain.
   gate.release.resolve();
   await flush();
 
-  // J1 must reach N+1 (joined N+1, or joined N plus move N+1); J2 may get joined N followed by the buffered move N+1.
-  const j1Joined = j1.last('joined');
-  assert.ok(j1Joined, 'J1 must have received joined');
-  const j1Moves = j1.sent.filter((m) => m.t === 'move');
-  const j1Rev = j1Joined.state.stateRevision === 1 ? 1 : (j1Moves.length === 1 ? j1Moves[0]!.stateRevision : 0);
-  assert.equal(j1Rev, 1, 'J1 must reach stateRevision 1');
-
-  const j2Joined = j2.last('joined');
-  assert.ok(j2Joined, 'J2 must have received joined');
-  const j2Moves = j2.sent.filter((m) => m.t === 'move');
-  const j2Rev = j2Joined.state.stateRevision === 1 ? 1 : (j2Moves.length === 1 ? j2Moves[0]!.stateRevision : 0);
-  assert.equal(j2Rev, 1, 'J2 must reach stateRevision 1');
+  // Expect R's resumed.state.stateRevision === N+1.
+  const resumed = r.last('resumed');
+  assert.ok(resumed, 'R must have received resumed');
+  assert.equal(resumed.state.stateRevision, 1, 'R must resume with fresh stateRevision N+1');
+  assert.equal(resumed.state.ply, 1);
 });
 
 test('M1: authority loadMarker and residentLoadedAfter lifecycle', async () => {
@@ -1598,4 +1601,166 @@ test('M1: authority loadMarker and residentLoadedAfter lifecycle', async () => {
   assert.equal(authority.residentLoadedAfter(gameId, beforeMarker), false);
   gate.release.resolve();
   await reloadPromise;
+});
+
+test('L1 delayed draw response: late draw response does not send older state after newer move', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(writer, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-l1';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const black = new InMemoryConnection('black');
+  gateway.handleConnection(black);
+  black.deliver({ t: 'join', gameId, token: 'tok-bob' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+
+  assert.ok(white.last('joined'));
+  assert.ok(black.last('joined'));
+  assert.ok(spec.last('joined'));
+
+  // White sends offerDraw, writer commits rev N (1), router response is held.
+  const gate = createGate();
+  drawGate = gate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(gate, 'draw offer committed');
+
+  // Another command commits and broadcasts a move with rev N+1 (2) through pubsub.
+  white.deliver({ t: 'move', gameId, clientSeq: 1, uci: 'e2e4' });
+  await flush();
+
+  const specMove = spec.last('move');
+  assert.ok(specMove, 'spectator must have received move broadcast');
+  assert.equal(specMove.stateRevision, 2);
+
+  // Release the held draw response (which carried rev 1).
+  gate.release.resolve();
+  await flush();
+
+  // The spectator must NOT receive a state frame with stateRevision N after the move N+1.
+  const moveIndex = spec.sent.indexOf(specMove);
+  const subsequentStates = spec.sent.slice(moveIndex + 1).filter((m) => m.t === 'state');
+  assert.equal(subsequentStates.length, 0, 'spectator must not receive stale state frame after newer move');
+});
+
+test('L2 normal draw offer still delivered: spectator receives state frame with drawOffer set', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const router: CommandRouter = {
+    route: (gameId, userId, cmd) => writer.apply(gameId, userId, cmd),
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(writer, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-l2';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const black = new InMemoryConnection('black');
+  gateway.handleConnection(black);
+  black.deliver({ t: 'join', gameId, token: 'tok-bob' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+
+  white.deliver({ t: 'offerDraw', gameId });
+  await flush();
+
+  const stateMsg = spec.last('state');
+  assert.ok(stateMsg, 'spectator must receive state frame');
+  assert.equal(stateMsg.state.drawOffer, 'w');
+  assert.equal(stateMsg.state.stateRevision, 1);
+});
+
+test('L3 no leak: after all sessions close, observedRevision has no entry for the game', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(writer, pubsub, verifier);
+
+  const gameId = 'game-l3';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+
+  // White offers a draw, sending state to room and populating observedRevision.
+  white.deliver({ t: 'offerDraw', gameId });
+  await flush();
+
+  // Active game has an entry in observedRevision.
+  assert.equal(gateway.observedRevisionFor(gameId), 1);
+
+  // Close all sessions.
+  white.close();
+  spec.close();
+  await flush();
+
+  // Entry is cleaned up.
+  assert.equal(gateway.observedRevisionFor(gameId), undefined);
+
+  // Join buffer only (without a room):
+  const orphanConn = new InMemoryConnection('orphan');
+  gateway.handleConnection(orphanConn);
+  const orphanGameId = 'game-l3-orphan';
+  orphanConn.deliver({ t: 'join', gameId: orphanGameId });
+  // Publish a broadcast while join is pending to populate observedRevision.
+  pubsub.publish(gameChannel(orphanGameId), {
+    t: 'move',
+    gameId: orphanGameId,
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'test',
+    legalMoves: {},
+    clock: { w: 300000, b: 300000 },
+    serverTs: 1000,
+  });
+  assert.equal(gateway.observedRevisionFor(orphanGameId), 1);
+
+  // Close connection before join completes:
+  orphanConn.close();
+  await flush();
+  assert.equal(gateway.observedRevisionFor(orphanGameId), undefined);
 });

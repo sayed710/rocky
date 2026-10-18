@@ -87,6 +87,7 @@ export class RealtimeGateway {
   private readonly rooms = new Map<string, RoomEntry>();
   private readonly loadedGames = new Set<string>();
   private readonly joinBuffers = new Map<string, Set<ServerMessage[]>>();
+  private readonly observedRevision = new Map<string, number>();
   /**
    * Command router: directs game commands to the owning node. Defaults to
    * {@link LocalCommandRouter} (direct authority.apply) for single-node and
@@ -145,6 +146,11 @@ export class RealtimeGateway {
     return this.rooms.has(gameId);
   }
 
+  /** Observed revision for a game (test inspection). */
+  observedRevisionFor(gameId: string): number | undefined {
+    return this.observedRevision.get(gameId);
+  }
+
   private onMessage(session: Session, msg: ClientMessage): void {
     switch (msg.t) {
       case 'join':
@@ -189,7 +195,10 @@ export class RealtimeGateway {
       session.joinBuffers.delete(gameId);
     }
     const buffered: ServerMessage[] = [];
-    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => buffered.push(msg));
+    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => {
+      this.observe(gameId, msg);
+      buffered.push(msg);
+    });
     let set = this.joinBuffers.get(gameId);
     if (!set) {
       set = new Set();
@@ -207,6 +216,9 @@ export class RealtimeGateway {
         currentSet.delete(buffered);
         if (currentSet.size === 0) {
           this.joinBuffers.delete(gameId);
+          if (!this.rooms.has(gameId)) {
+            this.observedRevision.delete(gameId);
+          }
         }
       }
       if (session.joinBuffers.get(gameId) === stop) {
@@ -495,6 +507,10 @@ export class RealtimeGateway {
         this.rooms.delete(gameId);
         this.loadedGames.delete(gameId);
         this.onGameUnloaded?.(gameId);
+        const buffers = this.joinBuffers.get(gameId);
+        if (!buffers || buffers.size === 0) {
+          this.observedRevision.delete(gameId);
+        }
       } else {
         entry.room.broadcastPresence();
       }
@@ -506,17 +522,38 @@ export class RealtimeGateway {
     let entry = this.rooms.get(gameId);
     if (entry) return entry;
     const room = new Room(gameId);
-    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => room.broadcast(msg));
+    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => {
+      this.observe(gameId, msg);
+      room.broadcast(msg);
+    });
     entry = { room, unsubscribe };
     this.rooms.set(gameId, entry);
     return entry;
   }
 
+  private observe(gameId: string, msg: ServerMessage): void {
+    let rev: number | undefined;
+    if (msg.t === 'move' || msg.t === 'ended' || msg.t === 'ready') {
+      rev = msg.stateRevision;
+    } else if (msg.t === 'state') {
+      rev = msg.state.stateRevision;
+    }
+    if (rev !== undefined) {
+      const current = this.observedRevision.get(gameId);
+      if (current === undefined || rev > current) {
+        this.observedRevision.set(gameId, rev);
+      }
+    }
+  }
+
   private sendStateToRoom(gameId: string, state: StateView): void {
+    const highest = this.observedRevision.get(gameId) ?? -1;
+    if (state.stateRevision < highest) return;
     const entry = this.rooms.get(gameId);
     const buffers = this.joinBuffers.get(gameId);
     if (!entry && (!buffers || buffers.size === 0)) return;
     const msg: ServerMessage = { t: 'state', gameId, state };
+    this.observe(gameId, msg);
     if (entry) {
       entry.room.sendAll(msg);
     }
