@@ -548,7 +548,25 @@ export class RealtimeGateway {
 
   private sendStateToRoom(gameId: string, state: StateView): void {
     const highest = this.observedRevision.get(gameId) ?? -1;
-    if (state.stateRevision < highest) return;
+    if (state.stateRevision >= highest) {
+      this.deliverState(gameId, state);
+      return;
+    }
+    void this.authority
+      .readRecovery(gameId, 0)
+      .then((latest) => {
+        const floor = this.observedRevision.get(gameId) ?? -1;
+        if (latest.state.stateRevision >= floor) {
+          this.deliverState(gameId, latest.state);
+        }
+      })
+      .catch(() => {
+        // Best-effort refresh; the command already succeeded and its outcome
+        // reached the commanding client via the routed result path.
+      });
+  }
+
+  private deliverState(gameId: string, state: StateView): void {
     const entry = this.rooms.get(gameId);
     const buffers = this.joinBuffers.get(gameId);
     if (!entry && (!buffers || buffers.size === 0)) return;

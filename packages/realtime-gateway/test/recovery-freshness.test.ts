@@ -1663,10 +1663,13 @@ test('L1 delayed draw response: late draw response does not send older state aft
   gate.release.resolve();
   await flush();
 
-  // The spectator must NOT receive a state frame with stateRevision N after the move N+1.
+  // The spectator must not receive any state frame with revision lower than the move's.
   const moveIndex = spec.sent.indexOf(specMove);
-  const subsequentStates = spec.sent.slice(moveIndex + 1).filter((m) => m.t === 'state');
-  assert.equal(subsequentStates.length, 0, 'spectator must not receive stale state frame after newer move');
+  const subsequentStates = spec.sent.slice(moveIndex + 1).filter((m): m is ServerMessage & { t: 'state' } => m.t === 'state');
+  assert.ok(
+    subsequentStates.every((s) => s.state.stateRevision >= specMove.stateRevision),
+    "no state frame with revision lower than the move's",
+  );
 });
 
 test('L2 normal draw offer still delivered: spectator receives state frame with drawOffer set', async () => {
@@ -1763,4 +1766,78 @@ test('L3 no leak: after all sessions close, observedRevision has no entry for th
   orphanConn.close();
   await flush();
   assert.equal(gateway.observedRevisionFor(orphanGameId), undefined);
+});
+
+test("R1' readiness during a delayed draw response: detached refresh delivers draw offer", async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, store);
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-r1-draw';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: true,
+    source: 'seek',
+    noShowAfterMs: 60_000,
+  });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await flush();
+  assert.ok(white.last('joined'));
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(spec.last('joined'));
+
+  // White sends offerDraw; writer commits offer (rev 2), router response held.
+  const gate = createGate();
+  drawGate = gate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(gate, 'offerDraw committed on writer');
+
+  // Black's seat joins and commits readiness (ready broadcast, rev bumps to 3) while white's offerDraw response is held.
+  const black = new InMemoryConnection('black');
+  gateway.handleConnection(black);
+  black.deliver({ t: 'join', gameId, token: 'tok-bob' });
+  await flush();
+
+  const blackReady = spec.last('ready');
+  assert.ok(blackReady, 'spectator must receive black ready broadcast');
+  assert.equal(blackReady.stateRevision, 3);
+
+  // Release the held draw response.
+  gate.release.resolve();
+  await flush();
+
+  // The spectator must end with a state frame whose drawOffer is 'w' and whose stateRevision is >= the ready broadcast's revision.
+  const lastState = spec.last('state');
+  assert.ok(lastState, 'spectator must receive state frame with draw offer');
+  assert.equal(lastState.state.drawOffer, 'w');
+  assert.ok(
+    lastState.state.stateRevision >= blackReady.stateRevision,
+    `state revision ${lastState.state.stateRevision} must be >= ready broadcast revision ${blackReady.stateRevision}`,
+  );
 });
