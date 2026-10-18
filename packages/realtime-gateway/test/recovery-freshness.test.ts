@@ -14,7 +14,7 @@ import { InMemoryPubSub, gameChannel } from '../src/pubsub';
 import { RealtimeGateway } from '../src/gateway';
 import { InMemoryConnection } from '../src/transport';
 import { FakeTokenVerifier } from './fake-token-verifier';
-import { LocalCommandRouter } from '../src/command-router';
+import { LocalCommandRouter, type CommandRouter } from '../src/command-router';
 import type { Broadcast, ServerMessage } from '../src/protocol';
 
 const TC: TimeControl = { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' };
@@ -1306,4 +1306,160 @@ test('K2 cold resume: exactly 1 load for the resume and correct resumed state/mi
   assert.equal(resumed.state.ply, 2);
   assert.equal(resumed.missed.length, 1);
   assert.equal(resumed.missed[0]!.t, 'move');
+});
+
+test('D1: draw-only command routed to owner does not regress spectator to stale edge state', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, store);
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const router: CommandRouter = {
+    route: (gameId, userId, cmd) => writer.apply(gameId, userId, cmd),
+  };
+  const gateway = new RealtimeGateway(edge, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-d1';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  // Edge is warm at an OLD revision (rev 0).
+  const alice = new InMemoryConnection('alice-conn');
+  gateway.handleConnection(alice);
+  alice.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await flush();
+  assert.ok(alice.last('joined'));
+  assert.equal(edge.getState(gameId).stateRevision, 0);
+
+  // Players move on writer (rev goes 0 -> 2).
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await writer.apply(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
+  assert.equal(writer.getState(gameId).stateRevision, 2);
+  assert.equal(edge.getState(gameId).stateRevision, 0);
+
+  // Spectator joins edge (fresh snapshot rev 2).
+  const spec = new InMemoryConnection('spec-conn');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+  const joined = spec.last('joined');
+  assert.ok(joined);
+  assert.equal(joined.state.stateRevision, 2);
+
+  // White sends offerDraw through edge gateway (routed to writer, which returns result.state with rev 3, drawOffer 'w').
+  alice.deliver({ t: 'offerDraw', gameId });
+  await flush();
+
+  const stateMsg = spec.last('state');
+  assert.ok(stateMsg);
+  assert.equal(stateMsg.state.drawOffer, 'w');
+  assert.ok(stateMsg.state.stateRevision > joined.state.stateRevision);
+  assert.equal(stateMsg.state.stateRevision, 3);
+});
+
+test('B1: abandoned join closes and drops pubsub subscription before gate release', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier());
+
+  const gameId = 'game-b1';
+  await authority.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  // Warm authority slot with an initial spectator.
+  const spec0 = new InMemoryConnection('spec0');
+  gateway.handleConnection(spec0);
+  spec0.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(spec0.last('joined'));
+
+  const preJoinSubs = pubsub.subscriberCount(gameChannel(gameId));
+
+  const gate = createGate();
+  deferredLog.nextLoadGate = gate;
+
+  const conn = new RecordingConnection('abandoned-conn');
+  gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId });
+  await awaitGate(gate, 'join load');
+
+  // While load is gated, the connection closes.
+  conn.close();
+
+  // Assert subscriberCount drops back to pre-join value BEFORE releasing gate.
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), preJoinSubs);
+
+  // Release gate and flush.
+  gate.release.resolve();
+  await flush();
+
+  // No frames delivered to conn after close.
+  assert.equal(conn.sent.length, 0);
+  assert.equal(conn.attemptedAfterClose.length, 0);
+});
+
+test('B2: second join on same session supersedes and stops the first join buffer', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier());
+
+  const gameId = 'game-b2';
+  await authority.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  // Warm authority slot with an initial spectator.
+  const spec0 = new InMemoryConnection('spec0');
+  gateway.handleConnection(spec0);
+  spec0.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(spec0.last('joined'));
+
+  const preJoinSubs = pubsub.subscriberCount(gameChannel(gameId));
+
+  const gate1 = createGate();
+  deferredLog.nextLoadGate = gate1;
+
+  const conn = new InMemoryConnection('superseding-conn');
+  gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId });
+  await awaitGate(gate1, 'first join load');
+
+  // First join buffer is active (+1 subscriber).
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), preJoinSubs + 1);
+
+  // Deliver second join for the same game on the same session.
+  conn.deliver({ t: 'join', gameId });
+
+  // On warm slot, startJoinBuffer runs synchronously, stopping the first buffer and starting the second.
+  // Assert only one extra subscriber exists before releasing gate1.
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), preJoinSubs + 1);
+
+  gate1.release.resolve();
+  await flush();
+});
+
+test('U1: join an unknown game id rejects unknown_game without subscribing to pubsub at any point', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => 1000, store);
+  const gateway = new RealtimeGateway(authority, pubsub, new FakeTokenVerifier());
+
+  const unknownId = 'game-unknown-u1';
+  const conn = new InMemoryConnection('unknown-conn');
+  gateway.handleConnection(conn);
+
+  conn.deliver({ t: 'join', gameId: unknownId });
+
+  // Checked right after deliver (synchronously):
+  assert.equal(pubsub.subscriberCount(gameChannel(unknownId)), 0);
+
+  await flush();
+
+  // Checked after drain:
+  assert.equal(pubsub.subscriberCount(gameChannel(unknownId)), 0);
+  assert.equal(conn.last('joined'), undefined);
+  const reject = conn.last('reject');
+  assert.ok(reject);
+  assert.equal(reject.code, 'unknown_game');
 });

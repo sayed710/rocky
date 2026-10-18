@@ -51,6 +51,7 @@ interface Session {
   readonly conn: Connection;
   readonly games: Map<string, Membership>;
   readonly reads: Map<string, symbol>;
+  readonly joinBuffers: Map<string, () => void>;
 }
 
 interface RoomEntry {
@@ -113,7 +114,7 @@ export class RealtimeGateway {
 
   /** Register a new connection and wire its lifecycle handlers. */
   handleConnection(conn: Connection): void {
-    const session: Session = { conn, games: new Map(), reads: new Map() };
+    const session: Session = { conn, games: new Map(), reads: new Map(), joinBuffers: new Map() };
     this.sessions.set(conn.id, session);
     conn.onMessage((msg) => {
       try {
@@ -174,15 +175,21 @@ export class RealtimeGateway {
   }
 
   /**
-   * Starts buffering pubsub and room state frames before any snapshot is read,
-   * so every commit after the snapshot (which publishes after its append) is
-   * either in the snapshot or in the buffer. Known limitation: on a node with
-   * no existing subscription for the game, the first Redis SUBSCRIBE is
-   * fire-and-forget, so a commit published by another node in that short window
+   * Starts buffering pubsub and room state frames before any snapshot is read
+   * (synchronously on a warm slot; after verifying knows() but before ensureLoaded
+   * on a cold slot). Every commit after the snapshot (which publishes after its
+   * append) is either in the snapshot or in the buffer. Known limitation: on a
+   * node with no existing subscription for the game, the first Redis SUBSCRIBE
+   * is fire-and-forget, so a commit published by another node in that short window
    * can still be missed (pre-existing on main for cold joins; closing it needs
    * a PubSub API change).
    */
-  private startJoinBuffer(gameId: string): { stop: () => void; take: () => ServerMessage[] } {
+  private startJoinBuffer(session: Session, gameId: string): { stop: () => void; take: () => ServerMessage[] } {
+    const prevStop = session.joinBuffers.get(gameId);
+    if (prevStop) {
+      prevStop();
+      session.joinBuffers.delete(gameId);
+    }
     const buffered: ServerMessage[] = [];
     const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => buffered.push(msg));
     let set = this.joinBuffers.get(gameId);
@@ -204,7 +211,12 @@ export class RealtimeGateway {
           this.joinBuffers.delete(gameId);
         }
       }
+      if (session.joinBuffers.get(gameId) === stop) {
+        session.joinBuffers.delete(gameId);
+      }
     };
+
+    session.joinBuffers.set(gameId, stop);
 
     const take = (): ServerMessage[] => {
       stop();
@@ -226,9 +238,22 @@ export class RealtimeGateway {
     const current = (): boolean =>
       this.sessions.get(session.conn.id) === session && session.reads.get(gameId) === intent;
     const cold = !this.authority.hasFresh(gameId); // captured synchronously, before any await
-    const buffer = this.startJoinBuffer(gameId);
+    let buffer: { stop: () => void; take: () => ServerMessage[] } | undefined;
+    if (!cold) {
+      buffer = this.startJoinBuffer(session, gameId);
+    }
     void (async () => {
       try {
+        if (cold) {
+          if (!(await this.authority.knows(gameId))) {
+            if (current()) {
+              this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+            }
+            return;
+          }
+          if (!current()) return;
+          buffer = this.startJoinBuffer(session, gameId);
+        }
         let loaded = await this.authority.ensureLoaded(gameId);
         // A copy loaded for background work (the no-show worker) can be evicted between the load
         // and this continuation; load once more rather than failing a valid join.
@@ -257,7 +282,7 @@ export class RealtimeGateway {
             }
           }
         }
-        this.completeJoin(session, gameId, token, state, buffer.take);
+        this.completeJoin(session, gameId, token, state, buffer!.take);
       } catch (err: unknown) {
         if (current()) {
           if (err instanceof AuthorityError && err.code === 'unknown_game') {
@@ -267,7 +292,10 @@ export class RealtimeGateway {
           }
         }
       } finally {
-        buffer.stop();
+        buffer?.stop();
+        if (session.joinBuffers.get(gameId) === buffer?.stop) {
+          session.joinBuffers.delete(gameId);
+        }
         if (session.reads.get(gameId) === intent) {
           session.reads.delete(gameId);
         }
@@ -405,7 +433,7 @@ export class RealtimeGateway {
         // still change shared state; push an authoritative snapshot so both
         // sides see the updated draw offer.
         if (result.broadcasts.length === 0) {
-          this.sendStateToRoom(msg.gameId);
+          this.sendStateToRoom(msg.gameId, result.state);
         }
       })
       .catch((err: unknown) => {
@@ -473,6 +501,10 @@ export class RealtimeGateway {
   }
 
   private onClose(session: Session): void {
+    for (const stop of session.joinBuffers.values()) {
+      stop();
+    }
+    session.joinBuffers.clear();
     for (const gameId of session.games.keys()) {
       const entry = this.rooms.get(gameId);
       if (!entry) continue;
@@ -499,11 +531,11 @@ export class RealtimeGateway {
     return entry;
   }
 
-  private sendStateToRoom(gameId: string): void {
+  private sendStateToRoom(gameId: string, state: StateView): void {
     const entry = this.rooms.get(gameId);
     const buffers = this.joinBuffers.get(gameId);
     if (!entry && (!buffers || buffers.size === 0)) return;
-    const msg: ServerMessage = { t: 'state', gameId, state: this.authority.getState(gameId) };
+    const msg: ServerMessage = { t: 'state', gameId, state };
     if (entry) {
       entry.room.sendAll(msg);
     }
