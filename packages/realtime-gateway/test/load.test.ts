@@ -29,6 +29,7 @@ const TC: TimeControl = { initialMs: 600_000, incrementMs: 0, delayMs: 0, kind: 
 const IDLE = 50_000;
 const ACTIVE = 5_000;
 const P99_BUDGET_MS = 50;
+const flush = () => new Promise<void>((r) => setImmediate(r));
 
 // A long, fully-legal move sequence to broadcast repeatedly (Berlin-ish shuffle).
 const MOVES = [
@@ -93,6 +94,7 @@ test(`fanout stays under ${P99_BUDGET_MS}ms p99 with ${IDLE} idle + ${ACTIVE} ac
     a.deliver({ t: 'join', gameId: `idle-${g}`, token: `tok-iw${g}` });
     d.deliver({ t: 'join', gameId: `idle-${g}`, token: `tok-ib${g}` });
   }
+  await flush();
 
   assert.equal(gateway.roomCount, idleGames + 1);
 

@@ -40,6 +40,7 @@ test('join assigns the correct role and returns current state', async () => {
   const { connect } = await harness();
   const alice = connect('a');
   alice.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
+  await flush();
   const joined = alice.last('joined');
   assert.ok(joined);
   assert.equal(joined!.role, 'white');
@@ -47,6 +48,7 @@ test('join assigns the correct role and returns current state', async () => {
 
   const sam = connect('s');
   sam.deliver({ t: 'join', gameId: 'g1' }); // no token → anonymous spectator
+  await flush();
   assert.equal(sam.last('joined')!.role, 'spectator');
 });
 
@@ -132,10 +134,12 @@ test('valid joins and resumes wait for a stale takeover reload without disconnec
   const first = new InMemoryConnection('first');
   gateway.handleConnection(first);
   first.deliver({ t: 'join', gameId: 'reload-join', token: 'alice-token' });
+  await flush();
   assert.ok(first.last('joined'));
   const departing = new InMemoryConnection('departing');
   gateway.handleConnection(departing);
   departing.deliver({ t: 'join', gameId: 'reload-join' });
+  await flush();
   assert.ok(departing.last('joined'));
 
   const originalLoad = store.load.bind(store);
@@ -178,6 +182,7 @@ test('presence reflects seats and spectator count', async () => {
   alice.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
   bob.deliver({ t: 'join', gameId: 'g1', token: 'token-bob' });
   sam.deliver({ t: 'join', gameId: 'g1' }); // no token → anonymous spectator
+  await flush();
   const p = sam.last('presence')!;
   assert.equal(p.white, true);
   assert.equal(p.black, true);
@@ -196,6 +201,7 @@ test('a legal move is broadcast to players and spectators', async () => {
   ] as const) {
     c.deliver({ t: 'join', gameId: 'g1', ...(u === 'sam' ? {} : { token: `token-${u}` }) });
   }
+  await flush();
   alice.deliver({ t: 'move', gameId: 'g1', uci: 'e2e4', clientSeq: 1 });
   await flush();
   for (const c of [alice, bob, sam]) {
@@ -210,6 +216,7 @@ test('an illegal move is rejected referencing its clientSeq (rollback signal)', 
   const { connect } = await harness();
   const alice = connect('a');
   alice.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
+  await flush();
   alice.deliver({ t: 'move', gameId: 'g1', uci: 'e2e5', clientSeq: 7 });
   await flush();
   const rej = alice.last('reject')!;
@@ -221,6 +228,7 @@ test('stale or duplicate clientSeq is rejected', async () => {
   const { connect } = await harness();
   const alice = connect('a');
   alice.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
+  await flush();
   alice.deliver({ t: 'move', gameId: 'g1', uci: 'e2e4', clientSeq: 1 });
   await flush();
   alice.deliver({ t: 'move', gameId: 'g1', uci: 'd2d4', clientSeq: 1 });
@@ -233,6 +241,7 @@ test('a spectator cannot move; an unjoined connection cannot move', async () => 
   const { connect } = await harness();
   const sam = connect('s');
   sam.deliver({ t: 'join', gameId: 'g1' }); // no token → anonymous spectator
+  await flush();
   sam.deliver({ t: 'move', gameId: 'g1', uci: 'e2e4', clientSeq: 1 });
   await flush();
   assert.equal(sam.last('reject')!.code, 'not_a_player');
@@ -249,6 +258,7 @@ test('reconnect: rejoin restores seat + state, resume replays missed moves', asy
   const bob = connect('b');
   alice.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
   bob.deliver({ t: 'join', gameId: 'g1', token: 'token-bob' });
+  await flush();
   alice.deliver({ t: 'move', gameId: 'g1', uci: 'e2e4', clientSeq: 1 });
   await flush();
   bob.deliver({ t: 'move', gameId: 'g1', uci: 'e7e5', clientSeq: 1 });
@@ -261,12 +271,14 @@ test('reconnect: rejoin restores seat + state, resume replays missed moves', asy
   // She reconnects on a fresh socket.
   const alice2 = connect('a2');
   alice2.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
+  await flush();
   const joined = alice2.last('joined')!;
   assert.equal(joined.role, 'white'); // seat restored
   assert.equal(joined.state.ply, 2); // current authoritative state
 
   // She asks for everything after the last ply she saw (1).
   alice2.deliver({ t: 'resume', gameId: 'g1', lastPly: 1 });
+  await flush();
   const resumed = alice2.last('resumed')!;
   const missedPlies = resumed.missed.filter((m) => m.t === 'move').map((m) => (m.t === 'move' ? m.ply : 0));
   assert.deepEqual(missedPlies, [2]);
@@ -284,6 +296,7 @@ test('draw offer pushes state; acceptance ends the game as a draw', async () => 
   const bob = connect('b');
   alice.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
   bob.deliver({ t: 'join', gameId: 'g1', token: 'token-bob' });
+  await flush();
 
   alice.deliver({ t: 'offerDraw', gameId: 'g1' });
   await flush();
@@ -321,6 +334,7 @@ test('closing the last connection frees the room', async () => {
   const { connect, gateway } = await harness();
   const alice = connect('a');
   alice.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
+  await flush();
   assert.equal(gateway.roomCount, 1);
   alice.close();
   assert.equal(gateway.roomCount, 0);
@@ -333,6 +347,7 @@ test('C4: join with a valid token seats the token user, not a client-asserted id
   const alice = connect('a');
   // The token determines identity — there is no userId field to assert.
   alice.deliver({ t: 'join', gameId: 'g1', token: 'token-alice' });
+  await flush();
   const joined = alice.last('joined')!;
   assert.equal(joined.role, 'white', 'token-alice maps to alice who is white');
 });
@@ -341,6 +356,7 @@ test('C4: join with an invalid token is rejected with unauthorized', async () =>
   const { connect } = await harness();
   const c = connect('evil');
   c.deliver({ t: 'join', gameId: 'g1', token: 'forged-token' });
+  await flush();
   const rej = c.last('reject')!;
   assert.equal(rej.code, 'unauthorized');
   // No joined message, no presence broadcast.
@@ -352,6 +368,7 @@ test('C4: join without a token is seated as an anonymous spectator', async () =>
   const { connect } = await harness();
   const sam = connect('s');
   sam.deliver({ t: 'join', gameId: 'g1' });
+  await flush();
   const joined = sam.last('joined')!;
   assert.equal(joined.role, 'spectator');
 });
@@ -360,6 +377,7 @@ test('C4: a spectator (no token) cannot move', async () => {
   const { connect } = await harness();
   const sam = connect('s');
   sam.deliver({ t: 'join', gameId: 'g1' });
+  await flush();
   sam.deliver({ t: 'move', gameId: 'g1', uci: 'e2e4', clientSeq: 1 });
   await flush();
   assert.equal(sam.last('reject')!.code, 'not_a_player');
@@ -372,6 +390,7 @@ test('C4: identity comes from the token, not from any client claim', async () =>
   verifier.allow('token-bob-2', 'bob');
   const c = connect('b2');
   c.deliver({ t: 'join', gameId: 'g1', token: 'token-bob-2' });
+  await flush();
   const joined = c.last('joined')!;
   assert.equal(joined.role, 'black', 'token maps to bob → black, regardless of any claim');
 });
@@ -398,6 +417,7 @@ test('onGameLoaded callback is optional and invoked once when a join materialise
   const c1 = new InMemoryConnection('c1');
   gateway.handleConnection(c1);
   c1.deliver({ t: 'join', gameId: 'g-loaded', token: 'token-alice' });
+  await flush();
 
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0]!.gameId, 'g-loaded');
@@ -406,6 +426,7 @@ test('onGameLoaded callback is optional and invoked once when a join materialise
   const c2 = new InMemoryConnection('c2');
   gateway.handleConnection(c2);
   c2.deliver({ t: 'join', gameId: 'g-loaded' });
+  await flush();
 
   assert.equal(loaded.length, 1, 'onGameLoaded is guarded against double-invocation');
 });
@@ -435,6 +456,7 @@ test('onGameUnloaded fires once, when the last session in a game leaves', async 
   gateway.handleConnection(c2);
   c1.deliver({ t: 'join', gameId: 'g-unload', token: 'token-alice' });
   c2.deliver({ t: 'join', gameId: 'g-unload' });
+  await flush();
 
   c1.close();
   assert.deepEqual(unloaded, [], 'a spectator is still in the room');
@@ -464,6 +486,7 @@ test('onGameLoaded fires again when a game room empties and is rejoined', async 
   const c1 = new InMemoryConnection('c1');
   gateway.handleConnection(c1);
   c1.deliver({ t: 'join', gameId: 'g-rejoin', token: 'token-alice' });
+  await flush();
 
   assert.equal(loaded.length, 1);
 
@@ -476,6 +499,7 @@ test('onGameLoaded fires again when a game room empties and is rejoined', async 
   const c2 = new InMemoryConnection('c2');
   gateway.handleConnection(c2);
   c2.deliver({ t: 'join', gameId: 'g-rejoin', token: 'token-alice' });
+  await flush();
 
   assert.equal(loaded.length, 2, 'onGameLoaded must fire again after room empties and is rejoined');
 });

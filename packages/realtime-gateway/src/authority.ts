@@ -451,12 +451,39 @@ export class GameAuthority {
   }
 
   /**
+   * Detached read of one committed prefix of the game log.
+   *
+   * A commit occurring after the load may be absent. This method never installs or reconciles
+   * the resident command cache.
+   */
+  async readRecovery(gameId: string, lastPly: number): Promise<{ state: StateView; missed: GameBroadcast[] }> {
+    const logged = await this.store.load(gameId);
+    if (logged.length === 0) {
+      throw new AuthorityError('unknown_game', `no such game ${gameId}`);
+    }
+    const loaded = this.rebuildRecord(gameId, logged);
+    const slot = this.games.get(gameId);
+    const residentUsable =
+      slot?.record !== undefined && !slot.record.stale && !slot.dispose && slot.reloads === 0;
+    const chosen =
+      residentUsable && slot.record!.persistedSeq > loaded.persistedSeq ? slot.record! : loaded;
+    return {
+      state: this.viewOf(chosen.game, chosen.persistedSeq),
+      missed: this.missedFromRecord(chosen, lastPly),
+    };
+  }
+
+  /**
    * Every broadcast a resuming client missed: all broadcasts recorded after the
    * move whose ply equals `lastPly`. `lastPly <= 0` returns the full history.
    */
   getMissedSince(gameId: string, lastPly: number): GameBroadcast[] {
     const rec = this.require(gameId);
     if (rec.stale) throw new AuthorityError('invalid_command', 'durable game reload is required');
+    return this.missedFromRecord(rec, lastPly);
+  }
+
+  private missedFromRecord(rec: GameRecord, lastPly: number): GameBroadcast[] {
     if (lastPly <= 0) return rec.broadcasts.map((e) => e.msg);
     let cutSeq = -1;
     for (const e of rec.broadcasts) {

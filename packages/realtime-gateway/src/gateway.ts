@@ -48,6 +48,7 @@ interface Membership {
 interface Session {
   readonly conn: Connection;
   readonly games: Map<string, Membership>;
+  readonly reads: Map<string, symbol>;
 }
 
 interface RoomEntry {
@@ -98,7 +99,7 @@ export class RealtimeGateway {
 
   /** Register a new connection and wire its lifecycle handlers. */
   handleConnection(conn: Connection): void {
-    const session: Session = { conn, games: new Map() };
+    const session: Session = { conn, games: new Map(), reads: new Map() };
     this.sessions.set(conn.id, session);
     conn.onMessage((msg) => {
       try {
@@ -165,32 +166,50 @@ export class RealtimeGateway {
    * join is rejected with `unauthorized`.
    */
   private onJoin(session: Session, gameId: string, token: string | undefined): void {
-    // Hot path: a resident game joins synchronously (no microtask deferral), so
-    // the `joined` frame is emitted in the same turn the client's message
-    // arrives. Only a game evicted from the cache (or lost to a restart) takes
-    // the async hydration path below.
-    if (this.authority.hasFresh(gameId)) {
-      this.completeJoin(session, gameId, token);
-      return;
-    }
-    void this.authority.ensureLoaded(gameId)
-      .then(async (loaded) => {
+    // Joins always take the async path: ensureLoaded hydrates a resident slot for
+    // commands and presence hooks, then readRecovery fetches the freshest committed prefix.
+    const intent = Symbol('join');
+    session.reads.set(gameId, intent);
+    const current = (): boolean =>
+      this.sessions.get(session.conn.id) === session && session.reads.get(gameId) === intent;
+    void (async () => {
+      try {
+        let loaded = await this.authority.ensureLoaded(gameId);
         // A copy loaded for background work (the no-show worker) can be evicted between the load
         // and this continuation; load once more rather than failing a valid join.
         if (loaded && !this.authority.has(gameId)) loaded = await this.authority.ensureLoaded(gameId);
         if (!loaded) {
-          this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+          if (current()) {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+          }
           return;
         }
-        this.completeJoin(session, gameId, token);
-      })
-      .catch(() => {
-        this.reject(session, gameId, null, 'invalid_command', 'failed to load game');
-      });
+        if (!current()) return;
+        const read = await this.authority.readRecovery(gameId, 0);
+        if (current()) {
+          this.completeJoin(session, gameId, token, read.state);
+        }
+      } catch (err: unknown) {
+        if (current()) {
+          if (err instanceof AuthorityError && err.code === 'unknown_game') {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+          } else {
+            this.reject(session, gameId, null, 'invalid_command', 'failed to load game');
+          }
+        }
+      } finally {
+        if (session.reads.get(gameId) === intent) {
+          session.reads.delete(gameId);
+        }
+      }
+    })();
   }
 
-  /** Finish a join once the game is known to be resident in the authority. */
-  private completeJoin(session: Session, gameId: string, token: string | undefined): void {
+  /**
+   * Finish a join once the game is resident and recovery state has been read.
+   * State comes from a detached recovery read; the resident slot exists for commands and host hooks.
+   */
+  private completeJoin(session: Session, gameId: string, token: string | undefined, state: StateView): void {
     if (this.sessions.get(session.conn.id) !== session) return;
     // Derive identity from the token. No token → anonymous spectator.
     let userId: string;
@@ -212,14 +231,13 @@ export class RealtimeGateway {
       userId = `anon-${session.conn.id}`;
     }
 
-    const color = this.authority.colorOf(gameId, userId);
+    const color = state.players.white === userId ? 'w' : state.players.black === userId ? 'b' : null;
     const role: Role = color === 'w' ? 'white' : color === 'b' ? 'black' : 'spectator';
 
     const entry = this.ensureRoom(gameId);
     entry.room.add(session.conn, userId, role);
     session.games.set(gameId, { userId, role, lastSeq: 0 });
 
-    const state = this.authority.getState(gameId);
     session.conn.send({ t: 'joined', gameId, role, state });
     entry.room.broadcastPresence();
     if (color !== null) this.commitReadiness(session, gameId, userId, color, state);
@@ -318,29 +336,45 @@ export class RealtimeGateway {
       this.reject(session, gameId, null, 'not_joined', 'join before resuming');
       return;
     }
-    if (!this.authority.hasFresh(gameId)) {
-      void this.authority.ensureLoaded(gameId)
-        .then((loaded) => {
-          if (!loaded) {
+    const intent = Symbol('resume');
+    session.reads.set(gameId, intent);
+    const current = (): boolean =>
+      this.sessions.get(session.conn.id) === session &&
+      session.reads.get(gameId) === intent &&
+      session.games.get(gameId) === membership;
+    void (async () => {
+      try {
+        const loaded = await this.authority.ensureLoaded(gameId);
+        if (!loaded) {
+          if (current()) {
             this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
-            return;
           }
-          this.completeResume(session, gameId, lastPly);
-        })
-        .catch(() => this.reject(session, gameId, null, 'invalid_command', 'failed to load game'));
-      return;
-    }
-    this.completeResume(session, gameId, lastPly);
-  }
-
-  private completeResume(session: Session, gameId: string, lastPly: number): void {
-    if (this.sessions.get(session.conn.id) !== session || !session.games.has(gameId)) return;
-    session.conn.send({
-      t: 'resumed',
-      gameId,
-      state: this.authority.getState(gameId),
-      missed: this.authority.getMissedSince(gameId, lastPly),
-    });
+          return;
+        }
+        if (!current()) return;
+        const read = await this.authority.readRecovery(gameId, lastPly);
+        if (current()) {
+          session.conn.send({
+            t: 'resumed',
+            gameId,
+            state: read.state,
+            missed: read.missed,
+          });
+        }
+      } catch (err: unknown) {
+        if (current()) {
+          if (err instanceof AuthorityError && err.code === 'unknown_game') {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+          } else {
+            this.reject(session, gameId, null, 'invalid_command', 'failed to load game');
+          }
+        }
+      } finally {
+        if (session.reads.get(gameId) === intent) {
+          session.reads.delete(gameId);
+        }
+      }
+    })();
   }
 
   private onClose(session: Session): void {
