@@ -1416,5 +1416,360 @@ test('isStateRevision type guard correctly validates bounds and numeric types wi
   }
 });
 
+test('regression Qodo 1: terminal broadcast with revision gap triggers recovery query and restores history on equal snapshot', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
 
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
 
+  // Move 1 at revision 1, ply 1
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: { e7: ['e5'] },
+  });
+  assert.equal(sync.getState().ply, 1);
+  assert.equal(sync.stateRevision, 1);
+
+  const sentBefore = factory.last.sent.length;
+
+  // Terminal broadcast arrives at revision 3 (gap: 3 > 1 + 1, missed move 2)
+  factory.last.emit({
+    t: 'ended',
+    gameId: 'g1',
+    stateRevision: 3,
+    result: '1-0',
+    termination: 'resignation',
+    winner: 'w',
+    serverTs: 3_000,
+  });
+
+  assert.equal(sync.getState().status?.over, true, 'game is marked over');
+  assert.equal(sync.stateRevision, 3, 'floor advanced to terminal revision');
+
+  // Verify bounded read-only recovery query was sent for the missing position
+  const recoveryRequests = factory.last.sent.slice(sentBefore)
+    .map((frame) => JSON.parse(frame) as { t: string; lastPly?: number })
+    .filter((msg) => msg.t === 'resume');
+  assert.equal(recoveryRequests.length, 1, 'exactly one resume request sent for positional gap');
+  assert.equal(recoveryRequests[0]!.lastPly, 1, 'resume asks for history starting at observed ply 1');
+
+  // Out-of-order move 2 arrives at revision 2, ply 2 after terminal broadcast
+  const sentAfterEnded = factory.last.sent.length;
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 2,
+    ply: 2,
+    uci: 'e7e5',
+    san: 'e5',
+    by: 'b',
+    fenHash: 'h2',
+    clock: { w: 59_000, b: 59_000 },
+    serverTs: 2_000,
+    legalMoves: {},
+  });
+
+  // Late move must NOT reopen game, must NOT create loop, and must NOT change terminal status
+  assert.equal(sync.getState().status?.over, true);
+  assert.equal(factory.last.sent.length, sentAfterEnded, 'late move does not trigger additional resume loop');
+
+  // Duplicate ended broadcast at revision 3 must be dropped without sending resume
+  factory.last.emit({
+    t: 'ended',
+    gameId: 'g1',
+    stateRevision: 3,
+    result: '1-0',
+    termination: 'resignation',
+    winner: 'w',
+    serverTs: 3_000,
+  });
+  assert.equal(factory.last.sent.length, sentAfterEnded, 'duplicate ended does not trigger resume loop');
+
+  // Server responds to resume with complete equal-head terminal snapshot at revision 3, ply 2
+  factory.last.emit({
+    t: 'resumed',
+    gameId: 'g1',
+    state: {
+      ...stateView(2, 'w', [
+        { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+        { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' },
+      ]),
+      status: { over: true, result: '1-0', termination: 'resignation', winner: 'w' },
+      ready: null,
+      stateRevision: 3,
+    },
+    missed: [],
+  });
+
+  // Equal-head terminal snapshot restores missing positional history
+  assert.equal(sync.getState().ply, 2, 'ply restored to 2');
+  assert.equal(sync.getState().moves.length, 2, 'moves restored');
+  assert.equal(sync.getState().status?.over, true, 'terminal status preserved');
+  assert.equal(factory.last.sent.length, sentAfterEnded, 'no loop on equal terminal snapshot');
+
+  // Healthy ending control: revision 2 immediately follows revision 1 with no gap -> no resume sent
+  const healthySetup = setup();
+  healthySetup.sync.start();
+  healthySetup.factory.last.open();
+  healthySetup.factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+  healthySetup.factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'h1',
+    clock: { w: 59_000, b: 60_000 },
+    serverTs: 1_000,
+    legalMoves: {},
+  });
+  const healthySentBefore = healthySetup.factory.last.sent.length;
+  healthySetup.factory.last.emit({
+    t: 'ended',
+    gameId: 'g1',
+    stateRevision: 2,
+    result: '1-0',
+    termination: 'resignation',
+    winner: 'w',
+    serverTs: 2_000,
+  });
+  assert.equal(healthySetup.sync.getState().status?.over, true);
+  assert.equal(healthySetup.factory.last.sent.length, healthySentBefore, 'healthy ending without gap sends no resume');
+});
+
+test('regression Qodo 2: equal-head snapshot reconciles original-seat readiness uncertainty', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: { w: false, b: false }, stateRevision: 0 },
+  });
+
+  // Live ready arrives at revision 1
+  factory.last.emit({
+    t: 'ready',
+    gameId: 'g1',
+    stateRevision: 1,
+    ready: { w: true, b: false },
+    serverTs: 1_000,
+  });
+  assert.equal(sync.getState().ready?.w, true);
+  assert.equal(sync.stateRevision, 1);
+
+  // Late outcomeUnknown for the ready command arrives
+  factory.last.emit({
+    t: 'outcomeUnknown',
+    code: 'outcome_unknown',
+    gameId: 'g1',
+    ref: null,
+    requestId: 'ready-req-late',
+    action: 'ready',
+    readyColor: 'w',
+    message: 'Unknown readiness.',
+  });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+
+  // Equal-revision snapshot confirms original-seat ready is true
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: { w: true, b: false }, stateRevision: 1 },
+  });
+  assert.equal(sync.getState().lastReject, null, 'confirmed original-seat readiness resolves uncertainty notice');
+
+  // Negative control 1: move uncertainty is NOT settled by equal snapshot
+  const pending = sync.submitMove('e2e4');
+  assert.ok(pending);
+  factory.last.emit({
+    t: 'outcomeUnknown',
+    code: 'outcome_unknown',
+    gameId: 'g1',
+    ref: pending.clientSeq,
+    requestId: 'move-uncertain-req',
+    message: 'Unknown move.',
+  });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+
+  // Equal snapshot arrives
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: { w: true, b: false }, stateRevision: 1 },
+  });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown', 'position snapshot alone must never settle move uncertainty');
+
+  // Negative control 2: refusal received during uncertainty is preserved across equal snapshot
+  factory.last.emit({
+    t: 'reject',
+    gameId: 'g1',
+    ref: pending.clientSeq,
+    code: 'illegal_move',
+    message: 'Illegal move attempted.',
+  });
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: { w: true, b: false }, stateRevision: 1 },
+  });
+  assert.ok(sync.getState().lastReject?.message.includes('Illegal move attempted.'), 'refusal during uncertainty must be preserved');
+});
+
+test('regression Qodo 3: equal-head snapshot preserves monotonic readiness from unstamped or earlier ready', () => {
+  const { factory, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: { w: false, b: false }, stateRevision: 0 },
+  });
+
+  // Supported un-stamped ready broadcast sets white ready to true
+  factory.last.emit({
+    t: 'ready',
+    gameId: 'g1',
+    ready: { w: true, b: false },
+    serverTs: 1_000,
+  });
+  assert.equal(sync.getState().ready?.w, true);
+
+  // Equal snapshot with ready: { w: false, b: false } arrives (delayed or un-updated cache)
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: { w: false, b: false }, stateRevision: 0 },
+  });
+  assert.equal(sync.getState().ready?.w, true, 'monotonic readiness must survive equal snapshot');
+
+  // Also test resumed equal snapshot preserves readiness
+  factory.last.emit({
+    t: 'resumed',
+    gameId: 'g1',
+    state: { ...stateView(0, 'w'), ready: { w: false, b: false }, stateRevision: 0 },
+    missed: [],
+  });
+  assert.equal(sync.getState().ready?.w, true, 'monotonic readiness must survive resumed equal snapshot');
+
+  // Absent ready field in snapshot (legacy gateway) preserves known readiness
+  factory.last.emit({
+    t: 'state',
+    gameId: 'g1',
+    state: stateView(0, 'w'), // ready field is undefined
+  });
+  assert.equal(sync.getState().ready?.w, true, 'absent ready in snapshot preserves known state');
+});
+
+test('regression Greptile P2: equal-head reconnect clears ordinary command error while preserving uncertainty', () => {
+  const { factory, scheduler, sync } = setup();
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+
+  const pending = sync.submitMove('e2e4');
+  assert.ok(pending);
+
+  // Server rejects with ordinary command error
+  factory.last.emit({
+    t: 'reject',
+    gameId: 'g1',
+    ref: pending.clientSeq,
+    code: 'illegal_move',
+    message: 'Bad move.',
+  });
+  assert.equal(sync.getState().lastReject?.t, 'reject');
+  assert.equal(sync.getState().lastReject?.code, 'illegal_move');
+
+  // Socket drop and reconnect
+  factory.last.serverClose(1006, '', false);
+  assert.equal(sync.getState().connected, false);
+
+  scheduler.runNext();
+  factory.last.open();
+
+  // Reconnect delivers joined at equal revision 0
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+  assert.equal(sync.getState().connected, true);
+  assert.equal(sync.getState().lastReject, null, 'successful same-head reconnect clears ordinary obsolete error');
+
+  // Control: equal-head reconnect with active outcomeUnknown preserves uncertainty notice
+  const pending2 = sync.submitMove('d2d4');
+  assert.ok(pending2);
+  factory.last.emit({
+    t: 'outcomeUnknown',
+    code: 'outcome_unknown',
+    gameId: 'g1',
+    ref: pending2.clientSeq,
+    requestId: 'req-reconnect-unc',
+    message: 'Command outcome unknown.',
+  });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown');
+
+  factory.last.serverClose(1006, '', false);
+  scheduler.runNext();
+  factory.last.open();
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+  assert.equal(sync.getState().lastReject?.t, 'outcomeUnknown', 'unresolved outcomeUnknown preserved across reconnect');
+
+  // Control: refusal received during uncertainty is preserved across reconnect
+  factory.last.emit({
+    t: 'reject',
+    gameId: 'g1',
+    ref: null,
+    code: 'invalid_command',
+    message: 'Cannot move while uncertain.',
+  });
+  factory.last.serverClose(1006, '', false);
+  scheduler.runNext();
+  factory.last.open();
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
+  });
+  assert.ok(sync.getState().lastReject?.message.includes('Cannot move while uncertain.'), 'refusal received during uncertainty preserved across reconnect');
+});

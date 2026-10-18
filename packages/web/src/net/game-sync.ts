@@ -572,27 +572,7 @@ export class GameSync {
         } else if (freshness === 'equal') {
           // Equal-revision join reauthorizes the connection and reconciles the input gate without
           // claiming uncertain command completion.
-          const myColor = msg.role ? colorForRole(msg.role) : this.state.myColor;
-          this.patch({
-            role: msg.role,
-            myColor,
-            snapshot: msg.state,
-            moves: msg.state.moves,
-            ply: msg.state.ply,
-            turn: msg.state.turn,
-            clock: msg.state.clock,
-            turnStartedAt: clockAnchor(msg.state.turnStartedAt),
-            status: msg.state.status,
-            drawOffer: msg.state.drawOffer,
-            fenHash: msg.state.fenHash,
-            ready: msg.state.ready === undefined ? this.state.ready : readyView(msg.state.ready),
-            legalMoves: msg.state.legalMoves,
-            pending: null,
-            pendingAction: null,
-            lastReject: this.commandNotice(),
-            connected: true,
-            recoveryAvailable: false,
-          });
+          this.reconcileEqualSnapshot(msg.state, msg.role);
         } else {
           // Stale snapshot:
           // Preserve legitimate join/reconnect authorization and role establishment without
@@ -617,22 +597,7 @@ export class GameSync {
           this.applySnapshot(msg.state, this.state.role);
         } else if (freshness === 'equal') {
           // Reconcile position and release optimistic input without claiming uncertain command completion
-          this.patch({
-            snapshot: msg.state,
-            moves: msg.state.moves,
-            ply: msg.state.ply,
-            turn: msg.state.turn,
-            clock: msg.state.clock,
-            turnStartedAt: clockAnchor(msg.state.turnStartedAt),
-            status: msg.state.status,
-            drawOffer: msg.state.drawOffer,
-            fenHash: msg.state.fenHash,
-            ready: msg.state.ready === undefined ? this.state.ready : readyView(msg.state.ready),
-            legalMoves: msg.state.legalMoves,
-            pending: null,
-            pendingAction: null,
-            lastReject: this.commandNotice(),
-          });
+          this.reconcileEqualSnapshot(msg.state);
         }
         break;
       }
@@ -641,22 +606,7 @@ export class GameSync {
         if (freshness === 'newer') {
           this.applySnapshot(msg.state, this.state.role);
         } else if (freshness === 'equal') {
-          this.patch({
-            snapshot: msg.state,
-            moves: msg.state.moves,
-            ply: msg.state.ply,
-            turn: msg.state.turn,
-            clock: msg.state.clock,
-            turnStartedAt: clockAnchor(msg.state.turnStartedAt),
-            status: msg.state.status,
-            drawOffer: msg.state.drawOffer,
-            fenHash: msg.state.fenHash,
-            ready: msg.state.ready === undefined ? this.state.ready : readyView(msg.state.ready),
-            legalMoves: msg.state.legalMoves,
-            pending: null,
-            pendingAction: null,
-            lastReject: this.commandNotice(),
-          });
+          this.reconcileEqualSnapshot(msg.state);
         }
         break;
       }
@@ -725,9 +675,14 @@ export class GameSync {
       this.stateRevisionFloor = Math.max(this.stateRevisionFloor ?? 0, view.stateRevision);
     }
     const myColor = role ? colorForRole(role) : this.state.myColor;
+    const ready = view.ready === undefined
+      ? this.state.ready
+      : view.ready === null
+        ? null
+        : mergeReady(this.state.ready, readyView(view.ready));
     // A position/draw state cannot identify which request produced it. Only
     // terminal state or monotonic durable readiness safely settles the intent.
-    this.reconcileUncertainty(view.ready, view.status.over);
+    this.reconcileUncertainty(ready, view.status.over);
     if (view.status.over || !this.rejectDuringUncertainty) this.latestCommandReject = null;
     if (view.status.over) this.rejectDuringUncertainty = false;
     this.patch({
@@ -744,7 +699,7 @@ export class GameSync {
       fenHash: view.fenHash,
       // A snapshot from a gateway older than ADR-0148 has no field at all: keep what is known rather
       // than reopening the board. An explicit `null` means the game has no readiness.
-      ready: view.ready === undefined ? this.state.ready : readyView(view.ready),
+      ready,
       legalMoves: view.legalMoves,
       // Reconcile the displayed position and release the optimistic input gate.
       // An unchanged snapshot cannot prove cancellation: retain the uncertainty
@@ -754,6 +709,47 @@ export class GameSync {
       lastReject: this.commandNotice(),
       connected: true,
       recoveryAvailable: false,
+    });
+  }
+
+  /**
+   * Reconcile an equal-revision snapshot (joined, state, or resumed).
+   *
+   * Equal snapshots confirm the game at the current revision head:
+   * - Releases the optimistic input gate (`pending: null`, `pendingAction: null`).
+   * - Monotonically merges readiness (`mergeReady`).
+   * - Reconciles original-seat readiness uncertainty (`reconcileUncertainty`).
+   * - Clears ordinary obsolete errors when safe, but preserves unresolved `outcomeUnknown`
+   *   and refusals received during uncertainty (`rejectDuringUncertainty`).
+   * - Reauthorizes connection and role if `role` is provided (e.g. on `joined`).
+   */
+  private reconcileEqualSnapshot(view: StateView, role?: Role | null): void {
+    const ready = view.ready === undefined
+      ? this.state.ready
+      : view.ready === null
+        ? null
+        : mergeReady(this.state.ready, readyView(view.ready));
+    this.reconcileUncertainty(ready, view.status.over);
+    if (view.status.over || !this.rejectDuringUncertainty) this.latestCommandReject = null;
+    if (view.status.over) this.rejectDuringUncertainty = false;
+
+    const myColor = role ? colorForRole(role) : this.state.myColor;
+    this.patch({
+      ...(role !== undefined ? { role, myColor, connected: true, recoveryAvailable: false } : {}),
+      snapshot: view,
+      moves: view.moves,
+      ply: view.ply,
+      turn: view.turn,
+      clock: view.clock,
+      turnStartedAt: clockAnchor(view.turnStartedAt),
+      status: view.status,
+      drawOffer: view.drawOffer,
+      fenHash: view.fenHash,
+      ready,
+      legalMoves: view.legalMoves,
+      pending: null,
+      pendingAction: null,
+      lastReject: this.commandNotice(),
     });
   }
 
@@ -807,10 +803,16 @@ export class GameSync {
   private applyEnded(msg: EndedBroadcast): void {
     if (isStateRevision(msg.stateRevision)) {
       if (this.stateRevisionFloor !== null && msg.stateRevision <= this.stateRevisionFloor) {
-        // Stale or duplicate ended broadcast
+        // Stale or duplicate ended broadcast: drop without sending recovery or altering state
         return;
       }
+      const hasRevisionGap = this.stateRevisionFloor !== null && msg.stateRevision > this.stateRevisionFloor + 1;
       this.stateRevisionFloor = Math.max(this.stateRevisionFloor ?? 0, msg.stateRevision);
+      if (hasRevisionGap) {
+        // Ending lacks ply; a gap between observed floor and terminal revision indicates
+        // missed events (moves, draws, etc.). Request bounded authoritative snapshot recovery.
+        this.client.send({ t: 'resume', gameId: this.gameId, lastPly: this.state.ply });
+      }
     } else if (this.stateRevisionFloor !== null) {
       // Failclosed: missing stamp after revisioned state observed
       return;
