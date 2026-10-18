@@ -175,14 +175,12 @@ export class RealtimeGateway {
   }
 
   /**
-   * Starts buffering pubsub and room state frames before any snapshot is read
-   * (synchronously on a warm slot; after verifying knows() but before ensureLoaded
-   * on a cold slot). Every commit after the snapshot (which publishes after its
-   * append) is either in the snapshot or in the buffer. Known limitation: on a
-   * node with no existing subscription for the game, the first Redis SUBSCRIBE
-   * is fire-and-forget, so a commit published by another node in that short window
-   * can still be missed (pre-existing on main for cold joins; closing it needs
-   * a PubSub API change).
+   * Starts buffering pubsub and room state frames synchronously before any snapshot is read.
+   * Every commit after the snapshot (which publishes after its append) is either in the snapshot
+   * or in the buffer; the join reuses resident state only if loaded after this buffer started.
+   * Known limitation: on a node with no existing subscription for the game, the first Redis
+   * SUBSCRIBE is fire-and-forget, so a commit published by another node in that short window
+   * can still be missed (pre-existing on main for cold joins; closing it needs a PubSub API change).
    */
   private startJoinBuffer(session: Session, gameId: string): { stop: () => void; take: () => ServerMessage[] } {
     const prevStop = session.joinBuffers.get(gameId);
@@ -237,23 +235,10 @@ export class RealtimeGateway {
     session.reads.set(gameId, intent);
     const current = (): boolean =>
       this.sessions.get(session.conn.id) === session && session.reads.get(gameId) === intent;
-    const cold = !this.authority.hasFresh(gameId); // captured synchronously, before any await
-    let buffer: { stop: () => void; take: () => ServerMessage[] } | undefined;
-    if (!cold) {
-      buffer = this.startJoinBuffer(session, gameId);
-    }
+    const buffer = this.startJoinBuffer(session, gameId);
+    const marker = this.authority.loadMarker();
     void (async () => {
       try {
-        if (cold) {
-          if (!(await this.authority.knows(gameId))) {
-            if (current()) {
-              this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
-            }
-            return;
-          }
-          if (!current()) return;
-          buffer = this.startJoinBuffer(session, gameId);
-        }
         let loaded = await this.authority.ensureLoaded(gameId);
         // A copy loaded for background work (the no-show worker) can be evicted between the load
         // and this continuation; load once more rather than failing a valid join.
@@ -266,9 +251,7 @@ export class RealtimeGateway {
         }
         if (!current()) return;
         let state: StateView;
-        if (cold) {
-          // ensureLoaded just hydrated (or awaited a reload of) the slot from the durable log in this call,
-          // so the resident record is a fresh committed prefix: no second load.
+        if (this.authority.residentLoadedAfter(gameId, marker)) {
           state = this.authority.getState(gameId);
         } else {
           state = (await this.authority.readRecovery(gameId, 0)).state;
@@ -282,7 +265,7 @@ export class RealtimeGateway {
             }
           }
         }
-        this.completeJoin(session, gameId, token, state, buffer!.take);
+        this.completeJoin(session, gameId, token, state, buffer.take);
       } catch (err: unknown) {
         if (current()) {
           if (err instanceof AuthorityError && err.code === 'unknown_game') {
@@ -292,8 +275,8 @@ export class RealtimeGateway {
           }
         }
       } finally {
-        buffer?.stop();
-        if (session.joinBuffers.get(gameId) === buffer?.stop) {
+        buffer.stop();
+        if (session.joinBuffers.get(gameId) === buffer.stop) {
           session.joinBuffers.delete(gameId);
         }
         if (session.reads.get(gameId) === intent) {
@@ -453,7 +436,7 @@ export class RealtimeGateway {
       this.sessions.get(session.conn.id) === session &&
       session.reads.get(gameId) === intent &&
       session.games.get(gameId) === membership;
-    const cold = !this.authority.hasFresh(gameId);
+    const marker = this.authority.loadMarker();
     void (async () => {
       try {
         const loaded = await this.authority.ensureLoaded(gameId);
@@ -466,9 +449,7 @@ export class RealtimeGateway {
         if (!current()) return;
         let state: StateView;
         let missed: readonly GameBroadcast[];
-        if (cold) {
-          // Cold resume: ensureLoaded just hydrated the slot from the durable log, so the resident
-          // record is fresh. Reuse it directly without a second detached recovery load.
+        if (this.authority.residentLoadedAfter(gameId, marker)) {
           state = this.authority.getState(gameId);
           missed = this.authority.getMissedSince(gameId, lastPly);
         } else {
