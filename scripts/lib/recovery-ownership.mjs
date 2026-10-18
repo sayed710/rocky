@@ -12,7 +12,7 @@
  * - the history is well formed and below the `--max 256` window (lib/rollback-revision.mjs);
  * - its newest revision is exactly the snapshot's newest + 1 (0 + 1 for an initial install);
  * - that revision is `deployed` and its description is exactly this run's marker;
- * - for a rollback, the verified target is still in the history (and below this run's revision).
+ * - for a rollback, the verified target is still in the history with status `superseded` (and below this run's revision).
  *
  * Helm v3.16.3 records the marker: pkg/action/upgrade.go releasingUpgrade sets
  * `upgradedRelease.Info.Description = u.Description` (else "Upgrade complete") together with
@@ -165,8 +165,14 @@ export function checkRecoveryOwnership({ history, action, snapshotNewest, marker
   if (newestEntry.description !== marker) {
     return refuse(`the newest revision ${newest} was not written by this run: its description is ${oneLine(JSON.stringify(newestEntry.description ?? null))}, expected this run's marker "${marker}"`);
   }
-  if (action === 'rollback' && !byRevision.has(target)) {
-    return refuse(`the verified rollback target revision ${target} is no longer in the history`);
+  if (action === 'rollback') {
+    const targetEntry = byRevision.get(target);
+    if (!targetEntry) {
+      return refuse(`the verified rollback target revision ${target} is no longer in the history`);
+    }
+    if (targetEntry.status !== 'superseded') {
+      return refuse(`the verified rollback target revision ${target} has status "${targetEntry.status}", not "superseded"`);
+    }
   }
   return { ok: true, newestRevision: newest };
 }

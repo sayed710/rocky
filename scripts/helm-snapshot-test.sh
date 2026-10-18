@@ -1495,6 +1495,16 @@ done
 # The verified target is gone from the history (pruned, or the release was replaced).
 rb_run_ex target-gone rolling "$RB_PRE2" 0 "" @none 0 "$(hist 3:deployed:@m)"
 expect_recovery_refused target-gone 'roll back' 'no longer in the history' "the verified target 2 is no longer in the history: no rollback"
+# Target status in history at rollback time is not superseded.
+for s in failed deployed pending-upgrade pending-rollback pending-install unknown uninstalled uninstalling; do
+  rb_run_ex "target-$s" rolling "$RB_PRE2" 0 "" @none 0 "$(hist 1:superseded "2:$s" 3:deployed:@m)"
+  expect_recovery_refused "target-$s" 'roll back' "has status \"$s\", not \"superseded\"" "the verified target 2 has status $s: no rollback"
+done
+rb_run_ex target-superseded rolling "$RB_PRE2" 0 "" @none 0 "$(hist 1:superseded 2:superseded 3:deployed:@m)"
+expect_rollback target-superseded 2 "target revision 2 with status superseded: rolls back to 2"
+RB_PRE2_FAILED="$(hist 1:superseded 2:deployed 3:failed)"
+rb_run_ex target-superseded-with-failed-record rolling "$RB_PRE2_FAILED" 0 "" @none 0 "$(hist 1:superseded 2:superseded 3:failed 4:deployed:@m)"
+expect_rollback target-superseded-with-failed-record 2 "target 2 superseded with an unrelated old failed revision 3: rolls back to 2"
 rb_run_ex rollback-history-fails rolling "$RB_PRE2" 0 "" @none 0 @missing
 expect_recovery_refused rollback-history-fails 'roll back' 'failed' "helm history fails at rollback time: no rollback"
 rb_run_ex rollback-history-garbage rolling "$RB_PRE2" 0 "" @none 0 'Error: boom'

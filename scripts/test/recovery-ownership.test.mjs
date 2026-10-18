@@ -97,6 +97,65 @@ test('the verified rollback target must still be in the history', () => {
   refused(rollback(ours(), { targetRevision: undefined }), /target/, 'no target');
 });
 
+test('the verified rollback target must have status superseded; any other status is refused', () => {
+  assert.deepEqual(rollback(ours()), { ok: true, newestRevision: 3 });
+  assert.deepEqual(rollback([entry(1, 'superseded'), entry(2, 'superseded'), entry(3, 'deployed', MARKER)]), { ok: true, newestRevision: 3 });
+
+  const nonSupersededStatuses = [
+    'failed',
+    'deployed',
+    'pending-install',
+    'pending-upgrade',
+    'pending-rollback',
+    'unknown',
+    'uninstalled',
+    'uninstalling',
+  ];
+  for (const status of nonSupersededStatuses) {
+    const history = [entry(1, 'superseded'), entry(2, status), entry(3, 'deployed', MARKER)];
+    refused(
+      rollback(history),
+      new RegExp(`the verified rollback target revision 2 has status "${status}", not "superseded"`),
+      `target status: ${status}`,
+    );
+  }
+});
+
+test('unrelated old failed history records above or below the target do not cause refusal', () => {
+  const historyWithFailedTip = [
+    entry(1, 'superseded'),
+    entry(2, 'superseded'),
+    entry(3, 'failed'),
+    entry(4, 'deployed', MARKER),
+  ];
+  assert.deepEqual(
+    checkRecoveryOwnership({
+      history: historyWithFailedTip,
+      action: 'rollback',
+      snapshotNewest: 3,
+      marker: MARKER,
+      targetRevision: 2,
+    }),
+    { ok: true, newestRevision: 4 },
+  );
+
+  const historyWithFailedBelow = [
+    entry(1, 'failed'),
+    entry(2, 'superseded'),
+    entry(3, 'deployed', MARKER),
+  ];
+  assert.deepEqual(
+    checkRecoveryOwnership({
+      history: historyWithFailedBelow,
+      action: 'rollback',
+      snapshotNewest: 2,
+      marker: MARKER,
+      targetRevision: 2,
+    }),
+    { ok: true, newestRevision: 3 },
+  );
+});
+
 test('the uninstall re-check: revision 1 only, deployed, with this run\'s marker', () => {
   assert.deepEqual(uninstall([entry(1, 'deployed', MARKER)]), { ok: true, newestRevision: 1 });
   refused(uninstall([entry(1, 'deployed', 'Install complete')]), /not written by this run/, 'reinstalled revision 1 by another writer');
@@ -267,6 +326,35 @@ test('CLI check verifies ownership or exits 1 with the reason', () => {
   assert.equal(run(['check', '--action', 'rollback', '--snapshot-newest', '', '--marker', MARKER, '--target', '2'], JSON.stringify(ours())).status, 1);
   assert.equal(run(['check', '--action', 'rollback', '--snapshot-newest', '2', '--marker', '', '--target', '2'], JSON.stringify(ours())).status, 1);
   assert.equal(run(['check', '--action', 'rollback', '--bogus', 'x'], '[]').status, 2);
+});
+
+test('CLI check refuses non-superseded target statuses with exit 1 and the reason', () => {
+  const args = ['check', '--action', 'rollback', '--snapshot-newest', '2', '--marker', MARKER, '--target', '2'];
+  for (const status of [
+    'failed',
+    'deployed',
+    'pending-upgrade',
+    'pending-install',
+    'pending-rollback',
+    'unknown',
+    'uninstalled',
+    'uninstalling',
+  ]) {
+    const badHistory = [entry(1, 'superseded'), entry(2, status), entry(3, 'deployed', MARKER)];
+    const res = run(args, JSON.stringify(badHistory));
+    assert.equal(res.status, 1, `target status ${status} must exit 1`);
+    assert.equal(res.stdout, '', `target status ${status} stdout must be empty`);
+    assert.match(
+      res.stderr,
+      new RegExp(`^recovery-ownership: the verified rollback target revision 2 has status "${status}", not "superseded"\n$`),
+      `target status ${status} stderr mismatch`,
+    );
+  }
+  // Control: target with status superseded exits 0
+  const okHistory = [entry(1, 'superseded'), entry(2, 'superseded'), entry(3, 'deployed', MARKER)];
+  const ok = run(args, JSON.stringify(okHistory));
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(ok.stdout, 'recovery_ownership=verified\nrecovery_newest_revision=3\n');
 });
 
 test('CLI inventory prints the state, the objects and a single-line reason', () => {
