@@ -75,6 +75,7 @@ class RecordingConnection extends InMemoryConnection {
 class DeferredLog implements EventLog {
   public beforeAppendGate?: Gate;
   public afterAppendGate?: Gate;
+  public beforeLoadGate?: Gate;
   public nextLoadGate?: Gate;
   public appends = 0;
   public loads = 0;
@@ -86,6 +87,12 @@ class DeferredLog implements EventLog {
   }
 
   async load(id: string): Promise<readonly LoggedEvent[]> {
+    if (this.beforeLoadGate) {
+      const gate = this.beforeLoadGate;
+      this.beforeLoadGate = undefined;
+      gate.isEntered = true;
+      await gate.release.done;
+    }
     this.loads++;
     const snapshot = await this.inner.load(id);
     if (this.nextLoadGate) {
@@ -916,7 +923,7 @@ test('E1 eviction during recovery read: reloads and player command succeeds with
   assert.equal(moveMsg.uci, 'e2e4');
 });
 
-test('G1 ended during the join read: spectator receives joined then updated state frame with status.over true', async () => {
+test('G1 ended during the join read: S receives joined then ended broadcast, no state frame', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -956,23 +963,24 @@ test('G1 ended during the join read: spectator receives joined then updated stat
   assert.equal(joined.state.status.over, false);
   const revN = joined.state.stateRevision;
 
-  const stateMsg = spec.last('state');
-  assert.ok(stateMsg);
-  assert.equal(stateMsg.state.stateRevision, revN + 1);
-  assert.equal(stateMsg.state.status.over, true);
+  const endedMsg = spec.last('ended');
+  assert.ok(endedMsg);
+  assert.equal(endedMsg.stateRevision, revN + 1);
+
+  // Buffer replay delivers the ended broadcast; no catch-up state frame is emitted.
+  assert.equal(spec.all('state').length, 0);
 });
 
-test('G2 same-node draw offer during the join read: spectator receives catch-up state frame showing drawOffer w', async () => {
+test('G2 same-node draw offer during the join read: spectator receives state frame with drawOffer w via buffer', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
-  const owner = new GameAuthority(pubsub, () => 1000, store);
-  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const authority = new GameAuthority(pubsub, () => 1000, deferredLog);
   const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
-  const gateway = new RealtimeGateway(edge, pubsub, verifier, () => 1000, new LocalCommandRouter(owner));
+  const gateway = new RealtimeGateway(authority, pubsub, verifier);
 
   const gameId = 'game-g2';
-  await owner.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+  await authority.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
 
   // Both players seated via gateway.
   const alice = new InMemoryConnection('alice-conn');
@@ -995,9 +1003,12 @@ test('G2 same-node draw offer during the join read: spectator receives catch-up 
   spec.deliver({ t: 'join', gameId });
   await awaitGate(gate, 'spectator join read');
 
-  // White sends offerDraw through gateway (sendStateToRoom only notifies existing room members).
+  // White sends offerDraw through gateway (sendStateToRoom pushes to room and into in-flight joinBuffers).
   alice.deliver({ t: 'offerDraw', gameId });
   await flush();
+
+  // Evict game from authority so readRecovery uses the loaded snapshot (drawOffer null) instead of the resident record.
+  authority.evict(gameId);
 
   gate.release.resolve();
   await flush();
@@ -1012,7 +1023,7 @@ test('G2 same-node draw offer during the join read: spectator receives catch-up 
   assert.ok(stateMsg.state.stateRevision > joined.state.stateRevision);
 });
 
-test('G3 no catch-up frame when nothing changed: warm join with no concurrent commit -> zero state frames', async () => {
+test('G3 nothing changed: no frames other than joined/presence after the join', async () => {
   const store = new InMemoryEventLog();
   const pubsub = new InMemoryPubSub();
   const authority = new GameAuthority(pubsub, () => 1000, store);
@@ -1034,9 +1045,202 @@ test('G3 no catch-up frame when nothing changed: warm join with no concurrent co
 
   assert.ok(c2.last('joined'));
   assert.equal(c2.all('state').length, 0);
+  assert.equal(c2.all('move').length, 0);
+  assert.equal(c2.all('ended').length, 0);
+  for (const msg of c2.sent) {
+    assert.ok(msg.t === 'joined' || msg.t === 'presence', `unexpected message type: ${msg.t}`);
+  }
 });
 
-test('K1 cold join loads once for its snapshot: loads === 2 (one cold hydration + one catch-up)', async () => {
+test('G4 two moves during the gated join read: S receives joined(N) then move N+1 then move N+2, in order, each exactly once', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier);
+
+  const gameId = 'game-g4';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  // Player A joins so the room exists and edge is warm.
+  const playerA = new InMemoryConnection('alice-conn');
+  gateway.handleConnection(playerA);
+  playerA.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await flush();
+  assert.ok(playerA.last('joined'));
+
+  // Arm next-load gate.
+  const gate = createGate();
+  deferredLog.nextLoadGate = gate;
+
+  // Spectator S joins.
+  const spec = new InMemoryConnection('spec-conn');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await awaitGate(gate, 'spectator join read');
+
+  // Writer commits two moves while read is gated.
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await writer.apply(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
+
+  gate.release.resolve();
+  await flush();
+
+  const joined = spec.last('joined');
+  assert.ok(joined);
+  assert.equal(joined.state.stateRevision, 0);
+  assert.equal(joined.state.ply, 0);
+
+  const moves = spec.all('move');
+  assert.equal(moves.length, 2);
+  assert.equal(moves[0]!.stateRevision, 1);
+  assert.equal(moves[0]!.uci, 'e2e4');
+  assert.equal(moves[1]!.stateRevision, 2);
+  assert.equal(moves[1]!.uci, 'e7e5');
+
+  const joinedIdx = spec.sent.findIndex((m) => m.t === 'joined');
+  const move1Idx = spec.sent.findIndex((m) => m.t === 'move' && m.stateRevision === 1);
+  const move2Idx = spec.sent.findIndex((m) => m.t === 'move' && m.stateRevision === 2);
+  assert.ok(joinedIdx >= 0 && move1Idx > joinedIdx && move2Idx > move1Idx);
+});
+
+test('G5 commit BEFORE the load snapshot but after the join started: deduplicates against snapshot rev N+1', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier);
+
+  const gameId = 'game-g5';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  // Player A joins so room exists and edge is warm.
+  const playerA = new InMemoryConnection('alice-conn');
+  gateway.handleConnection(playerA);
+  playerA.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await flush();
+  assert.ok(playerA.last('joined'));
+
+  // Arm beforeLoadGate: pauses BEFORE calling inner.load.
+  const gate = createGate();
+  deferredLog.beforeLoadGate = gate;
+
+  const spec = new InMemoryConnection('spec-conn');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await awaitGate(gate, 'beforeLoadGate in join');
+
+  // Commit one move while paused before inner.load.
+  // The buffer already holds move N+1 (since buffer started at join initiation).
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+
+  gate.release.resolve();
+  await flush();
+
+  const joined = spec.last('joined');
+  assert.ok(joined);
+  assert.equal(joined.state.stateRevision, 1);
+  assert.equal(joined.state.ply, 1);
+
+  // The move was in the snapshot; buffer de-duplication must ensure S does NOT receive it again.
+  assert.equal(spec.all('move').length, 0);
+});
+
+test('G6 commandConfirmed published during the gated join read is delivered to S exactly once', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const gateway = new RealtimeGateway(edge, pubsub, new FakeTokenVerifier());
+
+  const gameId = 'game-g6';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  // Warm edge via spectator
+  const spec0 = new InMemoryConnection('spec0');
+  gateway.handleConnection(spec0);
+  spec0.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(spec0.last('joined'));
+
+  const gate = createGate();
+  deferredLog.nextLoadGate = gate;
+
+  const spec = new InMemoryConnection('spec-conn');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await awaitGate(gate, 'spectator join read');
+
+  // Writer applies with requestId 'r-g6'
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' }, { requestId: 'r-g6' });
+
+  gate.release.resolve();
+  await flush();
+
+  const joined = spec.last('joined');
+  assert.ok(joined);
+
+  const confirmed = spec.all('commandConfirmed');
+  assert.equal(confirmed.length, 1);
+  assert.equal(confirmed[0]!.requestId, 'r-g6');
+});
+
+test('G7 unauthorized join during a gated read rejects and cleans up pubsub subscription', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  let valid = true;
+  const verifier = { verify: (t: string) => (valid && t === 'tok-alice' ? { userId: 'alice' } : null) };
+  const gateway = new RealtimeGateway(edge, pubsub, verifier);
+
+  const gameId = 'game-g7';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  // Player A joins so room exists.
+  const alice = new InMemoryConnection('alice-conn');
+  gateway.handleConnection(alice);
+  alice.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await flush();
+  assert.ok(alice.last('joined'));
+
+  const initialSubCount = pubsub.subscriberCount(gameChannel(gameId));
+
+  const gate = createGate();
+  deferredLog.nextLoadGate = gate;
+
+  const conn = new RecordingConnection('bad-conn');
+  gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await awaitGate(gate, 'bad join load');
+
+  // During gated load, token is revoked AND a move is committed to pubsub.
+  valid = false;
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+
+  // While load is in flight, an extra subscriber was added for the buffer.
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), initialSubCount + 1);
+
+  gate.release.resolve();
+  await flush();
+
+  // Reject unauthorized delivered
+  assert.equal(conn.last('joined'), undefined);
+  assert.equal(conn.last('reject')?.code, 'unauthorized');
+  // No buffered frames delivered
+  assert.equal(conn.all('move').length, 0);
+
+  // Gateway cleaned up the buffer's pubsub subscription in finally
+  assert.equal(pubsub.subscriberCount(gameChannel(gameId)), initialSubCount);
+});
+
+test('K1 cold join loads once for its snapshot: loads === 1 (cold hydration only, no second recovery load)', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -1055,8 +1259,8 @@ test('K1 cold join loads once for its snapshot: loads === 2 (one cold hydration 
   spec.deliver({ t: 'join', gameId });
   await flush();
 
-  // Exactly 2 loads: 1 cold hydration in ensureLoaded + 1 in catchUpJoin.
-  assert.equal(deferredLog.loads, 2);
+  // Exactly 1 load: cold hydration in ensureLoaded.
+  assert.equal(deferredLog.loads, 1);
 
   const witness = new GameAuthority(new InMemoryPubSub(), () => 1000, store);
   await witness.ensureLoaded(gameId);

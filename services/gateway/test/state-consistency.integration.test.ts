@@ -79,9 +79,7 @@ stackTest('D4 real stack: simultaneous cold joins coalesce; normal owner and for
       assert.equal(second.last('joined'), undefined, 'second join must wait for the single flight');
       delay.release.resolve();
       await until(() => !!first.last('joined') && !!second.last('joined'));
-      // One coalesced cold hydration plus one detached recovery read per completed join (D1-A);
-      // without single-flight hydration this would be 4.
-      assert.equal(delay.reads(), 3, 'both joins shared one cold read; each added one recovery read');
+      assert.equal(delay.reads(), 1, 'both completed joins used the same cold read');
       assert.equal((await b.router.route(gameId, 'alice', { kind: 'move', uci: 'b1c3' })).state.ply, 1);
       // Another gateway forwards the exact black response via the production Redis consumer.
       assert.equal((await a.router.route(gameId, 'bob', { kind: 'move', uci: 'e7e5' })).state.ply, 2);

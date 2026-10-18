@@ -34,6 +34,7 @@ import type {
   MoveMessage,
   RejectCode,
   Role,
+  ServerMessage,
   SimpleCommandMessage,
   StateView,
   TokenVerifier,
@@ -69,10 +70,22 @@ const SIMPLE_TO_COMMAND: Record<SimpleCommandMessage['t'], Command['kind']> = {
   abort: 'abort',
 };
 
+/** Returns true if a buffered message was published after the snapshot's stateRevision or carries no revision. */
+function isNewerThanSnapshot(msg: ServerMessage, snapshotRevision: number): boolean {
+  if (msg.t === 'state') {
+    return msg.state.stateRevision > snapshotRevision;
+  }
+  if ('stateRevision' in msg && typeof msg.stateRevision === 'number') {
+    return msg.stateRevision > snapshotRevision;
+  }
+  return true;
+}
+
 export class RealtimeGateway {
   private readonly sessions = new Map<string, Session>();
   private readonly rooms = new Map<string, RoomEntry>();
   private readonly loadedGames = new Set<string>();
+  private readonly joinBuffers = new Map<string, Set<ServerMessage[]>>();
   /**
    * Command router: directs game commands to the owning node. Defaults to
    * {@link LocalCommandRouter} (direct authority.apply) for single-node and
@@ -161,6 +174,47 @@ export class RealtimeGateway {
   }
 
   /**
+   * Starts buffering pubsub and room state frames before any snapshot is read,
+   * so every commit after the snapshot (which publishes after its append) is
+   * either in the snapshot or in the buffer. Known limitation: on a node with
+   * no existing subscription for the game, the first Redis SUBSCRIBE is
+   * fire-and-forget, so a commit published by another node in that short window
+   * can still be missed (pre-existing on main for cold joins; closing it needs
+   * a PubSub API change).
+   */
+  private startJoinBuffer(gameId: string): { stop: () => void; take: () => ServerMessage[] } {
+    const buffered: ServerMessage[] = [];
+    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => buffered.push(msg));
+    let set = this.joinBuffers.get(gameId);
+    if (!set) {
+      set = new Set();
+      this.joinBuffers.set(gameId, set);
+    }
+    set.add(buffered);
+
+    let stopped = false;
+    const stop = (): void => {
+      if (stopped) return;
+      stopped = true;
+      unsubscribe();
+      const currentSet = this.joinBuffers.get(gameId);
+      if (currentSet) {
+        currentSet.delete(buffered);
+        if (currentSet.size === 0) {
+          this.joinBuffers.delete(gameId);
+        }
+      }
+    };
+
+    const take = (): ServerMessage[] => {
+      stop();
+      return buffered;
+    };
+
+    return { stop, take };
+  }
+
+  /**
    * Handle a join request. Identity is derived from the token (never from a
    * client-asserted userId). When the token is absent, the connection joins
    * as an anonymous spectator. When the token is present but invalid, the
@@ -172,6 +226,7 @@ export class RealtimeGateway {
     const current = (): boolean =>
       this.sessions.get(session.conn.id) === session && session.reads.get(gameId) === intent;
     const cold = !this.authority.hasFresh(gameId); // captured synchronously, before any await
+    const buffer = this.startJoinBuffer(gameId);
     void (async () => {
       try {
         let loaded = await this.authority.ensureLoaded(gameId);
@@ -202,10 +257,7 @@ export class RealtimeGateway {
             }
           }
         }
-        const membership = this.completeJoin(session, gameId, token, state);
-        if (membership) {
-          await this.catchUpJoin(session, gameId, membership, state.stateRevision, current);
-        }
+        this.completeJoin(session, gameId, token, state, buffer.take);
       } catch (err: unknown) {
         if (current()) {
           if (err instanceof AuthorityError && err.code === 'unknown_game') {
@@ -215,6 +267,7 @@ export class RealtimeGateway {
           }
         }
       } finally {
+        buffer.stop();
         if (session.reads.get(gameId) === intent) {
           session.reads.delete(gameId);
         }
@@ -225,15 +278,15 @@ export class RealtimeGateway {
   /**
    * Finish a join once the game is resident and recovery state has been read.
    * State comes from a detached recovery read; the resident slot exists for commands and host hooks.
-   * Returns the created Membership, or undefined if the join was rejected or superseded.
    */
   private completeJoin(
     session: Session,
     gameId: string,
     token: string | undefined,
     state: StateView,
-  ): Membership | undefined {
-    if (this.sessions.get(session.conn.id) !== session) return undefined;
+    takeBuffer: () => ServerMessage[],
+  ): void {
+    if (this.sessions.get(session.conn.id) !== session) return;
     // Derive identity from the token. No token → anonymous spectator.
     let userId: string;
     if (token !== undefined) {
@@ -245,7 +298,7 @@ export class RealtimeGateway {
       }
       if (verified === null) {
         this.reject(session, gameId, null, 'unauthorized', 'invalid or expired token');
-        return undefined;
+        return;
       }
       userId = verified.userId;
     } else {
@@ -259,45 +312,22 @@ export class RealtimeGateway {
 
     const entry = this.ensureRoom(gameId);
     entry.room.add(session.conn, userId, role);
-    const membership: Membership = { userId, role, lastSeq: 0 };
-    session.games.set(gameId, membership);
+    const pending = takeBuffer();
+
+    session.games.set(gameId, { userId, role, lastSeq: 0 });
 
     session.conn.send({ t: 'joined', gameId, role, state });
+    for (const msg of pending) {
+      if (isNewerThanSnapshot(msg, state.stateRevision)) {
+        session.conn.send(msg);
+      }
+    }
     entry.room.broadcastPresence();
     if (color !== null) this.commitReadiness(session, gameId, userId, color, state);
 
     if (!this.loadedGames.has(gameId)) {
       this.loadedGames.add(gameId);
       this.onGameLoaded?.(gameId, state);
-    }
-    return membership;
-  }
-
-  /**
-   * Reconcile any commit that landed between the initial recovery snapshot and room subscription.
-   * Runs after the connection is subscribed to the room; a failed catch-up must never reject
-   * or undo the successful join because the join already succeeded and later broadcasts or client
-   * resume will resync it.
-   */
-  private async catchUpJoin(
-    session: Session,
-    gameId: string,
-    membership: Membership,
-    joinedRevision: number,
-    current: () => boolean,
-  ): Promise<void> {
-    try {
-      const latest = await this.authority.readRecovery(gameId, 0);
-      if (
-        current() &&
-        session.games.get(gameId) === membership &&
-        latest.state.stateRevision > joinedRevision
-      ) {
-        session.conn.send({ t: 'state', gameId, state: latest.state });
-      }
-    } catch {
-      // Non-fatal: the join already succeeded; later room broadcasts and client gap detection
-      // on resume will resync any state difference without breaking the joined session.
     }
   }
 
@@ -471,8 +501,17 @@ export class RealtimeGateway {
 
   private sendStateToRoom(gameId: string): void {
     const entry = this.rooms.get(gameId);
-    if (!entry) return;
-    entry.room.sendAll({ t: 'state', gameId, state: this.authority.getState(gameId) });
+    const buffers = this.joinBuffers.get(gameId);
+    if (!entry && (!buffers || buffers.size === 0)) return;
+    const msg: ServerMessage = { t: 'state', gameId, state: this.authority.getState(gameId) };
+    if (entry) {
+      entry.room.sendAll(msg);
+    }
+    if (buffers) {
+      for (const buf of buffers) {
+        buf.push(msg);
+      }
+    }
   }
 
   private reject(
