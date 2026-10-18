@@ -48,6 +48,56 @@ interface OnlineIndexApplication {
 const MIGRATION_ADVISORY_LOCK_KEY = 4915219603172;
 
 /**
+ * The fencing foundation (0050) and its helper hardening (0051), applied as one
+ * transaction when both are pending.
+ *
+ * 0050 installs the `game_fencing` helpers as SECURITY DEFINER; 0051 immediately
+ * re-declares the four internal helpers SECURITY INVOKER. Applied as two separate
+ * commits — which is what the per-migration loop below does for every other
+ * migration — the committed-0050 / pre-0051 state is visible to any other
+ * connection, and in that state a role holding EXECUTE on
+ * `game_fencing.insert_batch` plus schema USAGE (but no `game_events` INSERT and
+ * no owner membership) can call the DEFINER helper directly and persist events it
+ * has no privilege to write. That window was demonstrated against the unmodified
+ * runner in disposable PostgreSQL 16.14 (task RZ-PR114-PG-ISOLATED-20261018-04).
+ *
+ * Coalescing these two — and only these two, matched by version AND filename — so
+ * their SQL and both ledger rows commit together means no other connection ever
+ * observes the intermediate state: either both are visible or neither is. This is
+ * narrow by construction (not a general cross-migration batch) and leaves every
+ * other migration, the online-index path, checksum immutability and transaction
+ * cleanup exactly as they were. It changes no migration bytes and writes each
+ * migration's own canonical checksum to the ledger, so a later run validates
+ * history identically.
+ *
+ * It does not and cannot close the window on a database that already committed
+ * 0050 under an earlier runner: that exposure is historical and is addressed by
+ * the operational upgrade path (isolate untrusted writers, then apply 0051 with
+ * trusted installer credentials), not retroactively by this runner. When 0050 is
+ * already applied, 0051 falls through to the ordinary per-migration path, where
+ * its unconditional `ALTER FUNCTION ... SECURITY INVOKER` fails closed for a
+ * caller that does not own the (possibly ownership-transferred) helpers.
+ *
+ * Applying 0050 without a pending 0051 is refused outright (see
+ * {@link planAtomicFencing}); the production runner never installs the DEFINER
+ * helpers alone. An already-0050 database is reproduced in tests by executing the
+ * real 0050 SQL and a truthful ledger row, not by that refused path.
+ */
+const FENCING_FOUNDATION_VERSION = 50;
+const FENCING_HARDENING_VERSION = 51;
+const ATOMIC_FENCING_PAIR: readonly { readonly version: number; readonly file: string }[] = [
+  { version: FENCING_FOUNDATION_VERSION, file: '0050_inactive_game_fencing.sql' },
+  { version: FENCING_HARDENING_VERSION, file: '0051_non_escalating_fencing_helpers.sql' },
+];
+
+interface AtomicGroupMember {
+  readonly version: number;
+  readonly file: string;
+  readonly checksum: string;
+  readonly sql: string;
+}
+
+/**
  * Reduce a migration to its canonical form: the committed LF text.
  *
  * Only the CRLF pair is rewritten, because that is the only difference a Git
@@ -278,6 +328,131 @@ export async function migrate(pool: Pool, dir: string): Promise<number> {
 }
 
 /**
+ * Decide how the fencing pair is applied this run, failing closed on any shape
+ * that cannot be applied safely rather than silently degrading.
+ *
+ * Returns the two members to apply in one transaction when both 0050 and 0051
+ * are pending and consistent; returns `null` when there is nothing fencing-
+ * specific to do (neither pending — already applied, or absent from this tree —
+ * so the ordinary loop handles them, including the legitimate "0050 already
+ * applied, 0051 pending" trusted-installer upgrade). It THROWS, before any 0050
+ * SQL executes, when:
+ *
+ *  - 0051 is recorded as applied but 0050 is not — an impossible history;
+ *  - 0051 is pending with no 0050 to build on (neither applied nor pending);
+ *  - 0050 is pending without a pending 0051 — installing the SECURITY DEFINER
+ *    helpers without the hardening that closes the escalation window is refused
+ *    in the production runner (a historical already-0050 database is reproduced
+ *    in tests by executing the real 0050 SQL and its truthful ledger row, never
+ *    by applying 0050 alone through this runner);
+ *  - either member is present under an unexpected filename or is not a plain
+ *    transactional migration — a malformed pair must not lose atomicity.
+ */
+function planAtomicFencing(
+  dir: string,
+  files: readonly { readonly file: string; readonly version: number }[],
+  applied: ReadonlyMap<number, AppliedRow>,
+): readonly AtomicGroupMember[] | null {
+  const present = new Map(ATOMIC_FENCING_PAIR.map(({ version }) => [version, files.find((f) => f.version === version)]));
+  const applied50 = applied.has(FENCING_FOUNDATION_VERSION);
+  const applied51 = applied.has(FENCING_HARDENING_VERSION);
+  const pending50 = present.get(FENCING_FOUNDATION_VERSION) !== undefined && !applied50;
+  const pending51 = present.get(FENCING_HARDENING_VERSION) !== undefined && !applied51;
+
+  if (applied51 && !applied50) {
+    throw new MigrationError(
+      `inconsistent fencing history: migration ${FENCING_HARDENING_VERSION} is recorded as applied but ${FENCING_FOUNDATION_VERSION} is not`,
+    );
+  }
+  if (pending51 && !applied50 && !pending50) {
+    throw new MigrationError(
+      `migration ${FENCING_HARDENING_VERSION} (fencing helper hardening) cannot be applied without migration ${FENCING_FOUNDATION_VERSION}`,
+    );
+  }
+  // A recorded online-index-style pending row is not an installed foundation.
+  for (const { version } of ATOMIC_FENCING_PAIR) {
+    const row = applied.get(version);
+    if (row && row.state !== 'applied') throw new MigrationError(`fencing migration ${version} has an invalid pending ledger state`);
+  }
+  if (applied50 && !applied51 && !pending51) {
+    throw new MigrationError('already applied migration 50 is missing migration 51 hardening file; refusing an incomplete migration tree');
+  }
+  // Validate a pending hardening-only upgrade too; never route an unexpected
+  // version-51 filename/directive through the ordinary migration path.
+  if (!pending50) {
+    if (pending51) {
+      const hardening = ATOMIC_FENCING_PAIR[1]!;
+      const found = present.get(hardening.version)!;
+      if (found.file !== hardening.file) throw new MigrationError(`fencing migration 51 must be named ${hardening.file}`);
+      if (parseMigration(readMigrationSql(dir, found.file)).kind !== 'transactional')
+        throw new MigrationError(`fencing migration ${found.file} must be a plain transactional migration`);
+    }
+    return null;
+  }
+  if (!pending51) {
+    throw new MigrationError(
+      `migration ${FENCING_FOUNDATION_VERSION} (inactive fencing foundation) must be applied together with migration ` +
+        `${FENCING_HARDENING_VERSION}: installing the SECURITY DEFINER helpers without the hardening that closes the ` +
+        `escalation window is refused`,
+    );
+  }
+
+  const members: AtomicGroupMember[] = [];
+  for (const { version, file } of ATOMIC_FENCING_PAIR) {
+    const found = present.get(version);
+    if (!found || found.file !== file) {
+      throw new MigrationError(
+        `fencing migration ${version} must be named ${file} to be applied atomically; refusing an unexpected filename`,
+      );
+    }
+    const sql = readMigrationSql(dir, file);
+    if (parseMigration(sql).kind !== 'transactional') {
+      throw new MigrationError(
+        `fencing migration ${file} must be a plain transactional migration to be grouped atomically`,
+      );
+    }
+    members.push({ version, file, checksum: migrationChecksum(sql), sql });
+  }
+  return members;
+}
+
+/**
+ * Apply the fencing pair in a single transaction: each member's SQL and its
+ * ledger row, then one COMMIT. Any failure rolls back both migrations and both
+ * ledger rows, leaving neither committed — mirroring the single-migration block
+ * in {@link runMigrations}, extended across the pair.
+ */
+async function applyAtomicFencingPair(
+  pool: Pool,
+  pair: readonly AtomicGroupMember[],
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const member of pair) {
+      await client.query(member.sql);
+      await client.query(
+        `INSERT INTO schema_migrations (version, name, checksum, state)
+           VALUES ($1, $2, $3, 'applied')`,
+        [member.version, member.file, member.checksum],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* ignore rollback failure */
+    }
+    throw new MigrationError(
+      `atomic migration group ${pair.map((m) => m.file).join(' + ')} failed: ${(err as Error).message}`,
+    );
+  } finally {
+    client.release();
+  }
+}
+
+/**
  * The walk itself: ensure the ledger exists, then apply every file the database has no record of.
  *
  * Separated from {@link migrate} because the advisory lock is that function's whole job — this one
@@ -308,8 +483,28 @@ async function runMigrations(pool: Pool, dir: string): Promise<number> {
   );
   const byVersion = new Map<number, AppliedRow>(applied.rows.map((r) => [r.version, r]));
 
+  // Decide the fencing pair up front: this fails closed on an inconsistent or
+  // unsafe shape (see planAtomicFencing) before any 0050 SQL executes, and the
+  // impossible-history check fires even when 0050 itself is not iterated.
+  const fencingPair = planAtomicFencing(dir, files, byVersion);
+
   let count = 0;
+  const coalescedVersions = new Set<number>();
   for (const { file, version } of files) {
+    if (coalescedVersions.has(version)) continue;
+
+    // Close the fencing escalation window: when 0050 and 0051 are both pending,
+    // apply them atomically so the committed-0050/pre-0051 state is never visible
+    // to another connection. Every other case (0050 already applied with 0051
+    // pending — the trusted-installer upgrade — and any unrelated migration) uses
+    // the normal per-migration path; unsafe shapes already threw above.
+    if (version === FENCING_FOUNDATION_VERSION && fencingPair) {
+      await applyAtomicFencingPair(pool, fencingPair);
+      count += fencingPair.length;
+      for (const member of fencingPair) coalescedVersions.add(member.version);
+      continue;
+    }
+
     const sql = readMigrationSql(dir, file);
     const checksum = migrationChecksum(sql);
     const migration = parseMigration(sql);

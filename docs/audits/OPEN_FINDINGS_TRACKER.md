@@ -79,7 +79,7 @@ in main until owner merge. No launch-priority or product-policy decision is made
 | R-01-D1 | Confirmed at historical baseline; pending, current source gap retained | Recommended P1 recovery correctness | Unassigned |
 | R-01-D2 | Confirmed at historical baseline; pending, current source gap retained | Recommended P1 distributed draw behavior | Unassigned |
 | R-01-LATE-APPEND | Accepted intermediate D3 limitation; unresolved production risk | Strong fence required before public multi-gateway production | Unassigned; owner policy |
-| PG-F1 | Future schema / durable authority infrastructure | Production safety dependency; inactive alone | Unassigned |
+| PG-F1 | Owner-authorized additive implementation candidate; delivery gates pending | Inactive foundation, not active fencing | Codex 1; isolated PG-F1 branch |
 | PG-F2 | Future mandatory all-writer enforcement | Production safety / rollout gate | Unassigned; owner enforcement choice |
 | R-02-F1 | Observed terminal retention; policy pending | Reported P1 operational concern, no retirement SLA | Owner policy; implementation unassigned |
 | R-02-F2 | Observed cumulative cache residency; policy pending | Reported P2 capacity concern, no measured heap leak | Owner policy; implementation unassigned |
@@ -231,6 +231,16 @@ in main until owner merge. No launch-priority or product-policy decision is made
   real PG old-append/new-grant ordering tests. #109 merge does not close this risk.
 
 ## PG-F1 — durable grant/schema and fenced append infrastructure
+
+- **2026-10-14 candidate:** owner-authorized additive work starts from fresh
+  `4ccf8f48869335e06ac1b1de467d2161869f8fd7` after #112 owner merge. See
+  [ADR-0162](../adr/0162-inactive-postgresql-fencing-foundation.md) for the protected
+  grant-row transaction/security/bootstrap contract and explicit limitations.
+  Real disposable PostgreSQL schema/API RED preceded implementation; current
+  local validation and post-fix/exact-head publication gates are pending.
+  This dated candidate update supersedes the historical “future” wording below,
+  not its retained limitations. Legacy writers remain enabled; PG-F2 and
+  R-01-LATE-APPEND are **not closed**, and no production deployment is authorized.
 
 - **State / relevance:** future, not implemented. E-DESIGN proposed PG-owned grant
   `{holder, epoch, grantId, leaseUntil}`; Redis is a routing mirror. E-MAIN
