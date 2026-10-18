@@ -30,6 +30,7 @@ import { gameChannel, type PubSub, type Unsubscribe } from './pubsub';
 import type { Connection } from './transport';
 import type {
   ClientMessage,
+  GameBroadcast,
   MoveMessage,
   RejectCode,
   Role,
@@ -166,12 +167,11 @@ export class RealtimeGateway {
    * join is rejected with `unauthorized`.
    */
   private onJoin(session: Session, gameId: string, token: string | undefined): void {
-    // Joins always take the async path: ensureLoaded hydrates a resident slot for
-    // commands and presence hooks, then readRecovery fetches the freshest committed prefix.
     const intent = Symbol('join');
     session.reads.set(gameId, intent);
     const current = (): boolean =>
       this.sessions.get(session.conn.id) === session && session.reads.get(gameId) === intent;
+    const cold = !this.authority.hasFresh(gameId); // captured synchronously, before any await
     void (async () => {
       try {
         let loaded = await this.authority.ensureLoaded(gameId);
@@ -185,9 +185,26 @@ export class RealtimeGateway {
           return;
         }
         if (!current()) return;
-        const read = await this.authority.readRecovery(gameId, 0);
-        if (current()) {
-          this.completeJoin(session, gameId, token, read.state);
+        let state: StateView;
+        if (cold) {
+          // ensureLoaded just hydrated (or awaited a reload of) the slot from the durable log in this call,
+          // so the resident record is a fresh committed prefix: no second load.
+          state = this.authority.getState(gameId);
+        } else {
+          state = (await this.authority.readRecovery(gameId, 0)).state;
+          if (!current()) return;
+          if (!this.authority.has(gameId)) { // An eviction (e.g. the deadline-expiry worker) during the read would leave the joined player without a resident slot for local commands; re-hydrate once.
+            const reloaded = await this.authority.ensureLoaded(gameId);
+            if (!current()) return;
+            if (!reloaded) {
+              this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+              return;
+            }
+          }
+        }
+        const membership = this.completeJoin(session, gameId, token, state);
+        if (membership) {
+          await this.catchUpJoin(session, gameId, membership, state.stateRevision, current);
         }
       } catch (err: unknown) {
         if (current()) {
@@ -208,9 +225,15 @@ export class RealtimeGateway {
   /**
    * Finish a join once the game is resident and recovery state has been read.
    * State comes from a detached recovery read; the resident slot exists for commands and host hooks.
+   * Returns the created Membership, or undefined if the join was rejected or superseded.
    */
-  private completeJoin(session: Session, gameId: string, token: string | undefined, state: StateView): void {
-    if (this.sessions.get(session.conn.id) !== session) return;
+  private completeJoin(
+    session: Session,
+    gameId: string,
+    token: string | undefined,
+    state: StateView,
+  ): Membership | undefined {
+    if (this.sessions.get(session.conn.id) !== session) return undefined;
     // Derive identity from the token. No token → anonymous spectator.
     let userId: string;
     if (token !== undefined) {
@@ -222,7 +245,7 @@ export class RealtimeGateway {
       }
       if (verified === null) {
         this.reject(session, gameId, null, 'unauthorized', 'invalid or expired token');
-        return;
+        return undefined;
       }
       userId = verified.userId;
     } else {
@@ -236,7 +259,8 @@ export class RealtimeGateway {
 
     const entry = this.ensureRoom(gameId);
     entry.room.add(session.conn, userId, role);
-    session.games.set(gameId, { userId, role, lastSeq: 0 });
+    const membership: Membership = { userId, role, lastSeq: 0 };
+    session.games.set(gameId, membership);
 
     session.conn.send({ t: 'joined', gameId, role, state });
     entry.room.broadcastPresence();
@@ -245,6 +269,35 @@ export class RealtimeGateway {
     if (!this.loadedGames.has(gameId)) {
       this.loadedGames.add(gameId);
       this.onGameLoaded?.(gameId, state);
+    }
+    return membership;
+  }
+
+  /**
+   * Reconcile any commit that landed between the initial recovery snapshot and room subscription.
+   * Runs after the connection is subscribed to the room; a failed catch-up must never reject
+   * or undo the successful join because the join already succeeded and later broadcasts or client
+   * resume will resync it.
+   */
+  private async catchUpJoin(
+    session: Session,
+    gameId: string,
+    membership: Membership,
+    joinedRevision: number,
+    current: () => boolean,
+  ): Promise<void> {
+    try {
+      const latest = await this.authority.readRecovery(gameId, 0);
+      if (
+        current() &&
+        session.games.get(gameId) === membership &&
+        latest.state.stateRevision > joinedRevision
+      ) {
+        session.conn.send({ t: 'state', gameId, state: latest.state });
+      }
+    } catch {
+      // Non-fatal: the join already succeeded; later room broadcasts and client gap detection
+      // on resume will resync any state difference without breaking the joined session.
     }
   }
 
@@ -342,6 +395,7 @@ export class RealtimeGateway {
       this.sessions.get(session.conn.id) === session &&
       session.reads.get(gameId) === intent &&
       session.games.get(gameId) === membership;
+    const cold = !this.authority.hasFresh(gameId);
     void (async () => {
       try {
         const loaded = await this.authority.ensureLoaded(gameId);
@@ -352,13 +406,24 @@ export class RealtimeGateway {
           return;
         }
         if (!current()) return;
-        const read = await this.authority.readRecovery(gameId, lastPly);
+        let state: StateView;
+        let missed: readonly GameBroadcast[];
+        if (cold) {
+          // Cold resume: ensureLoaded just hydrated the slot from the durable log, so the resident
+          // record is fresh. Reuse it directly without a second detached recovery load.
+          state = this.authority.getState(gameId);
+          missed = this.authority.getMissedSince(gameId, lastPly);
+        } else {
+          const read = await this.authority.readRecovery(gameId, lastPly);
+          state = read.state;
+          missed = read.missed;
+        }
         if (current()) {
           session.conn.send({
             t: 'resumed',
             gameId,
-            state: read.state,
-            missed: read.missed,
+            state,
+            missed,
           });
         }
       } catch (err: unknown) {
