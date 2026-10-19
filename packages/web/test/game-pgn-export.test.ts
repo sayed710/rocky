@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   OBJECT_URL_REVOKE_MS,
+  browserClipboardWriter,
   mountGamePgnExport,
   pgnFilename,
   saveFile,
@@ -285,4 +286,326 @@ test('the saved bytes are never changed by the locale', async () => {
   await settle();
   assert.equal(saved[0]!.text, PGN);
   assert.equal(saved[0]!.filename, `game-${GAME_ID}.pgn`);
+});
+
+// --- Copy PGN --------------------------------------------------------------------------------------
+
+/** A clipboard that, like the browser's, only writes once the pending text resolves. */
+function fakeClipboard(outcome: 'grant' | 'deny' = 'grant') {
+  const written: string[] = [];
+  const calls: Promise<string>[] = [];
+  const writeClipboard = async (text: Promise<string>): Promise<void> => {
+    calls.push(text);
+    const value = await text;
+    if (outcome === 'deny') throw new DOMException('Write permission denied.', 'NotAllowedError');
+    written.push(value);
+  };
+  return { writeClipboard, written, calls };
+}
+
+function copySetup(clipboard = fakeClipboard(), locale: 'en' | 'ar' = 'en') {
+  const { doc, elements } = createGameDocument();
+  const i18n = createTestI18n();
+  if (locale === 'ar') i18n.setLocale('ar');
+  const requests: { gameId: string; signal: AbortSignal; reply: ReturnType<typeof deferred<string>> }[] = [];
+  const saved: PgnFile[] = [];
+  const mounted = mountGamePgnExport({
+    doc, gameId: GAME_ID, i18n,
+    requestPgn: (gameId, signal) => {
+      const reply = deferred<string>();
+      requests.push({ gameId, signal, reply });
+      return reply.promise;
+    },
+    save: (file) => { saved.push(file); },
+    writeClipboard: clipboard.writeClipboard,
+  });
+  const el = (id: string): FakeElement => elements.get(id)!;
+  return { mounted, requests, saved, el, i18n, clipboard };
+}
+
+test('Copy PGN is offered only for a finished game and only where a clipboard exists', () => {
+  const { mounted, requests, el } = copySetup();
+  assert.equal(el('game-pgn-copy').hidden, false);
+  assert.equal(el('game-export').hidden, true, 'the whole panel is hidden while the game is live');
+  el('game-pgn-copy').click();
+  assert.equal(requests.length, 0, 'a live game is never requested');
+  mounted.setFinished(true);
+  assert.equal(el('game-pgn-copy').getAttribute('aria-disabled'), 'false');
+
+  const { doc, elements } = createGameDocument();
+  const noClipboard = mountGamePgnExport({
+    doc, gameId: GAME_ID, i18n: createTestI18n(), requestPgn: async () => PGN, writeClipboard: null,
+  });
+  noClipboard.setFinished(true);
+  assert.equal(elements.get('game-pgn-copy')!.hidden, true, 'no copy control that cannot work');
+  assert.equal(elements.get('game-pgn-download')!.hidden, false, 'download is still offered');
+});
+
+test('the default writer is absent without a browser clipboard, so the control stays hidden', () => {
+  const { doc, elements } = createGameDocument();
+  mountGamePgnExport({ doc, gameId: GAME_ID, i18n: createTestI18n(), requestPgn: async () => PGN }).setFinished(true);
+  assert.equal(elements.get('game-pgn-copy')!.hidden, true);
+  assert.equal(browserClipboardWriter(undefined), null);
+  assert.equal(browserClipboardWriter({} as Navigator), null);
+});
+
+test('the writer starts inside the click, before the server text arrives', () => {
+  const { mounted, clipboard, el } = copySetup();
+  mounted.setFinished(true);
+  el('game-pgn-copy').click();
+  assert.equal(clipboard.calls.length, 1, 'clipboard call is made synchronously, keeping user activation');
+});
+
+test('copying puts exactly the server text on the clipboard and announces it', async () => {
+  const { mounted, requests, saved, el, clipboard } = copySetup();
+  mounted.setFinished(true);
+
+  el('game-pgn-copy').click();
+  assert.equal(requests[0]!.gameId, GAME_ID);
+  assert.equal(el('game-pgn-copy').getAttribute('aria-disabled'), 'true');
+  assert.equal(el('game-pgn-download').getAttribute('aria-disabled'), 'true', 'one request at a time');
+  assert.equal(el('game-export').getAttribute('aria-busy'), 'true');
+  assert.equal(el('game-pgn-status').textContent, 'Copying the PGN…');
+
+  requests[0]!.reply.resolve(PGN);
+  await settle();
+
+  assert.deepEqual(clipboard.written, [PGN], 'headers, Unicode, escapes and line breaks unchanged');
+  assert.equal(saved.length, 0, 'copying downloads nothing');
+  assert.equal(el('game-pgn-status').textContent, 'PGN copied to the clipboard.');
+  assert.equal(el('game-pgn-copy').getAttribute('aria-disabled'), 'false');
+  assert.equal(el('game-export').getAttribute('aria-busy'), 'false');
+  assert.equal(el('game-pgn-error').hidden, true);
+});
+
+test('a denied clipboard write is an alert, never a success', async () => {
+  const { mounted, requests, el } = copySetup(fakeClipboard('deny'));
+  mounted.setFinished(true);
+  el('game-pgn-copy').click();
+  requests[0]!.reply.resolve(PGN);
+  await settle();
+
+  assert.equal(el('game-pgn-status').textContent, '');
+  assert.equal(el('game-pgn-error').hidden, false);
+  assert.equal(el('game-pgn-error').textContent, 'The PGN could not be copied. Please try again.');
+  assert.ok(!el('game-pgn-error').textContent.includes('1. e4'), 'the PGN never leaks into the message');
+  assert.equal(el('game-pgn-copy').getAttribute('aria-disabled'), 'false');
+});
+
+test('a failed request copies nothing, and a retry or a download clears the copy error', async () => {
+  const { mounted, requests, el, clipboard, saved } = copySetup();
+  mounted.setFinished(true);
+  el('game-pgn-copy').click();
+  requests[0]!.reply.reject(new Error('503'));
+  await settle();
+  assert.deepEqual(clipboard.written, []);
+  assert.equal(el('game-pgn-error').textContent, 'The PGN could not be copied. Please try again.');
+
+  el('game-pgn-download').click();
+  assert.equal(el('game-pgn-error').hidden, true, 'a new attempt clears the previous failure');
+  requests[1]!.reply.resolve(PGN);
+  await settle();
+  assert.equal(saved.length, 1);
+  assert.equal(el('game-pgn-status').textContent, 'PGN download started.');
+
+  el('game-pgn-copy').click();
+  requests[2]!.reply.resolve(PGN);
+  await settle();
+  assert.deepEqual(clipboard.written, [PGN]);
+});
+
+test('repeat clicks on either control while one request is pending start nothing', async () => {
+  const { mounted, requests, el, clipboard, saved } = copySetup();
+  mounted.setFinished(true);
+  el('game-pgn-copy').click();
+  el('game-pgn-copy').click();
+  el('game-pgn-download').click();
+  assert.equal(requests.length, 1);
+  assert.equal(clipboard.calls.length, 1);
+  requests[0]!.reply.resolve(PGN);
+  await settle();
+  assert.deepEqual(clipboard.written, [PGN]);
+  assert.equal(saved.length, 0);
+
+  el('game-pgn-copy').click();
+  assert.equal(requests.length, 2, 'a settled request frees the controls');
+});
+
+test('a response arriving after route disposal never reaches the clipboard', async () => {
+  const { mounted, requests, el, clipboard } = copySetup();
+  mounted.setFinished(true);
+  el('game-pgn-copy').click();
+  const statusBefore = el('game-pgn-status').textContent;
+
+  mounted.dispose();
+  assert.equal(requests[0]!.signal.aborted, true);
+  requests[0]!.reply.resolve(PGN);
+  await settle();
+
+  assert.deepEqual(clipboard.written, [], 'the pending text rejects, so the clipboard is untouched');
+  assert.equal(el('game-pgn-status').textContent, statusBefore, 'no stale render');
+  assert.equal(el('game-pgn-error').hidden, true);
+
+  el('game-pgn-copy').click();
+  assert.equal(requests.length, 1, 'the disposed control no longer listens');
+});
+
+test('a writer that throws synchronously is a failure, with no unhandled rejection', async () => {
+  const { doc, elements } = createGameDocument();
+  const mounted = mountGamePgnExport({
+    doc, gameId: GAME_ID, i18n: createTestI18n(),
+    requestPgn: async () => { throw new Error('503'); },
+    writeClipboard: () => { throw new TypeError('ClipboardItem unsupported'); },
+  });
+  mounted.setFinished(true);
+  elements.get('game-pgn-copy')!.click();
+  await settle();
+  assert.equal(elements.get('game-pgn-error')!.textContent, 'The PGN could not be copied. Please try again.');
+});
+
+test('copy status and error re-translate in place, and the copied text ignores the locale', async () => {
+  const { mounted, requests, el, i18n, clipboard } = copySetup(fakeClipboard('deny'));
+  mounted.setFinished(true);
+  el('game-pgn-copy').click();
+  requests[0]!.reply.resolve(PGN);
+  await settle();
+
+  i18n.setLocale('ar');
+  mounted.relocalize();
+  assert.equal(el('game-pgn-error').textContent, 'تعذّر نسخ PGN. حاول مرة أخرى.');
+  assert.ok(!/[‎‏⁦-⁩]/.test(el('game-pgn-error').textContent), 'no invisible direction marks');
+  assert.equal(i18n.t('game.export.copyPgn'), 'نسخ PGN');
+  assert.deepEqual(clipboard.written, []);
+
+  const ar = copySetup(fakeClipboard(), 'ar');
+  ar.mounted.setFinished(true);
+  ar.el('game-pgn-copy').click();
+  assert.equal(ar.el('game-pgn-status').textContent, 'جارٍ نسخ PGN…');
+  ar.requests[0]!.reply.resolve(PGN);
+  await settle();
+  assert.equal(ar.el('game-pgn-status').textContent, 'تم نسخ PGN إلى الحافظة.');
+  assert.deepEqual(ar.clipboard.written, [PGN]);
+});
+
+// --- The browser writer ---------------------------------------------------------------------------
+
+test('the browser writer prefers a ClipboardItem holding the pending text as a plain-text Blob', async (t) => {
+  const items: FakeClipboardItem[] = [];
+  class FakeClipboardItem { constructor(readonly types: Record<string, Promise<Blob>>) { items.push(this); } }
+  const g = globalThis as { ClipboardItem?: unknown };
+  const previous = g.ClipboardItem;
+  g.ClipboardItem = FakeClipboardItem;
+  t.after(() => { g.ClipboardItem = previous; });
+
+  let writeTextCalled = false;
+  const nav = {
+    clipboard: {
+      write: async (data: FakeClipboardItem[]) => { assert.equal(data.length, 1); },
+      writeText: async () => { writeTextCalled = true; },
+    },
+  } as unknown as Navigator;
+  await browserClipboardWriter(nav)!(Promise.resolve(PGN));
+
+  assert.equal(writeTextCalled, false);
+  const blob = await items[0]!.types['text/plain']!;
+  assert.equal(blob.type, 'text/plain');
+  assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), new TextEncoder().encode(PGN));
+});
+
+test('a clipboard refusal before the response aborts the pending request', async () => {
+  const { doc, elements } = createGameDocument();
+  const signals: AbortSignal[] = [];
+  const reply = deferred<string>();
+  const mounted = mountGamePgnExport({
+    doc, gameId: GAME_ID, i18n: createTestI18n(),
+    requestPgn: (_gameId, signal) => { signals.push(signal); return reply.promise; },
+    writeClipboard: async () => { throw new DOMException('denied', 'NotAllowedError'); },
+  });
+  mounted.setFinished(true);
+  elements.get('game-pgn-copy')!.click();
+  await settle();
+  assert.equal(signals[0]!.aborted, true, 'the abandoned request does not keep running');
+  assert.equal(elements.get('game-pgn-error')!.textContent, 'The PGN could not be copied. Please try again.');
+  assert.equal(elements.get('game-pgn-copy')!.getAttribute('aria-disabled'), 'false');
+  reply.resolve(PGN);
+  await settle();
+  assert.equal(elements.get('game-pgn-error')!.hidden, false, 'the late response changes nothing');
+});
+
+test('a request that throws synchronously still releases both controls', async () => {
+  const { doc, elements } = createGameDocument();
+  const clipboard = fakeClipboard();
+  const mounted = mountGamePgnExport({
+    doc, gameId: GAME_ID, i18n: createTestI18n(),
+    requestPgn: () => { throw new Error('no session'); },
+    writeClipboard: clipboard.writeClipboard,
+  });
+  mounted.setFinished(true);
+  for (const id of ['game-pgn-copy', 'game-pgn-download']) {
+    elements.get(id)!.click();
+    await settle();
+    assert.equal(elements.get('game-pgn-error')!.hidden, false, id);
+    assert.equal(elements.get('game-pgn-copy')!.getAttribute('aria-disabled'), 'false', id);
+    assert.equal(elements.get('game-pgn-download')!.getAttribute('aria-disabled'), 'false', id);
+  }
+  assert.deepEqual(clipboard.written, []);
+});
+
+test('a game that is no longer over abandons a pending copy or download', async () => {
+  const { mounted, requests, el, clipboard, saved } = copySetup();
+  mounted.setFinished(true);
+  el('game-pgn-copy').click();
+  mounted.setFinished(false);
+  assert.equal(requests[0]!.signal.aborted, true);
+  requests[0]!.reply.resolve(PGN);
+  await settle();
+  assert.deepEqual(clipboard.written, []);
+  assert.equal(el('game-pgn-status').textContent, '');
+  assert.equal(el('game-pgn-error').hidden, true);
+
+  mounted.setFinished(true);
+  el('game-pgn-download').click();
+  mounted.setFinished(false);
+  requests[1]!.reply.resolve(PGN);
+  await settle();
+  assert.equal(saved.length, 0);
+});
+
+test('a write the browser rejects early leaves no unhandled rejection when the text later fails', async (t) => {
+  class FakeClipboardItem { constructor(readonly types: Record<string, Promise<Blob>>) {} }
+  const g = globalThis as { ClipboardItem?: unknown };
+  const previous = g.ClipboardItem;
+  g.ClipboardItem = FakeClipboardItem;
+  t.after(() => { g.ClipboardItem = previous; });
+
+  const nav = { clipboard: { write: async () => { throw new DOMException('denied', 'NotAllowedError'); } } } as unknown as Navigator;
+  const text = deferred<string>();
+  await assert.rejects(browserClipboardWriter(nav)!(text.promise), /denied/);
+  text.reject(new Error('503'));
+  await settle();
+  await new Promise((resolve) => setImmediate(resolve));
+});
+
+test('an engine that refuses a promised ClipboardItem falls back to writeText', async (t) => {
+  class StrictClipboardItem { constructor() { throw new TypeError('The provided value is not of type Blob'); } }
+  const g = globalThis as { ClipboardItem?: unknown };
+  const previous = g.ClipboardItem;
+  g.ClipboardItem = StrictClipboardItem;
+  t.after(() => { g.ClipboardItem = previous; });
+
+  const written: string[] = [];
+  const nav = {
+    clipboard: { write: async () => { assert.fail('write must not be reached'); }, writeText: async (value: string) => { written.push(value); } },
+  } as unknown as Navigator;
+  await browserClipboardWriter(nav)!(Promise.resolve(PGN));
+  assert.deepEqual(written, [PGN]);
+});
+
+test('without ClipboardItem the browser writer falls back to writeText with the exact text', async () => {
+  const written: string[] = [];
+  const nav = { clipboard: { writeText: async (text: string) => { written.push(text); } } } as unknown as Navigator;
+  await browserClipboardWriter(nav)!(Promise.resolve(PGN));
+  assert.deepEqual(written, [PGN]);
+  await assert.rejects(browserClipboardWriter(nav)!(Promise.reject(new Error('stale'))));
+  assert.deepEqual(written, [PGN], 'a rejected text writes nothing');
 });

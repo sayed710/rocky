@@ -143,7 +143,10 @@
         </section>
         <section id="game-export" class="analysis-panel game-export" aria-labelledby="game-export-heading" hidden>
           <h2 id="game-export-heading" class="analysis-title" data-i18n="game.export.title">Export</h2>
-          <button id="game-pgn-download" type="button" class="button" aria-disabled="false" data-i18n="game.export.downloadPgn">Download PGN</button>
+          <div class="analysis-controls">
+            <button id="game-pgn-download" type="button" class="button" aria-disabled="false" data-i18n="game.export.downloadPgn">Download PGN</button>
+            <button id="game-pgn-copy" type="button" class="button" aria-disabled="false" data-i18n="game.export.copyPgn" hidden>Copy PGN</button>
+          </div>
           <p id="game-pgn-status" class="count" role="status" aria-live="polite"></p>
           <div id="game-pgn-error" class="error" role="alert" hidden></div>
         </section>

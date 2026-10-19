@@ -1,9 +1,9 @@
 /**
- * Finished-game PGN download (ADR-0154).
+ * Finished-game PGN download and copy (ADR-0154).
  *
- * The bytes saved are exactly the server's export of the durable event log. Nothing here writes PGN,
- * reads the board, or uses Game Review; nothing is kept in storage. The control exists only while
- * the authoritative game state is over.
+ * The bytes saved or copied are exactly the server's export of the durable event log. Nothing here
+ * writes PGN, reads the board, or uses Game Review; nothing is kept in storage. The controls exist
+ * only while the authoritative game state is over.
  */
 import type { I18n } from '../i18n/index.js';
 import { PGN_MEDIA_TYPE } from '../api/client.js';
@@ -65,16 +65,54 @@ export function saveFile(doc: Document, file: PgnFile, env: DownloadEnvironment 
   }
 }
 
+/**
+ * Puts the text a promise settles to on the clipboard. It is called synchronously inside the click,
+ * before the request resolves: Safari drops the user activation a later clipboard call would need.
+ * A rejected promise must leave the clipboard untouched.
+ */
+export type ClipboardWriter = (text: Promise<string>) => Promise<void>;
+
+/**
+ * The browser's clipboard writer, or null where there is none (an insecure context, or no Clipboard
+ * API), in which case Copy PGN is not offered at all.
+ */
+export function browserClipboardWriter(nav: Navigator | undefined): ClipboardWriter | null {
+  const clipboard = nav?.clipboard;
+  if (!clipboard) return null;
+  const writeText = typeof clipboard.writeText === 'function'
+    ? async (text: Promise<string>) => clipboard.writeText(await text)
+    : null;
+  if (typeof ClipboardItem === 'function' && typeof clipboard.write === 'function') {
+    return (text) => {
+      const blob = text.then((value) => new Blob([value], { type: 'text/plain' }));
+      // The browser may reject the write before the text settles; a later rejection is not unhandled.
+      blob.catch(() => {});
+      let item: ClipboardItem;
+      try {
+        item = new ClipboardItem({ 'text/plain': blob });
+      } catch (error) {
+        // Older engines accept only a ready Blob, not a promised one.
+        if (writeText) return writeText(text);
+        throw error;
+      }
+      return clipboard.write([item]);
+    };
+  }
+  return writeText;
+}
+
 export interface GamePgnExportOptions {
   readonly doc: Document;
   readonly gameId: string;
   readonly i18n: I18n;
   readonly requestPgn: (gameId: string, signal: AbortSignal) => Promise<string>;
   readonly save?: (file: PgnFile) => void;
+  /** Defaults to the document's browser clipboard; null hides Copy PGN. */
+  readonly writeClipboard?: ClipboardWriter | null;
 }
 
 export interface MountedGamePgnExport {
-  /** Show the control only for an authoritatively finished game. */
+  /** Show the controls only for an authoritatively finished game. */
   setFinished(over: boolean): void;
   /** Re-translate the current status or error after a locale change. */
   relocalize(): void;
@@ -82,15 +120,22 @@ export interface MountedGamePgnExport {
   dispose(): void;
 }
 
-type StatusKey = 'game.export.preparing' | 'game.export.started';
-const ERROR_KEY = 'game.export.unavailableError';
+type Action = 'download' | 'copy';
+type StatusKey = 'game.export.preparing' | 'game.export.started' | 'game.export.copying' | 'game.export.copied';
+const PENDING_KEY: Record<Action, StatusKey> = { download: 'game.export.preparing', copy: 'game.export.copying' };
+const DONE_KEY: Record<Action, StatusKey> = { download: 'game.export.started', copy: 'game.export.copied' };
+const ERROR_KEY = { download: 'game.export.unavailableError', copy: 'game.export.copyError' } as const;
 
-/** Mount the Download PGN control on the game route. */
+/** Mount the Download PGN and Copy PGN controls on the game route. */
 export function mountGamePgnExport(options: GamePgnExportOptions): MountedGamePgnExport {
   const { doc, gameId, i18n, requestPgn } = options;
   const save = options.save ?? ((file: PgnFile) => saveFile(doc, file));
+  const writeClipboard = options.writeClipboard === undefined
+    ? browserClipboardWriter(doc.defaultView?.navigator)
+    : options.writeClipboard;
   const section = doc.getElementById('game-export');
   const button = doc.getElementById('game-pgn-download');
+  const copyButton = doc.getElementById('game-pgn-copy');
   const statusEl = doc.getElementById('game-pgn-status');
   const errorEl = doc.getElementById('game-pgn-error');
 
@@ -98,49 +143,71 @@ export function mountGamePgnExport(options: GamePgnExportOptions): MountedGamePg
   let disposed = false;
   let inFlight: AbortController | null = null;
   let statusKey: StatusKey | null = null;
-  let failed = false;
+  let failed: Action | null = null;
 
   const render = (): void => {
     if (section) section.hidden = !finished;
+    if (copyButton) copyButton.hidden = writeClipboard === null;
     // `aria-disabled` rather than `disabled`: a disabled button drops keyboard focus mid-request.
+    // Both controls share one request at a time.
     button?.setAttribute('aria-disabled', String(inFlight !== null));
+    copyButton?.setAttribute('aria-disabled', String(inFlight !== null));
     section?.setAttribute('aria-busy', String(inFlight !== null));
     if (statusEl) statusEl.textContent = statusKey ? i18n.t(statusKey) : '';
     if (errorEl) {
-      errorEl.hidden = !failed;
-      errorEl.textContent = failed ? i18n.t(ERROR_KEY) : '';
+      errorEl.hidden = failed === null;
+      errorEl.textContent = failed ? i18n.t(ERROR_KEY[failed]) : '';
     }
   };
 
-  const download = async (): Promise<void> => {
+  const run = async (action: Action): Promise<void> => {
     if (disposed || !finished || inFlight !== null) return;
+    if (action === 'copy' && writeClipboard === null) return;
     const controller = new AbortController();
     inFlight = controller;
-    failed = false;
-    statusKey = 'game.export.preparing';
+    failed = null;
+    statusKey = PENDING_KEY[action];
     render();
+    // A superseded request's text never reaches the clipboard or a file: the promise rejects instead.
+    // The executor turns a synchronous throw into a rejection, so the controls are always released.
+    const text = new Promise<string>((resolve) => resolve(requestPgn(gameId, controller.signal))).then((value) => {
+      if (inFlight !== controller) throw new Error('stale PGN response');
+      return value;
+    });
+    text.catch(() => {});
     try {
-      const text = await requestPgn(gameId, controller.signal);
+      if (action === 'copy') await writeClipboard!(text);
+      else save({ filename: pgnFilename(gameId), text: await text });
       if (inFlight !== controller) return;
-      save({ filename: pgnFilename(gameId), text });
-      statusKey = 'game.export.started';
+      statusKey = DONE_KEY[action];
     } catch {
       if (inFlight !== controller) return;
+      // A clipboard refusal can arrive before the response: do not leave that request running.
+      controller.abort();
       statusKey = null;
-      failed = true;
+      failed = action;
     }
     inFlight = null;
     render();
   };
 
-  const onClick = (): void => { void download(); };
-  button?.addEventListener('click', onClick);
+  const onDownload = (): void => { void run('download'); };
+  const onCopy = (): void => { void run('copy'); };
+  button?.addEventListener('click', onDownload);
+  copyButton?.addEventListener('click', onCopy);
   render();
 
   return {
     setFinished(over: boolean): void {
       if (disposed || finished === over) return;
       finished = over;
+      if (!over) {
+        // No longer authoritatively over: a pending request must not copy or save anything.
+        inFlight?.abort();
+        inFlight = null;
+        statusKey = null;
+        failed = null;
+      }
       render();
     },
     relocalize(): void {
@@ -151,7 +218,8 @@ export function mountGamePgnExport(options: GamePgnExportOptions): MountedGamePg
       disposed = true;
       inFlight?.abort();
       inFlight = null;
-      button?.removeEventListener('click', onClick);
+      button?.removeEventListener('click', onDownload);
+      copyButton?.removeEventListener('click', onCopy);
     },
   };
 }
