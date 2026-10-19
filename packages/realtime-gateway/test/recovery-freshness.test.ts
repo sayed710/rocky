@@ -1841,3 +1841,130 @@ test("R1' readiness during a delayed draw response: detached refresh delivers dr
     `state revision ${lastState.state.stateRevision} must be >= ready broadcast revision ${blackReady.stateRevision}`,
   );
 });
+
+test('CR1 regression: remote draw offer committed before cold resume is reflected in resumed state', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, store);
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier);
+
+  const gameId = 'game-cr1';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  // Spectator joins on edge.
+  const conn = new InMemoryConnection('c1');
+  gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(conn.last('joined'));
+
+  // Edge is evicted after join so the next request hydrates cold.
+  edge.evict(gameId);
+  assert.equal(edge.has(gameId), false);
+
+  // A remote draw offer is committed on the writer BEFORE the cold resume request on edge.
+  await writer.apply(gameId, 'alice', { kind: 'offerDraw' });
+  assert.equal(writer.getState(gameId).drawOffer, 'w');
+  assert.equal(writer.getState(gameId).stateRevision, 1);
+
+  // Client on edge sends resume.
+  conn.deliver({ t: 'resume', gameId, lastPly: 0 });
+  await flush();
+
+  // Resumed state reflects the committed draw offer and revision.
+  const resumed = conn.last('resumed');
+  assert.ok(resumed, 'client must receive resumed frame');
+  assert.equal(resumed.state.drawOffer, 'w', 'resumed state must include committed drawOffer');
+  assert.equal(resumed.state.stateRevision, 1, 'resumed stateRevision must include the draw offer');
+});
+
+test("CR2 boundary characterization: D2 boundary: a remote draw offer committed after the read's snapshot is not delivered cross-node", async () => {
+  // D2 boundary characterization: draw offers produce no cross-node pubsub broadcast.
+  // A remote draw offer committed after the read's snapshot is therefore neither in the snapshot
+  // nor delivered via pubsub. This assertion must flip when cross-node draw distribution (D2) lands.
+
+  // 1. Cold path: gate ensureLoaded hydration after its snapshot
+  {
+    const store = new InMemoryEventLog();
+    const deferredLog = new DeferredLog(store);
+    const pubsub = new InMemoryPubSub();
+    const writer = new GameAuthority(pubsub, () => 1000, store);
+    const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+    const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+    const gateway = new RealtimeGateway(edge, pubsub, verifier);
+
+    const gameId = 'game-cr2-cold';
+    await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+    const conn = new InMemoryConnection('c-cold');
+    gateway.handleConnection(conn);
+    conn.deliver({ t: 'join', gameId });
+    await flush();
+    assert.ok(conn.last('joined'));
+
+    // Evict so resume hydrates cold
+    edge.evict(gameId);
+    assert.equal(edge.has(gameId), false);
+
+    const gate = createGate();
+    deferredLog.nextLoadGate = gate;
+
+    conn.deliver({ t: 'resume', gameId, lastPly: 0 });
+    await awaitGate(gate, 'cold ensureLoaded snapshot');
+
+    // Commit remote draw offer while gated (after snapshot taken at rev 0)
+    await writer.apply(gameId, 'alice', { kind: 'offerDraw' });
+    assert.equal(writer.getState(gameId).drawOffer, 'w');
+
+    gate.release.resolve();
+    await flush();
+
+    const resumed = conn.last('resumed');
+    assert.ok(resumed);
+    assert.equal(resumed.state.drawOffer, null, 'cold resumed snapshot omits draw offer committed after snapshot');
+    assert.equal(resumed.state.stateRevision, 0);
+    assert.equal(conn.all('state').length, 0, 'no state frame reaches edge client afterwards');
+  }
+
+  // 2. Warm path: gate readRecovery after its snapshot
+  {
+    const store = new InMemoryEventLog();
+    const deferredLog = new DeferredLog(store);
+    const pubsub = new InMemoryPubSub();
+    const writer = new GameAuthority(pubsub, () => 1000, store);
+    const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+    const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+    const gateway = new RealtimeGateway(edge, pubsub, verifier);
+
+    const gameId = 'game-cr2-warm';
+    await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+    const conn = new InMemoryConnection('c-warm');
+    gateway.handleConnection(conn);
+    conn.deliver({ t: 'join', gameId });
+    await flush();
+    assert.ok(conn.last('joined'));
+
+    // Edge remains warm. Arm gate for readRecovery.
+    const gate = createGate();
+    deferredLog.nextLoadGate = gate;
+
+    conn.deliver({ t: 'resume', gameId, lastPly: 0 });
+    await awaitGate(gate, 'warm readRecovery snapshot');
+
+    // Commit remote draw offer while gated (after snapshot taken at rev 0)
+    await writer.apply(gameId, 'alice', { kind: 'offerDraw' });
+    assert.equal(writer.getState(gameId).drawOffer, 'w');
+
+    gate.release.resolve();
+    await flush();
+
+    const resumed = conn.last('resumed');
+    assert.ok(resumed);
+    assert.equal(resumed.state.drawOffer, null, 'warm resumed snapshot omits draw offer committed after snapshot');
+    assert.equal(resumed.state.stateRevision, 0);
+    assert.equal(conn.all('state').length, 0, 'no state frame reaches edge client afterwards');
+  }
+});
