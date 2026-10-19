@@ -586,11 +586,13 @@ export class RealtimeGateway {
 
         for (let attempt = 1; attempt <= STATE_REFRESH_ATTEMPTS; attempt++) {
           const room = this.rooms.get(gameId);
-          const buffers = this.joinBuffers.get(gameId);
-          if (!room && (!buffers || buffers.size === 0)) {
+          const initialBufferSize = this.joinBuffers.get(gameId)?.size ?? 0;
+          if (!room && initialBufferSize === 0) {
             this.stateRefreshes.delete(gameId);
             return;
           }
+
+          let stateToDeliver: StateView | undefined;
 
           try {
             const latest = await this.authority.readRecovery(gameId, 0);
@@ -600,12 +602,16 @@ export class RealtimeGateway {
               this.stateRefreshes.delete(gameId);
               return;
             }
+            if (activeRoom !== room && initialBufferSize === 0) {
+              this.stateRefreshes.delete(gameId);
+              return;
+            }
             const floor = this.observedRevision.get(gameId) ?? -1;
             if (latest.state.stateRevision >= floor) {
-              this.deliverState(gameId, latest.state);
+              stateToDeliver = latest.state;
+            } else {
+              lastError = new Error('state refresh read below observed revision');
             }
-            succeeded = true;
-            break;
           } catch (err: unknown) {
             lastError = err;
             const activeRoom = this.rooms.get(gameId);
@@ -614,19 +620,29 @@ export class RealtimeGateway {
               this.stateRefreshes.delete(gameId);
               return;
             }
+            if (activeRoom !== room && initialBufferSize === 0) {
+              this.stateRefreshes.delete(gameId);
+              return;
+            }
             if (this.authority.hasFresh(gameId)) {
               try {
                 const resident = this.authority.getState(gameId);
                 const floor = this.observedRevision.get(gameId) ?? -1;
                 if (resident.stateRevision >= floor) {
-                  this.deliverState(gameId, resident);
-                  succeeded = true;
-                  break;
+                  stateToDeliver = resident;
+                } else {
+                  lastError = new Error('resident state below observed revision');
                 }
               } catch {
                 // Ignore getState error and continue to next attempt
               }
             }
+          }
+
+          if (stateToDeliver) {
+            succeeded = true;
+            this.deliverState(gameId, stateToDeliver);
+            break;
           }
         }
 

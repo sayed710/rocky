@@ -17,7 +17,6 @@ import { FakeTokenVerifier } from './fake-token-verifier';
 import { LocalCommandRouter, type CommandRouter } from '../src/command-router';
 import type { Broadcast, ServerMessage, StateView } from '../src/protocol';
 
-const GatewayWithHook = RealtimeGateway;
 
 const TC: TimeControl = { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' };
 
@@ -82,6 +81,7 @@ class DeferredLog implements EventLog {
   public nextLoadGate?: Gate;
   public throwLoadTimes = 0;
   public throwLoadError = new Error('simulated load failure');
+  public staleLoadTimes = 0;
   public appends = 0;
   public loads = 0;
 
@@ -110,13 +110,14 @@ class DeferredLog implements EventLog {
       throw this.throwLoadError;
     }
     const snapshot = await this.inner.load(id);
+    const toReturn = this.staleLoadTimes > 0 ? (this.staleLoadTimes--, snapshot.slice(0, -1)) : snapshot;
     if (this.nextLoadGate) {
       const gate = this.nextLoadGate;
       this.nextLoadGate = undefined;
       gate.isEntered = true;
       await gate.release.done;
     }
-    return snapshot;
+    return toReturn;
   }
 
   async append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
@@ -595,7 +596,7 @@ test('RF1 transient failure: the first refresh read throws, the second succeeds 
     },
   };
   const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
-  const gateway = new GatewayWithHook(edge, pubsub, verifier, () => 1000, router);
+  const gateway = new RealtimeGateway(edge, pubsub, verifier, () => 1000, router);
 
   const gameId = 'game-rf1';
   await writer.createGame({
@@ -672,7 +673,7 @@ test('RF2 all attempts fail on a non-owner edge (resident stale) -> exactly STAT
   };
   const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
   const failedCalls: { gameId: string; error: unknown }[] = [];
-  const gateway = new GatewayWithHook(
+  const gateway = new RealtimeGateway(
     edge,
     pubsub,
     verifier,
@@ -749,7 +750,7 @@ test('RF3 owner-node fallback: every read throws, but the gateways authority is 
   };
   const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
   const failedCalls: { gameId: string; error: unknown }[] = [];
-  const gateway = new GatewayWithHook(
+  const gateway = new RealtimeGateway(
     owner,
     pubsub,
     verifier,
@@ -802,7 +803,7 @@ test('RF3 owner-node fallback: every read throws, but the gateways authority is 
   assert.equal(failedCalls.length, 0, 'onStateRefreshFailed NOT called');
 });
 
-test('RF4 stale revision: the refresh read succeeds but returns a revision below the floor (simulate by raising the floor via a newer frame during the gated read) -> no state frame delivered', async () => {
+test('RF4 stale revision: a gated read returning below the floor is followed by another read that delivers the newer state containing drawOffer w', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -823,7 +824,7 @@ test('RF4 stale revision: the refresh read succeeds but returns a revision below
   };
   const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
   const failedCalls: { gameId: string; error: unknown }[] = [];
-  const gateway = new GatewayWithHook(
+  const gateway = new RealtimeGateway(
     edge,
     pubsub,
     verifier,
@@ -839,7 +840,9 @@ test('RF4 stale revision: the refresh read succeeds but returns a revision below
     gameId,
     players: { white: 'alice', black: 'bob' },
     timeControl: TC,
-    rated: false,
+    rated: true,
+    source: 'seek',
+    noShowAfterMs: 60_000,
   });
 
   const white = new InMemoryConnection('white');
@@ -850,38 +853,49 @@ test('RF4 stale revision: the refresh read succeeds but returns a revision below
   gateway.handleConnection(spec);
   spec.deliver({ t: 'join', gameId });
   await flush();
+  assert.ok(white.last('joined'));
+  assert.ok(spec.last('joined'));
 
-  // White offers draw (rev 1); response held.
+  // White becomes ready (rev 1).
+  await writer.apply(gameId, 'alice', { kind: 'ready' });
+  await flush();
+
+  // White offers draw (rev 2); response held in router.
   const gate = createGate();
   drawGate = gate;
   white.deliver({ t: 'offerDraw', gameId });
   await awaitGate(gate, 'offerDraw committed on writer');
 
-  // Overtake with move 1 (rev 2).
-  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  // Black commits readiness on writer (rev 3); observedRevision on edge becomes 3.
+  await writer.apply(gameId, 'bob', { kind: 'ready' });
   await flush();
+  assert.equal(gateway.observedRevisionFor(gameId), 3);
 
-  // Gate the refresh read after snapshot is taken at rev 2.
+  // Configure attempt 1 to return a stale snapshot (rev 2 < floor 3) and pause in refreshGate.
   const refreshGate = createGate();
   deferredLog.nextLoadGate = refreshGate;
+  deferredLog.staleLoadTimes = 1;
 
-  // Release offerDraw; refresh starts and enters refreshGate.
+  // Release offerDraw (carrying rev 2 < floor 3).
+  // sendStateToRoom starts refreshState. Attempt 1 enters refreshGate.
   gate.release.resolve();
   await awaitGate(refreshGate, 'refresh read snapshot');
 
-  // While paused, raise the floor via a newer move (rev 3).
-  await writer.apply(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
-  await flush();
-
-  // Release the refresh read (returning rev 2 < floor 3).
+  // Release the refresh gate. Attempt 1 returns rev 2 < floor 3.
   refreshGate.release.resolve();
   await flush();
+  await flush();
 
-  assert.equal(spec.all('state').length, 0, 'no state frame delivered');
-  assert.equal(failedCalls.length, 0, 'onStateRefreshFailed not called');
+  // Attempt 1 was below floor (rev 2 < floor 3) so it did not deliver.
+  // Attempt 2 succeeds and reads rev 3 (preserving drawOffer 'w').
+  const stateFrames = spec.all('state');
+  assert.equal(stateFrames.length, 1, 'room gets state frame from second attempt');
+  assert.equal(stateFrames[0]!.state.drawOffer, 'w');
+  assert.equal(stateFrames[0]!.state.stateRevision, 3);
+  assert.equal(failedCalls.length, 0, 'onStateRefreshFailed not called when retry succeeds');
 });
 
-test('RF5 replacement room / disconnected clients: all room members close while the refresh read is gated; release with failures -> the cycle stops (no further reads after teardown), no frames, onStateRefreshFailed not called; a NEW joiner afterwards gets its own fresh snapshot only', async () => {
+test('RF5 replacement room / disconnected clients: room closes while refresh read is in flight, new member joins -> no stale state frame reaches new spectator', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -902,7 +916,7 @@ test('RF5 replacement room / disconnected clients: all room members close while 
   };
   const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
   const failedCalls: { gameId: string; error: unknown }[] = [];
-  const gateway = new GatewayWithHook(
+  const gateway = new RealtimeGateway(
     edge,
     pubsub,
     verifier,
@@ -940,45 +954,46 @@ test('RF5 replacement room / disconnected clients: all room members close while 
   await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
   await flush();
 
-  // Gate the refresh read.
+  // Gate the refresh read after snapshot is taken at rev 2.
   const refreshGate = createGate();
-  deferredLog.beforeLoadGate = refreshGate;
-  deferredLog.throwLoadTimes = 10;
+  deferredLog.nextLoadGate = refreshGate;
 
+  // Release offerDraw; refresh starts and enters refreshGate (snapshot held at rev 2).
   gate.release.resolve();
-  await awaitGate(refreshGate, 'refresh read before load');
+  await awaitGate(refreshGate, 'refresh read snapshot');
 
-  const loadsAtTeardown = deferredLog.loads;
-
-  // All room members close while refresh read is gated.
+  // While the read is blocked in refreshGate:
+  // 1. Close the old room members.
   white.close();
   spec.close();
   await flush();
   assert.equal(gateway.roomCount, 0);
 
-  // Release the refresh read with failure.
-  refreshGate.release.resolve();
+  // 2. Commit a newer move on writer (rev 3).
+  await writer.apply(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
   await flush();
 
-  // Cycle stops: no further reads after teardown, no frames, onStateRefreshFailed not called.
-  assert.equal(deferredLog.loads, loadsAtTeardown + 1, 'cycle stops (no further reads after teardown)');
-  assert.equal(failedCalls.length, 0, 'onStateRefreshFailed not called');
-
-  // Reset throwLoadTimes so subsequent new joiner can load.
-  deferredLog.throwLoadTimes = 0;
-
-  // A NEW joiner afterwards gets its own fresh snapshot only.
+  // 3. A NEW spectator joins the same game, creating a NEW room and observing snapshot at rev 3.
   const specNew = new InMemoryConnection('specNew');
   gateway.handleConnection(specNew);
   specNew.deliver({ t: 'join', gameId });
   await flush();
 
   assert.ok(specNew.last('joined'), 'new joiner receives joined frame');
-  assert.equal(specNew.last('joined')!.state.stateRevision, 2);
-  assert.equal(specNew.all('state').length, 0, 'new joiner receives no state frames from old refresh');
+  assert.equal(specNew.last('joined')!.state.stateRevision, 3);
+
+  // 4. Open the gate. The in-flight refresh read (with rev 2) completes.
+  refreshGate.release.resolve();
+  await flush();
+  await flush();
+
+  // Assert NO stale state frame (rev < 3) reaches the new spectator.
+  const staleFrames = specNew.all('state').filter((s) => s.state.stateRevision < 3);
+  assert.equal(staleFrames.length, 0, 'no stale state frame reaches the new spectator');
+  assert.ok(specNew.all('state').every((s) => s.state.stateRevision >= 3), 'delivered state is at or above floor');
 });
 
-test('RF6 coalescing: two overtaken draw-only commands while the first refresh is in flight -> total refresh reads <= 2 * STATE_REFRESH_ATTEMPTS and at most one extra cycle; final delivered state is the newest', async () => {
+test('RF6 coalescing: two overtaken draw-only commands while the first refresh is in flight -> exactly ONE additional cycle runs, newest state is delivered, and stateRefreshes is cleared', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -998,7 +1013,7 @@ test('RF6 coalescing: two overtaken draw-only commands while the first refresh i
     },
   };
   const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
-  const gateway = new GatewayWithHook(edge, pubsub, verifier, () => 1000, router);
+  const gateway = new RealtimeGateway(edge, pubsub, verifier, () => 1000, router);
 
   const gameId = 'game-rf6';
   await writer.createGame({
@@ -1051,10 +1066,9 @@ test('RF6 coalescing: two overtaken draw-only commands while the first refresh i
   deferredLog.nextLoadGate = refreshGate;
 
   // Release draw 1 response (rev 1 < 4) -> starts refresh 1, pauses in refreshGate.
+  const loadsBeforeRefresh = deferredLog.loads;
   heldGates[0]!.release.resolve();
   await awaitGate(refreshGate, 'refresh 1 load');
-
-  const loadsBeforeCoalesced = deferredLog.loads;
 
   // While refresh 1 is in flight:
   // Release command 2 (declineDraw, rev 2 < 4) -> overtaken, sets again = true.
@@ -1068,19 +1082,36 @@ test('RF6 coalescing: two overtaken draw-only commands while the first refresh i
   // Now release refresh 1.
   refreshGate.release.resolve();
   await flush();
+  await flush();
 
-  // Total refresh reads must be <= 2 * STATE_REFRESH_ATTEMPTS (3 * 2 = 6).
-  const refreshReads = deferredLog.loads - loadsBeforeCoalesced;
-  assert.ok(
-    refreshReads <= 2 * 3,
-    `total refresh reads ${refreshReads} <= 2 * STATE_REFRESH_ATTEMPTS`,
-  );
+  // Exactly ONE additional cycle ran for the two coalesced commands:
+  // cycle 1 (attempt 1) + cycle 2 (attempt 1) = exactly 2 refresh reads.
+  const refreshReads = deferredLog.loads - loadsBeforeRefresh;
+  assert.equal(refreshReads, 2, 'exactly one additional cycle runs (cycle 2 does not re-run for command 3)');
 
   // Final delivered state is the newest (revision 4).
   const stateFrames = spec.all('state');
   assert.ok(stateFrames.length >= 1, 'at least one state frame delivered');
   const lastState = stateFrames[stateFrames.length - 1]!;
   assert.equal(lastState.state.stateRevision, 4);
+
+  // Assert stateRefreshes was cleared: a later overtaken command starts a fresh read.
+  interceptDraw = true;
+  white.deliver({ t: 'offerDraw', gameId });
+  await flush();
+  assert.equal(heldGates.length, 4, 'command 4 committed and held');
+  interceptDraw = false;
+
+  // Overtake command 4 with move 2 (rev 6) on writer:
+  await writer.apply(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
+  await flush();
+
+  const loadsBeforeCmd4 = deferredLog.loads;
+  heldGates[3]!.release.resolve();
+  await flush();
+  await flush();
+
+  assert.equal(deferredLog.loads - loadsBeforeCmd4, 1, 'later overtaken command starts a fresh read (stateRefreshes was cleared)');
 });
 
 test('Control A1: owner append paused before inner append: resume returns rev 2; single append and confirmation', async () => {
