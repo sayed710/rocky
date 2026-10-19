@@ -10,6 +10,7 @@ import {
   InMemoryEventLog,
   RedisPubSub,
   RealtimeGateway,
+  SubscriptionCancelledError,
   gameChannel,
   type RedisLike,
 } from '../src/index';
@@ -787,7 +788,7 @@ test('SB11: a ready() waiter on a pending SUBSCRIBE; reconnect replaces the entr
   assert.equal(waiterResolved, true, 'old waiter resolves once new SUBSCRIBE is acknowledged');
 });
 
-test('SB12: a ready() waiter; the last handler unsubscribes while SUBSCRIBE is pending; the waiter resolves', async () => {
+test('SB12: a ready() waiter; the last handler unsubscribes while SUBSCRIBE is pending; the waiter rejects with SubscriptionCancelledError', async () => {
   const broker = new FakeRedisBroker();
   const pub = broker.createClient('pub');
   const sub = broker.createClient('sub');
@@ -798,19 +799,20 @@ test('SB12: a ready() waiter; the last handler unsubscribes while SUBSCRIBE is p
 
   const unsub = pubsub.subscribe(ch, () => {});
 
-  let waiterResolved = false;
+  let waiterSettled = false;
   const waiter = pubsub.ready(ch);
-  void waiter.then(() => {
-    waiterResolved = true;
-  });
+  void waiter.then(
+    () => { waiterSettled = true; },
+    () => { waiterSettled = true; },
+  );
   await flush();
-  assert.equal(waiterResolved, false, 'waiter is waiting on pending SUBSCRIBE');
+  assert.equal(waiterSettled, false, 'waiter is waiting on pending SUBSCRIBE');
 
   // Last handler unsubscribes while SUBSCRIBE is pending
   unsub();
   await flush();
 
-  assert.equal(waiterResolved, true, 'waiter resolves when last handler unsubscribes');
+  await assert.rejects(waiter, SubscriptionCancelledError);
 });
 
 test('SB13: a gateway join with NO read deadline is waiting on readiness; subscription superseded by reconnect resubscribe that is acknowledged; join completes', async () => {
@@ -970,7 +972,7 @@ test('SB16: failed readiness followed by a successful later join on the same gam
   assert.equal(gateway.unconfirmedSubscriptions.has(gameId), false);
 });
 
-test('SB17: a pending ready() waiter resolves after close()', async () => {
+test('SB17: a pending ready() waiter rejects with SubscriptionCancelledError after close()', async () => {
   const broker = new FakeRedisBroker();
   const pub = broker.createClient('pub');
   const sub = broker.createClient('sub');
@@ -982,20 +984,69 @@ test('SB17: a pending ready() waiter resolves after close()', async () => {
   // Subscribe issues pending SUBSCRIBE
   pubsub.subscribe(ch, () => {});
 
-  let waiterResolved = false;
+  let waiterSettled = false;
   const waiter = pubsub.ready(ch);
-  void waiter.then(() => {
-    waiterResolved = true;
-  });
+  void waiter.then(
+    () => { waiterSettled = true; },
+    () => { waiterSettled = true; },
+  );
   await flush();
-  assert.equal(waiterResolved, false, 'waiter is waiting on pending SUBSCRIBE');
+  assert.equal(waiterSettled, false, 'waiter is waiting on pending SUBSCRIBE');
 
   // Close the pubsub while ready() is pending
   await pubsub.close();
   await flush();
 
-  assert.equal(waiterResolved, true, 'pending ready() waiter resolves after close()');
+  await assert.rejects(waiter, SubscriptionCancelledError);
 });
+
+test('SB18: a game marked unconfirmed; the subscription is cancelled while a second waiter is pending; the game is still in the unconfirmed set', async () => {
+  const broker = new FakeRedisBroker();
+  const store = new InMemoryEventLog();
+  const pub = broker.createClient('pub');
+  const sub = broker.createClient('sub');
+  const pubsub = new RedisPubSub(pub, sub, 'node-1');
+  const authority = new GameAuthority(pubsub, () => 1000, store);
+  const verifier = new FakeTokenVerifier();
+  const gateway = new RealtimeGateway(authority, pubsub, verifier);
+
+  const gameId = 'game-sb18';
+  await authority.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  const ch = gameChannel(gameId);
+  broker.failSubscribe(ch, new Error('Redis connection refused'));
+
+  // First join fails and marks game unconfirmed
+  const c1 = new InMemoryConnection('c1');
+  gateway.handleConnection(c1);
+  c1.deliver({ t: 'join', gameId });
+  await flush();
+
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 1, 'game is in unconfirmed set');
+  assert.ok(gateway.unconfirmedSubscriptions.has(gameId));
+
+  // Clear fail, gate SUBSCRIBE on channel so the second waiter stays pending
+  broker.clearFailSubscribe(ch);
+  broker.gateChannel(ch);
+
+  // Second join starts and its ready() waiter is pending
+  const c2 = new InMemoryConnection('c2');
+  gateway.handleConnection(c2);
+  c2.deliver({ t: 'join', gameId });
+  await flush();
+
+  assert.equal(c2.last('joined'), undefined, 'second join is pending');
+
+  // Cancel subscription while the second waiter is pending
+  await pubsub.close();
+  await flush();
+
+  // The game is still in the unconfirmed set (not cleared by a cancellation)
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 1, 'game is still in unconfirmed set');
+  assert.ok(gateway.unconfirmedSubscriptions.has(gameId));
+});
+
+
 
 
 

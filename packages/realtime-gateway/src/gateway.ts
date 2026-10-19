@@ -26,7 +26,7 @@ import type { Color } from '@chess-platform/core';
 import { GameAuthority, AuthorityError, AuthorityCommitError, CommandOutcomeUnknownError, type Command } from './authority';
 import { LocalCommandRouter, type CommandRouter } from './command-router';
 import { Room } from './room';
-import { gameChannel, type PubSub, type Unsubscribe } from './pubsub';
+import { gameChannel, SubscriptionCancelledError, type PubSub, type Unsubscribe } from './pubsub';
 import type { Connection } from './transport';
 import type {
   Broadcast,
@@ -299,7 +299,10 @@ export class RealtimeGateway {
         await readyPromise;
       }
       this.unconfirmedSubscriptionsSet.delete(gameId);
-    } catch {
+    } catch (err: unknown) {
+      if (err instanceof SubscriptionCancelledError) {
+        return;
+      }
       if (current()) {
         this.unconfirmedSubscriptionsSet.add(gameId);
       }

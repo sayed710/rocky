@@ -141,10 +141,21 @@ interface RedisEnvelope {
   readonly msg: Broadcast;
 }
 
+/**
+ * Thrown when a pending subscription is cancelled because the last local subscriber
+ * unsubscribed or the pub/sub connection was closed before Redis acknowledged it.
+ */
+export class SubscriptionCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SubscriptionCancelledError';
+  }
+}
+
 interface ChannelSubscriptionEntry {
   generation: number;
   promise: Promise<void>;
-  settled: 'pending' | 'ok' | 'failed';
+  settled: 'pending' | 'ok' | 'failed' | 'cancelled';
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -399,8 +410,8 @@ export class RedisPubSub implements PubSub {
         this.subHandlers.delete(channel);
         const oldEntry = this.subscriptionEntries.get(channel);
         if (oldEntry && oldEntry.settled === 'pending') {
-          oldEntry.settled = 'ok';
-          oldEntry.resolve();
+          oldEntry.settled = 'cancelled';
+          oldEntry.reject(new SubscriptionCancelledError(`Subscription cancelled on channel ${channel}`));
         }
         this.subscriptionEntries.delete(channel);
         void Promise.resolve(this.sub.unsubscribe(channel)).catch((err: unknown) => {
@@ -421,10 +432,10 @@ export class RedisPubSub implements PubSub {
     this.sub.off('close', this.closeListener);
     this.sub.off('ready', this.readyListener);
     this.subHandlers.clear();
-    for (const entry of this.subscriptionEntries.values()) {
+    for (const [channel, entry] of this.subscriptionEntries.entries()) {
       if (entry.settled === 'pending') {
-        entry.settled = 'ok';
-        entry.resolve();
+        entry.settled = 'cancelled';
+        entry.reject(new SubscriptionCancelledError(`Subscription cancelled on channel ${channel} due to close`));
       }
     }
     this.subscriptionEntries.clear();
@@ -441,8 +452,8 @@ export class RedisPubSub implements PubSub {
     return this.subHandlers.get(channel)?.size ?? 0;
   }
 
-  /** Subscription state for a channel ('pending' | 'ok' | 'failed' | undefined). */
-  subscriptionState(channel: string): 'pending' | 'ok' | 'failed' | undefined {
+  /** Subscription state for a channel ('pending' | 'ok' | 'failed' | 'cancelled' | undefined). */
+  subscriptionState(channel: string): 'pending' | 'ok' | 'failed' | 'cancelled' | undefined {
     return this.subscriptionEntries.get(channel)?.settled;
   }
 }
