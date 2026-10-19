@@ -79,13 +79,26 @@ export type ClipboardWriter = (text: Promise<string>) => Promise<void>;
 export function browserClipboardWriter(nav: Navigator | undefined): ClipboardWriter | null {
   const clipboard = nav?.clipboard;
   if (!clipboard) return null;
+  const writeText = typeof clipboard.writeText === 'function'
+    ? async (text: Promise<string>) => clipboard.writeText(await text)
+    : null;
   if (typeof ClipboardItem === 'function' && typeof clipboard.write === 'function') {
-    return (text) => clipboard.write([
-      new ClipboardItem({ 'text/plain': text.then((value) => new Blob([value], { type: 'text/plain' })) }),
-    ]);
+    return (text) => {
+      const blob = text.then((value) => new Blob([value], { type: 'text/plain' }));
+      // The browser may reject the write before the text settles; a later rejection is not unhandled.
+      blob.catch(() => {});
+      let item: ClipboardItem;
+      try {
+        item = new ClipboardItem({ 'text/plain': blob });
+      } catch (error) {
+        // Older engines accept only a ready Blob, not a promised one.
+        if (writeText) return writeText(text);
+        throw error;
+      }
+      return clipboard.write([item]);
+    };
   }
-  if (typeof clipboard.writeText === 'function') return async (text) => clipboard.writeText(await text);
-  return null;
+  return writeText;
 }
 
 export interface GamePgnExportOptions {
@@ -156,7 +169,8 @@ export function mountGamePgnExport(options: GamePgnExportOptions): MountedGamePg
     statusKey = PENDING_KEY[action];
     render();
     // A superseded request's text never reaches the clipboard or a file: the promise rejects instead.
-    const text = requestPgn(gameId, controller.signal).then((value) => {
+    // The executor turns a synchronous throw into a rejection, so the controls are always released.
+    const text = new Promise<string>((resolve) => resolve(requestPgn(gameId, controller.signal))).then((value) => {
       if (inFlight !== controller) throw new Error('stale PGN response');
       return value;
     });
@@ -185,6 +199,13 @@ export function mountGamePgnExport(options: GamePgnExportOptions): MountedGamePg
     setFinished(over: boolean): void {
       if (disposed || finished === over) return;
       finished = over;
+      if (!over) {
+        // No longer authoritatively over: a pending request must not copy or save anything.
+        inFlight?.abort();
+        inFlight = null;
+        statusKey = null;
+        failed = null;
+      }
       render();
     },
     relocalize(): void {
