@@ -552,12 +552,19 @@ export class RealtimeGateway {
       this.deliverState(gameId, state);
       return;
     }
+    const entry = this.rooms.get(gameId);
+    const buffers = this.joinBuffers.get(gameId);
     void this.authority
       .readRecovery(gameId, 0)
       .then((latest) => {
-        const floor = this.observedRevision.get(gameId) ?? -1;
-        if (latest.state.stateRevision >= floor) {
-          this.deliverState(gameId, latest.state);
+        if (
+          this.rooms.get(gameId) === entry &&
+          (entry !== undefined || this.joinBuffers.get(gameId) === buffers)
+        ) {
+          const floor = this.observedRevision.get(gameId) ?? -1;
+          if (latest.state.stateRevision >= floor) {
+            this.deliverState(gameId, latest.state);
+          }
         }
       })
       .catch(() => {

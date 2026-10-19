@@ -316,6 +316,109 @@ test('N1: no resident mutation: detached read does not install resident state, a
   assert.equal(freshAuthority.has(gameId), false);
 });
 
+test('N2: detached refresh does not deliver stale state to a new room created after teardown', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-n2';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: false,
+  });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const specA = new InMemoryConnection('specA');
+  gateway.handleConnection(specA);
+  specA.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(white.last('joined'));
+  assert.ok(specA.last('joined'));
+
+  // White offers draw; router holds response while writer commits (rev 1).
+  const gate = createGate();
+  drawGate = gate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(gate, 'offerDraw committed on writer');
+
+  // A newer frame overtakes the held draw response: writer commits move 1 (rev 2).
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await flush();
+
+  const specAMove = specA.last('move');
+  assert.ok(specAMove, 'specA must receive move broadcast');
+  assert.equal(specAMove.stateRevision, 2);
+
+  // Close white so spectator A is the sole member keeping the room alive.
+  white.close();
+  await flush();
+  assert.equal(gateway.roomCount, 1);
+
+  // Gate the detached refresh's load.
+  const refreshGate = createGate();
+  deferredLog.nextLoadGate = refreshGate;
+
+  // Release the held draw response (which carried rev 1).
+  // Because rev 1 < observedRevision 2, sendStateToRoom starts detached readRecovery refresh.
+  gate.release.resolve();
+  await awaitGate(refreshGate, 'detached refresh load');
+
+  // Close spectator A (room torn down, observedRevision cleared).
+  specA.close();
+  await flush();
+  assert.equal(gateway.roomCount, 0);
+  assert.equal(gateway.hasLocalSessions(gameId), false);
+  assert.equal(gateway.observedRevisionFor(gameId), undefined);
+
+  // Writer commits move 2 (rev 3).
+  await writer.apply(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
+
+  // A NEW spectator B joins and gets a snapshot at the newest revision (rev 3).
+  const specB = new InMemoryConnection('specB');
+  gateway.handleConnection(specB);
+  specB.deliver({ t: 'join', gameId });
+  await flush();
+
+  const bJoined = specB.last('joined');
+  assert.ok(bJoined, 'spectator B must have joined');
+  assert.equal(bJoined.state.stateRevision, 3, 'spectator B joins at newest revision');
+
+  // Release the refresh gate and drain.
+  refreshGate.release.resolve();
+  await flush();
+
+  // Assert B receives no state frame with a revision lower than its joined revision
+  // (in fact no frame from the old refresh).
+  const bStates = specB.sent.filter((m): m is ServerMessage & { t: 'state' } => m.t === 'state');
+  assert.ok(
+    bStates.every((s) => s.state.stateRevision >= bJoined.state.stateRevision),
+    "B receives no state frame with revision lower than joined revision",
+  );
+  assert.equal(bStates.length, 0, 'in fact no state frame from the old refresh');
+});
+
 test('Control A1: owner append paused before inner append: resume returns rev 2; single append and confirmation', async () => {
   const innerStore = new InMemoryEventLog();
   const deferredLog = new DeferredLog(innerStore);
