@@ -54,6 +54,7 @@ const MATES: ReadonlyArray<[string, string]> = [
   ['K+B vs K+B, opposite-coloured bishops (own bishop blocks g8)', '6bk/8/6K1/4B3/8/8/8/8 b - - 0 1'],
   ['K+N vs K+N (own knight blocks h7)', '7k/5K1n/6N1/8/8/8/8/8 b - - 0 1'],
   ['K+N+N vs K', '7k/5K2/5NN1/8/8/8/8/8 b - - 0 1'],
+  ['K+B vs K+N (own knight blocks a7)', 'k7/nBK5/8/8/8/8/8/8 b - - 0 1'],
 ];
 
 for (const [name, fen] of MATES) {
