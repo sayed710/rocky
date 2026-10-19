@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-18 — PR #114 missing-hardening follow-up: already-0050 databases reject incomplete migration trees instead of falsely returning zero work; focused real-PG RED reproduced. Complete-tree trusted-installer path retained; final full gates and independent review remain pending, PG-F1 inactive and PG-F2 unauthorized._
+_Last updated: 2026-10-19 — PR #118 manually merged at 25f7278a9938767d539dfe92398ee189832d82d9; reviewed head and historical Qodo exception preserved. Review-policy v3 defines conditional owner-adoption/manual-merge activation; this proposal does not activate it or migrate PR #119._
+
+Prior: _Last updated: 2026-10-18 — PR #114 missing-hardening follow-up: already-0050 databases reject incomplete migration trees instead of falsely returning zero work; focused real-PG RED reproduced. Complete-tree trusted-installer path retained; final full gates and independent review remain pending, PG-F1 inactive and PG-F2 unauthorized._
 
 Prior: _Last updated: 2026-10-18 — PR #114 atomic 0050/0051 correction: actual old-runner unauthorized-event invariant RED, corrected grouped transaction GREEN; malformed/missing fencing inputs fail closed; restricted during-pause call and exact ledger/rollback/cleanup regressions pass. Full final gates and independent review remain pending; no publication, PG-F1 activation or PG-F2 authorization._
 
@@ -5668,3 +5670,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - The runner now refuses a recorded 0050 without applied/present 0051 before the normal loop can report success. The complete canonical tree retains its existing trusted-installer upgrade and exact ledger handling; no migration bytes, privilege policy or online-index path changed. Focused GREEN results belong to task08 receipts; root full final gates and genuine independent review remain pending. No publication, activation or PG-F2 work.
 
 - Task08 focused standalone real-PG controls subsequently passed 2/2 with normal exit and zero skips: both incomplete trees rejected without a 0051 row, then each full tree applied real 0051 with exact canonical ledger and returned 0 on the next complete-tree call. The two corresponding repository regressions compile; root will execute the full final suite. Scoped compilation/lint and diff checks pass. No prior credential/evidence scan was repeated; preservation is limited to the explicit five-source/two-SQL whitelist.
+
+
+## 2026-10-19 — PR #118 merge record and conditional review-policy proposal
+
+- PR #118 was manually merged by the owner with merge commit 25f7278a9938767d539dfe92398ee189832d82d9. Its reviewed final head is 2fc6a10dd7e7fdd515cc6a23f04ffd817840bfcc. This records the merge without rewriting historical checkpoints.
+- The historical owner-approved Qodo exception applies only to PR #118 at reviewed head 2fc6a10dd7e7fdd515cc6a23f04ffd817840bfcc (https://github.com/sayed710/rocky/pull/118#issuecomment-6254770636). Qodo Requirement Gaps remain UNVERIFIED, not zero. Existing Greptile code review does not prove complete 15-ID requirements coverage; the independently attributable Claude assessment and Work consolidation remain separately identified. The GameSync Notion compilation remains DRAFT, with A01-A03 source-attribution corrections pending separate authorization.
+- Policy v3 specifies CI, exact-head Greptile, auditable requirement/code/test traceability, distinct-model review, zero unresolved actionable findings and threads, and Git consistency. Activation requires explicit head-bound GitHub owner adoption and owner manual merge of the policy PR; verify the receipt and prospective PR eligibility under docs/REVIEW_POLICY.md. Preparation or publication approval alone is not activation. The transition PR retains the current gates and receives no automatic Qodo exemption.
+- No retroactive policy change to merged PR #118 or existing PR #119. Claude retains D1-A/PR #119 ownership and its current gates. This proposal changes no product code, provider settings, integrations, branch protections or Notion content and authorizes no PG-F1 activation, PG-F2, deployment or agent merge. Activation must be established from the separate GitHub receipt; this historical preparation entry is not that receipt.
