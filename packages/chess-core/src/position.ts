@@ -376,7 +376,8 @@ export class Position {
     if (this.state.variant !== 'standard' && this.state.variant !== 'chess960') return false;
     // Draw only when no legal sequence can mate (a dead position), not when mate merely cannot be
     // forced: K+N+N vs K, K+N vs K+N and opposite-coloured bishops can all still be mated.
-    // ponytail: other dead positions (e.g. locked pawn chains) are left to play on.
+    // Conservative by design: only material is examined, so dead positions that depend on structure
+    // (e.g. locked pawn chains) are not recognised and play continues.
     const pieces: string[] = [];
     const bishopSquareColors = new Set<number>();
     for (let sq = 0; sq < 128; sq++) {
