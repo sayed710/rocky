@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-19 — PR #118 manually merged at 25f7278a9938767d539dfe92398ee189832d82d9; reviewed head and historical Qodo exception preserved. Review-policy v3 defines conditional owner-adoption/manual-merge activation; this proposal does not activate it or migrate PR #119._
+_Last updated: 2026-10-20 — Local-only temporary Qodo/Graphite review-stack proposal prepared for PR #126; policy INACTIVE, existing gates and final-SHA transition approval remain required._
+
+Prior: _Last updated: 2026-10-19 — PR #118 manually merged at 25f7278a9938767d539dfe92398ee189832d82d9; reviewed head and historical Qodo exception preserved. Review-policy v3 defines conditional owner-adoption/manual-merge activation; this proposal does not activate it or migrate PR #119._
 
 Prior: _Last updated: 2026-10-18 — PR #114 missing-hardening follow-up: already-0050 databases reject incomplete migration trees instead of falsely returning zero work; focused real-PG RED reproduced. Complete-tree trusted-installer path retained; final full gates and independent review remain pending, PG-F1 inactive and PG-F2 unauthorized._
 
@@ -5678,3 +5680,11 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - The historical owner-approved Qodo exception applies only to PR #118 at reviewed head 2fc6a10dd7e7fdd515cc6a23f04ffd817840bfcc (https://github.com/sayed710/rocky/pull/118#issuecomment-6254770636). Qodo Requirement Gaps remain UNVERIFIED, not zero. Existing Greptile code review does not prove complete 15-ID requirements coverage; the independently attributable Claude assessment and Work consolidation remain separately identified. The GameSync Notion compilation remains DRAFT, with A01-A03 source-attribution corrections pending separate authorization.
 - Policy v3 specifies CI, exact-head Greptile, auditable requirement/code/test traceability, distinct-model review, zero unresolved actionable findings and threads, and Git consistency. Activation requires explicit head-bound GitHub owner adoption and owner manual merge of the policy PR; verify the receipt and prospective PR eligibility under docs/REVIEW_POLICY.md. Preparation or publication approval alone is not activation. The transition PR retains the current gates and receives no automatic Qodo exemption.
 - No retroactive policy change to merged PR #118 or existing PR #119. Claude retains D1-A/PR #119 ownership and its current gates. This proposal changes no product code, provider settings, integrations, branch protections or Notion content and authorizes no PG-F1 activation, PG-F2, deployment or agent merge. Activation must be established from the separate GitHub receipt; this historical preparation entry is not that receipt.
+
+
+## 2026-10-20 — Temporary review stack local proposal; no activation
+
+- The owner directed preparation of a temporary Qodo/Graphite/relevant-skills policy revision. This is a local proposal, not authorization to publish, waive gates, adopt the policy or merge PR #126.
+- The published PR #126 head remains 92173b49746e66200095690681fa9d0c6440d50d. Its current Greptile and substantive Qodo requirements gates remain applicable unless separately excepted by the owner for the final PR SHA. New commits require renewed exact-head evidence; no retroactive migration of PR #119 or any previously created PR.
+- The proposed prospective stack requires actual Qodo Bugs=0/Rules=0, substantive exact-head Graphite evidence, scope-appropriate verified skill execution, a distinct-model requirements matrix, mandatory CI/tests, zero unresolved actionable findings and threads, and Git consistency. Qodo Requirement Gaps remain UNVERIFIED whenever not assessed; independently reviewed evidence is separately attributed.
+- Activation still requires separate explicit final-head GitHub owner adoption and owner manual merge, with prospective creation-time and commit-ancestry eligibility. Existing history, PR #118's SHA-specific exception, ownership, model-review hierarchy and all Git/security protections are preserved. No provider settings, Notion source, product code, integration or branch protection changes are part of this proposal.
