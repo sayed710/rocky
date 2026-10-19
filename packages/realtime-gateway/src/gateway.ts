@@ -29,12 +29,14 @@ import { Room } from './room';
 import { gameChannel, type PubSub, type Unsubscribe } from './pubsub';
 import type { Connection } from './transport';
 import type {
+  Broadcast,
   ClientMessage,
   MoveMessage,
   RejectCode,
   Role,
   ServerMessage,
   SimpleCommandMessage,
+  StateMessage,
   StateView,
   TokenVerifier,
 } from './protocol';
@@ -85,6 +87,10 @@ function isNewerThanSnapshot(msg: ServerMessage, snapshotRevision: number): bool
   return true;
 }
 
+function isStateMessage(msg: unknown): msg is StateMessage {
+  return typeof msg === 'object' && msg !== null && (msg as { t?: unknown }).t === 'state';
+}
+
 export class RealtimeGateway {
   private readonly sessions = new Map<string, Session>();
   private readonly rooms = new Map<string, RoomEntry>();
@@ -92,6 +98,7 @@ export class RealtimeGateway {
   private readonly joinBuffers = new Map<string, Set<ServerMessage[]>>();
   private readonly observedRevision = new Map<string, number>();
   private readonly stateRefreshes = new Map<string, { again: boolean }>();
+  private readonly unconfirmedSubscriptionsSet = new Set<string>();
   /**
    * Command router: directs game commands to the owning node. Defaults to
    * {@link LocalCommandRouter} (direct authority.apply) for single-node and
@@ -154,6 +161,16 @@ export class RealtimeGateway {
   /** Whether any connection on this node is in `gameId`'s room. */
   hasLocalSessions(gameId: string): boolean {
     return this.rooms.has(gameId);
+  }
+
+  /** Games whose Redis subscription has not been confirmed ready (diagnostics/tests). */
+  get unconfirmedSubscriptions(): ReadonlySet<string> {
+    return this.unconfirmedSubscriptionsSet;
+  }
+
+  /** Number of unconfirmed subscriptions on this gateway (diagnostics/tests). */
+  unconfirmedSubscriptionCount(): number {
+    return this.unconfirmedSubscriptionsSet.size;
   }
 
   /** Observed revision for a game (test inspection). */
@@ -228,6 +245,7 @@ export class RealtimeGateway {
           this.joinBuffers.delete(gameId);
           if (!this.rooms.has(gameId)) {
             this.observedRevision.delete(gameId);
+            this.unconfirmedSubscriptionsSet.delete(gameId);
           }
         }
       }
@@ -246,6 +264,29 @@ export class RealtimeGateway {
     return { stop, take };
   }
 
+  private async awaitSubscriptionReady(gameId: string): Promise<void> {
+    if (!this.pubsub.ready) return;
+    const timeoutMs = this.authority.durableReadTimeoutMs;
+    let cancel: (() => void) | undefined;
+    try {
+      const readyPromise = this.pubsub.ready(gameChannel(gameId));
+      if (timeoutMs !== undefined) {
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          cancel = this.authority.schedule(() => {
+            reject(new Error('subscription readiness timed out'));
+          }, timeoutMs);
+        });
+        await Promise.race([readyPromise, timeoutPromise]);
+      } else {
+        await readyPromise;
+      }
+    } catch {
+      this.unconfirmedSubscriptionsSet.add(gameId);
+    } finally {
+      cancel?.();
+    }
+  }
+
   /**
    * Handle a join request. Identity is derived from the token (never from a
    * client-asserted userId). When the token is absent, the connection joins
@@ -260,6 +301,9 @@ export class RealtimeGateway {
     const buffer = this.startJoinBuffer(session, gameId);
     void (async () => {
       try {
+        await this.awaitSubscriptionReady(gameId);
+        if (!current()) return;
+
         let loaded = await this.authority.ensureLoaded(gameId);
         // A copy loaded for background work (the no-show worker) can be evicted between the load
         // and this continuation; load once more rather than failing a valid join.
@@ -505,6 +549,7 @@ export class RealtimeGateway {
         const buffers = this.joinBuffers.get(gameId);
         if (!buffers || buffers.size === 0) {
           this.observedRevision.delete(gameId);
+          this.unconfirmedSubscriptionsSet.delete(gameId);
         }
       } else {
         entry.room.broadcastPresence();
@@ -517,7 +562,14 @@ export class RealtimeGateway {
     let entry = this.rooms.get(gameId);
     if (entry) return entry;
     const room = new Room(gameId);
-    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => {
+    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (rawMsg) => {
+      const msg = rawMsg as unknown as Broadcast | StateMessage;
+      if (isStateMessage(msg)) {
+        const currentRev = this.observedRevision.get(gameId);
+        if (currentRev !== undefined && msg.state.stateRevision <= currentRev) {
+          return;
+        }
+      }
       this.observe(gameId, msg);
       room.broadcast(msg);
     });

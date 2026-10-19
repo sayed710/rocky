@@ -187,9 +187,9 @@ export interface GameAuthorityOptions {
 export class GameAuthority {
   private readonly games = new Map<string, GameSlot>();
   private lifecycleSequence = 0;
-  private readonly durableReadTimeoutMs?: number;
+  private readonly _durableReadTimeoutMs?: number;
   private readonly durableWriteTimeoutMs?: number;
-  private readonly schedule: (fn: () => void, ms: number) => () => void;
+  private readonly _schedule: (fn: () => void, ms: number) => () => void;
 
   constructor(
     private readonly pubsub: PubSub,
@@ -206,9 +206,17 @@ export class GameAuthority {
   ) {
     validateTimeout(options.durableReadTimeoutMs, 'durableReadTimeoutMs');
     validateTimeout(options.durableWriteTimeoutMs, 'durableWriteTimeoutMs');
-    this.durableReadTimeoutMs = options.durableReadTimeoutMs;
+    this._durableReadTimeoutMs = options.durableReadTimeoutMs;
     this.durableWriteTimeoutMs = options.durableWriteTimeoutMs;
-    this.schedule = options.schedule ?? defaultSchedule;
+    this._schedule = options.schedule ?? defaultSchedule;
+  }
+
+  get durableReadTimeoutMs(): number | undefined {
+    return this._durableReadTimeoutMs;
+  }
+
+  get schedule(): (fn: () => void, ms: number) => () => void {
+    return this._schedule;
   }
 
   /** Whether a live game is currently held in the hot cache. */
