@@ -589,6 +589,12 @@ async function main(): Promise<void> {
       }
     },
     (gameId) => engineBotMover?.localSessionsGone(gameId),
+    (gameId, error) => {
+      logger.warn('State refresh failed', {
+        gameId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
   );
   // A forwarded server expiry must not evict a game someone here is watching (ADR-0149).
   commandConsumer?.watchLocalSessions((gameId) => gateway.hasLocalSessions(gameId));

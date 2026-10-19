@@ -15,7 +15,9 @@ import { RealtimeGateway } from '../src/gateway';
 import { InMemoryConnection } from '../src/transport';
 import { FakeTokenVerifier } from './fake-token-verifier';
 import { LocalCommandRouter, type CommandRouter } from '../src/command-router';
-import type { Broadcast, ServerMessage } from '../src/protocol';
+import type { Broadcast, ServerMessage, StateView } from '../src/protocol';
+
+const GatewayWithHook = RealtimeGateway;
 
 const TC: TimeControl = { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' };
 
@@ -78,6 +80,8 @@ class DeferredLog implements EventLog {
   public afterAppendGate?: Gate;
   public beforeLoadGate?: Gate;
   public nextLoadGate?: Gate;
+  public throwLoadTimes = 0;
+  public throwLoadError = new Error('simulated load failure');
   public appends = 0;
   public loads = 0;
 
@@ -101,6 +105,10 @@ class DeferredLog implements EventLog {
       await gate.release.done;
     }
     this.loads++;
+    if (this.throwLoadTimes > 0) {
+      this.throwLoadTimes--;
+      throw this.throwLoadError;
+    }
     const snapshot = await this.inner.load(id);
     if (this.nextLoadGate) {
       const gate = this.nextLoadGate;
@@ -565,6 +573,514 @@ test('RR: detached refresh delivers draw offer to a replacement room created by 
   const lastState = black1.last('state');
   assert.ok(lastState, 'black1 must receive state frame from refresh');
   assert.equal(lastState.state.drawOffer, 'w');
+});
+
+test('RF1 transient failure: the first refresh read throws, the second succeeds -> the room gets exactly one state frame with drawOffer w at revision >= floor', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new GatewayWithHook(edge, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-rf1';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: true,
+    source: 'seek',
+    noShowAfterMs: 60_000,
+  });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(white.last('joined'));
+  assert.ok(spec.last('joined'));
+
+  // White offers draw; router holds response while writer commits (rev 2).
+  const gate = createGate();
+  drawGate = gate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(gate, 'offerDraw committed on writer');
+
+  // A newer frame overtakes the held draw response: writer commits readiness for Black (rev 3).
+  await writer.apply(gameId, 'bob', { kind: 'ready' });
+  await flush();
+
+  const specReady = spec.last('ready');
+  assert.ok(specReady, 'spec must receive ready broadcast');
+  assert.equal(specReady.stateRevision, 3);
+
+  // Configure first refresh read to throw; second will succeed.
+  deferredLog.throwLoadTimes = 1;
+
+  // Release the held draw response (carrying rev 2).
+  // Because rev 2 < observedRevision 3, sendStateToRoom starts refreshState.
+  gate.release.resolve();
+  await flush();
+
+  // The room gets exactly one state frame with drawOffer 'w' at revision >= floor.
+  const stateFrames = spec.sent.filter((m): m is ServerMessage & { t: 'state' } => m.t === 'state');
+  assert.equal(stateFrames.length, 1, 'room gets exactly one state frame');
+  assert.equal(stateFrames[0]!.state.drawOffer, 'w');
+  assert.ok(
+    stateFrames[0]!.state.stateRevision >= specReady.stateRevision,
+    `state revision ${stateFrames[0]!.state.stateRevision} >= floor ${specReady.stateRevision}`,
+  );
+});
+
+test('RF2 all attempts fail on a non-owner edge (resident stale) -> exactly STATE_REFRESH_ATTEMPTS refresh reads, onStateRefreshFailed called exactly once with the gameId, NO state frame below the floor reaches anyone, the commanding client receives no reject and no outcomeUnknown, and the writers append count is unchanged after the command committed (no resubmission)', async () => {
+  const store = new InMemoryEventLog();
+  const writerLog = new DeferredLog(store);
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, writerLog);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const failedCalls: { gameId: string; error: unknown }[] = [];
+  const gateway = new GatewayWithHook(
+    edge,
+    pubsub,
+    verifier,
+    () => 1000,
+    router,
+    undefined,
+    undefined,
+    (gameId, err) => failedCalls.push({ gameId, error: err }),
+  );
+
+  const gameId = 'game-rf2';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: false,
+  });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+
+  // White offers draw; router holds response while writer commits (rev 1).
+  const gate = createGate();
+  drawGate = gate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(gate, 'offerDraw committed on writer');
+
+  // Overtake with move 1 (rev 2).
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await flush();
+
+  const appendsAfterCommit = writerLog.appends;
+  const loadsBeforeRefresh = deferredLog.loads;
+
+  // Every refresh read throws.
+  deferredLog.throwLoadTimes = 10;
+
+  gate.release.resolve();
+  await flush();
+
+  // Exactly 3 (STATE_REFRESH_ATTEMPTS) refresh reads:
+  assert.equal(deferredLog.loads - loadsBeforeRefresh, 3, 'exactly STATE_REFRESH_ATTEMPTS refresh reads');
+  assert.equal(failedCalls.length, 1, 'onStateRefreshFailed called exactly once');
+  assert.equal(failedCalls[0]!.gameId, gameId);
+  assert.equal(spec.all('state').length, 0, 'no state frame below floor reaches anyone');
+  assert.equal(white.all('reject').length, 0, 'no reject to commanding client');
+  assert.equal(white.all('outcomeUnknown').length, 0, 'no outcomeUnknown to commanding client');
+  assert.equal(writerLog.appends, appendsAfterCommit, 'writer append count unchanged (no resubmission)');
+});
+
+test('RF3 owner-node fallback: every read throws, but the gateways authority is the owner (resident fresh and >= floor) -> one state frame with drawOffer w; onStateRefreshFailed NOT called', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const owner = new GameAuthority(pubsub, () => 1000, deferredLog);
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await owner.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const failedCalls: { gameId: string; error: unknown }[] = [];
+  const gateway = new GatewayWithHook(
+    owner,
+    pubsub,
+    verifier,
+    () => 1000,
+    router,
+    undefined,
+    undefined,
+    (gameId, err) => failedCalls.push({ gameId, error: err }),
+  );
+
+  const gameId = 'game-rf3';
+  await owner.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: true,
+    source: 'seek',
+    noShowAfterMs: 60_000,
+  });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+
+  // White offers draw (rev 2); response held.
+  const gate = createGate();
+  drawGate = gate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(gate, 'offerDraw committed on owner');
+
+  // Black commits readiness on owner (rev 3); observedRevision becomes 3.
+  await owner.apply(gameId, 'bob', { kind: 'ready' });
+  await flush();
+
+  // Every load throws from now on.
+  deferredLog.throwLoadTimes = 10;
+
+  // Release held offerDraw response.
+  gate.release.resolve();
+  await flush();
+
+  const stateFrames = spec.all('state');
+  assert.equal(stateFrames.length, 1, 'one state frame delivered via resident fallback');
+  assert.equal(stateFrames[0]!.state.drawOffer, 'w');
+  assert.equal(failedCalls.length, 0, 'onStateRefreshFailed NOT called');
+});
+
+test('RF4 stale revision: the refresh read succeeds but returns a revision below the floor (simulate by raising the floor via a newer frame during the gated read) -> no state frame delivered', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const failedCalls: { gameId: string; error: unknown }[] = [];
+  const gateway = new GatewayWithHook(
+    edge,
+    pubsub,
+    verifier,
+    () => 1000,
+    router,
+    undefined,
+    undefined,
+    (gameId, err) => failedCalls.push({ gameId, error: err }),
+  );
+
+  const gameId = 'game-rf4';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: false,
+  });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+
+  // White offers draw (rev 1); response held.
+  const gate = createGate();
+  drawGate = gate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(gate, 'offerDraw committed on writer');
+
+  // Overtake with move 1 (rev 2).
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await flush();
+
+  // Gate the refresh read after snapshot is taken at rev 2.
+  const refreshGate = createGate();
+  deferredLog.nextLoadGate = refreshGate;
+
+  // Release offerDraw; refresh starts and enters refreshGate.
+  gate.release.resolve();
+  await awaitGate(refreshGate, 'refresh read snapshot');
+
+  // While paused, raise the floor via a newer move (rev 3).
+  await writer.apply(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
+  await flush();
+
+  // Release the refresh read (returning rev 2 < floor 3).
+  refreshGate.release.resolve();
+  await flush();
+
+  assert.equal(spec.all('state').length, 0, 'no state frame delivered');
+  assert.equal(failedCalls.length, 0, 'onStateRefreshFailed not called');
+});
+
+test('RF5 replacement room / disconnected clients: all room members close while the refresh read is gated; release with failures -> the cycle stops (no further reads after teardown), no frames, onStateRefreshFailed not called; a NEW joiner afterwards gets its own fresh snapshot only', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const failedCalls: { gameId: string; error: unknown }[] = [];
+  const gateway = new GatewayWithHook(
+    edge,
+    pubsub,
+    verifier,
+    () => 1000,
+    router,
+    undefined,
+    undefined,
+    (gameId, err) => failedCalls.push({ gameId, error: err }),
+  );
+
+  const gameId = 'game-rf5';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: false,
+  });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+
+  // White offers draw (rev 1); response held.
+  const gate = createGate();
+  drawGate = gate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(gate, 'offerDraw committed on writer');
+
+  // Overtake with move 1 (rev 2).
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await flush();
+
+  // Gate the refresh read.
+  const refreshGate = createGate();
+  deferredLog.beforeLoadGate = refreshGate;
+  deferredLog.throwLoadTimes = 10;
+
+  gate.release.resolve();
+  await awaitGate(refreshGate, 'refresh read before load');
+
+  const loadsAtTeardown = deferredLog.loads;
+
+  // All room members close while refresh read is gated.
+  white.close();
+  spec.close();
+  await flush();
+  assert.equal(gateway.roomCount, 0);
+
+  // Release the refresh read with failure.
+  refreshGate.release.resolve();
+  await flush();
+
+  // Cycle stops: no further reads after teardown, no frames, onStateRefreshFailed not called.
+  assert.equal(deferredLog.loads, loadsAtTeardown + 1, 'cycle stops (no further reads after teardown)');
+  assert.equal(failedCalls.length, 0, 'onStateRefreshFailed not called');
+
+  // Reset throwLoadTimes so subsequent new joiner can load.
+  deferredLog.throwLoadTimes = 0;
+
+  // A NEW joiner afterwards gets its own fresh snapshot only.
+  const specNew = new InMemoryConnection('specNew');
+  gateway.handleConnection(specNew);
+  specNew.deliver({ t: 'join', gameId });
+  await flush();
+
+  assert.ok(specNew.last('joined'), 'new joiner receives joined frame');
+  assert.equal(specNew.last('joined')!.state.stateRevision, 2);
+  assert.equal(specNew.all('state').length, 0, 'new joiner receives no state frames from old refresh');
+});
+
+test('RF6 coalescing: two overtaken draw-only commands while the first refresh is in flight -> total refresh reads <= 2 * STATE_REFRESH_ATTEMPTS and at most one extra cycle; final delivered state is the newest', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const heldGates: Gate[] = [];
+  let interceptDraw = true;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (interceptDraw && (cmd.kind === 'offerDraw' || cmd.kind === 'declineDraw')) {
+        const gate = createGate();
+        heldGates.push(gate);
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new GatewayWithHook(edge, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-rf6';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: false,
+  });
+
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const black = new InMemoryConnection('black');
+  gateway.handleConnection(black);
+  black.deliver({ t: 'join', gameId, token: 'tok-bob' });
+
+  const spec = new InMemoryConnection('spec');
+  gateway.handleConnection(spec);
+  spec.deliver({ t: 'join', gameId });
+  await flush();
+
+  // 1. White offers draw (rev 1); response held in heldGates[0].
+  white.deliver({ t: 'offerDraw', gameId });
+  await flush();
+
+  // 2. Black declines draw (rev 2); response held in heldGates[1].
+  black.deliver({ t: 'declineDraw', gameId });
+  await flush();
+
+  // 3. White offers draw again (rev 3); response held in heldGates[2].
+  white.deliver({ t: 'offerDraw', gameId });
+  await flush();
+
+  assert.equal(heldGates.length, 3, 'all 3 draw commands committed on writer and held');
+
+  // Stop intercepting so subsequent moves/commands are not held.
+  interceptDraw = false;
+
+  // Move 1 (rev 4) overtakes all 3 draw commands.
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await flush();
+
+  const specMove = spec.last('move');
+  assert.ok(specMove, 'spec must receive move broadcast');
+  assert.equal(specMove.stateRevision, 4);
+
+  // Gate the first refresh read.
+  const refreshGate = createGate();
+  deferredLog.nextLoadGate = refreshGate;
+
+  // Release draw 1 response (rev 1 < 4) -> starts refresh 1, pauses in refreshGate.
+  heldGates[0]!.release.resolve();
+  await awaitGate(refreshGate, 'refresh 1 load');
+
+  const loadsBeforeCoalesced = deferredLog.loads;
+
+  // While refresh 1 is in flight:
+  // Release command 2 (declineDraw, rev 2 < 4) -> overtaken, sets again = true.
+  heldGates[1]!.release.resolve();
+  await flush();
+
+  // Release command 3 (offerDraw, rev 3 < 4) -> overtaken, sets again = true.
+  heldGates[2]!.release.resolve();
+  await flush();
+
+  // Now release refresh 1.
+  refreshGate.release.resolve();
+  await flush();
+
+  // Total refresh reads must be <= 2 * STATE_REFRESH_ATTEMPTS (3 * 2 = 6).
+  const refreshReads = deferredLog.loads - loadsBeforeCoalesced;
+  assert.ok(
+    refreshReads <= 2 * 3,
+    `total refresh reads ${refreshReads} <= 2 * STATE_REFRESH_ATTEMPTS`,
+  );
+
+  // Final delivered state is the newest (revision 4).
+  const stateFrames = spec.all('state');
+  assert.ok(stateFrames.length >= 1, 'at least one state frame delivered');
+  const lastState = stateFrames[stateFrames.length - 1]!;
+  assert.equal(lastState.state.stateRevision, 4);
 });
 
 test('Control A1: owner append paused before inner append: resume returns rev 2; single append and confirmation', async () => {

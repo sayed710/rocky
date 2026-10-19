@@ -63,6 +63,9 @@ interface RoomEntry {
 /** How many times a join's readiness is routed before the failure is reported to the client. */
 const READINESS_ATTEMPTS = 3;
 
+/** Bounded attempts for refreshing an overtaken draw-only state; mirrors READINESS_ATTEMPTS; no timers/backoff. */
+const STATE_REFRESH_ATTEMPTS = 3;
+
 const SIMPLE_TO_COMMAND: Record<SimpleCommandMessage['t'], Command['kind']> = {
   resign: 'resign',
   offerDraw: 'offerDraw',
@@ -89,6 +92,7 @@ export class RealtimeGateway {
   private readonly loadedGames = new Set<string>();
   private readonly joinBuffers = new Map<string, Set<ServerMessage[]>>();
   private readonly observedRevision = new Map<string, number>();
+  private readonly stateRefreshes = new Map<string, { again: boolean }>();
   /**
    * Command router: directs game commands to the owning node. Defaults to
    * {@link LocalCommandRouter} (direct authority.apply) for single-node and
@@ -107,6 +111,12 @@ export class RealtimeGateway {
     private readonly onGameLoaded?: (gameId: string, state: StateView) => void,
     /** Called when the last session in a game leaves this node — the pair of `onGameLoaded`. */
     private readonly onGameUnloaded?: (gameId: string) => void,
+    /**
+     * Called once when every bounded refresh attempt for an overtaken draw-only command state
+     * failed; the command itself committed - the gateway sends no frame for it (no stale snapshot, no
+     * false reject) and the host should log/alert.
+     */
+    private readonly onStateRefreshFailed?: (gameId: string, error: unknown) => void,
   ) {
     // Fall back to local routing when no router is injected. This preserves
     // backward compatibility: existing callers that don't pass a router get
@@ -554,20 +564,97 @@ export class RealtimeGateway {
       this.deliverState(gameId, state);
       return;
     }
-    void this.authority
-      .readRecovery(gameId, 0)
-      .then((latest) => {
-        const floor = this.observedRevision.get(gameId) ?? -1;
-        if (latest.state.stateRevision >= floor) {
-          this.deliverState(gameId, latest.state);
+    const existing = this.stateRefreshes.get(gameId);
+    if (existing) {
+      existing.again = true;
+      return;
+    }
+    this.stateRefreshes.set(gameId, { again: false });
+    void this.refreshState(gameId);
+  }
+
+  /**
+   * Bounded server-side refresh for an overtaken draw-only command state.
+   * Retries up to STATE_REFRESH_ATTEMPTS with resident fallback on the owner node.
+   * If all attempts fail, notifies onStateRefreshFailed so the host can alert/log.
+   */
+  private async refreshState(gameId: string): Promise<void> {
+    try {
+      while (true) {
+        let lastError: unknown;
+        let succeeded = false;
+
+        for (let attempt = 1; attempt <= STATE_REFRESH_ATTEMPTS; attempt++) {
+          const room = this.rooms.get(gameId);
+          const buffers = this.joinBuffers.get(gameId);
+          if (!room && (!buffers || buffers.size === 0)) {
+            this.stateRefreshes.delete(gameId);
+            return;
+          }
+
+          try {
+            const latest = await this.authority.readRecovery(gameId, 0);
+            const activeRoom = this.rooms.get(gameId);
+            const activeBuffers = this.joinBuffers.get(gameId);
+            if (!activeRoom && (!activeBuffers || activeBuffers.size === 0)) {
+              this.stateRefreshes.delete(gameId);
+              return;
+            }
+            const floor = this.observedRevision.get(gameId) ?? -1;
+            if (latest.state.stateRevision >= floor) {
+              this.deliverState(gameId, latest.state);
+            }
+            succeeded = true;
+            break;
+          } catch (err: unknown) {
+            lastError = err;
+            const activeRoom = this.rooms.get(gameId);
+            const activeBuffers = this.joinBuffers.get(gameId);
+            if (!activeRoom && (!activeBuffers || activeBuffers.size === 0)) {
+              this.stateRefreshes.delete(gameId);
+              return;
+            }
+            if (this.authority.hasFresh(gameId)) {
+              try {
+                const resident = this.authority.getState(gameId);
+                const floor = this.observedRevision.get(gameId) ?? -1;
+                if (resident.stateRevision >= floor) {
+                  this.deliverState(gameId, resident);
+                  succeeded = true;
+                  break;
+                }
+              } catch {
+                // Ignore getState error and continue to next attempt
+              }
+            }
+          }
         }
-      })
-      .catch(() => {
-        // Best-effort refresh. If this read fails, no state frame is sent for this draw-only command:
-        // room members (including the commanding player) learn the draw status only from a later
-        // snapshot (join, resume or another state frame). A bounded retry or failure notification
-        // would need an owner-approved policy (see PR #119 limitations).
-      });
+
+        if (!succeeded) {
+          try {
+            this.onStateRefreshFailed?.(gameId, lastError);
+          } catch {
+            // Protect gateway from throwing host hook
+          }
+        }
+
+        const entry = this.stateRefreshes.get(gameId);
+        if (entry?.again) {
+          entry.again = false;
+        } else {
+          this.stateRefreshes.delete(gameId);
+          return;
+        }
+      }
+    } catch (err: unknown) {
+      this.stateRefreshes.delete(gameId);
+      // Unexpected errors (e.g. from delivery) are reported, never swallowed.
+      try {
+        this.onStateRefreshFailed?.(gameId, err);
+      } catch {
+        /* a throwing host hook must not break the gateway */
+      }
+    }
   }
 
   private deliverState(gameId: string, state: StateView): void {
