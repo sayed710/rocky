@@ -374,16 +374,22 @@ export class Position {
 
   private hasInsufficientMaterial(): boolean {
     if (this.state.variant !== 'standard' && this.state.variant !== 'chess960') return false;
+    // Draw only when no legal sequence can mate (a dead position), not when mate merely cannot be
+    // forced: K+N+N vs K, K+N vs K+N and opposite-coloured bishops can all still be mated.
+    // ponytail: other dead positions (e.g. locked pawn chains) are left to play on.
     const pieces: string[] = [];
+    const bishopSquareColors = new Set<number>();
     for (let sq = 0; sq < 128; sq++) {
       if ((sq & 0x88) !== 0) continue;
       const p = this.state.board[sq];
-      if (p !== null && typeOf(p) !== 'k') pieces.push(typeOf(p));
+      if (p === null || typeOf(p) === 'k') continue;
+      pieces.push(typeOf(p));
+      if (typeOf(p) === 'b') bishopSquareColors.add(((sq >> 4) + (sq & 7)) & 1);
     }
     if (pieces.length === 0) return true; // K vs K
-    if (pieces.length === 1 && (pieces[0] === 'b' || pieces[0] === 'n')) return true; // K+minor
-    if (pieces.length === 2 && pieces.every((p) => p === 'b')) return true; // K+B vs K+B (same or diff color simplified)
-    return false;
+    if (pieces.length === 1 && (pieces[0] === 'b' || pieces[0] === 'n')) return true; // K+minor vs K
+    // Any number of bishops, for either side, all on squares of one colour.
+    return pieces.every((p) => p === 'b') && bishopSquareColors.size === 1;
   }
 
   /** Perft: count leaf nodes to `depth`. Used for engine verification. */

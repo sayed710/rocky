@@ -348,6 +348,25 @@ test('a lone king still draws on time in standard chess, where it genuinely cann
   }
 });
 
+test('a capture leaving opposite-coloured bishops keeps the game going; same-coloured bishops draw', () => {
+  // Bf1xd3 leaves White a light-squared bishop. Against Black's dark f8 bishop mate is still
+  // possible; against a light c8 bishop it never is.
+  const play = (initialFen: string) =>
+    Game.create({ gameId: 'bishops', timeControl: TC, players: { white: 'a', black: 'b' }, initialFen, at: 0 })
+      .game.playMove('f1d3', 1_000);
+
+  const opposite = play('5bk1/8/8/8/8/3n4/8/5BK1 w - - 0 1');
+  assert.equal(opposite.game.status.over, false);
+  assert.ok(!opposite.events.some((e) => e.type === 'GameEnded'));
+
+  const same = play('2b3k1/8/8/8/8/3n4/8/5BK1 w - - 0 1');
+  assert.equal(same.game.status.over, true);
+  if (same.game.status.over) {
+    assert.equal(same.game.status.termination, 'insufficient_material');
+    assert.equal(same.game.status.result, '1/2-1/2');
+  }
+});
+
 /**
  * Crazyhouse is the case the board cannot show. A player holding a queen is one drop from mate, and
  * `parseFen` was being called without the variant, so the pocket was never even consulted.
