@@ -11,7 +11,10 @@
         "packages/web/src/net/game-sync.ts",
         "packages/web/src/net/ws-protocol.ts",
         "packages/web/test/game-sync.test.ts",
-        "packages/web/test/state-revision.test.ts"
+        "packages/web/test/state-revision.test.ts",
+        "packages/realtime-gateway/src/protocol.ts",
+        "packages/realtime-gateway/src/authority.ts",
+        "packages/realtime-gateway/test/state-revision.test.ts"
       ]
     }
   ]
