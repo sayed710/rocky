@@ -418,14 +418,12 @@ test('N2: detached refresh does not deliver stale state to a new room created af
   refreshGate.release.resolve();
   await flush();
 
-  // Assert B receives no state frame with a revision lower than its joined revision
-  // (in fact no frame from the old refresh).
+  // Assert B receives no state frame with a revision lower than its joined revision.
   const bStates = specB.sent.filter((m): m is ServerMessage & { t: 'state' } => m.t === 'state');
   assert.ok(
     bStates.every((s) => s.state.stateRevision >= bJoined.state.stateRevision),
     "B receives no state frame with revision lower than joined revision",
   );
-  assert.equal(bStates.length, 0, 'in fact no state frame from the old refresh');
 });
 
 test('J1: overlapping resume during a gated re-join does not hang the re-join', async () => {
@@ -991,6 +989,30 @@ test('RF5 replacement room / disconnected clients: room closes while refresh rea
   const staleFrames = specNew.all('state').filter((s) => s.state.stateRevision < 3);
   assert.equal(staleFrames.length, 0, 'no stale state frame reaches the new spectator');
   assert.ok(specNew.all('state').every((s) => s.state.stateRevision >= 3), 'delivered state is at or above floor');
+
+  // Additionally assert the stateRefreshes entry was cleared:
+  // A later overtaken draw-only command triggers exactly one fresh refresh read.
+  const drawHold2 = createGate();
+  drawGate = drawHold2;
+
+  const whiteNew = new InMemoryConnection('whiteNew');
+  gateway.handleConnection(whiteNew);
+  whiteNew.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await flush();
+
+  whiteNew.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(drawHold2, 'later offerDraw committed on writer');
+
+  // Overtake with move 3 on writer (rev 5).
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'g1f3' });
+  await flush();
+
+  const loadsBeforeReleaseLater = deferredLog.loads;
+  drawHold2.release.resolve();
+  await flush();
+  await flush();
+
+  assert.equal(deferredLog.loads - loadsBeforeReleaseLater, 1, 'later overtaken draw-only command triggers exactly one fresh refresh read');
 });
 
 test('RF6 coalescing: two overtaken draw-only commands while the first refresh is in flight -> exactly ONE additional cycle runs, newest state is delivered, and stateRefreshes is cleared', async () => {
@@ -2765,4 +2787,115 @@ test("CR2 boundary characterization: D2 boundary: a remote draw offer committed 
     assert.equal(resumed.state.stateRevision, 0);
     assert.equal(conn.all('state').length, 0, 'no state frame reaches edge client afterwards');
   }
+});
+
+test("NF1 regression: room replacement during cycle 1's gated read does not discard coalesced command's again flag", async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const heldGates: Gate[] = [];
+  let interceptDraw = true;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (interceptDraw && (cmd.kind === 'offerDraw' || cmd.kind === 'declineDraw')) {
+        const gate = createGate();
+        heldGates.push(gate);
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-nf1';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: false,
+  });
+
+  // R0: white and black join on edge.
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+
+  const black = new InMemoryConnection('black');
+  gateway.handleConnection(black);
+  black.deliver({ t: 'join', gameId, token: 'tok-bob' });
+  await flush();
+  assert.equal(gateway.roomCount, 1);
+
+  // 1. First draw-only command: White offers draw (rev 1); response held in heldGates[0].
+  white.deliver({ t: 'offerDraw', gameId });
+  await flush();
+  assert.equal(heldGates.length, 1);
+
+  // 2. Second draw-only command: Black declines draw (rev 2); response held in heldGates[1].
+  black.deliver({ t: 'declineDraw', gameId });
+  await flush();
+  assert.equal(heldGates.length, 2);
+
+  // Stop intercepting so subsequent moves/commands are not held.
+  interceptDraw = false;
+
+  // Move 1 (rev 3) overtakes both draw commands on writer.
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await flush();
+  assert.equal(gateway.observedRevisionFor(gameId), 3);
+
+  // Gate cycle 1's refresh read.
+  const cycle1Gate = createGate();
+  deferredLog.nextLoadGate = cycle1Gate;
+
+  // Release command 1 response (rev 1 < 3) -> starts cycle 1, enters cycle1Gate.
+  heldGates[0]!.release.resolve();
+  await awaitGate(cycle1Gate, 'cycle 1 load');
+
+  // During the gate: start J with a gated join read.
+  const joinGate = createGate();
+  deferredLog.nextLoadGate = joinGate;
+  const joiner = new InMemoryConnection('joiner');
+  gateway.handleConnection(joiner);
+  joiner.deliver({ t: 'join', gameId });
+  await awaitGate(joinGate, 'joiner join load');
+
+  // Release command 2 response (rev 2 < 3) -> coalesces into cycle 1 (again = true).
+  heldGates[1]!.release.resolve();
+  await flush();
+
+  // Close all R0 members.
+  white.close();
+  black.close();
+  await flush();
+  assert.equal(gateway.roomCount, 0);
+
+  // Let J complete, creating R1.
+  joinGate.release.resolve();
+  await flush();
+  assert.equal(gateway.roomCount, 1);
+  const jJoined = joiner.last('joined');
+  assert.ok(jJoined, 'joiner must receive joined frame');
+  assert.equal(jJoined.state.stateRevision, 3, 'joiner snapshot at rev 3');
+
+  // Now release cycle 1.
+  cycle1Gate.release.resolve();
+  await flush();
+  await flush();
+
+  // Assert J's connection ends with a state frame carrying the second command's draw state
+  // (revision >= N+1, which is >= 2; here rev 3 with drawOffer null), and no state frame older than joined snapshot.
+  const jStates = joiner.all('state');
+  assert.ok(jStates.length >= 1, 'joiner in R1 must receive state frame from coalesced cycle 2');
+  assert.ok(
+    jStates.every((s) => s.state.stateRevision >= jJoined.state.stateRevision),
+    'no state frame older than joined snapshot',
+  );
+  const lastState = jStates[jStates.length - 1]!;
+  assert.ok(lastState.state.stateRevision >= 3, 'revision >= joined snapshot');
+  assert.equal(lastState.state.drawOffer, null, 'state carries second command (declineDraw cleared offer)');
 });

@@ -586,8 +586,8 @@ export class RealtimeGateway {
 
         for (let attempt = 1; attempt <= STATE_REFRESH_ATTEMPTS; attempt++) {
           const room = this.rooms.get(gameId);
-          const initialBufferSize = this.joinBuffers.get(gameId)?.size ?? 0;
-          if (!room && initialBufferSize === 0) {
+          const buffers = this.joinBuffers.get(gameId);
+          if (!room && (!buffers || buffers.size === 0)) {
             this.stateRefreshes.delete(gameId);
             return;
           }
@@ -602,10 +602,6 @@ export class RealtimeGateway {
               this.stateRefreshes.delete(gameId);
               return;
             }
-            if (activeRoom !== room && initialBufferSize === 0) {
-              this.stateRefreshes.delete(gameId);
-              return;
-            }
             const floor = this.observedRevision.get(gameId) ?? -1;
             if (latest.state.stateRevision >= floor) {
               stateToDeliver = latest.state;
@@ -617,10 +613,6 @@ export class RealtimeGateway {
             const activeRoom = this.rooms.get(gameId);
             const activeBuffers = this.joinBuffers.get(gameId);
             if (!activeRoom && (!activeBuffers || activeBuffers.size === 0)) {
-              this.stateRefreshes.delete(gameId);
-              return;
-            }
-            if (activeRoom !== room && initialBufferSize === 0) {
               this.stateRefreshes.delete(gameId);
               return;
             }
