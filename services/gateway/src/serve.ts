@@ -72,6 +72,7 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type VerifyClientCallbackSync, type WebSocket } from 'ws';
+import { parseDurableTimeoutEnv } from './durable-timeouts.js';
 import {
   GameAuthority,
   InMemoryPubSub,
@@ -170,6 +171,27 @@ async function main(): Promise<void> {
   const trustProxy = resolveTrustProxyEnv(process.env['TRUST_PROXY']);
 
   const logger = new JsonLogger({ service: 'realtime-gateway', nodeId });
+
+  let durableReadTimeoutMs: number;
+  let durableWriteTimeoutMs: number;
+  try {
+    // experimental default pending owner approval; see PR #119
+    durableReadTimeoutMs = parseDurableTimeoutEnv(
+      process.env['GATEWAY_DURABLE_READ_TIMEOUT_MS'],
+      'GATEWAY_DURABLE_READ_TIMEOUT_MS',
+      5000,
+    );
+    // experimental default pending owner approval; see PR #119
+    durableWriteTimeoutMs = parseDurableTimeoutEnv(
+      process.env['GATEWAY_DURABLE_WRITE_TIMEOUT_MS'],
+      'GATEWAY_DURABLE_WRITE_TIMEOUT_MS',
+      5000,
+    );
+  } catch (err) {
+    logger.error((err as Error).message);
+    process.exit(1);
+  }
+
   // A leftover "0" asks for nothing, so it is tolerated; anything else would expect analysis here.
   for (const moved of ['BOT_AUTO_ANALYZE', 'ANTICHEAT_AUTO_ANALYZE']) {
     if (process.env[moved] !== undefined && process.env[moved] !== '0') {
@@ -280,7 +302,10 @@ async function main(): Promise<void> {
     logger.info('pub/sub: in-memory (single-node)');
   }
 
-  const authority = new GameAuthority(pubsub, () => Date.now(), store);
+  const authority = new GameAuthority(pubsub, () => Date.now(), store, {
+    durableReadTimeoutMs,
+    durableWriteTimeoutMs,
+  });
 
   // --- Tournament Result Reporter (M9 inc 13, ADR-0025) ---
   let reporter: TournamentResultReporter | undefined;
@@ -891,6 +916,7 @@ function positiveIntEnv(name: string, fallback: number): number {
   }
   return parsed;
 }
+
 
 /**
  * Checks whether an incoming WebSocket upgrade origin is permitted.

@@ -174,6 +174,76 @@ test('postgres event store: round-trip and optimistic concurrency', { skip }, as
   }, isolated);
 });
 
+test('postgres event store: head, heads, loadSince and abortable signal', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const store = new PostgresEventStore(pool);
+    const emptyGameId = uuidv7();
+    const gameWith3EventsId = uuidv7();
+    const anotherGameId = uuidv7();
+
+    // head on an empty game
+    assert.equal(await store.head(emptyGameId), -1);
+
+    // game with 3 events (GameCreated + 2 moves)
+    let { game, events } = Game.create({
+      gameId: gameWith3EventsId,
+      timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      players: { white: 'a', black: 'b' },
+      rated: false,
+      at: 1000,
+    });
+    let seq = await store.append(gameWith3EventsId, -1, events); // seq 0
+    ({ game, events } = game.playMove('e2e4', 2000));
+    seq = await store.append(gameWith3EventsId, seq, events); // seq 1
+    ({ game, events } = game.playMove('e7e5', 3000));
+    seq = await store.append(gameWith3EventsId, seq, events); // seq 2
+
+    // head on game with 3 events
+    assert.equal(await store.head(gameWith3EventsId), 2);
+
+    // another game with 1 event
+    const { events: anotherEvents } = Game.create({
+      gameId: anotherGameId,
+      timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      players: { white: 'a', black: 'b' },
+      rated: false,
+      at: 1000,
+    });
+    await store.append(anotherGameId, -1, anotherEvents); // seq 0
+
+    // heads for 3 ids (one missing)
+    const headsMap = await store.heads([gameWith3EventsId, anotherGameId, emptyGameId]);
+    assert.equal(headsMap.get(gameWith3EventsId), 2);
+    assert.equal(headsMap.get(anotherGameId), 0);
+    assert.equal(headsMap.get(emptyGameId), -1);
+
+    // empty heads call
+    assert.deepEqual(await store.heads([]), new Map());
+
+    // loadSince
+    const sinceSeq0 = await store.loadSince(gameWith3EventsId, 0);
+    assert.equal(sinceSeq0.length, 2);
+    assert.equal(sinceSeq0[0]?.seq, 1);
+    assert.equal(sinceSeq0[1]?.seq, 2);
+
+    const sinceSeq2 = await store.loadSince(gameWith3EventsId, 2);
+    assert.equal(sinceSeq2.length, 0);
+
+    // pre-aborted signal rejecting head, heads, and loadSince
+    const abortedSignal = AbortSignal.abort();
+    await assert.rejects(store.head(gameWith3EventsId, abortedSignal), (err: unknown) => {
+      return err !== null && typeof err === 'object';
+    });
+    await assert.rejects(store.heads([gameWith3EventsId], abortedSignal), (err: unknown) => {
+      return err !== null && typeof err === 'object';
+    });
+    await assert.rejects(store.loadSince(gameWith3EventsId, 0, abortedSignal), (err: unknown) => {
+      return err !== null && typeof err === 'object';
+    });
+  }, isolated);
+});
+
 test('postgres event store finds only unended games for either player seat', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, join(process.cwd(), 'migrations'));

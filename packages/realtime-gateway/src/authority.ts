@@ -163,9 +163,33 @@ export interface ApplyOptions {
   readonly lifecycleGeneration?: number;
 }
 
+function validateTimeout(val: number | undefined, name: string): void {
+  if (val === undefined) return;
+  if (!Number.isInteger(val) || val < 1 || val > 600000) {
+    throw new RangeError(`${name} must be an integer between 1 and 600000`);
+  }
+}
+
+const defaultSchedule = (fn: () => void, ms: number): (() => void) => {
+  const timer = setTimeout(fn, ms);
+  if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
+    timer.unref();
+  }
+  return () => clearTimeout(timer);
+};
+
+export interface GameAuthorityOptions {
+  durableReadTimeoutMs?: number;
+  durableWriteTimeoutMs?: number;
+  schedule?: (fn: () => void, ms: number) => () => void;
+}
+
 export class GameAuthority {
   private readonly games = new Map<string, GameSlot>();
   private lifecycleSequence = 0;
+  private readonly durableReadTimeoutMs?: number;
+  private readonly durableWriteTimeoutMs?: number;
+  private readonly schedule: (fn: () => void, ms: number) => () => void;
 
   constructor(
     private readonly pubsub: PubSub,
@@ -178,7 +202,14 @@ export class GameAuthority {
      * Postgres store (`@chess-platform/persistence`).
      */
     private readonly store: EventLog = new InMemoryEventLog(),
-  ) {}
+    options: GameAuthorityOptions = {},
+  ) {
+    validateTimeout(options.durableReadTimeoutMs, 'durableReadTimeoutMs');
+    validateTimeout(options.durableWriteTimeoutMs, 'durableWriteTimeoutMs');
+    this.durableReadTimeoutMs = options.durableReadTimeoutMs;
+    this.durableWriteTimeoutMs = options.durableWriteTimeoutMs;
+    this.schedule = options.schedule ?? defaultSchedule;
+  }
 
   /** Whether a live game is currently held in the hot cache. */
   has(gameId: string): boolean {
@@ -192,12 +223,55 @@ export class GameAuthority {
     return slot?.record !== undefined && !slot.record.stale && !slot.dispose && slot.reloads === 0;
   }
 
+  private async withDeadline<T>(
+    label: string,
+    ms: number | undefined,
+    op: (signal?: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    if (ms === undefined) {
+      return op(undefined);
+    }
+    const controller = new AbortController();
+    const cancel = this.schedule(() => {
+      controller.abort();
+    }, ms);
+
+    let onAbort: (() => void) | undefined;
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (controller.signal.aborted) {
+        reject(new AuthorityError('invalid_command', `durable ${label} timed out`));
+        return;
+      }
+      onAbort = () => {
+        reject(new AuthorityError('invalid_command', `durable ${label} timed out`));
+      };
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+    });
+
+    const opPromise = op(controller.signal);
+    void opPromise.catch(() => {});
+
+    try {
+      return await Promise.race([opPromise, abortPromise]);
+    } catch (err) {
+      if (controller.signal.aborted) {
+        throw new AuthorityError('invalid_command', `durable ${label} timed out`);
+      }
+      throw err;
+    } finally {
+      cancel();
+      if (onAbort) {
+        controller.signal.removeEventListener('abort', onAbort);
+      }
+    }
+  }
+
   /**
    * Whether a game exists at all — in the hot cache or the durable log.
    * Unlike {@link has} this consults the store, so an evicted/cold game counts.
    */
   async knows(gameId: string): Promise<boolean> {
-    return this.has(gameId) || this.store.exists(gameId);
+    return this.has(gameId) || this.withDeadline('exists', this.durableReadTimeoutMs, (s) => this.store.exists(gameId, s));
   }
 
   /**
@@ -341,7 +415,7 @@ export class GameAuthority {
   private async refreshSlot(gameId: string, slot: GameSlot, generation = slot.generation, revive = true): Promise<boolean> {
     if (generation !== slot.generation) return false;
     if (slot.record) slot.record.stale = true;
-    const logged = await this.store.load(gameId);
+    const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) => this.store.load(gameId, s));
     if (generation !== slot.generation || this.games.get(gameId) !== slot) return false;
     if (logged.length === 0) {
       slot.record = undefined;
@@ -409,37 +483,82 @@ export class GameAuthority {
    * produced it, so resume/catch-up ({@link getMissedSince}) works after a
    * restart.
    */
-  private rebuildRecord(gameId: string, logged: readonly LoggedEvent[]): GameRecord {
-    let previous = -1;
-    for (const entry of logged) {
+  private isValidSuffix(suffix: readonly LoggedEvent[], baseSeq: number): boolean {
+    if (suffix.length === 0) return false;
+    let expected = baseSeq + 1;
+    for (const entry of suffix) {
+      if (!isStateRevision(entry.seq) || entry.seq !== expected) {
+        return false;
+      }
+      expected++;
+    }
+    return true;
+  }
+
+  private extendRecord(
+    gameId: string,
+    base: {
+      game: Game;
+      broadcasts: readonly BroadcastLogEntry[];
+      broadcastSeq: number;
+      persistedSeq: number;
+    },
+    suffix: readonly LoggedEvent[],
+  ): GameRecord {
+    let previous = base.persistedSeq;
+    for (const entry of suffix) {
       if (!isStateRevision(entry.seq) || entry.seq !== previous + 1) {
         throw new Error(`invalid durable event sequence for ${gameId}`);
       }
       previous = entry.seq;
     }
-    const events = logged.map((e) => e.event);
-    let game = Game.fromEvents(events.slice(0, 1));
-    const broadcasts: BroadcastLogEntry[] = [];
-    let broadcastSeq = 0;
-    // Replay incrementally: a MovePlayed/GameEnded broadcast carries the
-    // fenHash + legalMoves of the position *after* that event, exactly as the
-    // live path computes them.
-    for (let i = 1; i < events.length; i++) {
-      const ev = events[i]!;
+    let game = base.game;
+    const broadcasts = [...base.broadcasts];
+    let broadcastSeq = base.broadcastSeq;
+    for (const entry of suffix) {
+      const ev = entry.event;
       game = game.withEvents([ev]);
       if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded' && ev.type !== 'PlayerReady') continue;
-      const msg = this.toBroadcast(gameId, ev, game, logged[i]!.seq);
+      const msg = this.toBroadcast(gameId, ev, game, entry.seq);
       if (!msg) continue;
       const seq = ++broadcastSeq;
       broadcasts.push({ seq, ply: msg.t === 'move' ? msg.ply : null, msg });
     }
     return {
       game,
-      events,
+      events: [],
       broadcasts,
       broadcastSeq,
       persistedSeq: previous,
       stale: false,
+    };
+  }
+
+  /**
+   * Rebuild a full {@link GameRecord} from a durable event log: the folded
+   * {@link Game}, plus the broadcast history replayed exactly as the live path
+   * produced it, so resume/catch-up ({@link getMissedSince}) works after a
+   * restart.
+   */
+  private rebuildRecord(gameId: string, logged: readonly LoggedEvent[]): GameRecord {
+    if (logged.length === 0) {
+      throw new Error(`invalid durable event sequence for ${gameId}`);
+    }
+    const first = logged[0]!;
+    if (!isStateRevision(first.seq) || first.seq !== 0) {
+      throw new Error(`invalid durable event sequence for ${gameId}`);
+    }
+    const baseGame = Game.fromEvents([first.event]);
+    const base = {
+      game: baseGame,
+      broadcasts: [] as BroadcastLogEntry[],
+      broadcastSeq: 0,
+      persistedSeq: 0,
+    };
+    const record = this.extendRecord(gameId, base, logged.slice(1));
+    return {
+      ...record,
+      events: logged.map((e) => e.event),
     };
   }
 
@@ -457,16 +576,98 @@ export class GameAuthority {
    * the resident command cache.
    */
   async readRecovery(gameId: string, lastPly: number): Promise<{ state: StateView; missed: GameBroadcast[] }> {
-    const logged = await this.store.load(gameId);
+    const slot = this.games.get(gameId);
+    const residentUsable =
+      slot?.record !== undefined && !slot.record.stale && !slot.dispose && slot.reloads === 0;
+
+    if (residentUsable && typeof this.store.head === 'function') {
+      const R = slot.record!;
+      const baseGame = R.game;
+      const baseSeq = R.persistedSeq;
+      const baseBroadcastLen = R.broadcasts.length;
+      const baseBroadcastSeq = R.broadcastSeq;
+      const baseBroadcasts = R.broadcasts.slice(0, baseBroadcastLen);
+
+      const h = await this.withDeadline('head', this.durableReadTimeoutMs, (s) =>
+        this.store.head!(gameId, s),
+      );
+      if (h === -1) {
+        throw new AuthorityError('unknown_game', `no such game ${gameId}`);
+      }
+
+      const currentSlot = this.games.get(gameId);
+      const isResidentStillCurrent =
+        currentSlot === slot &&
+        slot.record === R &&
+        !R.stale &&
+        !slot.dispose &&
+        slot.reloads === 0 &&
+        R.persistedSeq >= h;
+
+      if (isResidentStillCurrent) {
+        return {
+          state: this.viewOf(R.game, R.persistedSeq),
+          missed: this.missedFromRecord(R, lastPly),
+        };
+      }
+
+      if (baseSeq >= h) {
+        return {
+          state: this.viewOf(baseGame, baseSeq),
+          missed: this.missedFromBroadcasts(baseBroadcasts, lastPly),
+        };
+      }
+
+      if (typeof this.store.loadSince === 'function') {
+        const suffix = await this.withDeadline('suffix read', this.durableReadTimeoutMs, (s) =>
+          this.store.loadSince!(gameId, baseSeq, s),
+        );
+        if (this.isValidSuffix(suffix, baseSeq)) {
+          const detached = this.extendRecord(
+            gameId,
+            {
+              game: baseGame,
+              broadcasts: baseBroadcasts,
+              broadcastSeq: baseBroadcastSeq,
+              persistedSeq: baseSeq,
+            },
+            suffix,
+          );
+          const activeSlot = this.games.get(gameId);
+          const activeUsable =
+            activeSlot?.record !== undefined &&
+            !activeSlot.record.stale &&
+            !activeSlot.dispose &&
+            activeSlot.reloads === 0;
+          const chosen =
+            activeUsable && activeSlot.record!.persistedSeq > detached.persistedSeq
+              ? activeSlot.record!
+              : detached;
+          return {
+            state: this.viewOf(chosen.game, chosen.persistedSeq),
+            missed: this.missedFromRecord(chosen, lastPly),
+          };
+        }
+      }
+    }
+
+    const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) =>
+      this.store.load(gameId, s),
+    );
     if (logged.length === 0) {
       throw new AuthorityError('unknown_game', `no such game ${gameId}`);
     }
     const loaded = this.rebuildRecord(gameId, logged);
-    const slot = this.games.get(gameId);
-    const residentUsable =
-      slot?.record !== undefined && !slot.record.stale && !slot.dispose && slot.reloads === 0;
+    const fallbackSlot = this.games.get(gameId);
+    const fallbackUsable =
+      fallbackSlot?.record !== undefined &&
+      !fallbackSlot.record.stale &&
+      !fallbackSlot.dispose &&
+      fallbackSlot.reloads === 0;
     const chosen =
-      residentUsable && slot.record!.persistedSeq > loaded.persistedSeq ? slot.record! : loaded;
+      fallbackUsable && fallbackSlot.record!.persistedSeq > loaded.persistedSeq
+        ? fallbackSlot.record!
+        : loaded;
     return {
       state: this.viewOf(chosen.game, chosen.persistedSeq),
       missed: this.missedFromRecord(chosen, lastPly),
@@ -484,12 +685,16 @@ export class GameAuthority {
   }
 
   private missedFromRecord(rec: GameRecord, lastPly: number): GameBroadcast[] {
-    if (lastPly <= 0) return rec.broadcasts.map((e) => e.msg);
+    return this.missedFromBroadcasts(rec.broadcasts, lastPly);
+  }
+
+  private missedFromBroadcasts(broadcasts: readonly BroadcastLogEntry[], lastPly: number): GameBroadcast[] {
+    if (lastPly <= 0) return broadcasts.map((e) => e.msg);
     let cutSeq = -1;
-    for (const e of rec.broadcasts) {
+    for (const e of broadcasts) {
       if (e.ply === lastPly) cutSeq = e.seq;
     }
-    return rec.broadcasts.filter((e) => e.seq > cutSeq).map((e) => e.msg);
+    return broadcasts.filter((e) => e.seq > cutSeq).map((e) => e.msg);
   }
 
   /** Resolve a user's seat in a game, or `null` if they are a spectator. */
@@ -647,7 +852,9 @@ export class GameAuthority {
     // so a durable-log failure leaves the in-memory game and the store in lock
     // step (nothing committed, nothing broadcast) rather than ahead of disk.
     try {
-      const returnedHead = await this.store.append(gameId, rec.persistedSeq, result.events);
+      const returnedHead = await this.withDeadline('append', this.durableWriteTimeoutMs, (s) =>
+        this.store.append(gameId, rec.persistedSeq, result.events, s),
+      );
       this.validateAppendHead(returnedHead, expectedHead);
       rec.persistedSeq = returnedHead;
     } catch (err) {

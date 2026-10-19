@@ -53,11 +53,17 @@ export interface EventLog {
    * Append `events` after `expectedSeq` (the caller's last known head; `-1` for a
    * brand-new game). Returns the new head seq. Rejects if the head has moved.
    */
-  append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number>;
+  append(gameId: string, expectedSeq: number, events: readonly GameEvent[], signal?: AbortSignal): Promise<number>;
   /** Full ordered log for a game (feed straight into `Game.fromEvents`). */
-  load(gameId: string): Promise<readonly LoggedEvent[]>;
+  load(gameId: string, signal?: AbortSignal): Promise<readonly LoggedEvent[]>;
   /** Whether any events exist for a game. */
-  exists(gameId: string): Promise<boolean>;
+  exists(gameId: string, signal?: AbortSignal): Promise<boolean>;
+  /** Maximum sequence number, or -1 when there are no events. */
+  head?(gameId: string, signal?: AbortSignal): Promise<number>;
+  /** Ascending events with seq > afterSeq. */
+  loadSince?(gameId: string, afterSeq: number, signal?: AbortSignal): Promise<readonly LoggedEvent[]>;
+  /** Bulk head query; missing games map to -1. */
+  heads?(gameIds: readonly string[], signal?: AbortSignal): Promise<ReadonlyMap<string, number>>;
 }
 
 /** Raised when an append's `expectedSeq` does not match the log head. */
@@ -82,7 +88,8 @@ export class EventLogConcurrencyError extends Error {
 export class InMemoryEventLog implements EventLog {
   private readonly logs = new Map<string, LoggedEvent[]>();
 
-  append(gameId: string, expectedSeq: number, events: readonly GameEvent[]): Promise<number> {
+  append(gameId: string, expectedSeq: number, events: readonly GameEvent[], signal?: AbortSignal): Promise<number> {
+    signal?.throwIfAborted();
     const log = this.logs.get(gameId) ?? [];
     const head = log.length - 1;
     if (head !== expectedSeq) {
@@ -93,17 +100,42 @@ export class InMemoryEventLog implements EventLog {
       return Promise.reject(new Error('first logged event must be GameCreated'));
     }
     for (const event of events) {
+      signal?.throwIfAborted();
       log.push({ seq: log.length, event: structuredClone(event) });
     }
     this.logs.set(gameId, log);
     return Promise.resolve(log.length - 1);
   }
 
-  load(gameId: string): Promise<readonly LoggedEvent[]> {
+  load(gameId: string, signal?: AbortSignal): Promise<readonly LoggedEvent[]> {
+    signal?.throwIfAborted();
     return Promise.resolve((this.logs.get(gameId) ?? []).map((e) => ({ ...e })));
   }
 
-  exists(gameId: string): Promise<boolean> {
+  exists(gameId: string, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted();
     return Promise.resolve((this.logs.get(gameId)?.length ?? 0) > 0);
+  }
+
+  head(gameId: string, signal?: AbortSignal): Promise<number> {
+    signal?.throwIfAborted();
+    const log = this.logs.get(gameId);
+    return Promise.resolve(log && log.length > 0 ? log.length - 1 : -1);
+  }
+
+  loadSince(gameId: string, afterSeq: number, signal?: AbortSignal): Promise<readonly LoggedEvent[]> {
+    signal?.throwIfAborted();
+    const log = this.logs.get(gameId) ?? [];
+    return Promise.resolve(log.filter((e) => e.seq > afterSeq).map((e) => ({ ...e })));
+  }
+
+  heads(gameIds: readonly string[], signal?: AbortSignal): Promise<ReadonlyMap<string, number>> {
+    signal?.throwIfAborted();
+    const map = new Map<string, number>();
+    for (const id of gameIds) {
+      const log = this.logs.get(id);
+      map.set(id, log && log.length > 0 ? log.length - 1 : -1);
+    }
+    return Promise.resolve(map);
   }
 }
