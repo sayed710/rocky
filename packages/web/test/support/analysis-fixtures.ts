@@ -160,6 +160,7 @@ export const GAME_ELEMENT_IDS = [
   'action-decline-draw',
   'game-export',
   'game-pgn-download',
+  'game-pgn-copy',
   'game-pgn-status',
   'game-pgn-error',
   'game-review',

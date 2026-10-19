@@ -239,6 +239,10 @@ export const enMessages = {
   'game.export.preparing': 'Preparing the PGN file…',
   'game.export.started': 'PGN download started.',
   'game.export.unavailableError': 'The PGN file could not be downloaded. Please try again.',
+  'game.export.copyPgn': 'Copy PGN',
+  'game.export.copying': 'Copying the PGN…',
+  'game.export.copied': 'PGN copied to the clipboard.',
+  'game.export.copyError': 'The PGN could not be copied. Please try again.',
 
   // Game Review
   'game.review.title': 'Game review',
