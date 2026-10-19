@@ -106,6 +106,7 @@ export class RealtimeGateway {
    * router that forwards non-owned commands (see ADR-0010).
    */
   private readonly commandRouter: CommandRouter;
+  private readonly unregisterReconnect?: () => void;
 
   constructor(
     private readonly authority: GameAuthority,
@@ -128,6 +129,23 @@ export class RealtimeGateway {
     // backward compatibility: existing callers that don't pass a router get
     // the same direct-authority behavior.
     this.commandRouter = commandRouter ?? new LocalCommandRouter(this.authority);
+    this.unregisterReconnect = this.pubsub.onReconnect?.(() => {
+      for (const gameId of [...this.unconfirmedSubscriptionsSet]) {
+        void this.pubsub.ready?.(gameChannel(gameId))?.then(
+          () => {
+            this.unconfirmedSubscriptionsSet.delete(gameId);
+          },
+          () => {
+            // on reject, keep it
+          },
+        );
+      }
+    });
+  }
+
+  /** Unregister background subscriptions and lifecycle listeners. */
+  close(): void {
+    this.unregisterReconnect?.();
   }
 
   /** Register a new connection and wire its lifecycle handlers. */
@@ -264,7 +282,7 @@ export class RealtimeGateway {
     return { stop, take };
   }
 
-  private async awaitSubscriptionReady(gameId: string): Promise<void> {
+  private async awaitSubscriptionReady(gameId: string, current: () => boolean): Promise<void> {
     if (!this.pubsub.ready) return;
     const timeoutMs = this.authority.durableReadTimeoutMs;
     let cancel: (() => void) | undefined;
@@ -280,8 +298,11 @@ export class RealtimeGateway {
       } else {
         await readyPromise;
       }
+      this.unconfirmedSubscriptionsSet.delete(gameId);
     } catch {
-      this.unconfirmedSubscriptionsSet.add(gameId);
+      if (current()) {
+        this.unconfirmedSubscriptionsSet.add(gameId);
+      }
     } finally {
       cancel?.();
     }
@@ -301,7 +322,7 @@ export class RealtimeGateway {
     const buffer = this.startJoinBuffer(session, gameId);
     void (async () => {
       try {
-        await this.awaitSubscriptionReady(gameId);
+        await this.awaitSubscriptionReady(gameId, current);
         if (!current()) return;
 
         let loaded = await this.authority.ensureLoaded(gameId);

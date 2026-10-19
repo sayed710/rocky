@@ -145,6 +145,8 @@ interface ChannelSubscriptionEntry {
   generation: number;
   promise: Promise<void>;
   settled: 'pending' | 'ok' | 'failed';
+  resolve: () => void;
+  reject: (err: unknown) => void;
 }
 
 /**
@@ -212,6 +214,11 @@ export class RedisPubSub implements PubSub {
     this.closeListener = (): void => {
       if (this.closed) return;
       this.sawClose = true;
+      for (const [channel, subs] of this.subHandlers.entries()) {
+        if (subs.size > 0) {
+          this.createPendingEntry(channel);
+        }
+      }
     };
 
     this.readyListener = (): void => {
@@ -226,7 +233,7 @@ export class RedisPubSub implements PubSub {
     this.sub.on('ready', this.readyListener);
   }
 
-  private issueSubscribe(channel: string): Promise<void> {
+  private createPendingEntry(channel: string): ChannelSubscriptionEntry {
     const gen = ++this.generationSeq;
     let resolvePromise!: () => void;
     let rejectPromise!: (err: unknown) => void;
@@ -237,19 +244,34 @@ export class RedisPubSub implements PubSub {
     // Never leave an unhandled rejection
     promise.catch(() => {});
 
+    const oldEntry = this.subscriptionEntries.get(channel);
+
     const entry: ChannelSubscriptionEntry = {
       generation: gen,
       promise,
       settled: 'pending',
+      resolve: resolvePromise,
+      reject: rejectPromise,
     };
     this.subscriptionEntries.set(channel, entry);
+
+    if (oldEntry && oldEntry.settled === 'pending') {
+      entry.promise.then(oldEntry.resolve, oldEntry.reject);
+    }
+
+    return entry;
+  }
+
+  private issueSubscribe(channel: string): Promise<void> {
+    const entry = this.createPendingEntry(channel);
+    const gen = entry.generation;
 
     void Promise.resolve(this.sub.subscribe(channel))
       .then(() => {
         const current = this.subscriptionEntries.get(channel);
         if (current && current.generation === gen) {
           current.settled = 'ok';
-          resolvePromise();
+          entry.resolve();
         }
       })
       .catch((err: unknown) => {
@@ -257,11 +279,11 @@ export class RedisPubSub implements PubSub {
         const current = this.subscriptionEntries.get(channel);
         if (current && current.generation === gen) {
           current.settled = 'failed';
-          rejectPromise(err);
+          entry.reject(err);
         }
       });
 
-    return promise;
+    return entry.promise;
   }
 
   private async handleReconnect(): Promise<void> {
@@ -375,6 +397,11 @@ export class RedisPubSub implements PubSub {
       if (set.size === 0) {
         // Last local subscriber gone → issue Redis UNSUBSCRIBE.
         this.subHandlers.delete(channel);
+        const oldEntry = this.subscriptionEntries.get(channel);
+        if (oldEntry && oldEntry.settled === 'pending') {
+          oldEntry.settled = 'ok';
+          oldEntry.resolve();
+        }
         this.subscriptionEntries.delete(channel);
         void Promise.resolve(this.sub.unsubscribe(channel)).catch((err: unknown) => {
           console.error(`[RedisPubSub] unsubscribe failed on channel ${channel}:`, err);
@@ -394,6 +421,12 @@ export class RedisPubSub implements PubSub {
     this.sub.off('close', this.closeListener);
     this.sub.off('ready', this.readyListener);
     this.subHandlers.clear();
+    for (const entry of this.subscriptionEntries.values()) {
+      if (entry.settled === 'pending') {
+        entry.settled = 'ok';
+        entry.resolve();
+      }
+    }
     this.subscriptionEntries.clear();
     this.reconnectListeners.clear();
     this.publishFailedListeners.clear();
