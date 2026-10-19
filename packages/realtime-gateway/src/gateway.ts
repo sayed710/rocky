@@ -50,7 +50,8 @@ interface Membership {
 interface Session {
   readonly conn: Connection;
   readonly games: Map<string, Membership>;
-  readonly reads: Map<string, symbol>;
+  readonly joinReads: Map<string, symbol>;
+  readonly resumeReads: Map<string, symbol>;
   readonly joinBuffers: Map<string, () => void>;
 }
 
@@ -115,7 +116,7 @@ export class RealtimeGateway {
 
   /** Register a new connection and wire its lifecycle handlers. */
   handleConnection(conn: Connection): void {
-    const session: Session = { conn, games: new Map(), reads: new Map(), joinBuffers: new Map() };
+    const session: Session = { conn, games: new Map(), joinReads: new Map(), resumeReads: new Map(), joinBuffers: new Map() };
     this.sessions.set(conn.id, session);
     conn.onMessage((msg) => {
       try {
@@ -244,9 +245,9 @@ export class RealtimeGateway {
    */
   private onJoin(session: Session, gameId: string, token: string | undefined): void {
     const intent = Symbol('join');
-    session.reads.set(gameId, intent);
+    session.joinReads.set(gameId, intent);
     const current = (): boolean =>
-      this.sessions.get(session.conn.id) === session && session.reads.get(gameId) === intent;
+      this.sessions.get(session.conn.id) === session && session.joinReads.get(gameId) === intent;
     const buffer = this.startJoinBuffer(session, gameId);
     const marker = this.authority.loadMarker();
     void (async () => {
@@ -291,8 +292,8 @@ export class RealtimeGateway {
         if (session.joinBuffers.get(gameId) === buffer.stop) {
           session.joinBuffers.delete(gameId);
         }
-        if (session.reads.get(gameId) === intent) {
-          session.reads.delete(gameId);
+        if (session.joinReads.get(gameId) === intent) {
+          session.joinReads.delete(gameId);
         }
       }
     })();
@@ -340,6 +341,7 @@ export class RealtimeGateway {
     session.games.set(gameId, { userId, role, lastSeq: 0 });
 
     session.conn.send({ t: 'joined', gameId, role, state });
+    this.observe(gameId, { t: 'state', gameId, state });
     for (const msg of pending) {
       if (isNewerThanSnapshot(msg, state.stateRevision)) {
         session.conn.send(msg);
@@ -443,10 +445,10 @@ export class RealtimeGateway {
       return;
     }
     const intent = Symbol('resume');
-    session.reads.set(gameId, intent);
+    session.resumeReads.set(gameId, intent);
     const current = (): boolean =>
       this.sessions.get(session.conn.id) === session &&
-      session.reads.get(gameId) === intent &&
+      session.resumeReads.get(gameId) === intent &&
       session.games.get(gameId) === membership;
     const marker = this.authority.loadMarker();
     void (async () => {
@@ -486,8 +488,8 @@ export class RealtimeGateway {
           }
         }
       } finally {
-        if (session.reads.get(gameId) === intent) {
-          session.reads.delete(gameId);
+        if (session.resumeReads.get(gameId) === intent) {
+          session.resumeReads.delete(gameId);
         }
       }
     })();
@@ -552,19 +554,12 @@ export class RealtimeGateway {
       this.deliverState(gameId, state);
       return;
     }
-    const entry = this.rooms.get(gameId);
-    const buffers = this.joinBuffers.get(gameId);
     void this.authority
       .readRecovery(gameId, 0)
       .then((latest) => {
-        if (
-          this.rooms.get(gameId) === entry &&
-          (entry !== undefined || this.joinBuffers.get(gameId) === buffers)
-        ) {
-          const floor = this.observedRevision.get(gameId) ?? -1;
-          if (latest.state.stateRevision >= floor) {
-            this.deliverState(gameId, latest.state);
-          }
+        const floor = this.observedRevision.get(gameId) ?? -1;
+        if (latest.state.stateRevision >= floor) {
+          this.deliverState(gameId, latest.state);
         }
       })
       .catch(() => {

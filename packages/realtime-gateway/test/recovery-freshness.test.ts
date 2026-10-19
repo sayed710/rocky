@@ -419,6 +419,154 @@ test('N2: detached refresh does not deliver stale state to a new room created af
   assert.equal(bStates.length, 0, 'in fact no state frame from the old refresh');
 });
 
+test('J1: overlapping resume during a gated re-join does not hang the re-join', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier);
+
+  const gameId = 'game-j1';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: false,
+  });
+
+  // A session joined (membership exists).
+  const conn = new InMemoryConnection('c1');
+  gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await flush();
+  assert.equal(conn.all('joined').length, 1, 'initial join succeeded');
+
+  // Gate the next load.
+  const gate = createGate();
+  deferredLog.nextLoadGate = gate;
+
+  // The session re-sends join (its read is gated).
+  conn.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await awaitGate(gate, 're-join load');
+
+  // Then sends resume (lastPly 0) before the join read finishes.
+  conn.deliver({ t: 'resume', gameId, lastPly: 0 });
+  await flush();
+
+  // Release the gate; drain.
+  gate.release.resolve();
+  await flush();
+
+  // Expect exactly one new joined frame for that join (total 2 joined frames, no hang).
+  const joinedFrames = conn.all('joined');
+  assert.equal(joinedFrames.length, 2, 'expected exactly one new joined frame for the re-join (no hang)');
+
+  // The overlapping resume either arrives or is suppressed (assert no reject for it).
+  assert.equal(conn.all('reject').length, 0, 'no reject for the overlapping resume');
+  const resumedFrames = conn.all('resumed');
+  const resumeOutcome = resumedFrames.length > 0 ? 'arrived' : 'suppressed';
+  assert.ok(
+    resumedFrames.length === 0 || resumedFrames.length === 1,
+    `overlapping resume observed outcome: ${resumeOutcome}`,
+  );
+});
+
+test('RR: detached refresh delivers draw offer to a replacement room created by a pending join', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  let drawGate: Gate | undefined;
+  const router: CommandRouter = {
+    route: async (gameId, userId, cmd) => {
+      const res = await writer.apply(gameId, userId, cmd);
+      if (cmd.kind === 'offerDraw' && drawGate) {
+        const gate = drawGate;
+        drawGate = undefined;
+        gate.isEntered = true;
+        await gate.release.done;
+      }
+      return res;
+    },
+  };
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier, () => 1000, router);
+
+  const gameId = 'game-rr';
+  await writer.createGame({
+    gameId,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: TC,
+    rated: true,
+    source: 'seek',
+    noShowAfterMs: 60_000,
+  });
+
+  // White joins on edge. White commits readiness (ready broadcast, rev 1).
+  const white = new InMemoryConnection('white');
+  gateway.handleConnection(white);
+  white.deliver({ t: 'join', gameId, token: 'tok-alice' });
+  await flush();
+  assert.ok(white.last('joined'));
+
+  // Black's join on the edge is gated holding a snapshot from before White's offer.
+  const black1 = new InMemoryConnection('black1');
+  gateway.handleConnection(black1);
+  const blackGate = createGate();
+  deferredLog.nextLoadGate = blackGate;
+  black1.deliver({ t: 'join', gameId, token: 'tok-bob' });
+  await awaitGate(blackGate, 'black1 join snapshot');
+
+  // White's offerDraw response (CommandRouter double) is held.
+  const drawHoldGate = createGate();
+  drawGate = drawHoldGate;
+  white.deliver({ t: 'offerDraw', gameId });
+  await awaitGate(drawHoldGate, 'offerDraw committed on writer');
+
+  // A second Black tab joins and commits readiness (ready broadcast, newer revision).
+  const black2 = new InMemoryConnection('black2');
+  gateway.handleConnection(black2);
+  black2.deliver({ t: 'join', gameId, token: 'tok-bob' });
+  await flush();
+  assert.ok(black2.last('joined'));
+  const readyMsg = white.last('ready');
+  assert.ok(readyMsg, 'white must observe black readiness');
+
+  // Gate the detached refresh's load so we control when it resolves.
+  const refreshGate = createGate();
+  deferredLog.nextLoadGate = refreshGate;
+
+  // Release White's offerDraw response so White's response starts a refresh.
+  drawHoldGate.release.resolve();
+  await awaitGate(refreshGate, 'detached refresh load');
+
+  // All other room members close (white and black2).
+  white.close();
+  black2.close();
+  await flush();
+  // Room is now torn down because white and black2 both left.
+  assert.equal(gateway.roomCount, 0);
+
+  // Release Black's gated join (it creates the replacement room).
+  blackGate.release.resolve();
+  await flush();
+  assert.equal(gateway.roomCount, 1);
+  assert.ok(black1.last('joined'));
+  assert.equal(black1.last('joined')!.state.drawOffer, null, 'black1 joined snapshot was from before offer');
+
+  // Release the refresh; drain.
+  refreshGate.release.resolve();
+  await flush();
+
+  // Expect Black's connection to end with a state whose drawOffer is 'w' (via the refresh state frame).
+  const lastState = black1.last('state');
+  assert.ok(lastState, 'black1 must receive state frame from refresh');
+  assert.equal(lastState.state.drawOffer, 'w');
+});
+
 test('Control A1: owner append paused before inner append: resume returns rev 2; single append and confirmation', async () => {
   const innerStore = new InMemoryEventLog();
   const deferredLog = new DeferredLog(innerStore);
