@@ -2387,7 +2387,6 @@ test('H2: coalesced hydration, commit BEFORE resume', async () => {
   assert.equal(resumed.state.ply, 1);
 });
 
-
 test('L1 delayed draw response: late draw response does not send older state after newer move', async () => {
   const store = new InMemoryEventLog();
   const pubsub = new InMemoryPubSub();
