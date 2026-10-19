@@ -2068,7 +2068,7 @@ test('G7 unauthorized join during a gated read rejects and cleans up pubsub subs
   assert.equal(pubsub.subscriberCount(gameChannel(gameId)), initialSubCount);
 });
 
-test('K1 cold join loads once for its snapshot: loads === 1 (cold hydration only, no second recovery load)', async () => {
+test('K1 cold join loads twice for its snapshot: loads === 2 (cold hydration + post-hydration recovery read)', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -2087,8 +2087,8 @@ test('K1 cold join loads once for its snapshot: loads === 1 (cold hydration only
   spec.deliver({ t: 'join', gameId });
   await flush();
 
-  // Exactly 1 load: cold hydration in ensureLoaded.
-  assert.equal(deferredLog.loads, 1);
+  // post-hydration recovery read (Qodo cold-race fix)
+  assert.equal(deferredLog.loads, 2);
 
   const witness = new GameAuthority(new InMemoryPubSub(), () => 1000, store);
   await witness.ensureLoaded(gameId);
@@ -2098,7 +2098,7 @@ test('K1 cold join loads once for its snapshot: loads === 1 (cold hydration only
   assert.equal(joined.state.ply, 2);
 });
 
-test('K2 cold resume: exactly 1 load for the resume and correct resumed state/missed', async () => {
+test('K2 cold resume: exactly 2 loads for the resume and correct resumed state/missed', async () => {
   const store = new InMemoryEventLog();
   const deferredLog = new DeferredLog(store);
   const pubsub = new InMemoryPubSub();
@@ -2126,8 +2126,8 @@ test('K2 cold resume: exactly 1 load for the resume and correct resumed state/mi
   spec.deliver({ t: 'resume', gameId, lastPly: 1 });
   await flush();
 
-  // Exactly 1 load for cold resume (ensureLoaded only, no second recovery load).
-  assert.equal(deferredLog.loads, loadsBefore + 1);
+  // post-hydration recovery read (Qodo cold-race fix)
+  assert.equal(deferredLog.loads, loadsBefore + 2);
 
   const resumed = spec.last('resumed');
   assert.ok(resumed);
@@ -2321,9 +2321,8 @@ test('H1: coalesced hydration, commit BEFORE J1 joins', async () => {
   gate.release.resolve();
   await flush();
 
-  // Expect: J1's joined.state.stateRevision === N+1 (it must take a fresh recovery read, because the
-  // resident record's load began before J1's buffer), and J1 receives no move N+1 frame afterwards
-  // (it is already in the snapshot). J2 may get joined N followed by move N+1.
+  // Expect: J1's joined.state.stateRevision === N+1 (always takes a post-hydration recovery read),
+  // and J1 receives no move N+1 frame afterwards (it is already in the snapshot). J2 may get joined N followed by move N+1.
   const j1Joined = j1.last('joined');
   assert.ok(j1Joined, 'J1 must have received joined');
   assert.equal(j1Joined.state.stateRevision, 1, 'J1 must take fresh recovery read at rev N+1');
@@ -2374,7 +2373,7 @@ test('H2: coalesced hydration, commit BEFORE resume', async () => {
   // Writer commits N+1.
   await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
 
-  // R sends resume lastPly 0 (its marker is taken after the gated load began).
+  // R sends resume lastPly 0 (always takes a post-hydration recovery read).
   r.deliver({ t: 'resume', gameId, lastPly: 0 });
 
   // Release; drain.
@@ -2388,41 +2387,6 @@ test('H2: coalesced hydration, commit BEFORE resume', async () => {
   assert.equal(resumed.state.ply, 1);
 });
 
-test('M1: authority loadMarker and residentLoadedAfter lifecycle', async () => {
-  const store = new InMemoryEventLog();
-  const deferredLog = new DeferredLog(store);
-  const pubsub = new InMemoryPubSub();
-  const authority = new GameAuthority(pubsub, () => 1000, deferredLog);
-
-  const gameId = 'game-m1';
-  await authority.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
-
-  // Evict to make it cold:
-  authority.evict(gameId);
-  assert.equal(authority.has(gameId), false);
-
-  // Take marker BEFORE cold ensureLoaded:
-  const beforeMarker = authority.loadMarker();
-  const loaded = await authority.ensureLoaded(gameId);
-  assert.equal(loaded, true);
-
-  // residentLoadedAfter with marker before load -> true:
-  assert.equal(authority.residentLoadedAfter(gameId, beforeMarker), true);
-
-  // With a marker taken AFTER the load -> false:
-  const afterMarker = authority.loadMarker();
-  assert.equal(authority.residentLoadedAfter(gameId, afterMarker), false);
-
-  // A stale/reloading slot -> false:
-  const gate = createGate();
-  deferredLog.nextLoadGate = gate;
-  const reloadPromise = authority.reloadFromLog(gameId);
-  await awaitGate(gate, 'M1 reload');
-  // While reloading, slot.reloads > 0 and record is stale:
-  assert.equal(authority.residentLoadedAfter(gameId, beforeMarker), false);
-  gate.release.resolve();
-  await reloadPromise;
-});
 
 test('L1 delayed draw response: late draw response does not send older state after newer move', async () => {
   const store = new InMemoryEventLog();
@@ -2701,12 +2665,97 @@ test('CR1 regression: remote draw offer committed before cold resume is reflecte
   assert.equal(resumed.state.stateRevision, 1, 'resumed stateRevision must include the draw offer');
 });
 
-test("CR2 boundary characterization: D2 boundary: a remote draw offer committed after the read's snapshot is not delivered cross-node", async () => {
-  // D2 boundary characterization: draw offers produce no cross-node pubsub broadcast.
-  // A remote draw offer committed after the read's snapshot is therefore neither in the snapshot
-  // nor delivered via pubsub. This assertion must flip when cross-node draw distribution (D2) lands.
+test('QR1 regression: cold resume whose hydration snapshot predates a remote draw offer delivers the committed offer', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier);
 
-  // 1. Cold path: gate ensureLoaded hydration after its snapshot
+  const gameId = 'game-qr1';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  const conn = new InMemoryConnection('c-qr1');
+  gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(conn.last('joined'));
+
+  edge.evict(gameId);
+  assert.equal(edge.has(gameId), false);
+
+  const gate1 = createGate();
+  deferredLog.nextLoadGate = gate1;
+  conn.deliver({ t: 'resume', gameId, lastPly: 0 });
+  await awaitGate(gate1, 'cold hydration snapshot');
+
+  await writer.apply(gameId, 'alice', { kind: 'offerDraw' });
+  assert.equal(writer.getState(gameId).drawOffer, 'w');
+  assert.equal(writer.getState(gameId).stateRevision, 1);
+
+  gate1.release.resolve();
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(conn.all('resumed').length, 1);
+  const resumed = conn.last('resumed');
+  assert.ok(resumed);
+  assert.equal(resumed.state.drawOffer, 'w');
+  assert.equal(resumed.state.stateRevision, 1);
+  assert.equal(conn.all('reject').length, 0);
+  assert.equal(edge.has(gameId), true);
+
+  const durableMissed = (await new GameAuthority(new InMemoryPubSub(), () => 1000, store).readRecovery(gameId, 0)).missed;
+  assert.deepEqual(resumed.missed, durableMissed);
+});
+
+test('QJ1 regression: cold join whose hydration snapshot predates a remote draw offer delivers the committed offer', async () => {
+  const store = new InMemoryEventLog();
+  const deferredLog = new DeferredLog(store);
+  const pubsub = new InMemoryPubSub();
+  const writer = new GameAuthority(pubsub, () => 1000, store);
+  const edge = new GameAuthority(pubsub, () => 1000, deferredLog);
+  const verifier = new FakeTokenVerifier().allow('tok-alice', 'alice').allow('tok-bob', 'bob');
+  const gateway = new RealtimeGateway(edge, pubsub, verifier);
+
+  const gameId = 'game-qj1';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  assert.equal(edge.has(gameId), false);
+
+  const gate1 = createGate();
+  deferredLog.nextLoadGate = gate1;
+
+  const conn = new InMemoryConnection('c-qj1');
+  gateway.handleConnection(conn);
+  conn.deliver({ t: 'join', gameId });
+  await awaitGate(gate1, 'cold join snapshot');
+
+  await writer.apply(gameId, 'alice', { kind: 'offerDraw' });
+  assert.equal(writer.getState(gameId).drawOffer, 'w');
+  assert.equal(writer.getState(gameId).stateRevision, 1);
+
+  gate1.release.resolve();
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(conn.all('joined').length, 1);
+  const joined = conn.last('joined');
+  assert.ok(joined);
+  assert.equal(joined.state.drawOffer, 'w');
+  assert.equal(joined.state.stateRevision, 1);
+  assert.equal(conn.all('reject').length, 0);
+  assert.equal(edge.has(gameId), true);
+});
+
+test("CR2 boundary characterization: D2 boundary — an offer committed after the FINAL read's snapshot (cold or warm) is not delivered cross-node; must flip when D2 lands", async () => {
+  // D2 boundary — an offer committed after the FINAL read's snapshot (cold or warm) is not delivered cross-node; must flip when D2 lands.
+
+  // 1. Cold path: gate the final read (post-hydration recovery read) after its snapshot
   {
     const store = new InMemoryEventLog();
     const deferredLog = new DeferredLog(store);
@@ -2729,17 +2778,23 @@ test("CR2 boundary characterization: D2 boundary: a remote draw offer committed 
     edge.evict(gameId);
     assert.equal(edge.has(gameId), false);
 
-    const gate = createGate();
-    deferredLog.nextLoadGate = gate;
+    const gate1 = createGate();
+    deferredLog.nextLoadGate = gate1;
 
     conn.deliver({ t: 'resume', gameId, lastPly: 0 });
-    await awaitGate(gate, 'cold ensureLoaded snapshot');
+    await awaitGate(gate1, 'cold hydration');
+
+    const gate2 = createGate();
+    deferredLog.nextLoadGate = gate2;
+    gate1.release.resolve();
+
+    await awaitGate(gate2, 'post-hydration recovery read');
 
     // Commit remote draw offer while gated (after snapshot taken at rev 0)
     await writer.apply(gameId, 'alice', { kind: 'offerDraw' });
     assert.equal(writer.getState(gameId).drawOffer, 'w');
 
-    gate.release.resolve();
+    gate2.release.resolve();
     await flush();
 
     const resumed = conn.last('resumed');

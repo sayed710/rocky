@@ -30,7 +30,6 @@ import { gameChannel, type PubSub, type Unsubscribe } from './pubsub';
 import type { Connection } from './transport';
 import type {
   ClientMessage,
-  GameBroadcast,
   MoveMessage,
   RejectCode,
   Role,
@@ -259,7 +258,6 @@ export class RealtimeGateway {
     const current = (): boolean =>
       this.sessions.get(session.conn.id) === session && session.joinReads.get(gameId) === intent;
     const buffer = this.startJoinBuffer(session, gameId);
-    const marker = this.authority.loadMarker();
     void (async () => {
       try {
         let loaded = await this.authority.ensureLoaded(gameId);
@@ -273,19 +271,14 @@ export class RealtimeGateway {
           return;
         }
         if (!current()) return;
-        let state: StateView;
-        if (this.authority.residentLoadedAfter(gameId, marker)) {
-          state = this.authority.getState(gameId);
-        } else {
-          state = (await this.authority.readRecovery(gameId, 0)).state;
+        const state = (await this.authority.readRecovery(gameId, 0)).state;
+        if (!current()) return;
+        if (!this.authority.has(gameId)) { // An eviction (e.g. the deadline-expiry worker) during the read would leave the joined player without a resident slot for local commands; re-hydrate once.
+          const reloaded = await this.authority.ensureLoaded(gameId);
           if (!current()) return;
-          if (!this.authority.has(gameId)) { // An eviction (e.g. the deadline-expiry worker) during the read would leave the joined player without a resident slot for local commands; re-hydrate once.
-            const reloaded = await this.authority.ensureLoaded(gameId);
-            if (!current()) return;
-            if (!reloaded) {
-              this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
-              return;
-            }
+          if (!reloaded) {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+            return;
           }
         }
         this.completeJoin(session, gameId, token, state, buffer.take);
@@ -460,7 +453,6 @@ export class RealtimeGateway {
       this.sessions.get(session.conn.id) === session &&
       session.resumeReads.get(gameId) === intent &&
       session.games.get(gameId) === membership;
-    const marker = this.authority.loadMarker();
     void (async () => {
       try {
         const loaded = await this.authority.ensureLoaded(gameId);
@@ -471,22 +463,13 @@ export class RealtimeGateway {
           return;
         }
         if (!current()) return;
-        let state: StateView;
-        let missed: readonly GameBroadcast[];
-        if (this.authority.residentLoadedAfter(gameId, marker)) {
-          state = this.authority.getState(gameId);
-          missed = this.authority.getMissedSince(gameId, lastPly);
-        } else {
-          const read = await this.authority.readRecovery(gameId, lastPly);
-          state = read.state;
-          missed = read.missed;
-        }
+        const read = await this.authority.readRecovery(gameId, lastPly);
         if (current()) {
           session.conn.send({
             t: 'resumed',
             gameId,
-            state,
-            missed,
+            state: read.state,
+            missed: read.missed,
           });
         }
       } catch (err: unknown) {

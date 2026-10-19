@@ -99,7 +99,6 @@ interface GameRecord {
   persistedSeq: number;
   /** Set when an uncertain append could not be reconciled with the durable log. */
   stale: boolean;
-  loadSeq: number;
 }
 
 /** The serialization boundary outlives every replaceable resident snapshot. */
@@ -167,7 +166,6 @@ export interface ApplyOptions {
 export class GameAuthority {
   private readonly games = new Map<string, GameSlot>();
   private lifecycleSequence = 0;
-  private loadSequence = 0;
 
   constructor(
     private readonly pubsub: PubSub,
@@ -200,26 +198,6 @@ export class GameAuthority {
    */
   async knows(gameId: string): Promise<boolean> {
     return this.has(gameId) || this.store.exists(gameId);
-  }
-
-  /** Returns the monotonic sequence number of the most recent durable read issued. */
-  loadMarker(): number {
-    return this.loadSequence;
-  }
-
-  /**
-   * The record was hydrated by a durable read issued after `marker`.
-   */
-  residentLoadedAfter(gameId: string, marker: number): boolean {
-    const slot = this.games.get(gameId);
-    return (
-      slot !== undefined &&
-      slot.record !== undefined &&
-      !slot.record.stale &&
-      !slot.dispose &&
-      slot.reloads === 0 &&
-      slot.record.loadSeq > marker
-    );
   }
 
   /**
@@ -266,7 +244,6 @@ export class GameAuthority {
         broadcastSeq: 0,
         persistedSeq,
         stale: false,
-        loadSeq: ++this.loadSequence,
       };
       // Eviction of a not-yet-created game must not discard a successful creation.
       slot.dispose = false;
@@ -364,14 +341,13 @@ export class GameAuthority {
   private async refreshSlot(gameId: string, slot: GameSlot, generation = slot.generation, revive = true): Promise<boolean> {
     if (generation !== slot.generation) return false;
     if (slot.record) slot.record.stale = true;
-    const seq = ++this.loadSequence;
     const logged = await this.store.load(gameId);
     if (generation !== slot.generation || this.games.get(gameId) !== slot) return false;
     if (logged.length === 0) {
       slot.record = undefined;
       return false;
     }
-    slot.record = this.rebuildRecord(gameId, logged, seq);
+    slot.record = this.rebuildRecord(gameId, logged);
     if (revive) slot.dispose = false;
     return true;
   }
@@ -433,7 +409,7 @@ export class GameAuthority {
    * produced it, so resume/catch-up ({@link getMissedSince}) works after a
    * restart.
    */
-  private rebuildRecord(gameId: string, logged: readonly LoggedEvent[], loadSeq = 0): GameRecord {
+  private rebuildRecord(gameId: string, logged: readonly LoggedEvent[]): GameRecord {
     let previous = -1;
     for (const entry of logged) {
       if (!isStateRevision(entry.seq) || entry.seq !== previous + 1) {
@@ -464,7 +440,6 @@ export class GameAuthority {
       broadcastSeq,
       persistedSeq: previous,
       stale: false,
-      loadSeq,
     };
   }
 

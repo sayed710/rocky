@@ -252,6 +252,11 @@ test('W2 cold delayed resume: cold hydration delayed resumed does not regress Ga
   await h.pump(); // delivers resume to serverConn
   await awaitGate(gate);
 
+  // gate the final (post-hydration recovery) read so the reply snapshot predates the commits
+  const gate2 = h.gatedLog.armLoadGate();
+  gate.release();
+  await awaitGate(gate2);
+
   // Writer commits move N+1 (1)
   await h.writer.apply(h.gameId, 'alice', { kind: 'move', uci: 'e2e4' });
 
@@ -261,7 +266,7 @@ test('W2 cold delayed resume: cold hydration delayed resumed does not regress Ga
   assert.equal(h.sync.getState().ply, 1);
 
   // Release gate; deliver late resumed (revision 0)
-  gate.release();
+  gate2.release();
   await h.pump();
 
   // Assert server connection sent exactly one resumed frame with older revision N = 0
@@ -301,12 +306,17 @@ test('W3 join during commits: join buffered commits apply correctly once in Game
   await h.pump();
   await awaitGate(gate);
 
+  // gate the final (post-hydration recovery) read so the reply snapshot predates the commits
+  const gate2 = h.gatedLog.armLoadGate();
+  gate.release();
+  await awaitGate(gate2);
+
   // The writer commits N+1 and N+2
   await h.writer.apply(h.gameId, 'alice', { kind: 'move', uci: 'e2e4' });
   await h.writer.apply(h.gameId, 'bob', { kind: 'move', uci: 'e7e5' });
 
   // Release gate
-  gate.release();
+  gate2.release();
   await h.pump();
 
   // Assert each move frame reached the client exactly once (count move frames per ply)
