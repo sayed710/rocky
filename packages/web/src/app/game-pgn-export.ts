@@ -182,6 +182,8 @@ export function mountGamePgnExport(options: GamePgnExportOptions): MountedGamePg
       statusKey = DONE_KEY[action];
     } catch {
       if (inFlight !== controller) return;
+      // A clipboard refusal can arrive before the response: do not leave that request running.
+      controller.abort();
       statusKey = null;
       failed = action;
     }

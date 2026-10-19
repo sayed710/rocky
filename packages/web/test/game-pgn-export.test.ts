@@ -512,6 +512,26 @@ test('the browser writer prefers a ClipboardItem holding the pending text as a p
   assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), new TextEncoder().encode(PGN));
 });
 
+test('a clipboard refusal before the response aborts the pending request', async () => {
+  const { doc, elements } = createGameDocument();
+  const signals: AbortSignal[] = [];
+  const reply = deferred<string>();
+  const mounted = mountGamePgnExport({
+    doc, gameId: GAME_ID, i18n: createTestI18n(),
+    requestPgn: (_gameId, signal) => { signals.push(signal); return reply.promise; },
+    writeClipboard: async () => { throw new DOMException('denied', 'NotAllowedError'); },
+  });
+  mounted.setFinished(true);
+  elements.get('game-pgn-copy')!.click();
+  await settle();
+  assert.equal(signals[0]!.aborted, true, 'the abandoned request does not keep running');
+  assert.equal(elements.get('game-pgn-error')!.textContent, 'The PGN could not be copied. Please try again.');
+  assert.equal(elements.get('game-pgn-copy')!.getAttribute('aria-disabled'), 'false');
+  reply.resolve(PGN);
+  await settle();
+  assert.equal(elements.get('game-pgn-error')!.hidden, false, 'the late response changes nothing');
+});
+
 test('a request that throws synchronously still releases both controls', async () => {
   const { doc, elements } = createGameDocument();
   const clipboard = fakeClipboard();
