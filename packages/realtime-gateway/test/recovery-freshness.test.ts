@@ -420,6 +420,7 @@ test('N2: detached refresh does not deliver stale state to a new room created af
 
   // Assert B receives no state frame with a revision lower than its joined revision.
   const bStates = specB.sent.filter((m): m is ServerMessage & { t: 'state' } => m.t === 'state');
+  assert.ok(bStates.length <= 1, 'at most one state frame from the old refresh reaches B');
   assert.ok(
     bStates.every((s) => s.state.stateRevision >= bJoined.state.stateRevision),
     "B receives no state frame with revision lower than joined revision",
