@@ -561,8 +561,10 @@ export class RealtimeGateway {
         }
       })
       .catch(() => {
-        // Best-effort refresh; the command already succeeded and its outcome
-        // reached the commanding client via the routed result path.
+        // Best-effort refresh. If this read fails, no state frame is sent for this draw-only command:
+        // room members (including the commanding player) learn the draw status only from a later
+        // snapshot (join, resume or another state frame). A bounded retry or failure notification
+        // would need an owner-approved policy (see PR #119 limitations).
       });
   }
 
