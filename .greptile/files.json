@@ -14,7 +14,16 @@
         "packages/web/test/state-revision.test.ts",
         "packages/realtime-gateway/src/protocol.ts",
         "packages/realtime-gateway/src/authority.ts",
-        "packages/realtime-gateway/test/state-revision.test.ts"
+        "packages/realtime-gateway/test/state-revision.test.ts",
+        "packages/realtime-gateway/src/event-log.ts",
+        "packages/persistence/src/event-store.ts",
+        "packages/persistence/src/pg/event-store.ts",
+        "packages/persistence/src/pg/games-projector.ts",
+        "packages/persistence/test/event-store.test.ts",
+        "packages/persistence/test/pg.integration.test.ts",
+        "packages/persistence/test/games-projector.integration.test.ts",
+        "packages/persistence/src/games-projection.ts",
+        "packages/persistence/test/games-projection.test.ts"
       ]
     }
   ]
