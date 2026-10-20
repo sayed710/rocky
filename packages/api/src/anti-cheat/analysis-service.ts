@@ -32,6 +32,7 @@ export class AntiCheatAnalysisService {
       players: { white: g.white, black: g.black },
       plies,
       depth: opts.depth ?? DEFAULT_ANALYSIS_DEPTH,
+      ...(g.historicalExcluded === undefined ? {} : { historicalExcluded: g.historicalExcluded.player }),
     });
   }
 }

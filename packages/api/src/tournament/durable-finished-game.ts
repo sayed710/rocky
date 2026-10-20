@@ -1,4 +1,5 @@
 import { Game } from '@chess-platform/game';
+import { replayStoredHistory } from '@chess-platform/game/stored-history';
 import type { EventStore } from '@chess-platform/persistence';
 
 import type { FinishedGame, FinishedGameArchive } from './finished-game';
@@ -30,7 +31,7 @@ export class DurableFinishedGameArchive implements FinishedGameArchive {
     if (stored.length === 0) return undefined;
 
     const events = stored.map((entry) => entry.event);
-    const game = Game.fromEvents(events);
+    const { game } = replayStoredHistory(gameId, stored);
     const state = game.snapshot();
     if (!state.status.over) return undefined;
 

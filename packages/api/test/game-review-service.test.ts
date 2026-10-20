@@ -416,3 +416,26 @@ test('POST /v1/games/:id/review requires a player token and presents only that p
     await h.close();
   }
 });
+
+test('a stored pre-#127 atomic move is never assessed and makes the review explicitly partial', async () => {
+  const legacy = game({
+    variant: 'atomic',
+    result: '0-1',
+    termination: 'variant',
+    moves: [
+      { ply: 1, uci: 'e2e4', san: 'e4', by: 'w', fenBefore: FEN },
+      { ply: 2, uci: 'e7e5', san: 'e5', by: 'b', fenBefore: AFTER_E4_FEN },
+      { ply: 3, uci: 'g1f3', san: 'Nf3', by: 'w', fenBefore: AFTER_E4_E5_FEN, historical: true },
+    ],
+  });
+  const { service, assessed } = build(legacy);
+  const white = await service.review({ gameId: legacy.gameId, userId: 'white-player', signal: new AbortController().signal }, async () => {});
+  assert.deepEqual(assessed.map((entry) => entry.move), ['e2e4'], 'the historical move is never sent to the assessor');
+  assert.equal(white.isPartial, true);
+  assert.equal(white.isPartial && white.cutoffReason, 'historical_move');
+  assert.equal(white.totalPlayerMoves, 2);
+  assert.equal(white.analyzedPlayerMoves, 1);
+
+  const black = await service.review({ gameId: legacy.gameId, userId: 'black-player', signal: new AbortController().signal }, async () => {});
+  assert.equal(black.isPartial, false, 'the opponent, whose moves are all legal today, gets a complete review');
+});

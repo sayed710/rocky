@@ -794,6 +794,7 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
       tRateSampleCount: { type: 'integer' },
       rawCentipawnLossTotal: { type: 'number' },
       cappedCentipawnLossTotal: { type: 'number' },
+      historicalExcludedPlies: { type: 'integer', minimum: 1 },
     },
   },
 
@@ -2399,7 +2400,7 @@ export const COMPONENT_SCHEMAS: ComponentSchemas = {
           isPartial: { type: 'boolean', enum: [true] },
           totalPlayerMoves: { type: 'integer', minimum: 0 },
           analyzedPlayerMoves: { type: 'integer', minimum: 0 },
-          cutoffReason: { type: 'string', enum: ['move_limit'] },
+          cutoffReason: { type: 'string', enum: ['move_limit', 'historical_move'] },
         },
         additionalProperties: false,
       },

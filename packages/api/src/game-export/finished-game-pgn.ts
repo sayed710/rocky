@@ -5,12 +5,11 @@
  * The event log is the only source. The `games` projection holds no moves and may lag the log, so
  * nothing here reads it. Stream invariants are checked by the projection's own validator
  * ({@link projectGameStream}) and every stored move is replayed through the authority
- * ({@link Game.fromEvents}), so a stream no authority could have written is refused, never exported.
+ * ({@link replayStoredHistory}), so a stream no authority could have written is refused, never exported.
  */
 
 import { Position } from '@chess-platform/core';
 import {
-  Game,
   type GameCreatedEvent,
   type GameEndedEvent,
   type MovePlayedEvent,
@@ -18,6 +17,7 @@ import {
   type Termination,
   type TimeControl,
 } from '@chess-platform/game';
+import { replayStoredHistory, type StoredPly } from '@chess-platform/game/stored-history';
 import {
   CorruptGameStreamError,
   projectGameStream,
@@ -64,8 +64,11 @@ export function readFinishedGame(gameId: string, stream: readonly StoredEvent[])
   if (created?.type !== 'GameCreated' || created.gameId !== gameId) {
     throw new CorruptGameStreamError(gameId, 'GameCreated names a different game');
   }
+  let mismatch: string | null = null;
   try {
-    Game.fromEvents(events);
+    replayStoredHistory(gameId, stream, (ply) => {
+      mismatch ??= ply.historical ? null : sanMismatch(ply);
+    });
   } catch (err) {
     throw new CorruptGameStreamError(gameId, `replay failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -80,7 +83,6 @@ export function readFinishedGame(gameId: string, stream: readonly StoredEvent[])
   if (contradiction !== null) throw new CorruptGameStreamError(gameId, `GameEnded ${contradiction}`);
 
   const moves = events.filter((event): event is MovePlayedEvent => event.type === 'MovePlayed');
-  const mismatch = sanMismatch(created, moves);
   if (mismatch !== null) throw new CorruptGameStreamError(gameId, mismatch);
   return { created, moves, ended };
 }
@@ -127,22 +129,19 @@ function endingContradiction(ended: GameEndedEvent): string | null {
 }
 
 /**
- * Why a stored SAN does not denote the stored UCI move, or `null` when every one does.
+ * Why a stored SAN does not denote the stored UCI move, or `null` when it does.
  *
  * Replay checks the UCI; the SAN is what the export writes. A SAN for another move would make the PGN
  * describe a different game, and text that is not SAN at all could forge movetext or tags. Each stored
  * SAN must equal the authority's SAN for its move, apart from check, mate and annotation suffixes and
- * the `0-0` castling spelling.
+ * the `0-0` castling spelling. The one pre-#127 atomic move the replay admits has its SAN checked there
+ * instead, since today's `toSan` would disambiguate against today's legal moves.
  */
-function sanMismatch(created: GameCreatedEvent, moves: readonly MovePlayedEvent[]): string | null {
-  let position = Position.fromFen(created.initialFen, created.variant);
-  for (const move of moves) {
-    const legal = position.legalMoves().find((candidate) => position.toUci(candidate) === move.uci);
-    if (legal === undefined) return `move ${move.ply} (${move.uci}) is not legal`;
-    if (typeof move.san !== 'string' || bareSan(move.san) !== bareSan(position.toSan(legal))) {
-      return `move ${move.ply} stores SAN ${JSON.stringify(move.san)} for ${move.uci}`;
-    }
-    position = position.play(legal);
+function sanMismatch({ event: move, before }: StoredPly): string | null {
+  const legal = before.legalMoves().find((candidate) => before.toUci(candidate) === move.uci);
+  if (legal === undefined) return `move ${move.ply} (${move.uci}) is not legal`;
+  if (typeof move.san !== 'string' || bareSan(move.san) !== bareSan(before.toSan(legal))) {
+    return `move ${move.ply} stores SAN ${JSON.stringify(move.san)} for ${move.uci}`;
   }
   return null;
 }

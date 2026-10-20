@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Game } from '@chess-platform/game';
+import { replayStoredHistory } from '@chess-platform/game/stored-history';
 import type { EventStore, TournamentsRepository } from '@chess-platform/persistence';
 
 import type { LiveBoard, TournamentLiveView } from './live-view';
@@ -19,7 +19,7 @@ export class DurableTournamentLiveView implements TournamentLiveView {
     const reconstructed = await Promise.all(gameLinks.map(async ([, gameId]): Promise<LiveBoard | null> => {
       const stored = await this.events.load(gameId);
       if (stored.length === 0) return null;
-      const game = Game.fromEvents(stored.map((entry) => entry.event));
+      const { game } = replayStoredHistory(gameId, stored);
       const state = game.snapshot();
       if (state.status.over) return null;
       const fen = game.fen;

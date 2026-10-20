@@ -52,10 +52,16 @@ export interface GameReviewMove {
 }
 
 /**
+ * Why a review covers fewer than all of the player's moves: the {@link MAX_REVIEWED_PLAYER_MOVES} cap,
+ * or a stored pre-#127 atomic move that today's rules reject and no engine can assess (#127).
+ */
+export type GameReviewCutoffReason = 'move_limit' | 'historical_move';
+
+/**
  * The complete outcome of one engine-grounded player review.
  *
- * Discriminated on `isPartial`: when false the entire game was analysed; when true the review was
- * capped at {@link MAX_REVIEWED_PLAYER_MOVES} and `cutoffReason` names the cause.
+ * Discriminated on `isPartial`: when false every one of the player's moves was analysed; when true
+ * `cutoffReason` names why some were not.
  */
 export type GameReviewOutcome = {
   readonly gameId: string;
@@ -69,7 +75,7 @@ export type GameReviewOutcome = {
   readonly analyzedPlayerMoves: number;
 } & (
   | { readonly isPartial: false; readonly cutoffReason?: never }
-  | { readonly isPartial: true; readonly cutoffReason: 'move_limit' }
+  | { readonly isPartial: true; readonly cutoffReason: GameReviewCutoffReason }
 );
 
 /** Construction-time wiring for {@link GameReviewService}. */
@@ -144,8 +150,12 @@ export class GameReviewService {
     if (moves.length === 0) throw HttpError.validation('game has no moves to review');
 
     const totalPlayerMoves = moves.length;
-    const isPartial = totalPlayerMoves > MAX_REVIEWED_PLAYER_MOVES;
-    const analyzedMoves = isPartial ? moves.slice(0, MAX_REVIEWED_PLAYER_MOVES) : moves;
+    // A stored pre-#127 atomic move is never assessed: today's rules reject it, so no engine can. It is
+    // always the game's last move, so it lies past the cutoff whenever the move limit applies.
+    const reviewable = moves.filter((move) => move.historical !== true);
+    const cutoffReason: GameReviewCutoffReason | null =
+      reviewable.length > MAX_REVIEWED_PLAYER_MOVES ? 'move_limit' : reviewable.length < totalPlayerMoves ? 'historical_move' : null;
+    const analyzedMoves = reviewable.slice(0, MAX_REVIEWED_PLAYER_MOVES);
 
     // Archive/ownership/length validation is complete before quota is spent. One accepted review
     // consumes one quota unit even though it contains several fixed-policy engine assessments.
@@ -208,8 +218,8 @@ export class GameReviewService {
         analyzedPlayerMoves: reviewed.length,
       };
 
-      return isPartial
-        ? { ...base, isPartial: true, cutoffReason: 'move_limit' as const }
+      return cutoffReason !== null
+        ? { ...base, isPartial: true, cutoffReason }
         : { ...base, isPartial: false };
     } catch (error: unknown) {
       throwIfReviewCancelled(input.signal, deadline.signal);
