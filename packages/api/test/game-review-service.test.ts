@@ -439,3 +439,24 @@ test('a stored pre-#127 atomic move is never assessed and makes the review expli
   const black = await service.review({ gameId: legacy.gameId, userId: 'black-player', signal: new AbortController().signal }, async () => {});
   assert.equal(black.isPartial, false, 'the opponent, whose moves are all legal today, gets a complete review');
 });
+
+test('a stored pre-#127 final move past the move limit reports the limit; at the boundary it reports itself', async () => {
+  // The historical move is always the game's last, so past the cap it is unanalysed for the cap's reason
+  // as well; no reported reason is false. Exactly at the cap, it is the only unanalysed move.
+  const playerMoves = (reviewable: number) => [
+    ...Array.from({ length: reviewable }, (_, index) => ({ ply: index * 2 + 1, uci: 'e2e4', san: 'e4', by: 'w' as const, fenBefore: FEN })),
+    { ply: reviewable * 2 + 1, uci: 'g1f3', san: 'Nf3', by: 'w' as const, fenBefore: AFTER_E4_E5_FEN, historical: true as const },
+  ];
+  const cases = [
+    { reviewable: MAX_REVIEWED_PLAYER_MOVES + 5, cutoffReason: 'move_limit' },
+    { reviewable: MAX_REVIEWED_PLAYER_MOVES, cutoffReason: 'historical_move' },
+  ];
+  for (const { reviewable, cutoffReason } of cases) {
+    const { service, assessed } = build(game({ variant: 'atomic', result: '0-1', termination: 'variant', moves: playerMoves(reviewable) }));
+    const result = await service.review({ gameId: '00000000-0000-4000-8000-000000000001', userId: 'white-player', signal: new AbortController().signal }, async () => {});
+    assert.equal(result.isPartial && result.cutoffReason, cutoffReason, `${reviewable} reviewable moves`);
+    assert.equal(result.totalPlayerMoves, reviewable + 1);
+    assert.equal(result.analyzedPlayerMoves, MAX_REVIEWED_PLAYER_MOVES);
+    assert.ok(!assessed.some((input) => input.move === 'g1f3'), 'the historical move is never assessed');
+  }
+});
