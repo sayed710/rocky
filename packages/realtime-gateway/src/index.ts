@@ -31,5 +31,6 @@ export { InMemoryConnection } from './transport';
 export type { Connection } from './transport';
 export { Room } from './room';
 export { RealtimeGateway } from './gateway';
+export type { RealtimeGatewayOptions } from './gateway';
 export { LocalCommandRouter } from './command-router';
 export type { CommandRouter } from './command-router';

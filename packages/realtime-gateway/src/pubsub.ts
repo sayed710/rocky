@@ -26,7 +26,7 @@ export interface PubSub {
   subscribe(channel: string, handler: (msg: Broadcast) => void): Unsubscribe;
   /**
    * Resolves once the channel's CURRENT Redis subscription is acknowledged;
-   * rejects if that SUBSCRIBE failed.
+   * rejects if that SUBSCRIBE failed; also rejects with {@link SubscriptionCancelledError} when the subscription is cancelled (last handler unsubscribed or pub/sub closed).
    */
   ready?(channel: string): Promise<void>;
   /**
@@ -318,7 +318,7 @@ export class RedisPubSub implements PubSub {
 
   /**
    * Resolves once the channel's CURRENT Redis subscription is acknowledged;
-   * rejects if that SUBSCRIBE failed.
+   * rejects if that SUBSCRIBE failed; also rejects with {@link SubscriptionCancelledError} when the subscription is cancelled (last handler unsubscribed or pub/sub closed).
    */
   async ready(channel: string): Promise<void> {
     const subs = this.subHandlers.get(channel);

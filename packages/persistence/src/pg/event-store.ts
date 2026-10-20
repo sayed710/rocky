@@ -200,9 +200,14 @@ export class PostgresEventStore implements EventStore {
       'SELECT g.id::text AS game_id, (SELECT MAX(e.seq) FROM game_events e WHERE e.game_id = g.id) AS head FROM unnest($1::uuid[]) AS g(id)',
       [gameIds],
     );
-    const map = new Map<string, number>();
+    // PostgreSQL returns the canonical lowercase UUID text; key results by the ids the caller passed.
+    const byCanonical = new Map<string, number>();
     for (const row of res.rows) {
-      map.set(row.game_id, row.head === null || row.head === undefined ? -1 : Number(row.head));
+      byCanonical.set(row.game_id, row.head === null || row.head === undefined ? -1 : Number(row.head));
+    }
+    const map = new Map<string, number>();
+    for (const gameId of gameIds) {
+      map.set(gameId, byCanonical.get(gameId.toLowerCase()) ?? -1);
     }
     return map;
   }

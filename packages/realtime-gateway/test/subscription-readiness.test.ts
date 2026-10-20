@@ -134,6 +134,7 @@ class FakeRedisBroker {
   private readonly pendingSubscriptions = new Map<FakeRedisClient, Map<string, PendingSubscription[]>>();
   private readonly gatedChannels = new Set<string>();
   private readonly failingSubscribeChannels = new Map<string, Error>();
+  private readonly failingSubscribeCounts = new Map<string, { err: Error; remaining: number }>();
   private publishError: Error | null = null;
   public readonly subscribeCallCount = new Map<string, number>();
 
@@ -155,6 +156,11 @@ class FakeRedisBroker {
 
   failSubscribe(channel: string, err: Error): void {
     this.failingSubscribeChannels.set(channel, err);
+  }
+
+  /** The next SUBSCRIBE calls for `channel` fail `times` times, then succeed. */
+  failSubscribeTimes(channel: string, err: Error, times: number): void {
+    this.failingSubscribeCounts.set(channel, { err, remaining: times });
   }
 
   clearFailSubscribe(channel: string): void {
@@ -187,6 +193,11 @@ class FakeRedisBroker {
     const failErr = this.failingSubscribeChannels.get(channel);
     if (failErr) {
       return Promise.reject(failErr);
+    }
+    const counted = this.failingSubscribeCounts.get(channel);
+    if (counted && counted.remaining > 0) {
+      counted.remaining--;
+      return Promise.reject(counted.err);
     }
 
     if (this.gatedChannels.has(channel)) {
@@ -1054,3 +1065,201 @@ test('SB18: a game marked unconfirmed; the subscription is cancelled while a sec
 
 
 
+
+// ---------------------------------------------------------------------------
+// Qodo #3, #4 and #8 (PR #119): unconfirmed-subscription reporting, late confirmation, and
+// retrying a healthy room whose reconnect resubscribe failed.
+
+interface SubscriptionHookLog {
+  unconfirmed: Array<{ gameId: string; reason: 'timeout' | 'failed' }>;
+  confirmed: string[];
+  options: {
+    onSubscriptionUnconfirmed: (gameId: string, reason: 'timeout' | 'failed') => void;
+    onSubscriptionConfirmed: (gameId: string) => void;
+  };
+}
+
+function subscriptionHooks(): SubscriptionHookLog {
+  const unconfirmed: SubscriptionHookLog['unconfirmed'] = [];
+  const confirmed: string[] = [];
+  return {
+    unconfirmed,
+    confirmed,
+    options: {
+      onSubscriptionUnconfirmed: (gameId, reason) => unconfirmed.push({ gameId, reason }),
+      onSubscriptionConfirmed: (gameId) => confirmed.push(gameId),
+    },
+  };
+}
+
+function hookedGateway(authority: GameAuthority, pubsub: RedisPubSub, hooks: SubscriptionHookLog): RealtimeGateway {
+  return new RealtimeGateway(
+    authority, pubsub, new FakeTokenVerifier(), () => 1000, undefined, undefined, undefined, undefined, hooks.options,
+  );
+}
+
+test('SR3a: a readiness timeout reports the unconfirmed subscription once', async () => {
+  const broker = new FakeRedisBroker();
+  const pubsub = new RedisPubSub(broker.createClient('pub'), broker.createClient('sub'), 'node-1');
+  const scheduler = new ManualScheduler();
+  const authority = new GameAuthority(pubsub, () => 1000, new InMemoryEventLog(), {
+    durableReadTimeoutMs: 1000, schedule: scheduler.schedule,
+  });
+  const hooks = subscriptionHooks();
+  const gateway = hookedGateway(authority, pubsub, hooks);
+  const gameId = 'game-sr3a';
+  await authority.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+  broker.gateChannel(gameChannel(gameId));
+
+  const c = new InMemoryConnection('c');
+  gateway.handleConnection(c);
+  c.deliver({ t: 'join', gameId });
+  await flush();
+  scheduler.fire();
+  await flush();
+
+  assert.ok(c.last('joined'), 'the join still completes');
+  assert.deepEqual(hooks.unconfirmed, [{ gameId, reason: 'timeout' }]);
+});
+
+test('SR3b: repeated joins during one unconfirmed episode report it once', async () => {
+  const broker = new FakeRedisBroker();
+  const pubsub = new RedisPubSub(broker.createClient('pub'), broker.createClient('sub'), 'node-1');
+  const authority = new GameAuthority(pubsub, () => 1000, new InMemoryEventLog());
+  const hooks = subscriptionHooks();
+  const gateway = hookedGateway(authority, pubsub, hooks);
+  const gameId = 'game-sr3b';
+  await authority.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+  broker.failSubscribe(gameChannel(gameId), new Error('Redis refused'));
+
+  for (const id of ['c1', 'c2', 'c3']) {
+    const c = new InMemoryConnection(id);
+    gateway.handleConnection(c);
+    c.deliver({ t: 'join', gameId });
+    await flush();
+    assert.ok(c.last('joined'), `${id} joined`);
+  }
+
+  assert.deepEqual(hooks.unconfirmed, [{ gameId, reason: 'failed' }], 'reported once, not per join');
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 1);
+});
+
+test('SR4: an acknowledgement that arrives after the readiness timeout clears the unconfirmed mark', async () => {
+  const broker = new FakeRedisBroker();
+  const pubsub = new RedisPubSub(broker.createClient('pub'), broker.createClient('sub'), 'node-1');
+  const scheduler = new ManualScheduler();
+  const authority = new GameAuthority(pubsub, () => 1000, new InMemoryEventLog(), {
+    durableReadTimeoutMs: 1000, schedule: scheduler.schedule,
+  });
+  const hooks = subscriptionHooks();
+  const gateway = hookedGateway(authority, pubsub, hooks);
+  const gameId = 'game-sr4';
+  await authority.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+  const ch = gameChannel(gameId);
+  broker.gateChannel(ch);
+
+  const c = new InMemoryConnection('c');
+  gateway.handleConnection(c);
+  c.deliver({ t: 'join', gameId });
+  await flush();
+  scheduler.fire();
+  await flush();
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 1, 'unconfirmed after the timeout');
+
+  broker.acknowledgeAll(ch);
+  await flush();
+
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 0, 'the late acknowledgement clears the mark');
+  assert.deepEqual(hooks.confirmed, [gameId], 'confirmed once');
+});
+
+test('SR8: a healthy room whose reconnect resubscribe fails is retried and receives later broadcasts', async () => {
+  const broker = new FakeRedisBroker();
+  const subB = broker.createClient('subB');
+  const pubsubA = new RedisPubSub(broker.createClient('pubA'), broker.createClient('subA'), 'node-a');
+  const pubsubB = new RedisPubSub(broker.createClient('pubB'), subB, 'node-b');
+  const store = new InMemoryEventLog();
+  const writer = new GameAuthority(pubsubA, () => 1000, store);
+  const edge = new GameAuthority(pubsubB, () => 1000, store);
+  const hooks = subscriptionHooks();
+  const gateway = hookedGateway(edge, pubsubB, hooks);
+  const gameId = 'game-sr8';
+  await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+  const ch = gameChannel(gameId);
+
+  const c = new InMemoryConnection('c');
+  gateway.handleConnection(c);
+  c.deliver({ t: 'join', gameId });
+  await flush();
+  assert.ok(c.last('joined'));
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 0, 'healthy before the reconnect');
+
+  // The reconnect's own resubscribe fails once; the gateway's re-check must retry it.
+  broker.failSubscribeTimes(ch, new Error('Redis busy'), 1);
+  broker.simulateClose(subB);
+  broker.simulateReady(subB);
+  await flush();
+  await flush();
+
+  assert.equal(pubsubB.subscriptionState(ch), 'ok', 'the gateway retried the failed channel');
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 0);
+  await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+  await flush();
+  assert.equal(c.all('move').length, 1, 'the room receives a later move exactly once');
+});
+
+test('SR8b: a resubscribe that keeps failing marks the room unconfirmed and reports it once', async () => {
+  const broker = new FakeRedisBroker();
+  const subB = broker.createClient('subB');
+  const pubsubB = new RedisPubSub(broker.createClient('pubB'), subB, 'node-b');
+  const edge = new GameAuthority(pubsubB, () => 1000, new InMemoryEventLog());
+  const hooks = subscriptionHooks();
+  const gateway = hookedGateway(edge, pubsubB, hooks);
+  const gameId = 'game-sr8b';
+  await edge.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+  const ch = gameChannel(gameId);
+
+  const c = new InMemoryConnection('c');
+  gateway.handleConnection(c);
+  c.deliver({ t: 'join', gameId });
+  await flush();
+
+  broker.failSubscribeTimes(ch, new Error('Redis busy'), 2);
+  broker.simulateClose(subB);
+  broker.simulateReady(subB);
+  await flush();
+  await flush();
+
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 1, 'still failing: unconfirmed');
+  assert.deepEqual(hooks.unconfirmed, [{ gameId, reason: 'failed' }], 'reported once');
+});
+
+test('SR8c: one reconnect issues at most one SUBSCRIBE per local channel from the gateway re-check', async () => {
+  const broker = new FakeRedisBroker();
+  const subB = broker.createClient('subB');
+  const pubsubB = new RedisPubSub(broker.createClient('pubB'), subB, 'node-b');
+  const edge = new GameAuthority(pubsubB, () => 1000, new InMemoryEventLog());
+  const gateway = hookedGateway(edge, pubsubB, subscriptionHooks());
+  const ids: string[] = [];
+  for (let i = 0; i < 200; i++) {
+    const gameId = `game-sr8c-${i}`;
+    ids.push(gameId);
+    await edge.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+    const c = new InMemoryConnection(`c${i}`);
+    gateway.handleConnection(c);
+    c.deliver({ t: 'join', gameId });
+  }
+  await flush();
+  const before = new Map(ids.map((id) => [id, broker.subscribeCallCount.get(gameChannel(id)) ?? 0]));
+
+  broker.simulateClose(subB);
+  broker.simulateReady(subB);
+  await flush();
+  await flush();
+
+  for (const id of ids) {
+    const added = (broker.subscribeCallCount.get(gameChannel(id)) ?? 0) - before.get(id)!;
+    assert.equal(added, 1, `${id}: only the reconnect's own resubscribe; the healthy re-check adds none`);
+  }
+  assert.equal(gateway.unconfirmedSubscriptionCount(), 0);
+});

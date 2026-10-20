@@ -73,6 +73,7 @@ import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, type VerifyClientCallbackSync, type WebSocket } from 'ws';
 import { parseDurableTimeoutEnv } from './durable-timeouts.js';
+import { createPublishFailureLogger } from './publish-failure-log.js';
 import {
   GameAuthority,
   InMemoryPubSub,
@@ -301,6 +302,8 @@ async function main(): Promise<void> {
     pubsub = new InMemoryPubSub();
     logger.info('pub/sub: in-memory (single-node)');
   }
+  // A failed Redis publish loses that broadcast for other nodes; make it visible (throttled).
+  pubsub.onPublishFailed?.(createPublishFailureLogger((channel) => logger.warn('Redis publish failed', { channel })));
 
   const authority = new GameAuthority(pubsub, () => Date.now(), store, {
     durableReadTimeoutMs,
@@ -621,6 +624,10 @@ async function main(): Promise<void> {
         gameId,
         error: error instanceof Error ? error.message : String(error),
       });
+    },
+    {
+      onSubscriptionUnconfirmed: (gameId, reason) => logger.warn('Redis subscription unconfirmed', { gameId, reason }),
+      onSubscriptionConfirmed: (gameId) => logger.info('Redis subscription confirmed late', { gameId }),
     },
   );
   // A forwarded server expiry must not evict a game someone here is watching (ADR-0149).

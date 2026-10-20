@@ -218,6 +218,14 @@ test('postgres event store: head, heads, loadSince and abortable signal', { skip
     assert.equal(headsMap.get(anotherGameId), 0);
     assert.equal(headsMap.get(emptyGameId), -1);
 
+    // Qodo #6: results are keyed by the ids the caller passed, not PostgreSQL's canonical lowercase text
+    const upperExisting = gameWith3EventsId.toUpperCase();
+    const upperMissing = emptyGameId.toUpperCase();
+    const upperMap = await store.heads([upperExisting, upperMissing]);
+    assert.equal(upperMap.get(upperExisting), 2, 'uppercase caller id gets its head');
+    assert.equal(upperMap.get(upperMissing), -1, 'missing uppercase caller id maps to -1');
+    assert.equal(upperMap.size, 2);
+
     // empty heads call
     assert.deepEqual(await store.heads([]), new Map());
 

@@ -91,6 +91,17 @@ function isStateMessage(msg: unknown): msg is StateMessage {
   return typeof msg === 'object' && msg !== null && (msg as { t?: unknown }).t === 'state';
 }
 
+/** Optional host hooks for Redis subscription health (diagnostics only; never delivery). */
+export interface RealtimeGatewayOptions {
+  /** Called once per episode when a local game's channel subscription cannot be confirmed. */
+  readonly onSubscriptionUnconfirmed?: (gameId: string, reason: 'timeout' | 'failed') => void;
+  /** Called when a previously unconfirmed game's subscription is confirmed. */
+  readonly onSubscriptionConfirmed?: (gameId: string) => void;
+}
+
+/** Raised internally when a readiness wait outlives the durable read deadline. */
+class SubscriptionReadinessTimeout extends Error {}
+
 export class RealtimeGateway {
   private readonly sessions = new Map<string, Session>();
   private readonly rooms = new Map<string, RoomEntry>();
@@ -124,23 +135,60 @@ export class RealtimeGateway {
      * false reject) and the host should log/alert.
      */
     private readonly onStateRefreshFailed?: (gameId: string, error: unknown) => void,
+    private readonly options: RealtimeGatewayOptions = {},
   ) {
     // Fall back to local routing when no router is injected. This preserves
     // backward compatibility: existing callers that don't pass a router get
     // the same direct-authority behavior.
     this.commandRouter = commandRouter ?? new LocalCommandRouter(this.authority);
+    // After a subscriber reconnect, re-check every local game's channel once: a channel whose
+    // resubscribe failed is re-issued by ready() (one retry per reconnect), healthy ones resolve.
     this.unregisterReconnect = this.pubsub.onReconnect?.(() => {
-      for (const gameId of [...this.unconfirmedSubscriptionsSet]) {
+      for (const gameId of this.localGameIds()) {
         void this.pubsub.ready?.(gameChannel(gameId))?.then(
-          () => {
-            this.unconfirmedSubscriptionsSet.delete(gameId);
-          },
-          () => {
-            // on reject, keep it
+          () => this.markSubscriptionConfirmed(gameId),
+          (err: unknown) => {
+            if (!(err instanceof SubscriptionCancelledError) && this.isLocalGame(gameId)) {
+              this.markSubscriptionUnconfirmed(gameId, 'failed');
+            }
           },
         );
       }
     });
+  }
+
+  /** Games with a room or a pending join buffer on this node. */
+  private localGameIds(): Set<string> {
+    const ids = new Set(this.rooms.keys());
+    for (const [gameId, buffers] of this.joinBuffers) {
+      if (buffers.size > 0) ids.add(gameId);
+    }
+    return ids;
+  }
+
+  private isLocalGame(gameId: string): boolean {
+    return this.rooms.has(gameId) || (this.joinBuffers.get(gameId)?.size ?? 0) > 0;
+  }
+
+  /** Marks a game unconfirmed and reports it only when the episode starts (no log storm). */
+  private markSubscriptionUnconfirmed(gameId: string, reason: 'timeout' | 'failed'): void {
+    if (this.unconfirmedSubscriptionsSet.has(gameId)) return;
+    this.unconfirmedSubscriptionsSet.add(gameId);
+    try {
+      this.options.onSubscriptionUnconfirmed?.(gameId, reason);
+    } catch {
+      // A diagnostic hook must not affect the join.
+    }
+  }
+
+  /** Clears an unconfirmed mark and reports the recovery; a healthy game reports nothing. */
+  private markSubscriptionConfirmed(gameId: string): void {
+    if (!this.unconfirmedSubscriptionsSet.delete(gameId)) return;
+    try {
+      this.options.onSubscriptionConfirmed?.(gameId);
+    } catch {
+      // A diagnostic hook must not affect delivery.
+    }
   }
 
   /** Unregister background subscriptions and lifecycle listeners. */
@@ -286,25 +334,37 @@ export class RealtimeGateway {
     if (!this.pubsub.ready) return;
     const timeoutMs = this.authority.durableReadTimeoutMs;
     let cancel: (() => void) | undefined;
+    const readyPromise = this.pubsub.ready(gameChannel(gameId));
     try {
-      const readyPromise = this.pubsub.ready(gameChannel(gameId));
       if (timeoutMs !== undefined) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           cancel = this.authority.schedule(() => {
-            reject(new Error('subscription readiness timed out'));
+            reject(new SubscriptionReadinessTimeout('subscription readiness timed out'));
           }, timeoutMs);
         });
         await Promise.race([readyPromise, timeoutPromise]);
       } else {
         await readyPromise;
       }
-      this.unconfirmedSubscriptionsSet.delete(gameId);
+      this.markSubscriptionConfirmed(gameId);
     } catch (err: unknown) {
       if (err instanceof SubscriptionCancelledError) {
         return;
       }
-      if (current()) {
-        this.unconfirmedSubscriptionsSet.add(gameId);
+      if (!current()) return;
+      if (err instanceof SubscriptionReadinessTimeout) {
+        this.markSubscriptionUnconfirmed(gameId, 'timeout');
+        // The acknowledgement may still arrive: clear the mark then, while the game is local.
+        readyPromise.then(
+          () => {
+            if (this.isLocalGame(gameId)) this.markSubscriptionConfirmed(gameId);
+          },
+          () => {
+            // Still unconfirmed; a later join or reconnect re-checks it.
+          },
+        );
+      } else {
+        this.markSubscriptionUnconfirmed(gameId, 'failed');
       }
     } finally {
       cancel?.();
