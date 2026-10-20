@@ -305,6 +305,8 @@ async function main(): Promise<void> {
   const authority = new GameAuthority(pubsub, () => Date.now(), store, {
     durableReadTimeoutMs,
     durableWriteTimeoutMs,
+    onDurableWriteStalled: (gameId, op) => logger.warn('Durable write stalled', { gameId, op }),
+    onDurableWriteSettled: (gameId, op, outcome) => logger.info('Durable write settled', { gameId, op, outcome }),
   });
 
   // --- Tournament Result Reporter (M9 inc 13, ADR-0025) ---
