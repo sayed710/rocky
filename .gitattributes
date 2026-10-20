@@ -1,0 +1,4 @@
+# Generated test data (python-chess reference legal-move sets, #127); regenerate with
+# packages/chess-core/test/fixtures/atomic-reference.gen.py. Marked generated so GitHub and AI
+# review tools skip the 690 KB single-line JSON; the generator script itself is reviewed normally.
+packages/chess-core/test/fixtures/atomic-reference.json linguist-generated=true
