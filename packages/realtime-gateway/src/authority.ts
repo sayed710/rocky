@@ -1093,8 +1093,10 @@ export class GameAuthority {
         const returnedHead = await appendP;
         this.validateAppendHead(returnedHead, expectedHead);
         rec.persistedSeq = returnedHead;
-        rec.stale = false;
         if (timedOut) {
+          // Only the write-deadline timer marked the copy untrusted; an independent reload request
+          // (reloadFromLog) keeps its own stale mark and refresh.
+          rec.stale = false;
           if (slot) slot.stalled = undefined;
           this.notifyWriteSettled(gameId, 'append', 'committed');
         }

@@ -6,8 +6,8 @@ import type { TimeControl } from '@chess-platform/game';
 import { PostgresEventStore, migrate, migrationsDir } from '@chess-platform/persistence/pg';
 import { withTestDatabase } from '@chess-platform/persistence/test-support';
 
-const REDIS_URL = process.env['REDIS_URL'];
-const stackTest = REDIS_URL && process.env['DATABASE_URL'] ? test : test.skip;
+// PostgreSQL only (the pub/sub is in-memory), so these run wherever DATABASE_URL is set.
+const stackTest = process.env['DATABASE_URL'] ? test : test.skip;
 const TC: TimeControl = { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' };
 
 stackTest('PG1: write timeout under SHARE ROW EXCLUSIVE lock rolls back, clears stall and allows next command', { timeout: 30000 }, async () => {
