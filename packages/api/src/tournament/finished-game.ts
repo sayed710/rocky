@@ -21,6 +21,12 @@ export interface FinalMove {
   readonly san: string;
   /** The side that played it. */
   readonly by: 'w' | 'b';
+  /**
+   * Set when the move is a stored pre-#127 atomic move that today's rules reject (#127): it was never
+   * legal, so no engine can analyse it and nothing should describe it as a move played from
+   * {@link FinishedGame.fenBeforeFinalMove}.
+   */
+  readonly historical?: true;
 }
 
 /**

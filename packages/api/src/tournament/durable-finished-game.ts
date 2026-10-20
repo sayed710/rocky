@@ -31,7 +31,7 @@ export class DurableFinishedGameArchive implements FinishedGameArchive {
     if (stored.length === 0) return undefined;
 
     const events = stored.map((entry) => entry.event);
-    const { game } = replayStoredHistory(gameId, stored);
+    const { game, historicalPly } = replayStoredHistory(gameId, stored);
     const state = game.snapshot();
     if (!state.status.over) return undefined;
 
@@ -58,7 +58,9 @@ export class DurableFinishedGameArchive implements FinishedGameArchive {
       termination: state.status.termination,
       ply: state.ply,
       finalFen: game.fen,
-      finalMove: played ? { uci: played.uci, san: played.san, by: played.by } : null,
+      finalMove: played
+        ? { uci: played.uci, san: played.san, by: played.by, ...(played.ply === historicalPly ? { historical: true as const } : {}) }
+        : null,
       fenBeforeFinalMove: before,
     };
   }

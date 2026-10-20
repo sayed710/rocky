@@ -136,7 +136,7 @@ test('tournament archive: the finished game, its final move and the position bef
   assert.ok(finished);
   assert.equal(finished.result, '0-1');
   assert.equal(finished.termination, 'variant');
-  assert.deepEqual(finished.finalMove, { uci: 'd4e5', san: 'Kxe5', by: 'w' });
+  assert.deepEqual(finished.finalMove, { uci: 'd4e5', san: 'Kxe5', by: 'w', historical: true }, 'marked so commentary never narrates it');
   assert.equal(finished.fenBeforeFinalMove?.split(' ')[0], 'rnbq1bnr/pppp1ppp/3k4/4p3/3K4/4P3/PPPP1PPP/RNBQ1BNR');
 });
 

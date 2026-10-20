@@ -570,6 +570,7 @@ export const arMessages = {
   "game.review.statusReviewing": "جارٍ مراجعة {san}. أفضل نقلة: {bestMove}.",
   "game.review.bestMoveNotAvailable": "غير متاح",
   "game.review.partialNote": "مراجعة جزئية: حُلّلت أول {analyzed} نقلة من أصل {total} من نقلات اللاعب بسبب حد النقلات. اختر نقلة لعرض الوضعية قبل لعبها.",
+  "game.review.historicalNote": "مراجعة جزئية: حُلّلت {analyzed} نقلة من أصل {total} من نقلات اللاعب. سُجّلت نقلتك الأخيرة وفق قواعد سابقة للشطرنج الذري لم تعد تسمح بها، لذا لا يمكن تحليلها. اختر نقلة لعرض الوضعية قبل لعبها.",
   "game.review.selectMoveNote": "اختر نقلة لعرض الوضعية قبل لعبها.",
   "game.review.reviewingMoves": "جارٍ مراجعة نقلاتك…",
   "game.review.unavailableError": "المراجعة غير متاحة حاليًا. حاول مجددًا.",

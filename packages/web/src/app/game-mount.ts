@@ -1615,7 +1615,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       if (review.isPartial) {
         const analyzed = review.analyzedPlayerMoves ?? review.moves.length;
         const total = review.totalPlayerMoves ?? analyzed;
-        renderInterpolatedText(gameReviewNoteEl, i18n.t('game.review.partialNote'), {
+        // A stored pre-#127 atomic final move is excluded for a different reason than the move limit (#127).
+        const note = review.cutoffReason === 'historical_move' ? 'game.review.historicalNote' : 'game.review.partialNote';
+        renderInterpolatedText(gameReviewNoteEl, i18n.t(note), {
           analyzed: String(analyzed),
           total: String(total),
         });
