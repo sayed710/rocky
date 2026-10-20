@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-20 — Local-only temporary Qodo/Graphite review-stack proposal prepared for PR #126; policy INACTIVE, existing gates and final-SHA transition approval remain required._
+_Last updated: 2026-10-20 — Local-only final review-policy corrections prepared: auditable Graphite execution/applicability and suppression PASS/HOLD; Greptile dispatch remains disabled by owner decision. Published PR #126 stays at 2ffc213; no publication or activation._
+
+Prior: _Last updated: 2026-10-20 — Local-only temporary Qodo/Graphite review-stack proposal prepared for PR #126; policy INACTIVE, existing gates and final-SHA transition approval remain required._
 
 Prior: _Last updated: 2026-10-19 — PR #118 manually merged at 25f7278a9938767d539dfe92398ee189832d82d9; reviewed head and historical Qodo exception preserved. Review-policy v3 defines conditional owner-adoption/manual-merge activation; this proposal does not activate it or migrate PR #119._
 
@@ -5688,3 +5690,10 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - The published PR #126 head remains 92173b49746e66200095690681fa9d0c6440d50d. Its current Greptile and substantive Qodo requirements gates remain applicable unless separately excepted by the owner for the final PR SHA. New commits require renewed exact-head evidence; no retroactive migration of PR #119 or any previously created PR.
 - The proposed prospective stack requires actual Qodo Bugs=0/Rules=0, substantive exact-head Graphite evidence, scope-appropriate verified skill execution, a distinct-model requirements matrix, mandatory CI/tests, zero unresolved actionable findings and threads, and Git consistency. Qodo Requirement Gaps remain UNVERIFIED whenever not assessed; independently reviewed evidence is separately attributed.
 - Activation still requires separate explicit final-head GitHub owner adoption and owner manual merge, with prospective creation-time and commit-ancestry eligibility. Existing history, PR #118's SHA-specific exception, ownership, model-review hierarchy and all Git/security protections are preserved. No provider settings, Notion source, product code, integration or branch protection changes are part of this proposal.
+
+
+## 2026-10-20 — Final policy review corrections, local proposal only
+
+- The local proposal distinguishes zero published Graphite comments from zero detected findings; defines feasible exact-head execution/applicability evidence and explicit PASS/HOLD outcomes; and blocks unapproved material security/correctness suppression. Independent requirements verification remains mandatory.
+- REVIEW_POLICY and AGENTS are aligned with the owner decision to keep Greptile dispatch disabled until explicit restoration. The separate PR #126 exceptions at reviewed head 2ffc213f9b4b395184f69576efa67f28143462f6 remain unchanged and SHA-bound; any eventual new head needs its own owner-authorized handling. Prior transition records are preserved, not rewritten.
+- This is an uncommitted local proposal under independent read-only review, not adoption, activation, publication or a new exception. No provider settings or review triggers, other worktrees, product code, PG-F1 activation, PG-F2, deployment or merge are authorized.

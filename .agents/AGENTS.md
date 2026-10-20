@@ -30,11 +30,13 @@
 
 The evidence-based implementation gates and their activation test are documented
 in [docs/REVIEW_POLICY.md](../docs/REVIEW_POLICY.md). Until the recorded owner
-adoption and manual policy-PR merge satisfy that test, existing gates apply.
+adoption and manual policy-PR merge satisfy that test, existing gates apply,
+subject to separately recorded owner decisions and exact-SHA exceptions.
 For eligible future PRs after activation, use actual exact-head Qodo and
 substantive Graphite reviews, relevant verified review skills, and mandatory
-independently attributable requirements traceability. Greptile is supplementary
-under that temporary policy. Preserve all historical Qodo results
+independently attributable requirements traceability. Greptile remains disabled
+for review dispatch until the owner explicitly restores it; do not trigger it
+automatically as a supplementary reviewer. Preserve historical review results
 and exact-head exceptions without relabeling unverified assessments as PASS.
 All existing Git, full local test, scope, independent-review and owner-only-merge
 rules remain in force. No branch protection or integration setting is changed.
