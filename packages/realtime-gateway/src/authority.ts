@@ -256,16 +256,18 @@ export class GameAuthority {
   private notifyWriteStalled(gameId: string, op: 'append' | 'create'): void {
     try {
       this.onDurableWriteStalled?.(gameId, op);
-    } catch {
-      // Invoke every hook inside try/catch; a throwing hook is ignored.
+    } catch (err) {
+      // A throwing host hook must not break the write fence; report it instead of ignoring it.
+      console.error('[GameAuthority] onDurableWriteStalled hook threw:', err);
     }
   }
 
   private notifyWriteSettled(gameId: string, op: 'append' | 'create', outcome: 'committed' | 'failed'): void {
     try {
       this.onDurableWriteSettled?.(gameId, op, outcome);
-    } catch {
-      // Invoke every hook inside try/catch; a throwing hook is ignored.
+    } catch (err) {
+      // A throwing host hook must not break the write fence; report it instead of ignoring it.
+      console.error('[GameAuthority] onDurableWriteSettled hook threw:', err);
     }
   }
 

@@ -252,6 +252,104 @@ test('postgres event store: head, heads, loadSince and abortable signal', { skip
   }, isolated);
 });
 
+/**
+ * Aborting a read that is already running on PostgreSQL. An ACCESS EXCLUSIVE lock held by a separate
+ * pool blocks the read's SELECT; the test waits until pg_stat_activity shows that backend waiting on
+ * the lock (a barrier, not a sleep), then aborts. The abort must settle promptly, destroy only the
+ * read's own borrowed connection, and leave the pool serving later reads.
+ */
+test('postgres event store: aborting an in-flight head or loadSince releases only its connection', { skip }, async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const store = new PostgresEventStore(pool);
+    const gameId = uuidv7();
+    let { game, events } = Game.create({
+      gameId,
+      timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      players: { white: 'a', black: 'b' },
+      rated: false,
+      at: 1000,
+    });
+    let seq = await store.append(gameId, -1, events);
+    ({ game, events } = game.playMove('e2e4', 2000));
+    seq = await store.append(gameId, seq, events);
+    assert.equal(seq, 1);
+
+    const lockPool = new Pool({ connectionString, max: 1 });
+    const holder = await lockPool.connect();
+    // Another user of the same pool, borrowed for the whole test: aborting the read must not touch it.
+    const bystander = await pool.connect();
+    const waitingBackends = async (marker: string): Promise<number[]> => {
+      const res = await bystander.query<{ pid: number }>(
+        `SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid() AND query LIKE $1
+            AND wait_event_type = 'Lock'`,
+        [`%${marker}%`],
+      );
+      return res.rows.map((r) => r.pid);
+    };
+    const reads: Array<{ label: string; marker: string; run: (s: AbortSignal) => Promise<unknown> }> = [
+      { label: 'head', marker: 'COALESCE(MAX(seq), -1)', run: (s) => store.head(gameId, s) },
+      { label: 'loadSince', marker: 'seq > $2', run: (s) => store.loadSince(gameId, 0, s) },
+    ];
+    const abortedPids: number[] = [];
+    try {
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE game_events IN ACCESS EXCLUSIVE MODE');
+      for (const read of reads) {
+        const controller = new AbortController();
+        let settled = false;
+        const pending = read.run(controller.signal);
+        pending.then(() => { settled = true; }, () => { settled = true; });
+
+        const deadline = Date.now() + 10_000;
+        let pids: number[] = [];
+        while (pids.length === 0 && !settled && Date.now() < deadline) {
+          pids = await waitingBackends(read.marker);
+          if (pids.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        assert.equal(pids.length, 1, `${read.label}: the read is in flight, blocked on the lock`);
+        assert.equal(settled, false, `${read.label}: precondition, not yet settled`);
+        abortedPids.push(pids[0]!);
+
+        const totalBefore = pool.totalCount;
+        controller.abort(new Error(`${read.label} aborted by test`));
+        let timer: NodeJS.Timeout | undefined;
+        const bound = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), 5_000); });
+        const outcome = await Promise.race([pending.then(() => 'resolved', () => 'rejected'), bound]);
+        clearTimeout(timer);
+        assert.equal(outcome, 'rejected', `${read.label}: abort settles promptly while the lock is still held`);
+        assert.equal(pool.totalCount, totalBefore - 1, `${read.label}: exactly its own borrowed connection is destroyed`);
+        assert.equal((await bystander.query<{ one: number }>('SELECT 1 AS one')).rows[0]?.one, 1,
+          `${read.label}: the other borrowed connection still works`);
+      }
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {});
+      holder.release();
+      await lockPool.end();
+    }
+
+    // Once the lock clears, the orphaned server backends finish against their closed sockets and exit.
+    const gone = Date.now() + 10_000;
+    let lingering = abortedPids.length;
+    while (lingering > 0 && Date.now() < gone) {
+      const res = await bystander.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ANY($1::int[])', [abortedPids]);
+      lingering = res.rows[0]?.n ?? 0;
+      if (lingering > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(lingering, 0, 'the aborted reads leave no server backend behind');
+    bystander.release();
+
+    // The pool keeps serving reads, with and without a signal, and nothing stays checked out.
+    assert.equal(await store.head(gameId, new AbortController().signal), 1);
+    assert.deepEqual((await store.loadSince(gameId, 0, new AbortController().signal)).map((e) => e.seq), [1]);
+    assert.equal(await store.head(gameId), 1);
+    assert.equal(pool.waitingCount, 0);
+    assert.equal(pool.idleCount, pool.totalCount, 'every borrowed connection was returned or destroyed');
+  }, isolated);
+});
+
 test('postgres event store finds only unended games for either player seat', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, join(process.cwd(), 'migrations'));

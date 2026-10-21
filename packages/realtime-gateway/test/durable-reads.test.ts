@@ -8,6 +8,7 @@ import { Game } from '@chess-platform/game';
 import {
   GameAuthority,
   AuthorityError,
+  AuthorityCommitError,
   type GameAuthorityOptions,
 } from '../src/authority';
 import type { EventLog, LoggedEvent } from '../src/event-log';
@@ -97,6 +98,7 @@ class CountingLog implements EventLog {
   public existsGate?: Gate;
 
   public corruptSuffix = false;
+  public suffixMutation?: (suffix: readonly LoggedEvent[]) => readonly LoggedEvent[];
   public hangLoad = false;
   public hangHead = false;
   public hangLoadSince = false;
@@ -211,6 +213,7 @@ class CountingLog implements EventLog {
     if (this.corruptSuffix && res.length > 0) {
       return res.map((e, idx) => ({ ...e, seq: e.seq + 10 + idx }));
     }
+    if (this.suffixMutation) return this.suffixMutation(res);
     return res;
   }
 
@@ -516,10 +519,15 @@ test('DA7: Resident replaced by reload during gated loadSince', async () => {
   gate.release.resolve();
   await flush();
 
+  // The suffix read built a detached record at revision 1, but the reloaded resident (revision 2)
+  // is newer and must win; serving the detached record would hand c2 an older snapshot.
   const joined = c2.last('joined');
   assert.ok(joined);
-  assert.ok(joined.state.stateRevision >= 1);
-  assert.equal(joined.state.ply, joined.state.moves.length);
+  const writerState = writer.getState(gameId);
+  assert.equal(writerState.stateRevision, 2);
+  assert.equal(joined.state.stateRevision, 2, 'the newer reloaded resident wins over the detached suffix record');
+  assert.deepEqual(joined.state.moves, writerState.moves);
+  assert.equal(joined.state.fenHash, writerState.fenHash);
 });
 
 test('DA8: Non-contiguous suffix', async () => {
@@ -556,6 +564,85 @@ test('DA8: Non-contiguous suffix', async () => {
   assert.equal(joined.state.stateRevision, 2);
   assert.equal(joined.state.ply, 2);
 });
+
+/** An edge store exposing only the required EventLog methods (plus `head` when asked). */
+function withoutCapabilities(store: CountingLog, keepHead: boolean): EventLog {
+  const base: EventLog = {
+    append: (gameId, expectedSeq, events, signal) => store.append(gameId, expectedSeq, events, signal),
+    load: (gameId, signal) => store.load(gameId, signal),
+    exists: (gameId, signal) => store.exists(gameId, signal),
+  };
+  return keepHead ? { ...base, head: (gameId, signal) => store.head(gameId, signal) } : base;
+}
+
+const suffixFallbackCases: ReadonlyArray<{
+  name: string;
+  mutate?: (suffix: readonly LoggedEvent[]) => readonly LoggedEvent[];
+  edgeStore?: (store: CountingLog) => EventLog;
+  heads: number;
+  loadSinces: number;
+}> = [
+  { name: 'mid-suffix gap', mutate: (s) => [s[0]!, ...s.slice(2)], heads: 1, loadSinces: 1 },
+  { name: 'duplicate seq', mutate: (s) => [s[0]!, s[0]!, ...s.slice(1)], heads: 1, loadSinces: 1 },
+  { name: 'empty suffix while head is ahead', mutate: () => [], heads: 1, loadSinces: 1 },
+  { name: 'store with head but no loadSince', edgeStore: (s) => withoutCapabilities(s, true), heads: 1, loadSinces: 0 },
+  { name: 'store with neither head nor loadSince', edgeStore: (s) => withoutCapabilities(s, false), heads: 0, loadSinces: 0 },
+];
+
+for (const c of suffixFallbackCases) {
+  test(`DA10 (${c.name}): recovery falls back to a full load and serves a coherent current snapshot`, async () => {
+    const innerStore = new InMemoryEventLog();
+    const store = new CountingLog(innerStore);
+    const pubsub = new InMemoryPubSub();
+    const writer = new GameAuthority(pubsub, () => 1000, store);
+    const edge = new GameAuthority(pubsub, () => 1000, c.edgeStore ? c.edgeStore(store) : store);
+    const gateway = new RealtimeGateway(edge, pubsub, new FakeTokenVerifier());
+
+    const gameId = `game-da10-${c.name.replace(/\W+/g, '-')}`;
+    await writer.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+    // The edge becomes resident at revision 0, then the writer commits three moves.
+    const c1 = new InMemoryConnection('c1');
+    gateway.handleConnection(c1);
+    c1.deliver({ t: 'join', gameId });
+    await flush();
+    assert.ok(c1.last('joined'));
+    await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+    await writer.apply(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
+    await writer.apply(gameId, 'alice', { kind: 'move', uci: 'g1f3' });
+
+    store.suffixMutation = c.mutate;
+    store.resetCounts();
+
+    const c2 = new InMemoryConnection('c2');
+    gateway.handleConnection(c2);
+    c2.deliver({ t: 'join', gameId });
+    await flush();
+
+    assert.equal(store.headCount, c.heads, 'head checks');
+    assert.equal(store.loadSinces, c.loadSinces, 'suffix reads');
+    assert.equal(store.loads, 1, 'exactly one full-load fallback');
+    assert.equal(c2.all('reject').length, 0);
+    const writerState = writer.getState(gameId);
+    assert.equal(writerState.stateRevision, 3);
+    const joined = c2.last('joined');
+    assert.ok(joined, 'the join is served, not rejected');
+    assert.equal(joined.state.stateRevision, writerState.stateRevision);
+    assert.deepEqual(joined.state.moves, writerState.moves);
+    assert.equal(joined.state.fenHash, writerState.fenHash);
+    assert.deepEqual(joined.state.drawOffer, writerState.drawOffer);
+
+    // The resume path takes the same fallback; its missed broadcasts match a fresh full rebuild.
+    c1.deliver({ t: 'resume', gameId, lastPly: 0 });
+    await flush();
+    const resumed = c1.last('resumed');
+    assert.ok(resumed);
+    assert.equal(resumed.state.stateRevision, writerState.stateRevision);
+    const fresh = await new GameAuthority(pubsub, () => 1000, innerStore).readRecovery(gameId, 0);
+    assert.equal(fresh.missed.length, 3);
+    assert.deepEqual(resumed.missed, fresh.missed);
+  });
+}
 
 test('DA9: Same-ply draw offer committed remotely after hydration', async () => {
   const innerStore = new InMemoryEventLog();
@@ -867,11 +954,60 @@ test('DT6: A hung append for a command with durableWriteTimeoutMs', async () => 
   assert.equal(white.all('reject').length, 0, 'must not be reject');
   assert.ok(white.last('outcomeUnknown'), 'client receives outcomeUnknown');
 
-  // Later command on same game is processed
+  // The aborted append rejected, so the fence reconciled from the log: the move never committed.
+  // A later command on the same game must then commit and reach the client.
+  assert.equal(edge.stalledWriteCount(), 0, 'the fence cleared once the append settled');
   store.hangAppend = false;
   white.deliver({ t: 'resign', gameId });
   await flush();
-  assert.ok(white.last('ended') || white.last('move') || white.all('outcomeUnknown').length > 0, 'queue not stuck');
+  const ended = white.last('ended');
+  assert.ok(ended, 'the later resign commits and is broadcast');
+  assert.equal(ended.termination, 'resignation');
+  assert.equal(ended.winner, 'b');
+  const log = await innerStore.load(gameId);
+  assert.deepEqual(log.map((e) => e.event.type).filter((t) => t === 'MovePlayed'), [], 'the timed-out move did not commit');
+  assert.deepEqual(edge.getState(gameId).moves, []);
+});
+
+test('DT6b: Throwing write-stall hooks are reported and do not break the fence', async () => {
+  const innerStore = new InMemoryEventLog();
+  const store = new CountingLog(innerStore);
+  const scheduler = new ManualScheduler();
+  const edge = new GameAuthority(new InMemoryPubSub(), () => 1000, store, {
+    durableWriteTimeoutMs: 1000,
+    schedule: scheduler.schedule,
+    onDurableWriteStalled: () => { throw new Error('stall hook broke'); },
+    onDurableWriteSettled: () => { throw new Error('settle hook broke'); },
+  });
+  const gameId = 'game-dt6b';
+  await edge.createGame({ gameId, players: { white: 'alice', black: 'bob' }, timeControl: TC, rated: false });
+
+  const reported: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => { reported.push(args); };
+  try {
+    store.hangAppend = true;
+    const move = edge.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+    const outcome = assert.rejects(move, (err: unknown) => err instanceof AuthorityCommitError);
+    await flush();
+    scheduler.fire();
+    await outcome;
+    await flush();
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.deepEqual(
+    reported.map((args) => [String(args[0]), (args[1] as Error).message]),
+    [
+      ['[GameAuthority] onDurableWriteStalled hook threw:', 'stall hook broke'],
+      ['[GameAuthority] onDurableWriteSettled hook threw:', 'settle hook broke'],
+    ],
+  );
+  assert.equal(edge.stalledWriteCount(), 0, 'the fence still cleared after the append settled');
+  store.hangAppend = false;
+  const resigned = await edge.apply(gameId, 'alice', { kind: 'resign' });
+  assert.equal(resigned.state.status.over, true, 'a later command commits');
 });
 
 test('DT7: No timers are left behind after a successful read', async () => {
