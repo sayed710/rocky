@@ -1524,7 +1524,7 @@ export function mistakePredictionView(
  * Stable wire representation of a completed-game review.
  *
  * Move counts cover only the requesting player's moves. A partial response contains the analyzed
- * prefix and requires the `move_limit` cutoff reason; a complete response cannot expose one.
+ * moves and requires a cutoff reason; a complete response cannot expose one.
  */
 export type GameReviewView = {
   readonly gameId: string;
@@ -1545,7 +1545,7 @@ export type GameReviewView = {
   readonly analyzedPlayerMoves: number;
 } & (
   | { readonly isPartial: false; readonly cutoffReason?: never }
-  | { readonly isPartial: true; readonly cutoffReason: 'move_limit' }
+  | { readonly isPartial: true; readonly cutoffReason: import('./game-review/service.js').GameReviewCutoffReason }
 );
 
 /** Present the private service outcome through the stable public Game Review contract. */

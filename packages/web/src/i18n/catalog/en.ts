@@ -636,6 +636,7 @@ export const enMessages = {
   'game.review.statusReviewing': 'Reviewing {san}. Best move: {bestMove}.',
   'game.review.bestMoveNotAvailable': 'not available',
   'game.review.partialNote': 'Partial review: first {analyzed} of {total} player moves analyzed due to move limit. Select a move to see the position before it was played.',
+  'game.review.historicalNote': 'Partial review: {analyzed} of {total} player moves analyzed. Your final move was recorded under earlier Atomic rules that no longer allow it, so it cannot be analyzed. Select a move to see the position before it was played.',
   'game.review.selectMoveNote': 'Select a move to see the position before it was played.',
   'game.review.reviewingMoves': 'Reviewing your moves…',
   'game.review.unavailableError': 'The review is not available right now. Please try again.',

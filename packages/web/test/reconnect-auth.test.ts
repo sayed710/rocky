@@ -568,3 +568,24 @@ test('refreshed player rejoin resumes from the last observed ply after a missed 
   assert.equal(h.sync.getState().ply, 1);
   assert.equal(h.sync.getState().connected, true);
 });
+
+test('a permanently refused hydration (a pre-#127 atomic game, option ii) stops after three join retries on the same socket', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  await h.reconnect();
+  const socket = h.factory.last;
+  const sockets = h.factory.sockets.length;
+  const joins = (): number => socket.sent.filter((frame) => (JSON.parse(frame) as { t: string }).t === 'join').length;
+  const refuse = (): void => socket.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'invalid_command', message: 'failed to load game' });
+  assert.equal(joins(), 1);
+  refuse();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    assert.equal(h.scheduler.pending, 1, `retry ${attempt + 1} is scheduled`);
+    h.advance(10_000); h.scheduler.runNext(); await flush();
+    refuse();
+  }
+  assert.equal(joins(), 4, 'the first join plus three bounded retries, then no more');
+  assert.equal(h.scheduler.pending, 0);
+  assert.equal(h.factory.sockets.length, sockets, 'no reconnect storm: no new socket is opened');
+  assert.equal(h.sync.getState().connected, false);
+  assert.equal(h.sync.getState().recoveryAvailable, true, 'the player can retry explicitly');
+});

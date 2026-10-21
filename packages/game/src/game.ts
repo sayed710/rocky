@@ -11,6 +11,7 @@
 
 import {
   CHESS960_POSITIONS,
+  IllegalMoveError,
   Position,
   chess960Fen,
   opposite,
@@ -38,6 +39,7 @@ import type {
   ResultString,
   Termination,
 } from './events';
+import { FOLD_STORED } from './internal/stored-replay-key';
 
 /** Raised when a command is invalid for the current game state. */
 export class GameError extends Error {
@@ -614,6 +616,59 @@ export class Game {
     return id;
   }
 
+  /** Fold a `MovePlayed` whose resulting `position` the caller has already established. */
+  private static foldMove(state: GameState, event: MovePlayedEvent, position: Position): GameState {
+    const charged = charge(state.clock, event.by, event.at, state.timeControl, event.moveTimeMs);
+    // Update repetition history: increment the count for the new position's key.
+    const key = repetitionKey(position.snapshot());
+    const rep = new Map(state.repetition);
+    rep.set(key, (rep.get(key) ?? 0) + 1);
+    return {
+      ...state,
+      position,
+      clock: charged.clock,
+      ply: event.ply,
+      moves: [...state.moves, event],
+      drawOffer: null,
+      repetition: rep,
+    };
+  }
+
+  /**
+   * Stored-history replay only (`stored-history.ts`, #127), keyed by a symbol the package does not
+   * export. The strict fold of {@link fromEvents}, except that a `MovePlayed` the rules reject is offered
+   * to `admit`, which may return the position the stored move led to. Every other event, and every move
+   * `admit` refuses, folds — or throws — exactly as in `fromEvents`. `onPly` sees each move before it
+   * is folded, with `admitted` set only for a move the rules rejected.
+   */
+  static [FOLD_STORED](
+    events: readonly GameEvent[],
+    admit: (index: number, state: GameState, event: MovePlayedEvent) => Position | null,
+    onPly: (state: GameState, event: MovePlayedEvent, after: Position, admitted: boolean) => void,
+  ): Game {
+    let state: GameState | null = null;
+    for (const [index, event] of events.entries()) {
+      if (event.type !== 'MovePlayed' || state === null) {
+        state = Game.reduce(state, event);
+        continue;
+      }
+      let after: Position;
+      let admitted = false;
+      try {
+        after = state.position.play(event.uci);
+      } catch (err) {
+        const fallback = err instanceof IllegalMoveError ? admit(index, state, event) : null;
+        if (fallback === null) throw err;
+        after = fallback;
+        admitted = true;
+      }
+      onPly(state, event, after, admitted);
+      state = Game.foldMove(state, event, after);
+    }
+    if (state === null) throw new GameError('Cannot reconstruct a game from zero events');
+    return new Game(state);
+  }
+
   /** The pure reducer: `(state, event) -> state`. */
   private static reduce(state: GameState | null, event: GameEvent): GameState {
     switch (event.type) {
@@ -657,21 +712,7 @@ export class Game {
       }
       case 'MovePlayed': {
         if (state === null) throw new GameError('MovePlayed before GameCreated');
-        const position = state.position.play(event.uci);
-        const charged = charge(state.clock, event.by, event.at, state.timeControl, event.moveTimeMs);
-        // Update repetition history: increment the count for the new position's key.
-        const key = repetitionKey(position.snapshot());
-        const rep = new Map(state.repetition);
-        rep.set(key, (rep.get(key) ?? 0) + 1);
-        return {
-          ...state,
-          position,
-          clock: charged.clock,
-          ply: event.ply,
-          moves: [...state.moves, event],
-          drawOffer: null,
-          repetition: rep,
-        };
+        return Game.foldMove(state, event, state.position.play(event.uci));
       }
       case 'DrawOffered': {
         if (state === null) throw new GameError('DrawOffered before GameCreated');

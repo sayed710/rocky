@@ -120,7 +120,15 @@ export function isSquareAttacked(state: PositionState, sq: number, by: Color): b
 export function inCheck(state: PositionState, color: Color): boolean {
   const k = findKing(state, color);
   if (k === -1) return false;
+  // Atomic: a king can never capture (it would explode), so kings standing next to each other
+  // ("connected") cannot be in check — the enemy king shields its neighbour from every capture.
+  if (state.variant === 'atomic' && isAdjacent(k, findKing(state, opposite(color)))) return false;
   return isSquareAttacked(state, k, opposite(color));
+}
+
+/** True if 0x88 squares `a` and `b` (either may be -1) are a king step apart. */
+function isAdjacent(a: number, b: number): boolean {
+  return a !== -1 && b !== -1 && KING_OFFSETS.includes(b - a);
 }
 
 function pushMove(list: Move[], m: Move): void {
@@ -314,8 +322,11 @@ function kingPathSafe(state: PositionState, kingFrom: number, kingTo: number, th
   const rank = rankOf(kingFrom);
   const lo = Math.min(fileOf(kingFrom), fileOf(kingTo));
   const hi = Math.max(fileOf(kingFrom), fileOf(kingTo));
+  // Atomic: a square next to the enemy king is safe for ours, since connected kings are never in check.
+  const shield = state.variant === 'atomic' ? findKing(state, them) : -1;
   for (let file = lo; file <= hi; file++) {
-    if (isSquareAttacked(state, makeSquare(file, rank), them)) return false;
+    const sq = makeSquare(file, rank);
+    if (!isAdjacent(sq, shield) && isSquareAttacked(state, sq, them)) return false;
   }
   return true;
 }
@@ -551,16 +562,11 @@ function isLegalAfter(before: PositionState, after: PositionState, us: Color): b
   const them = opposite(us);
 
   if (before.variant === 'atomic') {
-    // In atomic, if your own king was blown up, the move is illegal — unless the
-    // enemy king was also destroyed (you win by exploding their king).
-    const myKing = findKing(after, us);
-    const enemyKing = findKing(after, them);
-    if (enemyKing === -1) return true; // you exploded their king → legal & winning
-    if (myKing === -1) return false;   // you blew up your own king → illegal
-    // Kings may be adjacent; check only matters if delivered by non-king means,
-    // but a king cannot capture in atomic (would self-destruct) so ordinary
-    // check detection still applies to the surviving king.
-    return !isSquareAttacked(after, myKing, them);
+    // A move that destroys your own king is illegal even if the enemy king goes with it (#127):
+    // that covers every king capture, since the capturer always explodes.
+    if (findKing(after, us) === -1) return false;
+    if (findKing(after, them) === -1) return true; // you exploded their king → legal & winning
+    return !inCheck(after, us); // connected kings are never in check
   }
 
   if (before.variant === 'racingkings') {

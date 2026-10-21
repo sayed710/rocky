@@ -630,3 +630,22 @@ test('a recap names unresolved players by id order, not by the order it happened
   const named = outcome.standings.map((r) => r.player);
   assert.equal(new Set(named).size, named.length);
 });
+
+test('a stored pre-#127 final atomic move gets no search, no provider call and no charge', async () => {
+  // The archive marks a final move only the pre-#127 atomic rules allowed (#127); it was never legal,
+  // so commentary refuses it as review and anti-cheat do, before any quota or engine work.
+  const tournament = startedTournament([WHITE_ID, BLACK_ID]);
+  tournament.linkGame(0, 0, 'g1');
+  const h = build({
+    tournament,
+    game: finishedGame({ variant: 'atomic', result: '0-1', termination: 'variant', finalMove: { uci: 'd4e5', san: 'Kxe5', by: 'w', historical: true } }),
+  });
+
+  await assert.rejects(
+    () => h.service.commentateGame({ tournamentId: 't1', gameId: 'g1' }, h.charge),
+    (err: unknown) => err instanceof HttpError && err.status === 409 && /earlier atomic rules/.test(err.message),
+  );
+  assert.equal(h.analysis.calls.length, 0);
+  assert.equal(h.completions.calls.length, 0);
+  assert.equal(h.charges.length, 0);
+});

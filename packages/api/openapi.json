@@ -15725,6 +15725,10 @@
           },
           "cappedCentipawnLossTotal": {
             "type": "number"
+          },
+          "historicalExcludedPlies": {
+            "type": "integer",
+            "minimum": 1
           }
         }
       },
@@ -19690,7 +19694,8 @@
               "cutoffReason": {
                 "type": "string",
                 "enum": [
-                  "move_limit"
+                  "move_limit",
+                  "historical_move"
                 ]
               }
             },
