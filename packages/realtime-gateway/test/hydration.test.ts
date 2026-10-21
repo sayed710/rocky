@@ -315,7 +315,8 @@ test('a joiner waiting on a forced read retries eviction instead of reporting a 
   await new Promise<void>(r => setImmediate(r));
   assert.ok(joiner.last('joined'));
   assert.equal(joiner.last('reject'), undefined);
-  assert.equal(d.reads(), 2);
+  // post-hydration recovery read (Qodo cold-race fix)
+  assert.equal(d.reads(), 3);
   joiner.close();
 });
 

@@ -21,9 +21,9 @@
 
 export * from './protocol';
 export * from './latency';
-export { GameAuthority, AuthorityError, AuthorityCommitError, CommandOutcomeUnknownError, FLAG_ACTOR, NO_SHOW_ACTOR, fenHash } from './authority';
-export type { Command, AuthorityErrorCode, ApplyResult, ApplyOptions } from './authority';
-export { InMemoryPubSub, RedisPubSub, gameChannel, gamesEndedChannel, gamesProjectedEndedChannel, tournamentChannel } from './pubsub';
+export { GameAuthority, AuthorityError, AuthorityCommitError, CommandOutcomeUnknownError, FLAG_ACTOR, NO_SHOW_ACTOR, fenHash, DEFAULT_CREATE_TIMEOUT_MS } from './authority';
+export type { Command, AuthorityErrorCode, ApplyResult, ApplyOptions, GameAuthorityOptions } from './authority';
+export { InMemoryPubSub, RedisPubSub, SubscriptionCancelledError, gameChannel, gamesEndedChannel, gamesProjectedEndedChannel, tournamentChannel } from './pubsub';
 export type { PubSub, Unsubscribe, RedisLike } from './pubsub';
 export { InMemoryEventLog, EventLogConcurrencyError } from './event-log';
 export type { EventLog, LoggedEvent } from './event-log';
@@ -31,5 +31,6 @@ export { InMemoryConnection } from './transport';
 export type { Connection } from './transport';
 export { Room } from './room';
 export { RealtimeGateway } from './gateway';
+export type { RealtimeGatewayOptions } from './gateway';
 export { LocalCommandRouter } from './command-router';
 export type { CommandRouter } from './command-router';

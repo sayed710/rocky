@@ -174,6 +174,182 @@ test('postgres event store: round-trip and optimistic concurrency', { skip }, as
   }, isolated);
 });
 
+test('postgres event store: head, heads, loadSince and abortable signal', { skip }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const store = new PostgresEventStore(pool);
+    const emptyGameId = uuidv7();
+    const gameWith3EventsId = uuidv7();
+    const anotherGameId = uuidv7();
+
+    // head on an empty game
+    assert.equal(await store.head(emptyGameId), -1);
+
+    // game with 3 events (GameCreated + 2 moves)
+    let { game, events } = Game.create({
+      gameId: gameWith3EventsId,
+      timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      players: { white: 'a', black: 'b' },
+      rated: false,
+      at: 1000,
+    });
+    let seq = await store.append(gameWith3EventsId, -1, events); // seq 0
+    ({ game, events } = game.playMove('e2e4', 2000));
+    seq = await store.append(gameWith3EventsId, seq, events); // seq 1
+    ({ game, events } = game.playMove('e7e5', 3000));
+    seq = await store.append(gameWith3EventsId, seq, events); // seq 2
+
+    // head on game with 3 events
+    assert.equal(await store.head(gameWith3EventsId), 2);
+
+    // another game with 1 event
+    const { events: anotherEvents } = Game.create({
+      gameId: anotherGameId,
+      timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      players: { white: 'a', black: 'b' },
+      rated: false,
+      at: 1000,
+    });
+    await store.append(anotherGameId, -1, anotherEvents); // seq 0
+
+    // heads for 3 ids (one missing)
+    const headsMap = await store.heads([gameWith3EventsId, anotherGameId, emptyGameId]);
+    assert.equal(headsMap.get(gameWith3EventsId), 2);
+    assert.equal(headsMap.get(anotherGameId), 0);
+    assert.equal(headsMap.get(emptyGameId), -1);
+
+    // Qodo #6: results are keyed by the ids the caller passed, not PostgreSQL's canonical lowercase text
+    const upperExisting = gameWith3EventsId.toUpperCase();
+    const upperMissing = emptyGameId.toUpperCase();
+    const upperMap = await store.heads([upperExisting, upperMissing]);
+    assert.equal(upperMap.get(upperExisting), 2, 'uppercase caller id gets its head');
+    assert.equal(upperMap.get(upperMissing), -1, 'missing uppercase caller id maps to -1');
+    assert.equal(upperMap.size, 2);
+
+    // empty heads call
+    assert.deepEqual(await store.heads([]), new Map());
+
+    // loadSince
+    const sinceSeq0 = await store.loadSince(gameWith3EventsId, 0);
+    assert.equal(sinceSeq0.length, 2);
+    assert.equal(sinceSeq0[0]?.seq, 1);
+    assert.equal(sinceSeq0[1]?.seq, 2);
+
+    const sinceSeq2 = await store.loadSince(gameWith3EventsId, 2);
+    assert.equal(sinceSeq2.length, 0);
+
+    // pre-aborted signal rejecting head, heads, and loadSince
+    const abortedSignal = AbortSignal.abort();
+    await assert.rejects(store.head(gameWith3EventsId, abortedSignal), (err: unknown) => {
+      return err !== null && typeof err === 'object';
+    });
+    await assert.rejects(store.heads([gameWith3EventsId], abortedSignal), (err: unknown) => {
+      return err !== null && typeof err === 'object';
+    });
+    await assert.rejects(store.loadSince(gameWith3EventsId, 0, abortedSignal), (err: unknown) => {
+      return err !== null && typeof err === 'object';
+    });
+  }, isolated);
+});
+
+/**
+ * Aborting a read that is already running on PostgreSQL. An ACCESS EXCLUSIVE lock held by a separate
+ * pool blocks the read's SELECT; the test waits until pg_stat_activity shows that backend waiting on
+ * the lock (a barrier, not a sleep), then aborts. The abort must settle promptly, destroy only the
+ * read's own borrowed connection, and leave the pool serving later reads.
+ */
+test('postgres event store: aborting an in-flight head or loadSince releases only its connection', { skip }, async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await migrate(pool, join(process.cwd(), 'migrations'));
+    const store = new PostgresEventStore(pool);
+    const gameId = uuidv7();
+    let { game, events } = Game.create({
+      gameId,
+      timeControl: { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      players: { white: 'a', black: 'b' },
+      rated: false,
+      at: 1000,
+    });
+    let seq = await store.append(gameId, -1, events);
+    ({ game, events } = game.playMove('e2e4', 2000));
+    seq = await store.append(gameId, seq, events);
+    assert.equal(seq, 1);
+
+    const lockPool = new Pool({ connectionString, max: 1 });
+    const holder = await lockPool.connect();
+    // Another user of the same pool, borrowed for the whole test: aborting the read must not touch it.
+    const bystander = await pool.connect();
+    const waitingBackends = async (marker: string): Promise<number[]> => {
+      const res = await bystander.query<{ pid: number }>(
+        `SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid() AND query LIKE $1
+            AND wait_event_type = 'Lock'`,
+        [`%${marker}%`],
+      );
+      return res.rows.map((r) => r.pid);
+    };
+    const reads: Array<{ label: string; marker: string; run: (s: AbortSignal) => Promise<unknown> }> = [
+      { label: 'head', marker: 'COALESCE(MAX(seq), -1)', run: (s) => store.head(gameId, s) },
+      { label: 'loadSince', marker: 'seq > $2', run: (s) => store.loadSince(gameId, 0, s) },
+    ];
+    const abortedPids: number[] = [];
+    try {
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE game_events IN ACCESS EXCLUSIVE MODE');
+      for (const read of reads) {
+        const controller = new AbortController();
+        let settled = false;
+        const pending = read.run(controller.signal);
+        pending.then(() => { settled = true; }, () => { settled = true; });
+
+        const deadline = Date.now() + 10_000;
+        let pids: number[] = [];
+        while (pids.length === 0 && !settled && Date.now() < deadline) {
+          pids = await waitingBackends(read.marker);
+          if (pids.length === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        assert.equal(pids.length, 1, `${read.label}: the read is in flight, blocked on the lock`);
+        assert.equal(settled, false, `${read.label}: precondition, not yet settled`);
+        abortedPids.push(pids[0]!);
+
+        const totalBefore = pool.totalCount;
+        controller.abort(new Error(`${read.label} aborted by test`));
+        let timer: NodeJS.Timeout | undefined;
+        const bound = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), 5_000); });
+        const outcome = await Promise.race([pending.then(() => 'resolved', () => 'rejected'), bound]);
+        clearTimeout(timer);
+        assert.equal(outcome, 'rejected', `${read.label}: abort settles promptly while the lock is still held`);
+        assert.equal(pool.totalCount, totalBefore - 1, `${read.label}: exactly its own borrowed connection is destroyed`);
+        assert.equal((await bystander.query<{ one: number }>('SELECT 1 AS one')).rows[0]?.one, 1,
+          `${read.label}: the other borrowed connection still works`);
+      }
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {});
+      holder.release();
+      await lockPool.end();
+    }
+
+    // Once the lock clears, the orphaned server backends finish against their closed sockets and exit.
+    const gone = Date.now() + 10_000;
+    let lingering = abortedPids.length;
+    while (lingering > 0 && Date.now() < gone) {
+      const res = await bystander.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = ANY($1::int[])', [abortedPids]);
+      lingering = res.rows[0]?.n ?? 0;
+      if (lingering > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(lingering, 0, 'the aborted reads leave no server backend behind');
+    bystander.release();
+
+    // The pool keeps serving reads, with and without a signal, and nothing stays checked out.
+    assert.equal(await store.head(gameId, new AbortController().signal), 1);
+    assert.deepEqual((await store.loadSince(gameId, 0, new AbortController().signal)).map((e) => e.seq), [1]);
+    assert.equal(await store.head(gameId), 1);
+    assert.equal(pool.waitingCount, 0);
+    assert.equal(pool.idleCount, pool.totalCount, 'every borrowed connection was returned or destroyed');
+  }, isolated);
+});
+
 test('postgres event store finds only unended games for either player seat', { skip }, async () => {
   await withTestDatabase(async ({ pool }) => {
     await migrate(pool, join(process.cwd(), 'migrations'));

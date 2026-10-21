@@ -17,6 +17,13 @@
 import { Redis } from 'ioredis';
 import { RedisPubSub, type PubSub, type RedisLike } from '@chess-platform/realtime-gateway';
 
+function isMessageListener(
+  event: 'message' | 'close' | 'ready',
+  _listener: ((channel: string, message: string) => void) | (() => void),
+): _listener is (channel: string, message: string) => void {
+  return event === 'message';
+}
+
 /**
  * Adapt an ioredis client to the domain's minimal {@link RedisLike} port.
  * ioredis's `subscribe`/`unsubscribe` are heavily overloaded and return
@@ -28,11 +35,19 @@ function toRedisLike(client: Redis): RedisLike {
     publish: (channel, message) => client.publish(channel, message),
     subscribe: (channel) => client.subscribe(channel).then(() => undefined),
     unsubscribe: (channel) => client.unsubscribe(channel).then(() => undefined),
-    on: (event, listener) => {
-      client.on(event, listener);
+    on(event: 'message' | 'close' | 'ready', listener: ((channel: string, message: string) => void) | (() => void)): void {
+      if (isMessageListener(event, listener)) {
+        client.on('message', listener);
+      } else {
+        client.on(event, listener);
+      }
     },
-    off: (event, listener) => {
-      client.off(event, listener);
+    off(event: 'message' | 'close' | 'ready', listener: ((channel: string, message: string) => void) | (() => void)): void {
+      if (isMessageListener(event, listener)) {
+        client.off('message', listener);
+      } else {
+        client.off(event, listener);
+      }
     },
     quit: () => client.quit().then(() => undefined),
   };
@@ -56,13 +71,15 @@ export interface RedisPubSubOptions {
  * before the ready check's INFO, which Redis then refuses; ioredis treats that as fatal, resets the
  * connection, and anything published meanwhile is lost. The check only waits for Redis to finish
  * loading its dataset, which pub/sub does not need. The publisher keeps it.
+ *
+ * autoResubscribe is disabled on the subscriber because RedisPubSub owns resubscription deterministically.
  */
 export function pubSubConnectionOptions(redisOptions?: Record<string, unknown>): {
   readonly pub: Record<string, unknown>;
   readonly sub: Record<string, unknown>;
 } {
   const base = { ...redisOptions, lazyConnect: false };
-  return { pub: base, sub: { ...base, enableReadyCheck: false } };
+  return { pub: base, sub: { ...base, enableReadyCheck: false, autoResubscribe: false } };
 }
 
 /**

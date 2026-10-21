@@ -60,11 +60,21 @@ class FakeRedis implements RedisLike {
     // unsubscribe are called correctly.
   }
 
-  on(event: 'message', listener: (channel: string, message: string) => void): void {
-    if (event === 'message') this.listeners.push(listener);
+  on(event: 'message', listener: (channel: string, message: string) => void): void;
+  on(event: 'close' | 'ready', listener: () => void): void;
+  on(
+    event: 'message' | 'close' | 'ready',
+    listener: ((channel: string, message: string) => void) | (() => void),
+  ): void {
+    if (event === 'message') this.listeners.push(listener as (channel: string, message: string) => void);
   }
 
-  off(event: 'message', listener: (channel: string, message: string) => void): void {
+  off(event: 'message', listener: (channel: string, message: string) => void): void;
+  off(event: 'close' | 'ready', listener: () => void): void;
+  off(
+    event: 'message' | 'close' | 'ready',
+    listener: ((channel: string, message: string) => void) | (() => void),
+  ): void {
     if (event === 'message') {
       this.listeners = this.listeners.filter((l) => l !== listener);
     }

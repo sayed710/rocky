@@ -398,19 +398,23 @@ stackTest('R-03: a late unowned expiry evicts its temporary copy without executi
 stackTest('R-03: expired forwarded resignation leaves the actual PostgreSQL event log unchanged', async () => {
   await withStack(async (s) => {
     const { gameId } = await seekGameUnderway(s);
-    assert.equal((await s.a.registry.claim(gameId)).owned, true);
-    s.a.consumer.stopConsumer(gameId);
+    // Either replica may own the game after both seats' readiness (see the owner lookups above); the
+    // owner holds the stopped consumer and the other replica forwards.
+    const owner = await s.redis.get(ownerKey(gameId));
+    const [ownerNode, other] = owner === s.a.nodeId ? [s.a, s.b] : [s.b, s.a];
+    assert.equal((await ownerNode.registry.claim(gameId)).owned, true);
+    ownerNode.consumer.stopConsumer(gameId);
     const before = await s.store.load(gameId); let payload: string | null = null;
-    const routed = assert.rejects(s.b.router.route(gameId, 'alice', { kind: 'resign' }), /expired before execution/);
+    const routed = assert.rejects(other.router.route(gameId, 'alice', { kind: 'resign' }), /expired before execution/);
     await waitFor('the forwarded resignation in Redis', async () => {
       payload = await s.redis.lindex(`game:cmd:v2:${gameId}`, 0); return payload !== null;
     });
     await routed;
     assert.ok(payload);
     // @ts-expect-error production receiver handles the delayed original envelope
-    await s.a.consumer.processCommand(payload);
+    await ownerNode.consumer.processCommand(payload);
     assert.deepEqual(await s.store.load(gameId), before);
-    assert.equal(s.a.authority.getState(gameId).status.over, false);
+    assert.equal(ownerNode.authority.getState(gameId).status.over, false);
     const envelope = JSON.parse(payload) as { requestId: string; responseKey: string };
     await s.redis.del(requestKey(envelope.requestId), envelope.responseKey, `game:cmd:v2:${gameId}`);
   });

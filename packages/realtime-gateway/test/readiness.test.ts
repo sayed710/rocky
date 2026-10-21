@@ -193,6 +193,7 @@ test('no-show expiry ends the game once, fans out, and refuses every later comma
   await create(n.authority);
   const spectator = n.connect('s');
   spectator.deliver({ t: 'join', gameId: 'g' });
+  await flush();
   const ended: Broadcast[] = [];
   n.pubsub.subscribe('games:ended', (m) => ended.push(m));
   n.clock.now = CREATED_AT + 60_000;
