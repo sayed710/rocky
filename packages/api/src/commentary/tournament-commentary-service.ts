@@ -201,6 +201,11 @@ export class TournamentCommentaryService {
     if (finalMove === null || fen === null) {
       throw HttpError.conflict('game ended before a move was played');
     }
+    // Refused before any quota or engine work, as review and anti-cheat do: the stored final move only
+    // the pre-#127 atomic rules allowed is not a legal move, so there is nothing true to narrate (#127).
+    if (finalMove.historical === true) {
+      throw HttpError.conflict('the final move was recorded under earlier atomic rules and cannot be analysed');
+    }
     if (!this.analysis.supportsVariant(game.variant)) {
       throw HttpError.unavailable('no engine is configured for this variant');
     }

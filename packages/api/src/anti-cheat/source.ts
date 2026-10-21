@@ -1,6 +1,6 @@
 import type { Variant } from '@chess-platform/core';
 import type { EventStore } from '@chess-platform/persistence';
-import { Game } from '@chess-platform/game';
+import { replayStoredHistory } from '@chess-platform/game/stored-history';
 import { NullLogger, type Logger } from '../ports/logger';
 
 export interface FinishedGame {
@@ -16,6 +16,11 @@ export interface FinishedGame {
   readonly initialFen: string;
   readonly white: string;
   readonly black: string;
+  /**
+   * The stored final move only the pre-#127 atomic rules allowed (#127), left out of `moves` because no
+   * engine can analyse a move today's rules reject. Present so the report can say so, never silently.
+   */
+  readonly historicalExcluded?: { readonly player: 'white' | 'black'; readonly ply: number; readonly uci: string };
 }
 
 export interface FinishedGameSource {
@@ -59,8 +64,11 @@ export class EventStoreGameSource implements FinishedGameSource {
     // durable row is unreadable. A log line is the difference between a contained failure and an
     // invisible one. Raised in the Qodo review of PR #12.
     let state;
+    let historicalPly: number | null;
     try {
-      state = Game.fromEvents(events).snapshot();
+      const replayed = replayStoredHistory(gameId, stored);
+      state = replayed.game.snapshot();
+      historicalPly = replayed.historicalPly;
     } catch {
       this.logger.error('anti-cheat: stored game could not be replayed', {
         gameId,
@@ -71,12 +79,16 @@ export class EventStoreGameSource implements FinishedGameSource {
     }
     if (!state.status.over) return null;
     if (!state.players.white || !state.players.black) return null;
+    const excluded = state.moves.find((m) => m.ply === historicalPly);
     return {
-      moves: state.moves.map((m) => m.uci),
+      moves: state.moves.filter((m) => m !== excluded).map((m) => m.uci),
       variant: state.variant,
       initialFen: created.initialFen,
       white: state.players.white,
       black: state.players.black,
+      ...(excluded === undefined
+        ? {}
+        : { historicalExcluded: { player: excluded.by === 'w' ? 'white' : 'black', ply: excluded.ply, uci: excluded.uci } as const }),
     };
   }
 }

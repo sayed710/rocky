@@ -38,6 +38,11 @@ export interface PlayerCorrelationReport {
   readonly rawCentipawnLossTotal: number;
   /** ACPL numerator with each ply clamped to {@link ACPL_CAP}, summed over {@link sampleSize} plies. */
   readonly cappedCentipawnLossTotal: number;
+  /**
+   * This player's stored moves left unanalysed because today's rules reject them: the pre-#127 atomic
+   * final move (#127). Absent when every move was offered to the engine.
+   */
+  readonly historicalExcludedPlies?: number;
 }
 
 /**

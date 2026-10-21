@@ -1,5 +1,5 @@
-import { Game, type GameEvent } from '@chess-platform/game';
-import { Position, type Color, type Variant } from '@chess-platform/core';
+import { replayStoredHistory } from '@chess-platform/game/stored-history';
+import type { Color, Variant } from '@chess-platform/core';
 import type { EventStore } from '@chess-platform/persistence';
 
 /** One durable move together with the position it was played from. */
@@ -9,6 +9,8 @@ export interface FinishedGameReviewMove {
   readonly san: string;
   readonly by: Color;
   readonly fenBefore: string;
+  /** Set on the stored pre-#127 atomic move, which today's rules (and so the engine) reject (#127). */
+  readonly historical?: true;
 }
 
 /** The private, completed-game source a player review is allowed to read. */
@@ -37,12 +39,21 @@ export class DurableFinishedGameReviewArchive implements FinishedGameReviewArchi
     const stored = await this.events.load(gameId);
     if (stored.length === 0) return undefined;
 
-    const events = stored.map((entry) => entry.event);
-    const game = Game.fromEvents(events);
+    // One forward replay captures each pre-move position; the stored-history replay also admits a
+    // pre-#127 atomic final move, which the review lists like any other.
+    const moves: FinishedGameReviewMove[] = [];
+    const { game } = replayStoredHistory(gameId, stored, ({ event, before, historical }) => {
+      moves.push({
+        ply: event.ply,
+        uci: event.uci,
+        san: event.san,
+        by: event.by,
+        fenBefore: before.fen(),
+        ...(historical ? { historical } : {}),
+      });
+    });
     const state = game.snapshot();
     if (!state.status.over || state.status.result === '*') return undefined;
-
-    const moves = reviewMoves(events);
 
     return {
       gameId,
@@ -54,29 +65,4 @@ export class DurableFinishedGameReviewArchive implements FinishedGameReviewArchi
       moves,
     };
   }
-}
-
-/** Capture pre-move positions in one forward pass instead of replaying every event prefix. */
-function reviewMoves(events: readonly GameEvent[]): FinishedGameReviewMove[] {
-  const created = events[0];
-  if (created?.type !== 'GameCreated') {
-    // The full aggregate replay above already enforces this invariant. Keep the local guard so this
-    // helper remains total if archive assembly is later rearranged.
-    throw new Error('completed game history must start with GameCreated');
-  }
-
-  let position = Position.fromFen(created.initialFen, created.variant);
-  const moves: FinishedGameReviewMove[] = [];
-  for (const event of events.slice(1)) {
-    if (event.type !== 'MovePlayed') continue;
-    moves.push({
-      ply: event.ply,
-      uci: event.uci,
-      san: event.san,
-      by: event.by,
-      fenBefore: position.fen(),
-    });
-    position = position.play(event.uci);
-  }
-  return moves;
 }
