@@ -1,0 +1,25 @@
+{
+  "startedAt": "2026-10-15T11:18:47.082Z",
+  "mode": "PREPARE_ONLY",
+  "runtime": {
+    "node": "v24.15.0",
+    "platform": "win32"
+  },
+  "before": {
+    "head": "dbf44d9a4207af6cf6096935693198a8a4954ff0",
+    "main": "4ccf8f48869335e06ac1b1de467d2161869f8fd7",
+    "status": ""
+  },
+  "setup": "PASS",
+  "bundleSHA256": "e73243de862ff235ea1cae672b73737bef017ba7232595555a6ec86a28d6f9b8",
+  "patchSHA256": "656c953f5ec3cb0789defd354d0c2bb6badbf91ce9529cc042cfc21709108bd2",
+  "execution": "NOT_RUN",
+  "parentArtifactsUnchanged": true,
+  "parentFrozenSourcesUnchanged": true,
+  "after": {
+    "head": "dbf44d9a4207af6cf6096935693198a8a4954ff0",
+    "main": "4ccf8f48869335e06ac1b1de467d2161869f8fd7",
+    "status": ""
+  },
+  "finishedAt": "2026-10-15T11:18:47.601Z"
+}

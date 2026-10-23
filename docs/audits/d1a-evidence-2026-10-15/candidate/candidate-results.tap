@@ -1,0 +1,82 @@
+TAP version 13
+# Subtest: F01 CONTROL
+ok 1 - F01 CONTROL
+  ---
+  duration_ms: 12.1934
+  type: 'test'
+  ...
+# Subtest: F02 CONTROL
+ok 2 - F02 CONTROL
+  ---
+  duration_ms: 4.0927
+  type: 'test'
+  ...
+# Subtest: F03 CONTROL
+ok 3 - F03 CONTROL
+  ---
+  duration_ms: 2.0498
+  type: 'test'
+  ...
+# Subtest: F04 CONTROL
+ok 4 - F04 CONTROL
+  ---
+  duration_ms: 3.7029
+  type: 'test'
+  ...
+# Subtest: S01 CANDIDATE
+ok 5 - S01 CANDIDATE
+  ---
+  duration_ms: 3.55
+  type: 'test'
+  ...
+# Subtest: S02 CANDIDATE
+ok 6 - S02 CANDIDATE
+  ---
+  duration_ms: 3.2451
+  type: 'test'
+  ...
+# Subtest: S03 CANDIDATE
+ok 7 - S03 CANDIDATE
+  ---
+  duration_ms: 2.1707
+  type: 'test'
+  ...
+# Subtest: S04 CANDIDATE
+ok 8 - S04 CANDIDATE
+  ---
+  duration_ms: 3.4279
+  type: 'test'
+  ...
+# Subtest: S05 CANDIDATE
+ok 9 - S05 CANDIDATE
+  ---
+  duration_ms: 3.2505
+  type: 'test'
+  ...
+# Subtest: F05 CONTROL
+ok 10 - F05 CONTROL
+  ---
+  duration_ms: 2.9066
+  type: 'test'
+  ...
+# Subtest: F06 CHARACTERIZATION
+ok 11 - F06 CHARACTERIZATION
+  ---
+  duration_ms: 2.0076
+  type: 'test'
+  ...
+# Subtest: F07 CONTROL
+ok 12 - F07 CONTROL
+  ---
+  duration_ms: 1.7113
+  type: 'test'
+  ...
+1..12
+# tests 12
+# suites 0
+# pass 12
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 229.029
