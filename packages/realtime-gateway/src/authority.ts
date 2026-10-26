@@ -1139,7 +1139,12 @@ export class GameAuthority {
       if (msg.t === 'ended') this.pubsub.publish(gamesEndedChannel(), msg);
     }
 
-    return { events: result.events, broadcasts, state: this.viewOf(rec.game, rec.persistedSeq) };
+    const state = this.viewOf(rec.game, rec.persistedSeq);
+    if (result.events.some((ev) => ev.type === 'DrawOffered' || ev.type === 'DrawDeclined')) {
+      this.pubsub.publish(gameChannel(gameId), { t: 'state', gameId, state });
+    }
+
+    return { events: result.events, broadcasts, state };
   }
 
   private guard(fn: () => { game: Game; events: GameEvent[] }): { game: Game; events: GameEvent[] } {

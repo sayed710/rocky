@@ -27,7 +27,6 @@ on:
       - '.github/workflows/ci.yml'
       - '.github/workflows/pin-parity.yml'
   pull_request:
-    branches: [main]
     paths:
       - 'docs/adr/**'
       - 'Dockerfile*'

@@ -26,7 +26,6 @@ on:
       - 'docs/adr/0121-deterministic-engine-install-in-ci.md'
 
   pull_request:
-    branches: [main]
     paths:
       - '**'
       - '!**/*.md'
