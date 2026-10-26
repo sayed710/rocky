@@ -6,7 +6,12 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-20 — Local-only final review-policy corrections prepared: auditable Graphite execution/applicability and suppression PASS/HOLD; Greptile dispatch remains disabled by owner decision. Published PR #126 stays at 2ffc213; no publication or activation._
+_Last updated: 2026-10-26 — Rocky D1-B candidate verified: root build and lint exit 0, all 19 hermetic workspaces pass (1652 web tests; 232 offline browser tests; ADR guard 164 ADRs; topology 542 test files across 21 suites; parity guards passed); boundary compilation blocker resolved, native review clean with four doc corrections integrating; no PR/commit/push/merge, silent publication loss and D1 open. Prior: _Last updated: 2026-10-26 — Rocky D1-B known-gap client recovery follow-up: V9 retry availability, snapshot validation and notification fencing, mounted input/premove clearing; coordinator web tests and production lint passed, frozen production review clean, boundary test correction and final all-scope review pending._
+Prior: _Last updated: 2026-10-26 — Rocky D1-B known-gap client recovery follow-up: teardown idempotency and reentrant stop fixture correction, logical wire-boundary dispatch charging with restart budget retention, manual retry epoch invalidation, timer handle ownership fencing, and boundary scheduler capture test; root verification and independent review pending._
+
+Prior: _Last updated: 2026-10-26 — Rocky D1-B known-gap client recovery: bounded coalesced retry across flight and backoff, synchronous listener and timer fencing, safe-integer ply validation, exhausted submission/UI gating, and qualified causality schedule; root verification and independent review pending._
+
+Prior: _Last updated: 2026-10-20 — Local-only final review-policy corrections prepared: auditable Graphite execution/applicability and suppression PASS/HOLD; Greptile dispatch remains disabled by owner decision. Published PR #126 stays at 2ffc213; no publication or activation._
 
 Prior: _Last updated: 2026-10-20 — Local-only temporary Qodo/Graphite review-stack proposal prepared for PR #126; policy INACTIVE, existing gates and final-SHA transition approval remain required._
 
@@ -5697,3 +5702,36 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - The local proposal distinguishes zero published Graphite comments from zero detected findings; defines feasible exact-head execution/applicability evidence and explicit PASS/HOLD outcomes; and blocks unapproved material security/correctness suppression. Independent requirements verification remains mandatory.
 - REVIEW_POLICY and AGENTS are aligned with the owner decision to keep Greptile dispatch disabled until explicit restoration. The separate PR #126 exceptions at reviewed head 2ffc213f9b4b395184f69576efa67f28143462f6 remain unchanged and SHA-bound; any eventual new head needs its own owner-authorized handling. Prior transition records are preserved, not rewritten.
 - This is an uncommitted local proposal under independent read-only review, not adoption, activation, publication or a new exception. No provider settings or review triggers, other worktrees, product code, PG-F1 activation, PG-F2, deployment or merge are authorized.
+
+
+## 2026-10-26 — Rocky D1-B known-gap client recovery
+
+- Addressed OpenCode and Pi review findings on candidate-v1: coalesced retry covers both flight and backoff delay; logical attempts are counted solely on actual resume dispatch; intermediate insufficient snapshots and command rejections preserve flight and debt until fixed timeout settlement.
+- Fenced synchronous listener reentrancy across stop/session/snapshot callbacks with recoveryEpoch and socket generation; timer callbacks verify fence before clearing handle or mutating state; enforced safe finite non-negative integer ply validation before legacy target discharge; removed test-only public getters in favor of observable contract assertions.
+- Unified board turn and action affordances through exhaustion by clarifying recovering as durable debt state; corrected reconnect scheduler oracle and seek-game causality authority fixture in web test suite.
+- Scope strictly confined to web package and docs; zero protocol/server/deployment changes; root verification and independent review pending; silent final-publication loss without observed gap remains open.
+
+
+### 2026-10-26 — Rocky D1-B known-gap client recovery follow-up (V4 corrections)
+
+- Corrected synchronous listener test recursion by establishing teardown idempotency in `GameSync.stop()` (`if (!this.unsubscribe) return;`) and qualifying test fixture reentrant transition; preserves essential no-resume and no-timer invariants while proving safe idempotent teardown.
+- Aligned attempt accounting strictly with logical wire dispatch (`this.client.send()`), rechecking lifecycle and target existence after subscriber notifications so listener-cancelled attempts preserve the full 3-attempt budget; verified via observable stop/restart budget retention test.
+- Corrected manual recovery in `networkOnline()` to invalidate manual replacement via `clearGapRecovery()` (`recoveryEpoch++`), reset attempt budget, and restart recovery; enforced timer callback handle ownership (`gapRecoveryHandle === myHandle`) and epoch fencing returning before any state mutation if ownership differs.
+- Added boundary scheduler capture test intercepting `setTimeout` to directly invoke a cancelled callback after manual retry, proving successor timer, budget, and recovery state remain intact without relying on unbounded while-pending drains.
+- Accurately qualified V3 compilation failures, V4 runtime failure, and static author inspection boundaries in ADR-0163 and D1B audit; root full tests and independent review pending.
+
+### 2026-10-26 — Rocky D1-B known-gap client recovery follow-up (V9 verification posture)
+
+- Corrected retry availability in `GameSync`, snapshot validation and notification fencing, and actual mounted input and premove clearing.
+- Coordinator executed 1648 web tests successfully before the validation refactor, and production lint passed after refactor.
+- Pi performed an actual frozen production-only review and found no new actionable production findings; this is not full candidate acceptance.
+- Later boundary test candidate remains unaccepted with compilation and fixture defects under correction.
+- OpenCode's attempted further review hit provider usage quota; final all-scope review remains pending.
+- No commit, push, new PR, Qodo/Graphite acceptance, merge or deployment. Silent unseen final-publication loss remains open.
+- Current verification (2026-10-26): All 10-file bounded candidate achieved root build and lint exit 0; root `npm test` SUCCESS across all 19 hermetic workspaces with zero skips (web 1652/1652 pass, zero fails/skips; offline browser 232/232 pass, zero skips under isolated 1 worker).
+- ADR claim guard passed for 164 ADRs. Topology guard inventoried 542 test files across 21 suites; CI parity and variant parity passed. Exact authority snapshot comparison and real regressions executed: send=false, malformed payloads, same-game positive floor, account, R03, and mounted input / premove clearing.
+- Current boundary compilation blocker is resolved; older failure entries remain historical.
+- Native separate read-only full-scope review found no remaining actionable production or test defects, requesting four documentation accuracy corrections only; these are currently being integrated with narrow doc review pending.
+- Review status: Actual Pi V9 production-only review found no new findings; prior Pi and OpenCode V8 reviews were rejections, not final acceptance. Requested additional CLI review was quota-blocked; no fallback is represented as Pi/OpenCode, and neither quota reset nor final CLI result is claimed.
+- Full backend browser was not run due to lean environment command denial; no Graphite settings inspection or clearance performed.
+- Remaining gates: No commit, push, PR, CI run, Qodo/Graphite published head acceptance, merge, or deploy yet. Overall D1 is not closed and silent unseen final-publication loss remains open; all-project production readiness is not claimed. Narrow local handoff awaits doc review and owner-only merge.
