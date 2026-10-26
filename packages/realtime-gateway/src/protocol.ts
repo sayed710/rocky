@@ -361,7 +361,7 @@ export type ServerMessage =
 export type GameBroadcast = MoveBroadcast | EndedBroadcast | ReadyBroadcast | CommandConfirmedMessage;
 
 /** Broadcasts fanned out to a whole room (as opposed to point-to-point replies). */
-export type Broadcast = GameBroadcast | TournamentUpdateBroadcast;
+export type Broadcast = GameBroadcast | TournamentUpdateBroadcast | StateMessage;
 
 // ─── Default JSON codec ─────────────────────────────────────────────────────
 

@@ -124,3 +124,92 @@ stackTest('D1-A real stack: non-owner edge serves freshest committed prefix on j
     }
   });
 });
+
+stackTest('Q3 real stack: committed draw-state publishes across nodes to remote clients without explicit resume', { timeout: 90000 }, async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await migrate(pool, migrationsDir());
+    const store = new PostgresEventStore(pool);
+    const gameId = randomUUID();
+    const a = node(store);
+    const b = node(store);
+    const c = node(store);
+
+    try {
+      // Node A creates game and claims ownership with the opening move (Node A has no local room / connections).
+      await create(a.authority, gameId);
+      await a.router.route(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
+
+      // Spectator and player Bob join on Node B; third viewing spectator joins on Node C.
+      const pBob = b.join(gameId, 'bob');
+      const sB = b.join(gameId);
+      const sC = c.join(gameId);
+
+      // Assert join acknowledgments across nodes before initiating draw actions.
+      await until(() => !!pBob.last('joined') && !!sB.last('joined') && !!sC.last('joined'));
+      assert.equal(pBob.last('joined')?.state.stateRevision, 1);
+      assert.equal(sB.last('joined')?.state.stateRevision, 1);
+      assert.equal(sC.last('joined')?.state.stateRevision, 1);
+      assert.equal(sC.last('joined')?.state.ply, 1);
+
+      // Owner Node A originates a draw offer at unchanged ply (stateRevision 2, ply 1).
+      const offerResult = await a.router.route(gameId, 'alice', { kind: 'offerDraw' });
+
+      // Remote observer on Node C receives authoritative state broadcast without explicit resume.
+      await until(() => sC.last('state')?.state.stateRevision === 2);
+      await until(() => sB.last('state')?.state.stateRevision === 2);
+      await until(() => pBob.last('state')?.state.stateRevision === 2);
+
+      // Verify remote snapshot arrived before any explicit resume and deepEquals authoritative route result.
+      assert.equal(sC.last('resumed'), undefined);
+      assert.equal(sB.last('resumed'), undefined);
+      const offerState = sC.last('state')!.state;
+      assert.deepEqual(offerState, offerResult.state);
+      assert.equal(offerState.stateRevision, 2);
+      assert.equal(offerState.ply, 1);
+      assert.equal(offerState.drawOffer, 'w');
+      assert.equal(offerState.moves[0]?.uci, 'e2e4');
+      assert.equal(offerState.ready, null);
+
+      // Bob on Node B declines the draw through direct client message, forwarded across Redis to owner A.
+      pBob.deliver({ t: 'declineDraw', gameId });
+
+      // Both remote node C and local B observe the committed decline at unchanged ply (stateRevision 3, ply 1).
+      await until(() => sC.last('state')?.state.stateRevision === 3);
+      await until(() => sB.last('state')?.state.stateRevision === 3);
+
+      const declineState = sC.last('state')!.state;
+      const authoritativeState = await a.authority.getState(gameId);
+      assert.deepEqual(declineState, authoritativeState);
+      assert.equal(declineState.stateRevision, 3);
+      assert.equal(declineState.ply, 1);
+      assert.equal(declineState.drawOffer, null);
+      assert.equal(declineState.moves[0]?.uci, 'e2e4');
+      assert.deepEqual(declineState.clock, authoritativeState.clock);
+      assert.equal(declineState.ready, null);
+
+      // Remote observer C receives exactly one state broadcast per committed draw mutation.
+      const cStates = sC.all('state');
+      assert.equal(cStates.length, 2);
+      assert.equal(cStates[0]?.state.stateRevision, 2);
+      assert.equal(cStates[1]?.state.stateRevision, 3);
+
+      // Ingress node B may observe redundant local response fallback, but state remains monotonic.
+      const bStates = sB.all('state');
+      assert.ok(bStates.length >= 2);
+
+      // Next legal move from Bob (e7e5) executes and broadcast reaches all nodes without gap.
+      await b.router.route(gameId, 'bob', { kind: 'move', uci: 'e7e5' });
+      await until(() => sC.last('move')?.ply === 2 && sB.last('move')?.ply === 2);
+
+      assert.equal(sC.last('move')?.uci, 'e7e5');
+      assert.equal(sB.last('move')?.uci, 'e7e5');
+      assert.equal(sC.last('resumed'), undefined);
+      assert.equal(sB.last('resumed'), undefined);
+    } finally {
+      await c.close();
+      await b.close();
+      await a.close();
+      await store.closePlayerLocks();
+    }
+  });
+});

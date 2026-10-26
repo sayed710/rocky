@@ -29,7 +29,6 @@ import { Room } from './room';
 import { gameChannel, SubscriptionCancelledError, type PubSub, type Unsubscribe } from './pubsub';
 import type { Connection } from './transport';
 import type {
-  Broadcast,
   ClientMessage,
   MoveMessage,
   RejectCode,
@@ -647,10 +646,10 @@ export class RealtimeGateway {
     if (entry) return entry;
     const room = new Room(gameId);
     const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (rawMsg) => {
-      const msg = rawMsg as unknown as Broadcast | StateMessage;
+      const msg = rawMsg;
       if (isStateMessage(msg)) {
         const currentRev = this.observedRevision.get(gameId);
-        if (currentRev !== undefined && msg.state.stateRevision <= currentRev) {
+        if (currentRev !== undefined && msg.state.stateRevision < currentRev) {
           return;
         }
       }

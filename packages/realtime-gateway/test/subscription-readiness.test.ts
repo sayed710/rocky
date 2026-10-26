@@ -686,7 +686,7 @@ test('SB8: Failed or revoked token while waiting for readiness', async () => {
   assert.equal(gateway.hasLocalSessions(gameId), false, 'no membership');
 });
 
-test('SB9: Duplicate state frame on the room channel at the observed revision', async () => {
+test('SB9: Equal-revision full state frame is forwarded on the room channel for join buffer reconciliation, while strictly lower revision is dropped', async () => {
   const broker = new FakeRedisBroker();
   const store = new InMemoryEventLog();
   const pub = broker.createClient('pub');
@@ -718,8 +718,9 @@ test('SB9: Duplicate state frame on the room channel at the observed revision', 
   sub.deliverMessage(gameChannel(gameId), JSON.stringify({ origin: 'other-node', msg: duplicateStateMsg }));
   await flush();
 
-  // Duplicate state frame should NOT be forwarded to client
-  assert.equal(c.all('state').length, 0, 'duplicate state at observed revision must not be forwarded');
+  // Equal revision state frame must be forwarded to client for join buffer reconciliation
+  assert.equal(c.all('state').length, 1, 'equal revision state frame must be forwarded');
+  assert.equal(c.all('state')[0]!.state.stateRevision, currentRev);
 
   // Send a newer state frame (revision currentRev + 1)
   const newerStateMsg = {
@@ -731,8 +732,20 @@ test('SB9: Duplicate state frame on the room channel at the observed revision', 
   await flush();
 
   // Newer state frame MUST be forwarded to client
-  assert.equal(c.all('state').length, 1, 'newer state frame must be forwarded');
-  assert.equal(c.all('state')[0]!.state.stateRevision, currentRev + 1);
+  assert.equal(c.all('state').length, 2, 'newer state frame must be forwarded');
+  assert.equal(c.all('state')[1]!.state.stateRevision, currentRev + 1);
+
+  // Send stale state frame below observed revision (currentRev < currentRev + 1)
+  const staleStateMsg = {
+    t: 'state' as const,
+    gameId,
+    state: { ...joined.state, stateRevision: currentRev },
+  };
+  sub.deliverMessage(gameChannel(gameId), JSON.stringify({ origin: 'other-node', msg: staleStateMsg }));
+  await flush();
+
+  // Stale state frame below observed revision must be dropped
+  assert.equal(c.all('state').length, 2, 'stale state frame below observed revision must not be forwarded');
 });
 
 test('SB10: publish rejection', async () => {
