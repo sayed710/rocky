@@ -94,11 +94,11 @@ test('server-rejected fresh credentials retain identity during refresh backoff w
   await h.reconnect();
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'rejected' });
   h.setRefresh(async () => { throw new NetworkError(); });
-  h.sync.networkOnline(); h.factory.last.open(); await flush();
+  h.sync.retryRecovery(); h.factory.last.open(); await flush();
   assert.equal(h.refreshes(), 1);
   assert.equal(h.factory.last.sent.length, 0);
   assert.equal(h.session.current?.user.id, 'alice');
-  h.sync.networkOnline(); await flush();
+  h.sync.retryRecovery(); await flush();
   assert.equal(h.refreshes(), 1, 'explicit retry cannot bypass manager cooldown');
   h.advance(10_000); h.setRefresh(async () => h.issue());
   h.scheduler.runNext(); await flush();
@@ -110,7 +110,7 @@ test('refresh returning a previously rejected token cannot resend it or create a
   await h.reconnect();
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'rejected' });
   h.setRefresh(async () => h.tokenA);
-  h.sync.networkOnline(); h.factory.last.open(); await flush();
+  h.sync.retryRecovery(); h.factory.last.open(); await flush();
   for (let attempt = 0; attempt < 3; attempt++) { h.advance(4_000); h.scheduler.runNext(); await flush(); }
   assert.equal(h.refreshes(), 4);
   assert.equal(h.scheduler.pending, 0);
@@ -495,7 +495,7 @@ test('explicit recovery can reopen a server-rejected join without reload or sess
   await h.reconnect();
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'invalid or expired token' });
   const sockets = h.factory.sockets.length;
-  h.sync.networkOnline();
+  h.sync.retryRecovery();
   assert.equal(h.factory.sockets.length, sockets + 1);
   h.factory.last.open(); await flush();
   assert.equal((await h.exchange()).last('joined')?.role, 'white');
@@ -514,7 +514,7 @@ test('bounded retries stop during a persistent refresh outage', async (t) => {
   assert.equal(h.session.current?.user.id, 'alice');
   assert.equal(h.sync.getState().recoveryAvailable, true);
   h.setRefresh(async () => h.issue()); h.advance(30_000);
-  h.sync.networkOnline(); await flush();
+  h.sync.retryRecovery(); await flush();
   assert.equal((await h.exchange()).last('joined')?.role, 'white');
   assert.equal(h.sync.getState().recoveryAvailable, false);
 });
@@ -523,7 +523,7 @@ test('unknown game rejection stays terminal without a reconnect storm', async (t
   const h = await harness(); t.after(() => dispose(h)); await h.reconnect();
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unknown_game', message: 'unknown game' });
   const sockets = h.factory.sockets.length;
-  h.sync.networkOnline();
+  h.sync.retryRecovery();
   assert.equal(h.factory.sockets.length, sockets);
   assert.equal(h.scheduler.pending, 0);
   assert.equal(h.sync.getState().recoveryAvailable, false);

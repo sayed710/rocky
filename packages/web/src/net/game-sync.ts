@@ -281,8 +281,17 @@ export class GameSync {
     this.client.networkOffline();
   }
 
-  /** Retry after network restoration or an explicit recovery action. */
+  /** The browser reported network connectivity was restored — reconnect transport if offline/disconnected. */
   networkOnline(): void {
+    if (!this.unsubscribe || this.suspended || this.terminalJoinFailure) return;
+    // An already-open transport's join and recovery lifecycles are preserved without reset.
+    if (this.client.state === 'open') return;
+    if (this.client.state === 'closed') this.client.connect();
+    else this.client.reconnectNow();
+  }
+
+  /** Explicit manual retry initiated by user action (e.g. clicking reconnect/retry button). */
+  retryRecovery(): void {
     if (!this.unsubscribe || this.suspended || this.terminalJoinFailure) return;
     const socket = this.client.generation;
     const joinEpoch = this.joinEpoch;
@@ -613,6 +622,11 @@ export class GameSync {
             || this.client.state !== 'open' || (this.session.current?.user.id ?? null) !== userId) return;
         }
         if (this.hasIncompleteRecovery() && !this.isValidRecoverySnapshot(msg.state)) {
+          if (!this.state.connected) {
+            this.awaitingJoin = false;
+            this.joiningAccessToken = undefined;
+            this.scheduleJoinRetry(this.session);
+          }
           return;
         }
         this.awaitingJoin = false;

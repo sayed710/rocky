@@ -69,9 +69,14 @@ Known-gap recovery is coalesced into one logical pending attempt across flight a
     budget is retained.
   - Reset on successful discharge: an accepted sufficient snapshot discharges the target and resets
     `gapRecoveryAttempt = 0`.
-  - Reset on explicit manual retry: `networkOnline()` invalidates manual replacement by invoking
+  - Reset on explicit manual retry: `retryRecovery()` invalidates manual replacement by invoking
     `clearGapRecovery()` (`recoveryEpoch++`, cancelling active timers and resetting pending flag),
-    resets `gapRecoveryAttempt = 0`, and restarts recovery if debt remains.
+    resets `gapRecoveryAttempt = 0`, and restarts recovery if debt remains (or resets auth/join attempts if
+    disconnected). Automatic `networkOnline()` is a no-op on already-open sockets, preserving in-flight gap
+    episodes, backoff, and attempt budgets. Owned disconnected malformed recovery joins clear `awaitingJoin` and settle into
+    existing bounded join retries with base delays of 1s/2s/4s (respecting `SessionManager.refreshRetryDelayMs` cooldown max),
+    providing an initial join plus 3 automatic retries before exposing manual retry availability, separate from the 3 logical
+    gap recovery resume budget; malformed connected duplicate joined frames are ignored without timer, role, or state changes.
 
 ### 3. Discharge condition and partial progress
 Only an ACCEPTED full snapshot (`snapshotFreshness` returning `'newer'` or `'equal'`) with sufficient

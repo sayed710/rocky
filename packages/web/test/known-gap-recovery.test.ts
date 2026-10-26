@@ -359,8 +359,8 @@ test('known-gap recovery: failure and timeout budget exhausts after exactly 3 at
   assert.equal(sync.submitMove('e2e4'), null, 'gameplay submission remains gated on exhaustion');
   assert.equal(sync.resign(), false, 'action submission remains gated on exhaustion');
 
-  // User triggers manual retry via networkOnline()
-  sync.networkOnline();
+  // User triggers manual retry via retryRecovery()
+  sync.retryRecovery();
   assert.equal(sync.getState().recoveryAvailable, false);
   assert.equal(sync.getState().recovering, true);
   assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 4, 'manual retry initiates attempt');
@@ -551,7 +551,7 @@ test('known-gap recovery: synchronous stop before wire dispatch preserves full a
 
   // Restart sync on the same socket
   sync.start();
-  sync.networkOnline();
+  sync.retryRecovery();
   factory.last.emit({
     t: 'joined',
     gameId: 'g1',
@@ -646,10 +646,10 @@ test('known-gap recovery: cancelled timer callback invoked after manual retry do
   assert.ok(obsoleteCallback !== undefined, 'attempt 1 timeout callback must be captured');
   assert.equal(typeof obsoleteCallback, 'function');
 
-  // User triggers manual retry via networkOnline() while connected with active debt
-  sync.networkOnline();
+  // User triggers manual retry via retryRecovery() while connected with active debt
+  sync.retryRecovery();
 
-  // networkOnline() invalidates previous recoveryEpoch, resets attempt budget, and schedules successor timeout
+  // retryRecovery() invalidates previous recoveryEpoch, resets attempt budget, and schedules successor timeout
   assert.equal(manualScheduler.pending, 1, 'successor timeout scheduled in manualScheduler');
   assert.equal(capturedCallbacks.length, 2, 'successor timeout callback captured');
 
@@ -678,7 +678,7 @@ test('known-gap recovery: reentrant listener replacement does not clear successo
     if (!replaced && state.recovering && state.connected) {
       replaced = true;
       // Reentrant listener replaces recovery episode with fresh manual recovery
-      sync.networkOnline();
+      sync.retryRecovery();
     }
   });
 
@@ -799,7 +799,7 @@ test('known-gap recovery: transport send boundary triggering replacement does no
     if (replaceDuringSend && parsed.t === 'resume') {
       replaceDuringSend = false;
       // Transport boundary synchronously triggers replacement via manual recovery
-      sync.networkOnline();
+      sync.retryRecovery();
     }
   };
 
@@ -1142,8 +1142,8 @@ test('synthetic: causality schedule with seek-game readiness, prefix1 selected b
   assert.equal(sync.getState().ply, 2, 'retains gapped ply 2');
   assert.equal(sync.submitMove('d2d4'), null, 'gameplay submission remains gated on exhaustion');
 
-  // Manual retry recovery via networkOnline
-  sync.networkOnline();
+  // Manual retry recovery via retryRecovery
+  sync.retryRecovery();
   assert.equal(sync.getState().recoveryAvailable, false);
   assert.equal(sync.getState().recovering, true);
   assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 4);
@@ -1248,7 +1248,7 @@ test('exhaustion/late insufficient progress preserves retry', (t) => {
   assert.equal(sync.claimFlag(), false);
   assert.equal(sync.abort(), false);
 
-  sync.networkOnline();
+  sync.retryRecovery();
   assert.equal(sync.getState().recoveryAvailable, false);
   assert.equal(sync.getState().recovering, true);
   assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 4);
@@ -1361,7 +1361,7 @@ test('nested legacy lower snapshot', (t) => {
   assert.deepEqual(sync.getState().snapshot?.legalMoves, legalMoves3);
 });
 
-test('networkOnline initial notification logout', (t) => {
+test('retryRecovery initial notification logout', (t) => {
   const { factory, scheduler, client, sync } = setup();
   t.after(() => {
     sync.stop();
@@ -1405,7 +1405,7 @@ test('networkOnline initial notification logout', (t) => {
   const socketCount = factory.sockets.length;
 
   armed = true;
-  sync.networkOnline();
+  sync.retryRecovery();
 
   assert.ok(factory.last.closed);
   assert.equal(factory.sockets.length, socketCount);
@@ -1489,4 +1489,719 @@ test('synchronous stop during sufficient rejoin-discharge prevents post-stop rec
   assert.equal(newSocketResumes.length, 0);
   assert.equal(scheduler.pending, 0);
   assert.equal(newSocket.closed, null);
+});
+
+test('auto-online flight backoff exhaustion coalesces on connected transport until explicit retry', (t) => {
+  const { factory, scheduler, client, sync } = setup();
+  t.after(() => {
+    sync.stop();
+    client.close();
+  });
+
+  const fullLedger4: StateView['moves'] = [
+    { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+    { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' },
+    { ply: 3, uci: 'g1f3', san: 'Nf3', by: 'w' },
+    { ply: 4, uci: 'b8c6', san: 'Nc6', by: 'b' },
+  ];
+
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: stateView(0, 'w', 0, []),
+  });
+  assert.equal(sync.getState().ply, 0);
+  assert.equal(sync.stateRevision, 0);
+
+  // Move gap to ply 3 triggers recovery flight 1 with 2s timeout
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 3,
+    ply: 3,
+    uci: 'g1f3',
+    san: 'Nf3',
+    by: 'w',
+    clock: { w: 60_000, b: 60_000 },
+    serverTs: 0,
+    fenHash: 'h3',
+    legalMoves: {},
+  });
+
+  assert.equal(sync.getState().recovering, true);
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 1);
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 2000);
+
+  // Repeated automatic online on connected transport is a no-op: retains single resume and active 2s timer
+  sync.networkOnline();
+  sync.networkOnline();
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 1);
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 2000);
+
+  // Attempt 1 timeout fires, transitioning to 1s backoff
+  scheduler.runNext();
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 1000);
+
+  // Online during backoff coalesces: no extra resume and timer unchanged
+  sync.networkOnline();
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 1000);
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 1);
+
+  // Higher target move arrives during backoff: coalesces without resetting backoff timer
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 4,
+    ply: 4,
+    uci: 'b8c6',
+    san: 'Nc6',
+    by: 'b',
+    clock: { w: 60_000, b: 60_000 },
+    serverTs: 0,
+    fenHash: 'h4',
+    legalMoves: {},
+  });
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 1);
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 1000);
+
+  // Backoff fires, sending resume 2 with 2s timeout
+  scheduler.runNext();
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 2);
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 2000);
+
+  // Attempt 2 timeout fires, transitioning to 2s backoff
+  scheduler.runNext();
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 2000);
+
+  // Attempt 2 backoff fires, sending resume 3 with 2s timeout
+  scheduler.runNext();
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 3);
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 2000);
+
+  // Attempt 3 timeout fires: budget exhausted, 0 timers remaining, retry available
+  scheduler.runNext();
+  assert.equal(scheduler.pending, 0);
+  assert.equal(sync.getState().recoveryAvailable, true);
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 3);
+
+  // Online after exhaustion on open transport preserves 3 resumes and recoveryAvailable true
+  sync.networkOnline();
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 3);
+  assert.equal(scheduler.pending, 0);
+  assert.equal(sync.getState().recoveryAvailable, true);
+
+  // Explicit retryRecovery alone initiates the 4th resume
+  sync.retryRecovery();
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 4);
+  assert.equal(sync.getState().recoveryAvailable, false);
+  assert.equal(sync.getState().recovering, true);
+
+  // Snapshot 3 arrives: insufficient because target was raised to revision 4, ply 4
+  const legalMoves3: LegalMoves = { b8: ['c6', 'a6'], g8: ['f6'] };
+  factory.last.emit({
+    t: 'resumed',
+    gameId: 'g1',
+    state: stateView(3, 'b', 3, fullLedger4.slice(0, 3), legalMoves3),
+    missed: [],
+  });
+  assert.equal(sync.getState().recovering, true);
+  assert.equal(sync.getState().ply, 3);
+  assert.equal(sync.stateRevision, 3);
+  assert.equal(sync.getState().snapshot?.ply, 3);
+  assert.equal(sync.getState().recoveryAvailable, false);
+
+  // Coherent full 4 snapshot arrives, discharging debt and restoring exact projection
+  const legalMoves4: LegalMoves = { f1: ['c4', 'b5', 'e2', 'd3'] };
+  factory.last.emit({
+    t: 'resumed',
+    gameId: 'g1',
+    state: stateView(4, 'w', 4, fullLedger4, legalMoves4),
+    missed: [],
+  });
+
+  assert.equal(sync.getState().recovering, false);
+  assert.equal(sync.getState().recoveryAvailable, false);
+  assert.equal(sync.getState().ply, 4);
+  assert.equal(sync.stateRevision, 4);
+  assert.equal(sync.getState().snapshot?.fen, PLY_FENS[4]);
+  assert.equal(sync.getState().snapshot?.fenHash, 'h4');
+  assert.deepEqual(sync.getState().snapshot?.moves, fullLedger4);
+  assert.equal(sync.getState().snapshot?.turn, 'w');
+  assert.deepEqual(sync.getState().snapshot?.status, { over: false });
+  assert.deepEqual(sync.getState().snapshot?.legalMoves, legalMoves4);
+});
+
+test('malformed rejoin retryable budget exhausts join retries and preserves gap debt budget', (t) => {
+  const { factory, scheduler, client, sync } = setup();
+  t.after(() => {
+    sync.stop();
+    client.close();
+  });
+
+  const fullLedger: StateView['moves'] = [
+    { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+    { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' },
+    { ply: 3, uci: 'g1f3', san: 'Nf3', by: 'w' },
+  ];
+
+  sync.start();
+  factory.last.open();
+
+  // Start accepted positive floor 1
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: stateView(1, 'b', 1, fullLedger.slice(0, 1)),
+  });
+  assert.equal(sync.getState().ply, 1);
+  assert.equal(sync.stateRevision, 1);
+  assert.equal(sync.getState().recovering, false);
+
+  // Debt 3/3 consumes resume 1
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 3,
+    ply: 3,
+    uci: 'g1f3',
+    san: 'Nf3',
+    by: 'w',
+    clock: { w: 60_000, b: 60_000 },
+    serverTs: 0,
+    fenHash: 'h3',
+    legalMoves: {},
+  });
+  assert.equal(sync.getState().recovering, true);
+  const socket1 = factory.last;
+  assert.equal(socket1.sent.filter((f) => JSON.parse(f).t === 'resume').length, 1);
+
+  // Capture complete state before bad join
+  const snapshotBefore = sync.getState().snapshot;
+  const movesBefore = snapshotBefore?.moves;
+  const fenBefore = snapshotBefore?.fen;
+  const hashBefore = snapshotBefore?.fenHash;
+  const turnBefore = snapshotBefore?.turn;
+  const statusBefore = snapshotBefore?.status;
+  const readyBefore = snapshotBefore?.ready;
+  const floorBefore = sync.stateRevision;
+  const plyBefore = sync.getState().ply;
+
+  // Drop and reconnect onto socket 2
+  socket1.serverClose();
+  scheduler.runNext();
+  assert.equal(factory.sockets.length, 2);
+  const socket2 = factory.last;
+  assert.notEqual(socket2, socket1);
+
+  socket2.open();
+  const countJoins = (sock: FakeSocket): number =>
+    sock.sent.filter((f) => JSON.parse(f).t === 'join').length;
+  assert.equal(countJoins(socket2), 1);
+
+  // Malformed joined reply with role: 'spectator' and truncated ledger
+  const legalMoves3: LegalMoves = { b8: ['c6', 'a6'], g8: ['f6'] };
+  socket2.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'spectator',
+    state: stateView(3, 'b', 3, fullLedger.slice(0, 1), legalMoves3),
+  });
+
+  // Rejected without acceptance: connected false blocks privilege; all snapshot fields unchanged
+  assert.equal(sync.getState().connected, false, 'connected false blocks privilege');
+  assert.equal(sync.getState().ply, plyBefore);
+  assert.equal(sync.stateRevision, floorBefore);
+  assert.equal(sync.getState().snapshot?.fen, fenBefore);
+  assert.equal(sync.getState().snapshot?.fenHash, hashBefore);
+  assert.equal(sync.getState().snapshot?.turn, turnBefore);
+  assert.deepEqual(sync.getState().snapshot?.status, statusBefore);
+  assert.deepEqual(sync.getState().snapshot?.ready, readyBefore);
+  assert.deepEqual(sync.getState().snapshot?.moves, movesBefore);
+  assert.equal(sync.submitMove('e7e5'), null, 'submitMove blocked');
+  assert.equal(sync.resign(), false, 'resign blocked');
+  assert.equal(sync.offerDraw(), false, 'offerDraw blocked');
+  assert.equal(sync.acceptDraw(), false, 'acceptDraw blocked');
+  assert.equal(sync.declineDraw(), false, 'declineDraw blocked');
+  assert.equal(sync.claimFlag(), false, 'claimFlag blocked');
+  assert.equal(sync.abort(), false, 'abort blocked');
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 1000);
+
+  // Automatic online during 1s backoff leaves join count and timer unchanged
+  sync.networkOnline();
+  assert.equal(countJoins(socket2), 1);
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 1000);
+
+  // Advance 1s -> sends join 2 (bad) -> schedules 2s
+  scheduler.runNext();
+  assert.equal(countJoins(socket2), 2);
+  socket2.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'spectator',
+    state: stateView(3, 'b', 3, fullLedger.slice(0, 1), legalMoves3),
+  });
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 2000);
+
+  // Automatic online during 2s backoff
+  sync.networkOnline();
+  assert.equal(countJoins(socket2), 2);
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 2000);
+
+  // Advance 2s -> sends join 3 (bad) -> schedules 4s
+  scheduler.runNext();
+  assert.equal(countJoins(socket2), 3);
+  socket2.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'spectator',
+    state: stateView(3, 'b', 3, fullLedger.slice(0, 1), legalMoves3),
+  });
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 4000);
+
+  // Automatic online during 4s backoff
+  sync.networkOnline();
+  assert.equal(countJoins(socket2), 3);
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, 4000);
+
+  // Advance 4s -> sends join 4 (bad) -> exhausts join retries
+  scheduler.runNext();
+  assert.equal(countJoins(socket2), 4);
+  socket2.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'spectator',
+    state: stateView(3, 'b', 3, fullLedger.slice(0, 1), legalMoves3),
+  });
+
+  assert.equal(scheduler.pending, 0);
+  assert.equal(sync.getState().recoveryAvailable, true);
+
+  // Automatic online during exhaustion does not send extra join
+  sync.networkOnline();
+  assert.equal(countJoins(socket2), 4);
+  assert.equal(scheduler.pending, 0);
+  assert.equal(sync.getState().recoveryAvailable, true);
+
+  // Explicit retryRecovery dispatches join 5
+  sync.retryRecovery();
+  assert.equal(countJoins(socket2), 5);
+  assert.equal(sync.getState().recoveryAvailable, false);
+
+  // Valid insufficient joined floor 1 restores owned role; debt remains and gap budget retains prior socket 1 usage
+  socket2.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: stateView(1, 'b', 1, fullLedger.slice(0, 1)),
+  });
+  assert.equal(sync.getState().connected, true);
+  assert.equal(sync.getState().ply, 1);
+  assert.equal(sync.getState().recovering, true);
+
+  const countResumes = (sock: FakeSocket): number =>
+    sock.sent.filter((f) => JSON.parse(f).t === 'resume').length;
+  assert.equal(countResumes(socket2), 1, 'socket 2 sends initial resume on debt discovery');
+  assert.equal(countResumes(socket1) + countResumes(socket2), 2, '2 cumulative resumes across sockets');
+
+  // Run out remaining gap budget: timeout -> backoff -> cumulative resume 3 -> timeout -> exhaustion
+  scheduler.runNext();
+  scheduler.runNext();
+  assert.equal(countResumes(socket2), 2);
+  assert.equal(countResumes(socket1) + countResumes(socket2), 3);
+
+  scheduler.runNext();
+  assert.equal(scheduler.pending, 0);
+  assert.equal(sync.getState().recoveryAvailable, true);
+
+  // Authoritative snapshot resolves debt without move command replay
+  socket2.emit({
+    t: 'resumed',
+    gameId: 'g1',
+    state: stateView(3, 'b', 3, fullLedger, legalMoves3),
+    missed: [],
+  });
+  assert.equal(sync.getState().recovering, false);
+  assert.equal(sync.getState().recoveryAvailable, false);
+  assert.equal(sync.getState().ply, 3);
+  assert.equal(sync.stateRevision, 3);
+  assert.equal(sync.getState().snapshot?.fen, PLY_FENS[3]);
+  assert.deepEqual(sync.getState().snapshot?.moves, fullLedger);
+  assert.equal(socket2.sent.filter((f) => JSON.parse(f).t === 'move').length, 0);
+});
+
+test('duplicate unowned joined while connected leaves timer role and authorization unchanged', (t) => {
+  const { factory, scheduler, client, sync } = setup();
+  t.after(() => {
+    sync.stop();
+    client.close();
+  });
+
+  const fullLedger: StateView['moves'] = [
+    { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+    { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' },
+    { ply: 3, uci: 'g1f3', san: 'Nf3', by: 'w' },
+  ];
+
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: stateView(1, 'b', 1, fullLedger.slice(0, 1)),
+  });
+
+  factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    stateRevision: 3,
+    ply: 3,
+    uci: 'g1f3',
+    san: 'Nf3',
+    by: 'w',
+    clock: { w: 60_000, b: 60_000 },
+    serverTs: 0,
+    fenHash: 'h3',
+    legalMoves: {},
+  });
+  assert.equal(sync.getState().recovering, true);
+  assert.equal(scheduler.pending, 1);
+  const activeDelay = scheduler.nextDelayMs;
+
+  // While connected and in active gap flight, duplicate unowned joined arrives
+  const joinsBefore = factory.last.sent.filter((f) => JSON.parse(f).t === 'join').length;
+  const resumesBefore = factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length;
+  const roleBefore = sync.getState().role;
+  const myColorBefore = sync.getState().myColor;
+  assert.equal(roleBefore, 'white');
+  assert.equal(myColorBefore, 'w');
+  factory.last.emit({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'spectator',
+    state: stateView(3, 'b', 3, fullLedger.slice(0, 1)),
+  });
+
+  // Timer, role, and authorization unchanged; no phantom joins sent
+  assert.equal(scheduler.pending, 1);
+  assert.equal(scheduler.nextDelayMs, activeDelay, 'timer unchanged');
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'join').length, joinsBefore, 'no phantom join');
+  assert.equal(sync.getState().connected, true, 'connected remains true for owned session');
+  assert.equal(sync.getState().role, roleBefore);
+  assert.equal(sync.getState().myColor, myColorBefore);
+  assert.equal(sync.getState().recovering, true);
+  assert.equal(sync.resign(), false);
+  assert.equal(sync.getState().ply, 1, 'ply unchanged');
+  assert.equal(sync.stateRevision, 1, 'floor unchanged');
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, resumesBefore);
+});
+
+test('malformed join exhaustion reentrancy stop, logout, and manual successor', (t) => {
+  const fullLedger: StateView['moves'] = [
+    { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+    { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' },
+    { ply: 3, uci: 'g1f3', san: 'Nf3', by: 'w' },
+  ];
+  const legalMoves3: LegalMoves = { b8: ['c6', 'a6'], g8: ['f6'] };
+  const badJoinState = stateView(3, 'b', 3, fullLedger.slice(0, 1), legalMoves3);
+
+  for (const action of ['stop', 'logout', 'manual'] as const) {
+    const { factory, scheduler, client, sync } = setup();
+    t.after(() => {
+      sync.stop();
+      client.close();
+    });
+
+    sync.start();
+    factory.last.open();
+
+    // Establish floor 1 / debt 3
+    factory.last.emit({
+      t: 'joined',
+      gameId: 'g1',
+      role: 'white',
+      state: stateView(1, 'b', 1, fullLedger.slice(0, 1)),
+    });
+    factory.last.emit({
+      t: 'move',
+      gameId: 'g1',
+      stateRevision: 3,
+      ply: 3,
+      uci: 'g1f3',
+      san: 'Nf3',
+      by: 'w',
+      clock: { w: 60_000, b: 60_000 },
+      serverTs: 0,
+      fenHash: 'h3',
+      legalMoves: {},
+    });
+    assert.equal(sync.getState().recovering, true);
+
+    // Drop and open new socket
+    factory.last.serverClose();
+    scheduler.runNext();
+    const socket2 = factory.last;
+    socket2.open();
+
+    const countJoins = (): number =>
+      socket2.sent.filter((f) => JSON.parse(f).t === 'join').length;
+    assert.equal(countJoins(), 1);
+
+    let handledExhaustion = false;
+    const unsubscribe = sync.subscribe((state) => {
+      if (handledExhaustion) return;
+      if (state.recoveryAvailable) {
+        handledExhaustion = true;
+        unsubscribe();
+
+        if (action === 'stop') {
+          sync.stop();
+          assert.equal(socket2.closed, null, 'sync.stop must not close shared socket');
+        } else if (action === 'logout') {
+          sync.logoutRequested();
+          assert.ok(socket2.closed, 'logout does close revoking privileges');
+        } else {
+          // Manual successor: DO NOT stop or logout first
+          sync.retryRecovery();
+          assert.equal(countJoins(), 5, 'retryRecovery dispatches join 5');
+
+          // Synchronously deliver complete joined 3 BEFORE old failure handler returns
+          socket2.emit({
+            t: 'joined',
+            gameId: 'g1',
+            role: 'white',
+            state: stateView(3, 'b', 3, fullLedger, legalMoves3),
+          });
+
+          assert.equal(sync.getState().ply, 3);
+          assert.equal(sync.stateRevision, 3);
+          assert.equal(sync.getState().recovering, false);
+          assert.deepEqual(sync.getState().snapshot?.moves, fullLedger);
+        }
+      }
+    });
+
+    // Join 1 bad -> 1s delay
+    socket2.emit({ t: 'joined', gameId: 'g1', role: 'spectator', state: badJoinState });
+    scheduler.runNext();
+
+    // Join 2 bad -> 2s delay
+    socket2.emit({ t: 'joined', gameId: 'g1', role: 'spectator', state: badJoinState });
+    scheduler.runNext();
+
+    // Join 3 bad -> 4s delay
+    socket2.emit({ t: 'joined', gameId: 'g1', role: 'spectator', state: badJoinState });
+    scheduler.runNext();
+
+    // Join 4 bad -> triggers exhaustion notification and subscriber action
+    socket2.emit({ t: 'joined', gameId: 'g1', role: 'spectator', state: badJoinState });
+    assert.ok(handledExhaustion);
+
+    if (action === 'stop') {
+      assert.equal(socket2.closed, null, 'socket stays open on stop');
+      assert.equal(countJoins(), 4, 'no join 5 dispatched on stop');
+      assert.equal(sync.getState().ply, 1, 'snapshot stays at floor 1');
+      assert.equal(sync.stateRevision, 1, 'floor stays 1');
+      assert.equal(scheduler.pending, 0, 'no timers after stop');
+    } else if (action === 'logout') {
+      assert.ok(socket2.closed, 'socket closed on logout');
+      assert.equal(countJoins(), 4, 'no new join traffic after logout');
+      assert.equal(scheduler.pending, 0, 'no timers after logout');
+    } else {
+      // Manual successor: old continuation did not schedule clobber timer / state
+      assert.equal(scheduler.pending, 0, 'no competing timer from old continuation');
+      assert.equal(sync.getState().ply, 3, 'clean full 3 preserved');
+      assert.equal(sync.stateRevision, 3, 'clean revision 3 preserved');
+      assert.equal(sync.getState().recovering, false);
+      assert.deepEqual(sync.getState().snapshot?.moves, fullLedger);
+      assert.equal(socket2.sent.filter((f) => JSON.parse(f).t === 'resume').length, 0, 'no extra resume');
+      assert.equal(socket2.sent.filter((f) => JSON.parse(f).t === 'move').length, 0, 'no command replay');
+    }
+  }
+});
+
+test('synthetic policy: withheld offerDraw advances revision without ply, triggering known-gap recovery on next move', async (t) => {
+  // Frame injection regression; not multinode gateway, PG, Redis, or network certification
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => 1_000);
+  const tc = { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' as const };
+  const init = await authority.createGame({ gameId: 'g1', timeControl: tc, players: { white: 'u1', black: 'u2' }, rated: false });
+
+  const { factory, client, sync } = setup();
+  t.after(() => {
+    sync.stop();
+    client.close();
+  });
+
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: init });
+  assert.equal(sync.getState().ply, 0);
+  assert.equal(sync.stateRevision, 0);
+
+  // Move 1: white plays e2e4 -> stateRevision 1, ply 1
+  const move1Res = await authority.apply('g1', 'u1', { kind: 'move', uci: 'e2e4' });
+  assert.equal(move1Res.state.stateRevision, 1);
+  assert.equal(move1Res.state.ply, 1);
+  const bcast1 = move1Res.broadcasts[0];
+  assert.ok(bcast1 !== undefined && bcast1.t === 'move');
+  factory.last.emit(bcast1);
+  assert.equal(sync.getState().ply, 1);
+  assert.equal(sync.stateRevision, 1);
+  const acceptedSnapshot = sync.getState().snapshot;
+  assert.ok(acceptedSnapshot !== null);
+
+  // offerDraw advances authority stateRevision to 2 while ply remains 1; assert broadcasts length 0
+  const drawRes = await authority.apply('g1', 'u1', { kind: 'offerDraw' });
+  assert.equal(drawRes.broadcasts.length, 0);
+  assert.equal(drawRes.state.stateRevision, 2);
+  assert.equal(drawRes.state.ply, 1);
+
+  // Move 2: black plays e7e5 -> stateRevision 3, ply 2
+  const move2Res = await authority.apply('g1', 'u2', { kind: 'move', uci: 'e7e5' });
+  assert.equal(move2Res.state.stateRevision, 3);
+  assert.equal(move2Res.state.ply, 2);
+
+  const bcast2 = move2Res.broadcasts[0];
+  assert.ok(bcast2 !== undefined && bcast2.t === 'move');
+  factory.last.emit(bcast2);
+
+  // Contiguous ply (1 -> 2) but revision jump (1 -> 3) triggers known-gap full recovery
+  assert.equal(sync.getState().recovering, true);
+  assert.equal(sync.resign(), false);
+  assert.equal(sync.stateRevision, 1);
+  assert.equal(sync.getState().ply, 1);
+  assert.equal(sync.getState().snapshot, acceptedSnapshot);
+  assert.deepEqual(sync.getState().snapshot?.moves, acceptedSnapshot.moves);
+  assert.deepEqual(sync.getState().snapshot?.ready, acceptedSnapshot.ready);
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 1);
+
+  const recovery = await authority.readRecovery('g1', 1);
+  factory.last.emit({
+    t: 'resumed',
+    gameId: 'g1',
+    state: recovery.state,
+    missed: recovery.missed,
+  });
+
+  assert.equal(sync.getState().recovering, false);
+  assert.equal(sync.getState().ply, 2);
+  assert.equal(sync.stateRevision, 3);
+  assert.equal(sync.getState().snapshot?.fen, recovery.state.fen);
+  assert.equal(sync.getState().snapshot?.fenHash, recovery.state.fenHash);
+  assert.equal(sync.getState().snapshot?.turn, recovery.state.turn);
+  assert.deepEqual(sync.getState().snapshot?.moves, recovery.state.moves);
+  assert.deepEqual(sync.getState().snapshot?.status, recovery.state.status);
+  assert.deepEqual(sync.getState().snapshot?.drawOffer, recovery.state.drawOffer);
+  assert.deepEqual(sync.getState().snapshot?.ready, recovery.state.ready);
+  assert.equal(sync.getState().snapshot?.turnStartedAt, recovery.state.turnStartedAt);
+  assert.deepEqual(sync.getState().snapshot?.clock, recovery.state.clock);
+  assert.deepEqual(sync.getState().snapshot?.legalMoves, recovery.state.legalMoves);
+});
+
+test('synthetic policy: withheld ready broadcasts trigger gate on first move until full recovery', async (t) => {
+  // Frame injection regression; not multinode gateway, PG, Redis, or network certification
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => 1_000);
+  const tc = { initialMs: 60_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' as const };
+  const init = await authority.createGame({
+    gameId: 'g1',
+    timeControl: tc,
+    players: { white: 'u1', black: 'u2' },
+    rated: false,
+    source: 'seek',
+    noShowAfterMs: 30_000,
+  });
+  assert.deepEqual(init.ready, { w: false, b: false });
+  assert.equal(init.stateRevision, 0);
+
+  const { factory, client, sync } = setup();
+  t.after(() => {
+    sync.stop();
+    client.close();
+  });
+
+  sync.start();
+  factory.last.open();
+
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: init });
+  assert.equal(sync.getState().ply, 0);
+  assert.equal(sync.stateRevision, 0);
+  assert.deepEqual(sync.getState().snapshot?.ready, { w: false, b: false });
+  const acceptedSnapshot = sync.getState().snapshot;
+  assert.ok(acceptedSnapshot !== null);
+
+  // Authority records readiness advancing stateRevision to 1 and 2; verify broadcasts length and stateRevision
+  const readyW = await authority.apply('g1', 'u1', { kind: 'ready' });
+  assert.equal(readyW.state.stateRevision, 1);
+  assert.equal(readyW.broadcasts.length, 1);
+  assert.equal(Reflect.get(readyW.broadcasts[0]!, 'stateRevision'), 1);
+
+  const readyB = await authority.apply('g1', 'u2', { kind: 'ready' });
+  assert.equal(readyB.state.stateRevision, 2);
+  assert.equal(readyB.broadcasts.length, 1);
+  assert.equal(Reflect.get(readyB.broadcasts[0]!, 'stateRevision'), 2);
+  assert.deepEqual(readyB.state.ready, { w: true, b: true });
+
+  // First move at stateRevision 3, ply 1
+  const move1 = await authority.apply('g1', 'u1', { kind: 'move', uci: 'e2e4' });
+  assert.equal(move1.state.stateRevision, 3);
+  assert.equal(move1.state.ply, 1);
+
+  const bcastMove = move1.broadcasts[0];
+  assert.ok(bcastMove !== undefined && bcastMove.t === 'move');
+  factory.last.emit(bcastMove);
+
+  // Client missing readiness revisions triggers recovery gate
+  assert.equal(sync.getState().recovering, true);
+  assert.equal(sync.resign(), false);
+  assert.equal(sync.stateRevision, 0);
+  assert.equal(sync.getState().ply, 0);
+  assert.equal(sync.getState().snapshot, acceptedSnapshot);
+  assert.deepEqual(sync.getState().snapshot?.moves, acceptedSnapshot.moves);
+  assert.deepEqual(sync.getState().snapshot?.ready, { w: false, b: false });
+  assert.equal(factory.last.sent.filter((f) => JSON.parse(f).t === 'resume').length, 1);
+
+  const recovery = await authority.readRecovery('g1', 0);
+  factory.last.emit({
+    t: 'resumed',
+    gameId: 'g1',
+    state: recovery.state,
+    missed: recovery.missed,
+  });
+
+  assert.equal(sync.getState().recovering, false);
+  assert.equal(sync.getState().ply, 1);
+  assert.equal(sync.stateRevision, 3);
+  assert.equal(sync.getState().snapshot?.fen, recovery.state.fen);
+  assert.equal(sync.getState().snapshot?.fenHash, recovery.state.fenHash);
+  assert.equal(sync.getState().snapshot?.turn, recovery.state.turn);
+  assert.deepEqual(sync.getState().snapshot?.moves, recovery.state.moves);
+  assert.deepEqual(sync.getState().snapshot?.status, recovery.state.status);
+  assert.deepEqual(sync.getState().snapshot?.ready, { w: true, b: true });
+  assert.deepEqual(sync.getState().snapshot?.drawOffer, recovery.state.drawOffer);
+  assert.equal(sync.getState().snapshot?.turnStartedAt, recovery.state.turnStartedAt);
+  assert.deepEqual(sync.getState().snapshot?.clock, recovery.state.clock);
+  assert.deepEqual(sync.getState().snapshot?.legalMoves, recovery.state.legalMoves);
 });

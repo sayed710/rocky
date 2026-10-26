@@ -1801,9 +1801,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const connectivityTarget = typeof window !== 'undefined' ? window : null;
   const onOffline = (): void => gameSync.networkOffline();
   const onOnline = (): void => gameSync.networkOnline();
+  const onRetry = (): void => gameSync.retryRecovery();
   if (reconnectButton) {
-    reconnectButton.addEventListener('click', onOnline);
-    unbinds.push(() => reconnectButton.removeEventListener('click', onOnline));
+    reconnectButton.addEventListener('click', onRetry);
+    unbinds.push(() => reconnectButton.removeEventListener('click', onRetry));
   }
   if (connectivityTarget) {
     connectivityTarget.addEventListener('offline', onOffline);

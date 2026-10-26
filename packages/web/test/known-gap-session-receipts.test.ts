@@ -207,7 +207,7 @@ test('known-gap recovery preserves command uncertainty across insufficient/full 
   assert.deepEqual(sync.getState().ready, { w: true, b: true });
 });
 
-test('session switch during recovery retains floor and budget across reconnect until exhaustion and manual networkOnline', async (t) => {
+test('session switch during recovery retains floor and budget across reconnect until exhaustion and manual retryRecovery', async (t) => {
   const scheduler = new ManualScheduler();
   const factory = new FakeSocketFactory();
   const client = new WsClient({
@@ -325,7 +325,7 @@ test('session switch during recovery retains floor and budget across reconnect u
   assert.equal(sync.stateRevision, 1);
   assert.equal(sync.getState().ply, 1);
 
-  sync.networkOnline();
+  sync.retryRecovery();
 
   assert.equal(sync.getState().recovering, true);
   assert.equal(countResumeFrames(socket1) + countResumeFrames(socket2), 4);

@@ -21,6 +21,34 @@ const AFTER_E5 = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
 const AFTER_NF3 = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2';
 const BOARD_PX = 800;
 
+class FakeWindowEvents {
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  listenerCount(type: string): number {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+
+  dispatchEvent(event: Event): boolean {
+    const listeners = this.listeners.get(event.type);
+    if (listeners) {
+      for (const fn of listeners) {
+        fn(event);
+      }
+    }
+    return true;
+  }
+}
+
 type Role = 'white' | 'black' | 'spectator';
 
 function live(fen: string, turn: 'w' | 'b', legalMoves: StateView['legalMoves']): StateView {
@@ -330,6 +358,15 @@ test('route: a Chess960 game keeps the same ownership boundary', () => {
 });
 
 test('route: gap recovery lifecycle disables input, clears premoves, manages retry, and restores gestures on target sync', () => {
+  const originalWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const fakeWindow = new FakeWindowEvents();
+  Object.defineProperty(globalThis, 'window', {
+    value: fakeWindow,
+    configurable: true,
+    writable: true,
+  });
+
+  try {
   const scheduler = new ManualScheduler();
   const r = setup({ scheduler, userId: 'u1' });
   try {
@@ -387,10 +424,29 @@ test('route: gap recovery lifecycle disables input, clears premoves, manages ret
     assert.deepEqual(r.premoves(), []);
     assert.deepEqual(r.submitted, []);
 
+    const countResumes = (): number =>
+      r.sockets.last.sent
+        .map((f) => JSON.parse(f) as { t: string })
+        .filter((f) => f.t === 'resume').length;
+
+    assert.equal(countResumes(), 1, '1 initial resume sent on gap detection');
+    assert.equal(scheduler.nextDelayMs, 2000);
+
+    // Online event during active flight has no effect on already-open transport
+    fakeWindow.dispatchEvent(new Event('online'));
+    assert.equal(countResumes(), 1, 'online event during first flight does not send extra resume');
+    assert.equal(scheduler.nextDelayMs, 2000, 'online event does not alter active flight timeout');
+
     // Expected recovery scheduler sequence: 2000, 1000, 2000, 2000, 2000 with 5 runNext total.
     assert.equal(scheduler.nextDelayMs, 2000);
     scheduler.runNext();
     assert.equal(scheduler.nextDelayMs, 1000);
+
+    // Online event during backoff delay has no effect
+    fakeWindow.dispatchEvent(new Event('online'));
+    assert.equal(countResumes(), 1, 'online event during backoff does not send extra resume');
+    assert.equal(scheduler.nextDelayMs, 1000, 'online event does not alter backoff delay');
+
     scheduler.runNext();
     assert.equal(scheduler.nextDelayMs, 2000);
     scheduler.runNext();
@@ -418,6 +474,12 @@ test('route: gap recovery lifecycle disables input, clears premoves, manages ret
     assert.equal(resignBtn.disabled, true, 'resign button disabled during recovery');
     assert.equal(drawBtn.disabled, true, 'draw offer button disabled during recovery');
     assert.equal(claimBtn.disabled, true, 'claim flag button disabled during recovery');
+
+    // Online event after exhaustion does not dispatch resume on open transport; retry button remains visible
+    fakeWindow.dispatchEvent(new Event('online'));
+    assert.equal(countResumes(), 3, 'online event after exhaustion does not send resume');
+    assert.equal(scheduler.pending, 0, 'no timer scheduled by online event');
+    assert.equal(reconnectBtn.hidden, false, 'retry button remains visible after online event');
 
     // No selections, premoves, or submissions under exhaustion.
     r.click('d2');
@@ -465,5 +527,12 @@ test('route: gap recovery lifecycle disables input, clears premoves, manages ret
     assert.deepEqual(r.submitted, []);
   } finally {
     r.dispose();
+  }
+  } finally {
+    if (originalWindowDescriptor) {
+      Object.defineProperty(globalThis, 'window', originalWindowDescriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, 'window');
+    }
   }
 });

@@ -245,7 +245,7 @@ test('malformed snapshot matrix preserves floor state and retries recovery', () 
   }
 });
 
-test('genuine transport send failure transitions to exhaustion and recovers on networkOnline', (t) => {
+test('genuine transport send failure transitions to exhaustion and recovers on retryRecovery', (t) => {
   const scheduler = new ManualScheduler();
   const factory = new FakeSocketFactory();
   const client = new WsClient({
@@ -350,7 +350,7 @@ test('genuine transport send failure transitions to exhaustion and recovers on n
 
   socket.send = originalSend;
 
-  sync.networkOnline();
+  sync.retryRecovery();
 
   const sentResumesAfterRestore = socket.sent.filter((raw) => {
     const m = JSON.parse(raw) as { t?: string };
