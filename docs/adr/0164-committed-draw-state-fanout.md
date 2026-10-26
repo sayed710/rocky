@@ -32,8 +32,12 @@ or client protocol message shapes.
 - Adjust gateway state receiver filter from `stateRevision <= observedRevision` to `stateRevision < observedRevision`. This allows complete equal-head state frames to reconcile room-level callbacks when a join-buffer callback observes the frame first.
 - Existing client monotonic floor invariants, terminal status, session IDs, and uncertainty handling remain protected. No new role-bearing frames or synthetic joins are introduced.
 
-### 3. Fallback and Compatibility Retention
-- Retain gateway local draw-state response fallback and bounded stale-result refresh as an OpenCode recommendation and orchestrator choice, not consensus (Pi preferred removing duplicate fallback). While routed results may cause one redundant local full snapshot bounded per committed draw response, retention preserves resilience against delayed or unobserved PubSub delivery; PubSub provides no reliable Redis-delivery guarantee. Full-history payload cost scales with move history and the number of committed draw commands.
+### 3. Fallback and Bounded Full-State Fanout Deduplication
+- Retain gateway local draw-state response fallback and bounded stale-result refresh for resilience against delayed or unobserved PubSub delivery (PubSub provides no reliable delivery guarantee).
+- Suppress repeated room full-state fanouts across PubSub and ingress fallback regardless of arrival order via a per-concreteRoomEntry full-state fanout revision tracker (`lastFullStateRevision` in `RoomEntry`).
+- The suppression tracker is strictly per-concreteRoomEntry and distinct from global `observedRevision` (which buffers and individual events advance without room full-state broadcast) and does not rely on browser acknowledgments.
+- The marker updates only upon actual non-empty room full-state fanout; resets on room lifecycle termination; active join buffers receive frames independently, while point-to-point joined/resumed responses remain unchanged.
+- Equal-observed first full state, terminal history repair, and exact R03/role protections are preserved. While deduplication eliminates duplicate room full-state broadcasts per draw, full-history payload per draw still scales with move history.
 
 ### 4. CI Workflow Trigger Scope
 - Remove `branches: [main]` branch filters under `pull_request` in `.github/workflows/ci.yml` and `.github/workflows/pin-parity.yml` while preserving `push: branches: [main]`, path filters, and `permissions: contents: read`.
@@ -47,12 +51,13 @@ or client protocol message shapes.
 - **Q3-04 Execution Serialization (Server Foundation)**: State publication occurs post-durable commit and is fenced before next command execution.
 - **Q3-05 Invariant Protection (Server Foundation)**: Stale, duplicate, or equal-head frames cannot regress client floors, clocks, or roles.
 - **Q3-06 Recovery Preservation (Server Foundation)**: Server changes remain compatible with existing baseline client admission and lifecycle recovery.
+- **Q3-07 Full-State Fanout Deduplication (Server Foundation)**: Gateway suppresses redundant room full-state fanouts at identical state revision across PubSub and ingress fallback paths regardless of arrival order, preserving missing-publication fallback, active join buffers, and terminal delivery.
 
 ## Verification and Test Obligations (Required, Not Claimed)
 
 1. **Authority Serialization**: Verify publish ordering after durable append; verify zero emission on append failure, invalid head, or no-op (`packages/realtime-gateway/test/draw-state-fanout.test.ts`).
 2. **Multi-Gateway Integration**: Real 3-gateway suite under PostgreSQL and Redis PubSub with `InMemoryConnection` transport, verifying cross-node draw fanout, owner with no local room, forwarded decline, and next legal move (`services/gateway/test/recovery-freshness.integration.test.ts`).
-3. **Ordering and Reconciliation**: Hermetic coverage of join-buffer-first delivery with equal revision reconciliation, duplicate frame idempotence, and origin disconnection while a forwarded route return is held (`recovery-freshness.test.ts`, `subscription-readiness.test.ts`, `packages/realtime-gateway/test/draw-state-fanout.test.ts`).
+3. **Ordering, Deduplication, and Reconciliation (Q3-07)**: Hermetic coverage of both arrival orders (PubSub before fallback, fallback before PubSub), missing publication fallback delivery, fresh room initial fanout, join-buffer-first delivery with independent buffer isolation, old frames and bounded stale-result refresh, duplicate frame idempotence, and origin disconnection while a forwarded route return is held (`recovery-freshness.test.ts`, `subscription-readiness.test.ts`, `packages/realtime-gateway/test/draw-state-fanout.test.ts`).
 4. **Split Verification**: Fresh local verification on server base `S` (standalone `npm ci`/build/lint and workspace suites); full client and browser gates validated on companion layers.
 
 ## Consequences and Scope Boundaries
