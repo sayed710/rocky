@@ -23,7 +23,11 @@ However, prior to D1-B, client-side recovery on observing gap frames was naive:
 5. An incomplete recovery state did not gate gameplay submission, permitting players to submit moves
    or actions against a known-incomplete local board projection.
 
-This increment delivers bounded, coalesced client-side recovery (D1-B) within `packages/web`.
+This increment delivers bounded, coalesced client core recovery (D1-B) within `packages/web`,
+with server foundation dependency in `ADR-0164`. Companion lifecycle, boundary, and cross-node
+GameSync integration tests (not shipped in core PR C) are now supplied in the composite TOP PR #130
+layer across `packages/web/test/known-gap-boundaries.test.ts`,
+`packages/web/test/known-gap-session-receipts.test.ts`, and `packages/web/test/draw-state-fanout.test.ts`.
 
 ## Decisions
 
@@ -145,6 +149,12 @@ Uncorrelated command rejections received during recovery do not abort recovery o
 
 - **Confined to web client:** No protocol, server, database, persistence, fencing, deployment,
   or authentication configuration changes are made.
+- **Client core scope and layer dependencies:** Confined to client core recovery components
+  (`game-sync.ts`, `game-controller.ts`, `game-mount.ts`, and core unit suites). It depends on the server
+  foundation in `ADR-0164`. While core PR C intentionally excludes companion lifecycle, boundary, and
+  cross-node GameSync integration suites, those tests are now supplied in the composite TOP PR #130 branch
+  (`packages/web/test/known-gap-boundaries.test.ts`, `packages/web/test/known-gap-session-receipts.test.ts`,
+  and `packages/web/test/draw-state-fanout.test.ts`).
 - **Silent final-publication loss:** If the final broadcast of a game is lost silently by the network
   and no subsequent frame or user action creates an observable gap, client-side gap detection cannot
   discover the lost frame until an explicit user action (e.g. reload or reconnect) queries the gateway.
@@ -153,5 +163,6 @@ Uncorrelated command rejections received during recovery do not abort recovery o
 ## References
 
 - [ADR-0161: Durable state revision foundation](0161-durable-state-revision-foundation.md)
+- [ADR-0164: Committed draw-state fanout](0164-committed-draw-state-fanout.md)
 - [GameSync implementation](../../packages/web/src/net/game-sync.ts)
 - [GameController implementation](../../packages/web/src/app/game-controller.ts)
