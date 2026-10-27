@@ -291,7 +291,9 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
   let filterLabelEl: HTMLLabelElement | null = null;
   let filterHelpEl: HTMLElement | null = null;
   let filterStatusEl: HTMLElement | null = null;
+  let filterAnnouncerEl: HTMLElement | null = null;
   let lastStatusText = '';
+  let lastAnnouncedText = '';
 
   const optionNodes: HTMLOptionElement[] = [];
 
@@ -361,6 +363,21 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
       : opponentSeeks.filter((s) => s.variant === selectedVariant);
     const hiddenCount = opponentSeeks.length - matchingOpponents.length;
     updateStatus(opponentSeeks.length, matchingOpponents.length, hiddenCount);
+
+    if (renderedSeeks.length === 0 && lastAnnouncedText !== '') {
+      if (filterAnnouncerEl) filterAnnouncerEl.textContent = '';
+      lastAnnouncedText = '';
+    }
+  }
+
+  function announceFilterResult(): void {
+    if (!routeActive || !hasReceivedSeeks || !filterAnnouncerEl || renderedSeeks.length === 0) {
+      return;
+    }
+    if (lastStatusText !== lastAnnouncedText) {
+      filterAnnouncerEl.textContent = lastStatusText;
+      lastAnnouncedText = lastStatusText;
+    }
   }
 
   function handleFilterChange(): void {
@@ -370,15 +387,19 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
       filterSelectEl.value = selectedVariant;
       return;
     }
+    if (val === selectedVariant) {
+      return;
+    }
     selectedVariant = val;
     if (filterResetBtn) {
       filterResetBtn.hidden = selectedVariant === 'all';
     }
     renderCurrentSeeks();
+    announceFilterResult();
   }
 
   function handleFilterReset(): void {
-    if (!routeActive) return;
+    if (!routeActive || selectedVariant === 'all') return;
     selectedVariant = 'all';
     if (filterSelectEl) {
       filterSelectEl.value = 'all';
@@ -387,6 +408,7 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
       filterResetBtn.hidden = true;
     }
     renderCurrentSeeks();
+    announceFilterResult();
     if (filterSelectEl) {
       filterSelectEl.focus();
     }
@@ -408,6 +430,7 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
     if (routeActive) {
       relocalizeFilter();
       renderCurrentSeeks();
+      announceFilterResult();
     }
   });
 
@@ -452,13 +475,16 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
 
     filterStatusEl = doc.createElement('div');
     filterStatusEl.className = 'seek-filter-status';
-    filterStatusEl.setAttribute('role', 'status');
-    filterStatusEl.setAttribute('aria-live', 'polite');
+
+    filterAnnouncerEl = doc.createElement('div');
+    filterAnnouncerEl.className = 'seek-filter-announcement sr-only';
+    filterAnnouncerEl.setAttribute('role', 'status');
+    filterAnnouncerEl.setAttribute('aria-live', 'polite');
 
     filterSelectEl.addEventListener('change', handleFilterChange);
     filterResetBtn.addEventListener('click', handleFilterReset);
 
-    filterHostEl.append(filterLabelEl, filterSelectEl, filterResetBtn, filterHelpEl, filterStatusEl);
+    filterHostEl.append(filterLabelEl, filterSelectEl, filterResetBtn, filterHelpEl, filterStatusEl, filterAnnouncerEl);
   }
 
   const lobby = new LobbyController({

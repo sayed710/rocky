@@ -97,6 +97,14 @@ function makeSeek(id: string, variant: string, creatorHandle = 'Opponent', creat
   };
 }
 
+type LobbyFilterProbeWindow = Window & {
+  lobbyFilterProbe?: {
+    node: Element;
+    mutations: number;
+    observer: MutationObserver;
+  };
+};
+
 for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', width: 320 }] as const) {
   test(`lobby opponent variant filtering lifecycle (${locale}, ${width}px)`, async ({ page }) => {
     await page.setViewportSize({ width, height: 800 });
@@ -120,8 +128,42 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
     const filterToolbar = page.locator('#seek-filter');
     const filterSelect = page.locator('#lobby-variant-filter');
     const seekList = page.locator('#seek-list');
+    const status = page.locator('#seek-filter .seek-filter-status');
+    const announcer = page.locator('#seek-filter .seek-filter-announcement');
+
     await expect(filterToolbar.locator('#lobby-variant-filter')).toHaveCount(1);
     await expect(seekList.locator('#lobby-variant-filter')).toHaveCount(0);
+    await expect(status).not.toHaveAttribute('role', 'status');
+    await expect(status).not.toHaveAttribute('aria-live');
+    await expect(announcer).toHaveClass(/sr-only/);
+    await expect(announcer).toHaveAttribute('role', 'status');
+    await expect(announcer).toHaveAttribute('aria-live', 'polite');
+    await expect(announcer).toHaveText('');
+
+    await page.evaluate(() => {
+      type ProbeWin = Window & {
+        lobbyFilterProbe?: { node: Element; mutations: number; observer: MutationObserver };
+      };
+      const el = document.querySelector('#seek-filter .seek-filter-announcement');
+      if (!el) throw new Error('Missing announcer #seek-filter .seek-filter-announcement');
+      const probe = {
+        node: el,
+        mutations: 0,
+        observer: new MutationObserver((records) => {
+          probe.mutations += records.length;
+        }),
+      };
+      probe.observer.observe(el, { childList: true, characterData: true, subtree: true });
+      (window as unknown as ProbeWin).lobbyFilterProbe = probe;
+    });
+
+    const getAnnouncerMutations = () =>
+      page.evaluate(() => {
+        const probe = (window as unknown as LobbyFilterProbeWindow).lobbyFilterProbe;
+        if (!probe) throw new Error('lobbyFilterProbe is missing on window');
+        return probe.mutations;
+      });
+
     expect(await filterSelect.locator('option').evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).value))).toEqual([
       'all', 'standard', 'chess960', 'kingofthehill', 'atomic', 'crazyhouse', 'threecheck', 'horde', 'racingkings',
     ]);
@@ -143,6 +185,15 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
     await expect(filterSelect).toHaveValue('atomic');
     expect(await snapshot()).toEqual(snap1);
 
+    await expect.poll(getAnnouncerMutations).toBeGreaterThan(0);
+    const expectedAtomicCount = locale === 'ar'
+      ? 'عرض 1 من أصل 3 من عروض الخصوم المحملة'
+      : 'Showing 1 of 3 loaded opponent offers';
+    await expect(status).toHaveText(expectedAtomicCount);
+    await expect(announcer).toHaveText(expectedAtomicCount);
+    await expect(announcer).toHaveText((await status.textContent()) ?? '');
+    const snapMut1 = await getAnnouncerMutations();
+
     await expect(page.locator('.seek-row')).toHaveCount(1);
     await expect(page.locator('.seek-row[data-seek-id="seek-atomic"]')).toBeVisible();
 
@@ -158,19 +209,27 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
     await expect(page.locator('.seek-row[data-seek-id="seek-atomic-2"]')).toBeVisible();
     expect(await page.evaluate(([a, b]) => a === b, [await filterSelect.elementHandle(), selectHandle])).toBe(true);
     await expect(filterSelect).toBeFocused();
+    const expectedCount2of3 = locale === 'ar'
+      ? 'عرض 2 من أصل 3 من عروض الخصوم المحملة'
+      : 'Showing 2 of 3 loaded opponent offers';
+    await expect(status).toHaveText(expectedCount2of3);
+    await expect(announcer).toHaveText(expectedAtomicCount);
+    expect(await getAnnouncerMutations()).toBe(snapMut1);
 
     const snap2 = await snapshot();
     await filterSelect.selectOption('horde');
     await expect(filterSelect).toHaveValue('horde');
     expect(await snapshot()).toEqual(snap2);
 
-    await expect(page.locator('.seek-row')).toHaveCount(0);
-    const status = page.locator('#seek-filter .seek-filter-status');
     const expectedEmpty = locale === 'ar'
       ? 'لا توجد تحديات خصوم محملة تطابق النوع المحدد.'
       : 'No loaded opponent challenges match the selected variant.';
+    await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMut1);
+    const snapMut2 = await getAnnouncerMutations();
+    await expect(page.locator('.seek-row')).toHaveCount(0);
     await expect(status).toHaveText(expectedEmpty);
     await expect(status).toBeVisible();
+    await expect(announcer).toHaveText(expectedEmpty);
     await expect(seekList.locator('.seek-filter-reset')).toHaveCount(0);
 
     const resetBtn = page.locator('#seek-filter .seek-filter-reset');
@@ -179,6 +238,13 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
     const snap3 = await snapshot();
     await resetBtn.click();
     expect(await snapshot()).toEqual(snap3);
+    await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMut2);
+    const snapMut3 = await getAnnouncerMutations();
+    const expectedAllCount3 = locale === 'ar'
+      ? 'عرض 3 من عروض الخصوم المحملة'
+      : 'Showing 3 loaded opponent offers';
+    await expect(status).toHaveText(expectedAllCount3);
+    await expect(announcer).toHaveText(expectedAllCount3);
 
     await expect(filterSelect).toHaveValue('all');
     await expect(filterSelect).toBeFocused();
@@ -186,6 +252,46 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
     await expect(page.locator('.seek-row').nth(0)).toHaveAttribute('data-seek-id', 'seek-std-2');
     await expect(page.locator('.seek-row').nth(1)).toHaveAttribute('data-seek-id', 'seek-atomic');
     await expect(page.locator('.seek-row').nth(2)).toHaveAttribute('data-seek-id', 'seek-atomic-2');
+
+    seeks = [
+      makeSeek('seek-std-2', 'standard', 'Dave'),
+      makeSeek('seek-atomic', 'atomic', 'Bob'),
+      makeSeek('seek-atomic-2', 'atomic', 'Eve'),
+      makeSeek('seek-extra', 'chess960', 'Grace'),
+    ];
+    const prevPoll4Seeks = seeksReqs;
+    await page.clock.runFor(10_000);
+    await expect.poll(() => seeksReqs).toBeGreaterThan(prevPoll4Seeks);
+    await expect(page.locator('.seek-row')).toHaveCount(4);
+    const expectedAllCount4 = locale === 'ar'
+      ? 'عرض 4 من عروض الخصوم المحملة'
+      : 'Showing 4 loaded opponent offers';
+    await expect(status).toHaveText(expectedAllCount4);
+    await expect(announcer).toHaveText(expectedAllCount3);
+    expect(await getAnnouncerMutations()).toBe(snapMut3);
+
+    seeks = [];
+    const prevEmptySeeks = seeksReqs;
+    await page.clock.runFor(10_000);
+    await expect.poll(() => seeksReqs).toBeGreaterThan(prevEmptySeeks);
+    await expect(page.locator('.seek-row')).toHaveCount(0);
+    await expect(seekList).toHaveAttribute('role', 'status');
+    await expect(seekList.locator('.empty')).toBeVisible();
+    await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMut3);
+    await expect(announcer).toHaveText('');
+    const snapEmptyMut = await getAnnouncerMutations();
+
+    const prevRepeatEmptySeeks = seeksReqs;
+    await page.clock.runFor(10_000);
+    await expect.poll(() => seeksReqs).toBeGreaterThan(prevRepeatEmptySeeks);
+    expect(await getAnnouncerMutations()).toBe(snapEmptyMut);
+    await expect(announcer).toHaveText('');
+    await expect(page.locator('.seek-row')).toHaveCount(0);
+    await expect(seekList).toHaveAttribute('role', 'status');
+    await expect(seekList.locator('.empty')).toBeVisible();
+    await expect(status).not.toHaveText(expectedEmpty);
+    expect(await page.evaluate(() => (window as unknown as LobbyFilterProbeWindow).lobbyFilterProbe?.node === document.querySelector('#seek-filter .seek-filter-announcement'))).toBe(true);
+
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 }

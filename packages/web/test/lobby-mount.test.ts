@@ -737,6 +737,10 @@ test('lobby variant filter (3): deferred GraphQL name enrichment and poll replac
   const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
   select.value = 'atomic';
   select.dispatchEvent(new Event('change'));
+  const announcer = filterHost.querySelector<FakeDOMElement>('.seek-filter-announcement')!;
+  assert.ok(announcer);
+  const baselineAnnouncerText = announcer.textContent;
+  assert.ok(baselineAnnouncerText.length > 0, 'explicit filter announced');
 
   let rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
   assert.equal(rows.length, 1);
@@ -756,6 +760,7 @@ test('lobby variant filter (3): deferred GraphQL name enrichment and poll replac
   ]));
   await gql1Promise;
   await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(announcer.textContent, baselineAnnouncerText, 'stale name resolution must not rewrite announcer');
 
   // Generation 1 resolution must be ignored by generation fence
   rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
@@ -775,6 +780,7 @@ test('lobby variant filter (3): deferred GraphQL name enrichment and poll replac
   assert.equal(rows.length, 1);
   assert.equal(rows[0]?.dataset.seekId, 'g2-atom');
   assert.equal(rows[0]?.querySelector('.row-link')?.textContent, 'fresh-carol');
+  assert.equal(announcer.textContent, baselineAnnouncerText, 'current generation name enrichment must not rewrite announcer');
 });
 
 test('lobby variant filter (4): empty state truthfulness, pre-load/failure state, and status semantics', async () => {
@@ -940,6 +946,13 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   const filterHost = elements.get('seek-filter')!;
   const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
   const statusEl = filterHost.querySelector<FakeDOMElement>('.seek-filter-status')!;
+  const announcerEl = filterHost.querySelector<FakeDOMElement>('.seek-filter-announcement')!;
+  assert.ok(announcerEl, 'sr-only announcer element must exist');
+  assert.equal(statusEl.getAttribute('role'), null, 'visible status must be non-live');
+  assert.equal(statusEl.getAttribute('aria-live'), null, 'visible status must not have aria-live');
+  assert.equal(announcerEl.getAttribute('role'), 'status', 'announcer must have status role');
+  assert.equal(announcerEl.getAttribute('aria-live'), 'polite', 'announcer must be aria-live polite');
+  assert.equal(announcerEl.textContent, '', 'announcer silent on initial poll');
 
   // Capture option references
   const initialOptions = select.querySelectorAll<FakeDOMElement>('option');
@@ -953,6 +966,11 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, select);
   select.value = 'atomic';
   select.dispatchEvent(new Event('change'));
+  assert.equal(
+    announcerEl.textContent,
+    testI18n.t('lobby.filterStatus', { shown: '2', total: '3' }),
+    'explicit filter selection provides announcer feedback',
+  );
 
   // Switch locale to Arabic: option node instances retained and relocalized in place
   i18n.setLocale('ar');
@@ -964,11 +982,32 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   assert.equal(allOption.textContent, i18n.t('lobby.filterAll'));
   assert.equal(select.value, 'atomic', 'selected value preserved');
   assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, select, 'selector focus preserved');
+  assert.equal(
+    announcerEl.textContent,
+    i18n.t('lobby.filterStatus', { shown: '2', total: '3' }),
+    'announcer relocalized on Arabic locale change',
+  );
 
   // Switch back to English
   i18n.setLocale('en');
   assert.equal(allOption.textContent, i18n.t('lobby.filterAll'));
   assert.equal(select.value, 'atomic');
+  assert.equal(
+    announcerEl.textContent,
+    testI18n.t('lobby.filterStatus', { shown: '2', total: '3' }),
+    'announcer relocalized on English locale change',
+  );
+
+  let announcerWrites = 0;
+  let currentAnnouncerText = announcerEl.textContent;
+  Object.defineProperty(announcerEl, 'textContent', {
+    get: () => currentAnnouncerText,
+    set: (v: string) => {
+      announcerWrites++;
+      currentAnnouncerText = v;
+    },
+    configurable: true,
+  });
 
   // Row focus fallback: focus second row accept button
   let rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
@@ -986,12 +1025,14 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   const row1Accept = rows[0]?.querySelector<FakeDOMElement>('.seek-accept');
   assert.ok(row1Accept);
   assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, row1Accept, 'focus fell back to surviving row');
+  assert.equal(announcerWrites, 0, 'active filter poll must be silent on announcer');
 
   // Next poll removes s-1 (rowless filtered): focus recovers to stable select element
   (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seek3];
   await mounted.lobby.refresh();
   await waitForCondition(() => seekList.querySelectorAll('.seek-row').length === 0, 'rowless reached');
   assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, select, 'rowless recovery moves focus to stable select');
+  assert.equal(announcerWrites, 0, 'rowless poll must be silent on announcer');
 
   // Status dedup on own + hidden opponent offers:
   const seekOwn = makeSeek({ id: 'own-1', creatorId: 'user-me', variant: 'atomic' });
@@ -1018,6 +1059,151 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   await mounted.lobby.refresh();
   await Promise.resolve();
   assert.equal(textWrites, 0, 'unchanged poll on own+hidden must not rewrite status textContent');
+  assert.equal(announcerWrites, 0, 'own+hidden poll must not rewrite announcer');
+
+  // Session change must be silent on announcer
+  mounted.onSessionChange();
+  assert.equal(announcerWrites, 0, 'session change must be silent on announcer');
+
+  // Invalid selection rejected and silent on announcer
+  select.value = 'unsupported-variant';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(select.value, 'atomic', 'invalid selection restored');
+  assert.equal(announcerWrites, 0, 'invalid selection must not write announcer');
+
+  // Explicit reset provides valid feedback
+  const resetBtn = filterHost.querySelector<FakeDOMElement>('.seek-filter-reset')!;
+  resetBtn.click();
+  assert.equal(select.value, 'all', 'reset restores all');
+  assert.equal(announcerWrites, 1, 'explicit reset writes announcer');
+  assert.equal(
+    announcerEl.textContent,
+    testI18n.t('lobby.filterStatusAll', { total: '1' }),
+    'reset announces total opponents count',
+  );
+
+  // True empty list (empty cache): transition clears obsolete announcer text once
+  announcerWrites = 0;
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [];
+  (fake.client.session as unknown as { current: unknown }).current = null;
+  await mounted.lobby.refresh();
+  await waitForCondition(() => seekList.getAttribute('role') === 'status', 'empty status list');
+  assert.equal(announcerWrites, 1, 'transition to true empty clears obsolete announcer text once');
+  assert.equal(announcerEl.textContent, '', 'announcer text cleared on true empty transition');
+
+  // Repeated empty polls and actions are silent
+  await mounted.lobby.refresh();
+  assert.equal(announcerWrites, 1, 'repeated empty poll must not write announcer');
+
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 1, 'filter change on true empty cache must not write announcer');
+
+  // Locale changes while empty must not trigger announcement
+  i18n.setLocale('ar');
+  assert.equal(announcerWrites, 1, 'locale change to ar on empty cache must not write announcer');
+  i18n.setLocale('en');
+  assert.equal(announcerWrites, 1, 'locale change to en on empty cache must not write announcer');
+  const emptyOptions = select.querySelectorAll<FakeDOMElement>('option');
+  assert.equal(emptyOptions.length, initialOptions.length);
+  for (let i = 0; i < initialOptions.length; i++) {
+    assert.equal(emptyOptions[i], initialOptions[i], `option node ${i} identity preserved across empty locale changes`);
+  }
+
+  // Nonempty restore allows explicit identical announcement again
+  (fake.client.session as unknown as { current: unknown }).current = { user: { id: 'user-me', handle: 'alice' } };
+  mounted.onSessionChange();
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seekOwn, seek3];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => seekList.querySelectorAll('.seek-row').length > 0, 'seeks restored');
+  assert.equal(announcerWrites, 1, 'nonempty changed poll stays silent');
+
+  resetBtn.click();
+  assert.equal(announcerWrites, 2, 'explicit choice can re-announce identical message after empty transition');
+  assert.equal(
+    announcerEl.textContent,
+    testI18n.t('lobby.filterStatusAll', { total: '1' }),
+  );
+
+  // Node identity and disposal
+  assert.equal(filterHost.querySelector('.seek-filter-announcement'), announcerEl);
+  assert.equal(filterHost.querySelector('.seek-filter-status'), statusEl);
+  mounted.lobby.dispose();
+  assert.equal(filterHost.children.length, 0, 'disposal clears all filter host nodes');
+  assert.equal(select.disabled, true, 'select disabled on dispose');
+  assert.equal(resetBtn.disabled, true, 'reset button disabled on dispose');
+});
+
+test('lobby variant filter (6b): deferred initial load with pre-load choices, default All poll silence, and noop guards', async () => {
+  let resolveInitialSeeks!: (seeks: SeekView[]) => void;
+  const initialSeeksPromise = new Promise<SeekView[]>((resolve) => {
+    resolveInitialSeeks = resolve;
+  });
+  const fake = makeFakeClient({ listSeeks: () => initialSeeksPromise });
+
+  const { doc, elements } = createTestDoc();
+  const i18n = createI18nManager();
+  const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => false, i18n });
+  mounted.lobby.stop();
+
+  const filterHost = elements.get('seek-filter')!;
+  const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+  const announcer = filterHost.querySelector<FakeDOMElement>('.seek-filter-announcement')!;
+  assert.ok(announcer);
+  assert.equal(announcer.textContent, '', 'announcer empty before initial load');
+
+  // Pre-load filter selection and locale change before first load resolves
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+  i18n.setLocale('ar');
+  assert.equal(announcer.textContent, '', 'pre-load choice and locale change must not write announcer');
+
+  let announcerWrites = 0;
+  let currentText = announcer.textContent;
+  Object.defineProperty(announcer, 'textContent', {
+    get: () => currentText,
+    set: (v: string) => {
+      announcerWrites++;
+      currentText = v;
+    },
+    configurable: true,
+  });
+
+  // Resolve deferred initial seeks
+  const s1 = makeSeek({ id: 's-init-1', creatorId: 'opp-1', variant: 'atomic' });
+  const s2 = makeSeek({ id: 's-init-2', creatorId: 'opp-2', variant: 'standard' });
+  resolveInitialSeeks([s1, s2]);
+
+  const seekList = elements.get('seek-list')!;
+  await waitForCondition(() => seekList.querySelectorAll('.seek-row').length === 1, 'matching atomic seek rendered');
+
+  assert.equal(announcerWrites, 0, 'deferred initial load completion must not trigger announcement');
+  const statusEl = filterHost.querySelector<FakeDOMElement>('.seek-filter-status')!;
+  assert.ok(statusEl.textContent.length > 0, 'visible status updated with loaded count');
+
+  // Same-value selection is no-op
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 0, 'same-value choice is no-op');
+
+  // Switch to All explicitly announces count
+  select.value = 'all';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 1, 'explicit switch to all announces');
+
+  // Background poll on All with changed count stays silent on announcer
+  const s3 = makeSeek({ id: 's-init-3', creatorId: 'opp-3', variant: 'chess960' });
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [s1, s2, s3];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => seekList.querySelectorAll('.seek-row').length === 3, '3 seeks on all');
+  assert.equal(announcerWrites, 1, 'default All poll changed count must be silent on announcer');
+
+  // Reset when already all is no-op
+  const resetBtn = filterHost.querySelector<FakeDOMElement>('.seek-filter-reset')!;
+  resetBtn.click();
+  assert.equal(announcerWrites, 1, 'reset when already all is no-op');
+
+  mounted.lobby.dispose();
 });
 
 test('lobby variant filter (7): action delegation dispatches exact seek IDs under nonmatching filter and matched navigation works', async () => {
