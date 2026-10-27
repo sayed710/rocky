@@ -1269,7 +1269,16 @@ export class GameSync {
       const ready = v.ready as Record<string, unknown>;
       if (typeof ready.w !== 'boolean' || typeof ready.b !== 'boolean') return false;
     }
-    if (v.chess960StartId !== undefined && v.chess960StartId !== null && (typeof v.chess960StartId !== 'number' || !Number.isInteger(v.chess960StartId))) return false;
+    if (
+      v.chess960StartId !== undefined &&
+      v.chess960StartId !== null &&
+      (typeof v.chess960StartId !== 'number' ||
+        !Number.isInteger(v.chess960StartId) ||
+        v.chess960StartId < 0 ||
+        v.chess960StartId > 959)
+    ) {
+      return false;
+    }
     return true;
   }
 

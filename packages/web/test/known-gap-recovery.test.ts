@@ -4,7 +4,7 @@ import { WsClient, type Scheduler } from '../src/net/ws-client.js';
 import { GameSync } from '../src/net/game-sync.js';
 import { GameController } from '../src/app/game-controller.js';
 import { createI18nManager } from '../src/i18n/index.js';
-import type { LegalMoves, StateView, WsColor } from '../src/net/ws-protocol.js';
+import { decodeServer, type LegalMoves, type StateView, type WsColor } from '../src/net/ws-protocol.js';
 import { FakeSocket, FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
 import type { WebSocketFactory } from '../src/ports/ws.js';
 import { GameAuthority, InMemoryPubSub } from '@chess-platform/realtime-gateway';
@@ -901,6 +901,115 @@ test('known-gap recovery: malformed legacy snapshot with missing or nonnumeric p
   assert.equal(sync.getState().ply, 3);
   assert.equal(scheduler.pending, 0);
 });
+
+for (const invalidId of [-1, 960]) {
+  test(`known-gap recovery: legacy resumed snapshot with out-of-range chess960StartId (${invalidId}) rejects discharge`, (t) => {
+    const { factory, client, sync } = setup();
+    t.after(() => {
+      sync.stop();
+      client.close();
+    });
+
+    sync.start();
+    factory.last.open();
+    factory.last.emit({
+      t: 'joined',
+      gameId: 'g1',
+      role: 'white',
+      state: stateView(0, 'w', null),
+    });
+
+    assert.equal(sync.getState().connected, true);
+    assert.equal(sync.stateRevision, null);
+    assert.equal(sync.getState().ply, 0);
+
+    factory.last.emit({
+      t: 'move',
+      gameId: 'g1',
+      ply: 2,
+      uci: 'e7e5',
+      san: 'e5',
+      by: 'b',
+      fenHash: 'h2',
+      clock: { w: 60_000, b: 59_000 },
+      serverTs: 1_000,
+      legalMoves: { g1: ['f3'] },
+    });
+
+    assert.equal(sync.getState().recovering, true);
+    assert.equal(sync.getState().ply, 0);
+
+    const moves2: StateView['moves'] = [
+      { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+      { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' },
+    ];
+
+    const invalidMsg = {
+      t: 'resumed' as const,
+      gameId: 'g1',
+      state: { ...stateView(2, 'w', null, moves2), chess960StartId: invalidId },
+      missed: [],
+    };
+    assert.ok(decodeServer(JSON.stringify(invalidMsg)) !== null, 'decoder accepts legacy frame');
+
+    factory.last.emit(invalidMsg);
+
+    assert.equal(sync.getState().recovering, true);
+    assert.equal(sync.getState().ply, 0);
+    assert.equal(sync.stateRevision, null);
+  });
+}
+
+for (const validId of [0, 959, null, undefined]) {
+  test(`known-gap recovery: legacy resumed snapshot with valid chess960StartId (${String(validId)}) discharges gap`, (t) => {
+    const { factory, client, sync } = setup();
+    t.after(() => {
+      sync.stop();
+      client.close();
+    });
+
+    sync.start();
+    factory.last.open();
+    factory.last.emit({
+      t: 'joined',
+      gameId: 'g1',
+      role: 'white',
+      state: stateView(0, 'w', null),
+    });
+
+    factory.last.emit({
+      t: 'move',
+      gameId: 'g1',
+      ply: 2,
+      uci: 'e7e5',
+      san: 'e5',
+      by: 'b',
+      fenHash: 'h2',
+      clock: { w: 60_000, b: 59_000 },
+      serverTs: 1_000,
+      legalMoves: { g1: ['f3'] },
+    });
+    assert.equal(sync.getState().recovering, true);
+
+    const moves2: StateView['moves'] = [
+      { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+      { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' },
+    ];
+    const validSnap = { ...stateView(2, 'w', null, moves2), chess960StartId: validId };
+
+    factory.last.emit({
+      t: 'resumed',
+      gameId: 'g1',
+      state: validSnap,
+      missed: [],
+    });
+
+    assert.equal(sync.getState().recovering, false);
+    assert.equal(sync.getState().ply, 2);
+    assert.equal(sync.getState().snapshot?.chess960StartId, validId);
+    assert.equal(sync.stateRevision, null);
+  });
+}
 
 test('known-gap recovery: GameController gates board turn, actions, and presentations through exhaustion until complete restoration', (t) => {
   const { factory, scheduler, client, sync } = setup();

@@ -353,4 +353,22 @@ test('loss test: withheld draw state triggers bounded recovery and debt settleme
   assert.equal(black.sync.getState().pendingAction, null);
   assert.equal(edge2Bridge.sentToServer.filter((m) => m.t === 'resume').length, 1);
   assert.equal(edge2Bridge.sentToServer.length, commandsBefore);
+
+  const committed = await ownerAuthority.readRecovery('g1', 2);
+  const s = black.sync.getState();
+  assert.equal(s.recovering, false);
+  assert.equal(s.ply, committed.state.ply);
+  assert.equal(s.turn, committed.state.turn);
+  assert.equal(s.drawOffer, committed.state.drawOffer);
+  assert.equal(s.fenHash, committed.state.fenHash);
+  assert.equal(s.snapshot?.fen, committed.state.fen);
+  assert.deepEqual(s.moves, committed.state.moves);
+  assert.deepEqual(s.legalMoves, committed.state.legalMoves);
+  assert.deepEqual(s.clock, committed.state.clock);
+  assert.deepEqual(s.ready, committed.state.ready);
+  assert.deepEqual(s.status, committed.state.status);
+  assert.equal(s.turnStartedAt, committed.state.turnStartedAt);
+  assert.equal(s.role, 'black');
+  assert.equal(s.myColor, 'b');
+  assert.equal(black.sync.stateRevision, committed.state.stateRevision);
 });
