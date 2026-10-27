@@ -1,6 +1,6 @@
 import { resolveBrowserStorage } from '../i18n/storage.js';
 import type { GambitClient } from '../api/client.js';
-import type { SeekView, SocialPlayer } from '../api/models.js';
+import { OFFERED_VARIANTS, type SeekView, type SocialPlayer, type Variant } from '../api/models.js';
 import { shortId } from '../api/graphql.js';
 import type { KeyValueStorage } from '../net/session.js';
 import { CreateGamePanel } from './create-game-panel.js';
@@ -32,6 +32,34 @@ export function renderSeeks(
   names: ReadonlyMap<string, SocialPlayer> | undefined,
   i18n: I18nManager,
 ): void {
+  renderSeeksInternal({
+    container,
+    seeks,
+    currentUserId,
+    names,
+    i18n,
+    filterVariant: 'all',
+  });
+}
+
+interface RenderSeeksInternalOptions {
+  readonly container: HTMLElement;
+  readonly seeks: readonly SeekView[];
+  readonly currentUserId: string | null;
+  readonly names: ReadonlyMap<string, SocialPlayer> | undefined;
+  readonly i18n: I18nManager;
+  readonly filterVariant?: string;
+  readonly onFocusRecovery?: () => void;
+}
+
+function renderSeeksInternal(opts: RenderSeeksInternalOptions): void {
+  const { container, seeks, currentUserId, names, i18n, filterVariant, onFocusRecovery } = opts;
+  const isOwn = (seek: SeekView): boolean => currentUserId !== null && seek.creatorId === currentUserId;
+  const filterActive = filterVariant !== undefined && filterVariant !== 'all';
+  const visibleSeeks = filterActive
+    ? seeks.filter((seek) => isOwn(seek) || seek.variant === filterVariant)
+    : seeks;
+
   // Polling an unchanged live status must not speak the empty list again.
   // Compare localized copy so a language change still replaces the status.
   if (seeks.length === 0
@@ -77,7 +105,7 @@ export function renderSeeks(
   }
   container.setAttribute('role', 'list');
   container.removeAttribute('tabindex');
-  for (const seek of seeks) {
+  for (const seek of visibleSeeks) {
     const owned = currentUserId !== null && seek.creatorId === currentUserId;
     const row = doc.createElement('div');
     row.className = owned ? 'seek-row seek-row-own' : 'seek-row';
@@ -200,11 +228,15 @@ export function renderSeeks(
     }
 
     const replacementRows = [...container.querySelectorAll<HTMLElement>('.seek-row')];
-    const fallbackRow = replacementRows[Math.min(focusedControl.rowIndex, replacementRows.length - 1)];
-    const fallbackControl = fallbackRow?.querySelector<HTMLElement>('.seek-accept')
-      ?? fallbackRow?.querySelector<HTMLElement>('.seek-cancel')
-      ?? fallbackRow?.querySelector<HTMLElement>('.row-link');
-    fallbackControl?.focus();
+    if (replacementRows.length > 0) {
+      const fallbackRow = replacementRows[Math.min(focusedControl.rowIndex, replacementRows.length - 1)];
+      const fallbackControl = fallbackRow?.querySelector<HTMLElement>('.seek-accept')
+        ?? fallbackRow?.querySelector<HTMLElement>('.seek-cancel')
+        ?? fallbackRow?.querySelector<HTMLElement>('.row-link');
+      fallbackControl?.focus();
+      return;
+    }
+    onFocusRecovery?.();
   }
 }
 
@@ -235,15 +267,130 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
   const { doc, client, isAuthenticated, storage, i18n } = deps;
   const preferenceStorage = storage ?? resolveBrowserStorage();
   const seekListEl = doc.getElementById('seek-list');
+  const filterHostEl = doc.getElementById('seek-filter');
   const createGameEl = doc.getElementById('create-game');
   const playBotMountEl = doc.getElementById('play-bot-mount');
   const errorEl = doc.getElementById('lobby-error');
 
+  if (seekListEl) {
+    seekListEl.replaceChildren();
+    seekListEl.removeAttribute('role');
+    seekListEl.removeAttribute('tabindex');
+  }
+
   let panel: CreateGamePanel | null = null;
   let playBotDialog: PlayBotDialog | null = null;
   let routeActive = true;
+  let hasReceivedSeeks = false;
+  let selectedVariant: string = 'all';
   let renderedSeeks: readonly SeekView[] = [];
   let renderedNames: ReadonlyMap<string, SocialPlayer> | undefined;
+
+  let filterSelectEl: HTMLSelectElement | null = null;
+  let filterResetBtn: HTMLButtonElement | null = null;
+  let filterLabelEl: HTMLLabelElement | null = null;
+  let filterHelpEl: HTMLElement | null = null;
+  let filterStatusEl: HTMLElement | null = null;
+  let lastStatusText = '';
+
+  const optionNodes: HTMLOptionElement[] = [];
+
+  function isKnownOfferedVariant(val: string): val is Variant {
+    for (const v of OFFERED_VARIANTS) {
+      if (v === val) return true;
+    }
+    return false;
+  }
+
+  function relocalizeFilter(): void {
+    if (filterLabelEl) filterLabelEl.textContent = i18n.t('lobby.filterLabel');
+    if (filterResetBtn) filterResetBtn.textContent = i18n.t('lobby.filterReset');
+    if (filterHelpEl) filterHelpEl.textContent = i18n.t('lobby.filterHelp');
+
+    const allOpt = optionNodes[0];
+    if (allOpt) allOpt.textContent = i18n.t('lobby.filterAll');
+    for (let i = 0; i < OFFERED_VARIANTS.length; i++) {
+      const v = OFFERED_VARIANTS[i]!;
+      const opt = optionNodes[i + 1];
+      if (opt) opt.textContent = getVariantLabel(v, i18n);
+    }
+  }
+
+  function updateStatus(totalOpponents: number, matchingOpponentsCount: number, hiddenCount: number): void {
+    if (!filterStatusEl) return;
+    let nextStatus = '';
+    if (totalOpponents === 0) {
+      nextStatus = i18n.t('lobby.filterStatusNone');
+    } else if (selectedVariant !== 'all' && matchingOpponentsCount === 0 && hiddenCount > 0) {
+      nextStatus = i18n.t('lobby.filterEmpty');
+    } else if (selectedVariant !== 'all' && hiddenCount > 0) {
+      nextStatus = i18n.t('lobby.filterStatus', {
+        shown: String(matchingOpponentsCount),
+        total: String(totalOpponents),
+      });
+    } else {
+      nextStatus = i18n.t('lobby.filterStatusAll', {
+        total: String(totalOpponents),
+      });
+    }
+
+    if (nextStatus !== lastStatusText) {
+      filterStatusEl.textContent = nextStatus;
+      lastStatusText = nextStatus;
+    }
+  }
+
+  function renderCurrentSeeks(): void {
+    if (!routeActive || !seekListEl || !hasReceivedSeeks) return;
+    const currentUserId = client.session.current?.user.id ?? null;
+    renderSeeksInternal({
+      container: seekListEl,
+      seeks: renderedSeeks,
+      currentUserId,
+      names: renderedNames,
+      i18n,
+      filterVariant: selectedVariant,
+      onFocusRecovery: () => {
+        if (filterSelectEl) filterSelectEl.focus();
+      },
+    });
+    const isOwn = (s: SeekView): boolean => currentUserId !== null && s.creatorId === currentUserId;
+    const opponentSeeks = renderedSeeks.filter((s) => !isOwn(s));
+    const matchingOpponents = selectedVariant === 'all'
+      ? opponentSeeks
+      : opponentSeeks.filter((s) => s.variant === selectedVariant);
+    const hiddenCount = opponentSeeks.length - matchingOpponents.length;
+    updateStatus(opponentSeeks.length, matchingOpponents.length, hiddenCount);
+  }
+
+  function handleFilterChange(): void {
+    if (!routeActive || !filterSelectEl) return;
+    const val = filterSelectEl.value;
+    if (val !== 'all' && !isKnownOfferedVariant(val)) {
+      filterSelectEl.value = selectedVariant;
+      return;
+    }
+    selectedVariant = val;
+    if (filterResetBtn) {
+      filterResetBtn.hidden = selectedVariant === 'all';
+    }
+    renderCurrentSeeks();
+  }
+
+  function handleFilterReset(): void {
+    if (!routeActive) return;
+    selectedVariant = 'all';
+    if (filterSelectEl) {
+      filterSelectEl.value = 'all';
+    }
+    if (filterResetBtn) {
+      filterResetBtn.hidden = true;
+    }
+    renderCurrentSeeks();
+    if (filterSelectEl) {
+      filterSelectEl.focus();
+    }
+  }
 
   function handleSeekAction(event: Event): void {
     if (!routeActive) return;
@@ -258,16 +405,61 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
   }
 
   const unsubscribeLocale = i18n.onLocaleChange(() => {
-    if (routeActive && seekListEl) {
-      renderSeeks(
-        seekListEl,
-        renderedSeeks,
-        client.session.current?.user.id ?? null,
-        renderedNames,
-        i18n,
-      );
+    if (routeActive) {
+      relocalizeFilter();
+      renderCurrentSeeks();
     }
   });
+
+  if (filterHostEl) {
+    filterHostEl.replaceChildren();
+
+    filterLabelEl = doc.createElement('label');
+    filterLabelEl.className = 'seek-filter-label';
+    filterLabelEl.htmlFor = 'lobby-variant-filter';
+    filterLabelEl.textContent = i18n.t('lobby.filterLabel');
+
+    filterSelectEl = doc.createElement('select');
+    filterSelectEl.id = 'lobby-variant-filter';
+    filterSelectEl.className = 'seek-filter-select';
+    filterSelectEl.setAttribute('aria-describedby', 'seek-filter-help');
+
+    const allOpt = doc.createElement('option');
+    allOpt.value = 'all';
+    allOpt.textContent = i18n.t('lobby.filterAll');
+    filterSelectEl.appendChild(allOpt);
+    optionNodes.push(allOpt);
+
+    for (const v of OFFERED_VARIANTS) {
+      const opt = doc.createElement('option');
+      opt.value = v;
+      opt.textContent = getVariantLabel(v, i18n);
+      filterSelectEl.appendChild(opt);
+      optionNodes.push(opt);
+    }
+    filterSelectEl.value = 'all';
+
+    filterResetBtn = doc.createElement('button');
+    filterResetBtn.type = 'button';
+    filterResetBtn.className = 'seek-filter-reset button';
+    filterResetBtn.textContent = i18n.t('lobby.filterReset');
+    filterResetBtn.hidden = true;
+
+    filterHelpEl = doc.createElement('p');
+    filterHelpEl.id = 'seek-filter-help';
+    filterHelpEl.className = 'seek-filter-help';
+    filterHelpEl.textContent = i18n.t('lobby.filterHelp');
+
+    filterStatusEl = doc.createElement('div');
+    filterStatusEl.className = 'seek-filter-status';
+    filterStatusEl.setAttribute('role', 'status');
+    filterStatusEl.setAttribute('aria-live', 'polite');
+
+    filterSelectEl.addEventListener('change', handleFilterChange);
+    filterResetBtn.addEventListener('click', handleFilterReset);
+
+    filterHostEl.append(filterLabelEl, filterSelectEl, filterResetBtn, filterHelpEl, filterStatusEl);
+  }
 
   const lobby = new LobbyController({
     client,
@@ -275,9 +467,8 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
       onSeeks: (seeks, names) => {
         renderedSeeks = seeks;
         renderedNames = names;
-        if (seekListEl) {
-          renderSeeks(seekListEl, seeks, client.session.current?.user.id ?? null, names, i18n);
-        }
+        hasReceivedSeeks = true;
+        renderCurrentSeeks();
       },
       onCreatePending: (pending) => {
         panel?.setPending(pending);
@@ -293,6 +484,11 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
     onDispose: () => {
       routeActive = false;
       seekListEl?.removeEventListener('click', handleSeekAction);
+      filterSelectEl?.removeEventListener('change', handleFilterChange);
+      filterResetBtn?.removeEventListener('click', handleFilterReset);
+      if (filterSelectEl) filterSelectEl.disabled = true;
+      if (filterResetBtn) filterResetBtn.disabled = true;
+      filterHostEl?.replaceChildren();
       panel?.dispose();
       playBotDialog?.dispose();
       unsubscribeLocale?.();
@@ -367,14 +563,8 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
 
   /** Re-render cached seeks after auth restoration changes which rows belong to the viewer. */
   function onSessionChange(): void {
-    if (routeActive && seekListEl) {
-      renderSeeks(
-        seekListEl,
-        renderedSeeks,
-        client.session.current?.user.id ?? null,
-        renderedNames,
-        i18n,
-      );
+    if (routeActive) {
+      renderCurrentSeeks();
     }
   }
 

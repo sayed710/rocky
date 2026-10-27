@@ -5,7 +5,7 @@ import { createI18nManager, type I18nManager } from '../src/i18n/index.js';
 import { formatMoreOptionsSummary } from '../src/app/create-game-panel.js';
 import { LobbyController } from '../src/app/lobby-controller.js';
 import { OFFERED_VARIANTS } from '../src/api/models.js';
-import { VARIANT_LABELS } from '../src/app/variant-labels.js';
+import { getVariantLabel, VARIANT_LABELS } from '../src/app/variant-labels.js';
 import { enMessages as en } from '../src/i18n/catalog/en.js';
 import type {
   CreateBotGameRequest,
@@ -43,6 +43,7 @@ class FakeDOMElement {
   checked = false;
   selected = false;
   name = '';
+  htmlFor = '';
   private _innerHTML = '';
   dataset: Record<string, string> = {};
   readonly attributes = new Map<string, string>();
@@ -324,6 +325,7 @@ function createTestDoc(): {
 
   const ids = [
     'lobby',
+    'seek-filter',
     'seek-list',
     'create-game',
     'play-bot-mount',
@@ -391,6 +393,8 @@ function makeFakeGameSummary(id: string): GameSummary {
 /** Build a typed lobby client seam and capture every create/accept/cancel call. */
 function makeFakeClient(opts: {
   seeks?: SeekView[];
+  listSeeks?: () => Promise<SeekView[]>;
+  resolvePlayers?: (ids: readonly string[]) => Promise<ReadonlyMap<string, SocialPlayer>>;
   createSeekResult?: SeekView;
   createSeek?: (body: CreateSeekRequest) => Promise<SeekView>;
   createBotGameError?: string;
@@ -403,13 +407,19 @@ function makeFakeClient(opts: {
   const canceledSeeks: string[] = [];
   const acceptedSeeks: string[] = [];
   const botGameCalls: CreateBotGameRequest[] = [];
+  let listCalls = 0;
+  let graphqlCalls = 0;
 
   const client = {
     session: {
       current: opts.userId ? { user: { id: opts.userId, handle: 'alice' } } : null,
     },
     seeks: {
-      list: async (): Promise<SeekView[]> => opts.seeks ?? [],
+      list: async (): Promise<SeekView[]> => {
+        listCalls++;
+        if (opts.listSeeks) return opts.listSeeks();
+        return opts.seeks ?? [];
+      },
       create: async (body: CreateSeekRequest): Promise<SeekView> => {
         createdSeeks.push(body);
         if (opts.createSeek) return opts.createSeek(body);
@@ -424,6 +434,14 @@ function makeFakeClient(opts: {
         return makeSeek({ id, gameId: 'game-matched-1' });
       },
     },
+    graphql: opts.resolvePlayers
+      ? {
+          resolvePlayers: async (ids: readonly string[]): Promise<ReadonlyMap<string, SocialPlayer>> => {
+            graphqlCalls++;
+            return opts.resolvePlayers!(ids);
+          },
+        }
+      : undefined,
     games: {
       createVsBot: async (body: CreateBotGameRequest): Promise<GameSummary> => {
         botGameCalls.push(body);
@@ -436,7 +454,15 @@ function makeFakeClient(opts: {
     },
   } as unknown as GambitClient;
 
-  return { client, createdSeeks, canceledSeeks, acceptedSeeks, botGameCalls };
+  return {
+    client,
+    createdSeeks,
+    canceledSeeks,
+    acceptedSeeks,
+    botGameCalls,
+    getListCalls: () => listCalls,
+    getGraphqlCalls: () => graphqlCalls,
+  };
 }
 
 const testI18n = createI18nManager();
@@ -534,6 +560,632 @@ const UNLIMITED_WIRE = { initialMs: 0, incrementMs: 0, delayMs: 0, kind: 'unlimi
 const UNLIMITED_SUMMARY = 'Correspondence — no clock, so neither side can run out of time.';
 
 // ── Tests ─────────────────────────────────────────────────────────────
+
+async function waitForCondition(predicate: () => boolean, message = 'condition not met', maxTurns = 50): Promise<void> {
+  for (let i = 0; i < maxTurns; i++) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  assert.fail(`Timed out waiting: ${message}`);
+}
+
+test('lobby variant filter (1): canonical options, default all, order preserved, and own non-matching offers remain visible with cancel button', async () => {
+  const { doc, elements } = createTestDoc();
+  const seekOwnStd = makeSeek({ id: 'seek-own', creatorId: 'user-me', variant: 'standard' });
+  const seekOppStd = makeSeek({ id: 'seek-opp-std', creatorId: 'opp-1', variant: 'standard' });
+  const seekOppAtom = makeSeek({ id: 'seek-opp-atom', creatorId: 'opp-2', variant: 'atomic' });
+  const seekOpp960 = makeSeek({ id: 'seek-opp-960', creatorId: 'opp-3', variant: 'chess960' });
+
+  const fake = makeFakeClient({
+    userId: 'user-me',
+    seeks: [seekOwnStd, seekOppStd, seekOppAtom, seekOpp960],
+  });
+
+  const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => true });
+  mounted.lobby.stop();
+  await waitForCondition(() => (elements.get('seek-list')?.children.length ?? 0) === 4, 'initial 4 seeks loaded');
+
+  const filterHost = elements.get('seek-filter');
+  assert.ok(filterHost, 'seek-filter host must exist');
+  const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter');
+  assert.ok(select, 'lobby-variant-filter select must exist');
+  const resetBtn = filterHost.querySelector<FakeDOMElement>('.seek-filter-reset');
+  assert.ok(resetBtn, 'reset button must exist');
+
+  const options = select.querySelectorAll<FakeDOMElement>('option');
+  assert.equal(options.length, OFFERED_VARIANTS.length + 1);
+  assert.equal(options[0]?.value, 'all');
+  assert.equal(options[0]?.textContent, testI18n.t('lobby.filterAll'));
+  for (let i = 0; i < OFFERED_VARIANTS.length; i++) {
+    const v = OFFERED_VARIANTS[i]!;
+    assert.equal(options[i + 1]?.value, v);
+    assert.equal(options[i + 1]?.textContent, getVariantLabel(v, testI18n));
+  }
+
+  assert.equal(select.value, 'all');
+  assert.equal(resetBtn.hidden, true);
+
+  const seekList = elements.get('seek-list')!;
+  let rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0]?.dataset.seekId, 'seek-own');
+  assert.ok(rows[0]?.querySelector('.seek-cancel'), 'own seek must have cancel affordance');
+  assert.equal(rows[1]?.dataset.seekId, 'seek-opp-std');
+  assert.equal(rows[2]?.dataset.seekId, 'seek-opp-atom');
+  assert.equal(rows[3]?.dataset.seekId, 'seek-opp-960');
+
+  // Filter to atomic
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+
+  assert.equal(resetBtn.hidden, false);
+  rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 2, 'own non-matching seek and matching atomic seek must remain');
+  assert.equal(rows[0]?.dataset.seekId, 'seek-own');
+  assert.ok(rows[0]?.querySelector('.seek-cancel'), 'own standard seek must still be cancellable');
+  assert.equal(rows[1]?.dataset.seekId, 'seek-opp-atom');
+  assert.ok(rows[1]?.querySelector('.seek-accept'), 'opponent atomic seek must be acceptable');
+});
+
+test('lobby variant filter (2): auth session switches preserve filter selection without extra fetch and update ownership affordances', async () => {
+  const { doc, elements } = createTestDoc();
+  const seekA = makeSeek({ id: 'seek-a', creatorId: 'user-a', variant: 'standard' });
+  const seekB = makeSeek({ id: 'seek-b', creatorId: 'user-b', variant: 'atomic' });
+  const seekC = makeSeek({ id: 'seek-c', creatorId: 'user-c', variant: 'atomic' });
+
+  const fake = makeFakeClient({
+    seeks: [seekA, seekB, seekC],
+  });
+
+  const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => false });
+  mounted.lobby.stop();
+  const seekList = elements.get('seek-list')!;
+  await waitForCondition(() => seekList.children.length === 3, 'initial seeks rendered');
+
+  const filterHost = elements.get('seek-filter')!;
+  const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+
+  // Filter by atomic in anonymous state
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+
+  let rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.dataset.seekId, 'seek-b');
+  assert.ok(rows[0]?.querySelector('.seek-accept'));
+  assert.equal(rows[1]?.dataset.seekId, 'seek-c');
+  assert.ok(rows[1]?.querySelector('.seek-accept'));
+
+  const initialFetchCount = fake.getListCalls();
+
+  // Focus seek-b accept button
+  const seekBAccept = rows[0]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(seekBAccept);
+  seekBAccept.focus();
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, seekBAccept);
+
+  // Sign in as user B (owner of atomic seek-b): accept button becomes cancel button
+  (fake.client.session as unknown as { current: unknown }).current = { user: { id: 'user-b', handle: 'bob' } };
+  mounted.onSessionChange();
+
+  assert.equal(fake.getListCalls(), initialFetchCount, 'onSessionChange must cause zero network I/O');
+  assert.equal(select.value, 'atomic', 'route-local choice survives session change');
+
+  rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0]?.dataset.seekId, 'seek-b');
+  const seekBCancel = rows[0]?.querySelector<FakeDOMElement>('.seek-cancel');
+  assert.ok(seekBCancel, 'seek-b must now carry cancel affordance');
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, seekBCancel, 'focus must transfer to newly rendered Cancel');
+
+  // Sign in as user A (owner of nonmatching standard seek-a):
+  (fake.client.session as unknown as { current: unknown }).current = { user: { id: 'user-a', handle: 'alice' } };
+  mounted.onSessionChange();
+
+  assert.equal(fake.getListCalls(), initialFetchCount);
+  rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 3, 'own nonmatching seek-a becomes visible alongside matching opponents');
+  assert.equal(rows[0]?.dataset.seekId, 'seek-a');
+  const seekACancel = rows[0]?.querySelector<FakeDOMElement>('.seek-cancel');
+  assert.ok(seekACancel, 'seek-a must carry cancel affordance');
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, seekACancel, 'fallback selects surviving cancel at index 0');
+
+  // Cancel own nonmatching offer:
+  seekACancel.click();
+  assert.deepEqual(fake.canceledSeeks, ['seek-a']);
+
+  // Sign out
+  (fake.client.session as unknown as { current: unknown }).current = null;
+  mounted.onSessionChange();
+
+  assert.equal(fake.getListCalls(), initialFetchCount);
+  rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 2);
+  assert.ok(rows[0]?.querySelector('.seek-accept'));
+  assert.ok(rows[1]?.querySelector('.seek-accept'));
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, rows[0]?.querySelector('.seek-accept'), 'signout selects surviving accept action');
+});
+
+test('lobby variant filter (3): deferred GraphQL name enrichment and poll replacement race ignores old generation and updates current generation', async () => {
+  const { doc, elements } = createTestDoc();
+  const seekG1Atom = makeSeek({ id: 'g1-atom', creatorId: 'player-1', creatorHandle: null, variant: 'atomic' });
+  const seekG1Std = makeSeek({ id: 'g1-std', creatorId: 'player-2', creatorHandle: null, variant: 'standard' });
+  const seekG2Atom = makeSeek({ id: 'g2-atom', creatorId: 'player-3', creatorHandle: null, variant: 'atomic' });
+  const seekG2Std = makeSeek({ id: 'g2-std', creatorId: 'player-4', creatorHandle: null, variant: 'standard' });
+
+  let currentSeeks: SeekView[] = [seekG1Atom, seekG1Std];
+  let resolveGql1!: (val: ReadonlyMap<string, SocialPlayer>) => void;
+  const gql1Promise = new Promise<ReadonlyMap<string, SocialPlayer>>((res) => { resolveGql1 = res; });
+  let resolveGql2!: (val: ReadonlyMap<string, SocialPlayer>) => void;
+  const gql2Promise = new Promise<ReadonlyMap<string, SocialPlayer>>((res) => { resolveGql2 = res; });
+
+  let gqlCallCount = 0;
+  const fake = makeFakeClient({
+    listSeeks: async () => currentSeeks,
+    resolvePlayers: async () => {
+      gqlCallCount++;
+      return gqlCallCount === 1 ? gql1Promise : gql2Promise;
+    },
+  });
+
+  const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => false });
+  mounted.lobby.stop();
+  const seekList = elements.get('seek-list')!;
+  await waitForCondition(() => seekList.children.length === 2, 'generation 1 loaded');
+
+  const filterHost = elements.get('seek-filter')!;
+  const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+
+  let rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.dataset.seekId, 'g1-atom');
+  assert.equal(fake.getGraphqlCalls(), 1, 'generation 1 requested player resolution');
+
+  // Next poll generation arrives before generation 1 GraphQL resolution completes
+  currentSeeks = [seekG2Atom, seekG2Std];
+  const refreshPromise = mounted.lobby.refresh();
+  await waitForCondition(() => seekList.querySelectorAll('.seek-row')[0]?.dataset.seekId === 'g2-atom', 'generation 2 rendered');
+  assert.equal(fake.getGraphqlCalls(), 2, 'generation 2 requested player resolution');
+
+  // Resolve generation 1 after generation 2 is active
+  resolveGql1(new Map([
+    ['player-1', { id: 'player-1', handle: 'stale-alice' }],
+    ['player-2', { id: 'player-2', handle: 'stale-bob' }],
+  ]));
+  await gql1Promise;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // Generation 1 resolution must be ignored by generation fence
+  rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.dataset.seekId, 'g2-atom');
+  assert.equal(rows[0]?.querySelector('.row-link'), null, 'still un-enriched generation 2 handle');
+
+  // Resolve generation 2: improves visible label while atomic filter remains active
+  resolveGql2(new Map([
+    ['player-3', { id: 'player-3', handle: 'fresh-carol' }],
+    ['player-4', { id: 'player-4', handle: 'fresh-dave' }],
+  ]));
+  await refreshPromise;
+  await waitForCondition(() => seekList.querySelector('.row-link')?.textContent === 'fresh-carol', 'generation 2 enriched');
+
+  rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.dataset.seekId, 'g2-atom');
+  assert.equal(rows[0]?.querySelector('.row-link')?.textContent, 'fresh-carol');
+});
+
+test('lobby variant filter (4): empty state truthfulness, pre-load/failure state, and status semantics', async () => {
+  const { doc, elements } = createTestDoc();
+  let rejectFirstLoad!: (err: Error) => void;
+  const firstPromise = new Promise<SeekView[]>((_, reject) => {
+    rejectFirstLoad = reject;
+  });
+
+  const fake = makeFakeClient({
+    listSeeks: () => firstPromise,
+    userId: 'user-me',
+  });
+
+  const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => true });
+  mounted.lobby.stop();
+
+  const seekList = elements.get('seek-list')!;
+  const filterHost = elements.get('seek-filter')!;
+  const statusEl = filterHost.querySelector<FakeDOMElement>('.seek-filter-status')!;
+
+  // 4a: Pre-load: no false empty state before first load finishes
+  assert.equal(seekList.children.length, 0);
+  assert.equal(seekList.querySelector('.empty'), null);
+
+  // 4b: Failed first load: error shown, but no false empty list
+  rejectFirstLoad(new Error('Network error'));
+  await waitForCondition(() => elements.get('lobby-error')?.textContent === 'Network error', 'lobby error set');
+  assert.equal(elements.get('lobby-error')?.textContent, 'Network error');
+  assert.equal(seekList.children.length, 0);
+  assert.equal(seekList.querySelector('.empty'), null);
+
+  // 4c: Genuine successful empty load:
+  let resolveEmpty!: (seeks: SeekView[]) => void;
+  const emptyPromise = new Promise<SeekView[]>((res) => { resolveEmpty = res; });
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = () => emptyPromise;
+  const pRefresh = mounted.lobby.refresh();
+  resolveEmpty([]);
+  await pRefresh;
+  await waitForCondition(() => seekList.getAttribute('role') === 'status', 'empty status set');
+
+  assert.equal(seekList.getAttribute('role'), 'status');
+  assert.equal(seekList.querySelector('.empty-title')?.textContent, testI18n.t('lobby.emptySeeksTitle'));
+  assert.equal(seekList.querySelector('.empty-body')?.textContent, testI18n.t('lobby.emptySeeksBody'));
+  assert.equal(statusEl.textContent, testI18n.t('lobby.filterStatusNone'));
+
+  // 4d: Hidden-only opponents: 1 standard opponent seek, filter atomic -> empty role=list, stable sibling notice
+  const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+
+  const seekOppStd = makeSeek({ id: 'opp-std', creatorId: 'other-user', variant: 'standard' });
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seekOppStd];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => statusEl.textContent === testI18n.t('lobby.filterEmpty'), 'filterEmpty status set');
+
+  assert.equal(seekList.getAttribute('role'), 'list');
+  assert.equal(seekList.querySelectorAll('.seek-row').length, 0);
+  assert.equal(seekList.querySelector('.empty'), null, 'no empty panel inside seek-list when filtered');
+  assert.equal(statusEl.textContent, testI18n.t('lobby.filterEmpty'));
+
+  // 4e: Own + hidden opponents: own atomic seek + opponent standard seek -> own row in list + sibling notice
+  const seekOwnAtom = makeSeek({ id: 'own-atom', creatorId: 'user-me', variant: 'atomic' });
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seekOwnAtom, seekOppStd];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => seekList.querySelectorAll('.seek-row').length === 1, 'own row rendered');
+
+  assert.equal(seekList.getAttribute('role'), 'list');
+  assert.equal(seekList.querySelectorAll('.seek-row').length, 1);
+  assert.equal(seekList.querySelector('.empty'), null);
+  assert.equal(statusEl.textContent, testI18n.t('lobby.filterEmpty'));
+
+  // 4f: No hidden opponents (own only): own atomic seek, 0 opponents -> own row ONLY, NO no-match notice
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seekOwnAtom];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => statusEl.textContent === testI18n.t('lobby.filterStatusNone'), 'status none set');
+
+  assert.equal(seekList.querySelectorAll('.seek-row').length, 1);
+  assert.equal(statusEl.textContent, testI18n.t('lobby.filterStatusNone'), 'must not claim filter empty when no opponents exist');
+});
+
+test('lobby variant filter (5): zero I/O across valid, invalid, and explicit reset, with reset focusing select', async () => {
+  const { doc, elements } = createTestDoc();
+  const storage = memoryStorage({ 'gambit.theme': 'dark', 'gambit.locale': 'en' });
+  const seekStd = makeSeek({ id: 's-std', creatorId: 'opp-1', creatorHandle: null, variant: 'standard' });
+  const seekAtom = makeSeek({ id: 's-atom', creatorId: 'opp-2', creatorHandle: null, variant: 'atomic' });
+
+  const fake = makeFakeClient({
+    seeks: [seekStd, seekAtom],
+    resolvePlayers: async (ids) => new Map(ids.map((id) => [id, { id, handle: `player-${id}` }])),
+  });
+  const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => false, storage });
+  mounted.lobby.stop();
+  const seekList = elements.get('seek-list')!;
+  await waitForCondition(() => seekList.querySelector('.row-link')?.textContent === 'player-opp-1', 'initial load settled');
+
+  const filterHost = elements.get('seek-filter')!;
+  const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+  const resetBtn = filterHost.querySelector<FakeDOMElement>('.seek-filter-reset')!;
+
+  const snapshot = () => ({
+    listCalls: fake.getListCalls(),
+    graphqlCalls: fake.getGraphqlCalls(),
+    storage: { ...storage.entries },
+    created: [...fake.createdSeeks],
+    canceled: [...fake.canceledSeeks],
+    accepted: [...fake.acceptedSeeks],
+    botCalls: [...fake.botGameCalls],
+    session: fake.client.session.current,
+  });
+
+  const baseline = snapshot();
+
+  // Invalid value rejected and restored
+  select.value = 'invalid-variant';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(select.value, 'all', 'unsupported DOM value must be restored to last valid selection');
+  assert.deepEqual(snapshot(), baseline, 'no I/O on invalid selection');
+
+  // Filter to atomic
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(select.value, 'atomic');
+  assert.equal(resetBtn.hidden, false);
+  assert.equal(seekList.querySelectorAll('.seek-row').length, 1);
+  assert.deepEqual(snapshot(), baseline, 'zero I/O on valid filter change');
+
+  // Another invalid value restores to 'atomic'
+  select.value = 'hacked-variant';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(select.value, 'atomic', 'restores to previous valid selection');
+  assert.deepEqual(snapshot(), baseline);
+
+  // Focus reset button first, then click it
+  resetBtn.focus();
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, resetBtn);
+  resetBtn.click();
+
+  assert.equal(select.value, 'all');
+  assert.equal(resetBtn.hidden, true);
+  assert.equal(seekList.querySelectorAll('.seek-row').length, 2, 'all cached rows restored');
+  assert.equal(
+    (doc as unknown as { activeElement: FakeDOMElement | null }).activeElement,
+    select,
+    'explicit reset must move focus to stable select',
+  );
+  assert.deepEqual(snapshot(), baseline, 'zero I/O on reset');
+});
+
+test('lobby variant filter (6): option node identity and label relocalization, row focus and rowless recovery, status mutation dedup', async () => {
+  const { doc, elements } = createTestDoc();
+  const i18n = createI18nManager();
+  const seek1 = makeSeek({ id: 's-1', creatorId: 'opp-1', variant: 'atomic' });
+  const seek2 = makeSeek({ id: 's-2', creatorId: 'opp-2', variant: 'atomic' });
+  const seek3 = makeSeek({ id: 's-3', creatorId: 'opp-3', variant: 'standard' });
+
+  const fake = makeFakeClient({ seeks: [seek1, seek2, seek3] });
+  const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => false, i18n });
+  mounted.lobby.stop();
+  const seekList = elements.get('seek-list')!;
+  await waitForCondition(() => seekList.children.length === 3, 'seeks rendered');
+
+  const filterHost = elements.get('seek-filter')!;
+  const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+  const statusEl = filterHost.querySelector<FakeDOMElement>('.seek-filter-status')!;
+
+  // Capture option references
+  const initialOptions = select.querySelectorAll<FakeDOMElement>('option');
+  assert.equal(initialOptions.length, OFFERED_VARIANTS.length + 1);
+  const allOption = initialOptions.find((o) => o.value === 'all');
+  assert.ok(allOption);
+  assert.equal(allOption.textContent, i18n.t('lobby.filterAll'));
+
+  // Focus select and set atomic
+  select.focus();
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, select);
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+
+  // Switch locale to Arabic: option node instances retained and relocalized in place
+  i18n.setLocale('ar');
+  const arOptions = select.querySelectorAll<FakeDOMElement>('option');
+  assert.equal(arOptions.length, initialOptions.length);
+  for (let i = 0; i < initialOptions.length; i++) {
+    assert.equal(arOptions[i], initialOptions[i], `option node ${i} identity must be preserved across locale change`);
+  }
+  assert.equal(allOption.textContent, i18n.t('lobby.filterAll'));
+  assert.equal(select.value, 'atomic', 'selected value preserved');
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, select, 'selector focus preserved');
+
+  // Switch back to English
+  i18n.setLocale('en');
+  assert.equal(allOption.textContent, i18n.t('lobby.filterAll'));
+  assert.equal(select.value, 'atomic');
+
+  // Row focus fallback: focus second row accept button
+  let rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  assert.equal(rows.length, 2);
+  const row2Accept = rows[1]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(row2Accept);
+  row2Accept.focus();
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, row2Accept);
+
+  // Next poll removes s-2: focus falls back to row 1
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seek1, seek3];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => seekList.querySelectorAll('.seek-row').length === 1, 's-2 removed');
+  rows = seekList.querySelectorAll<FakeDOMElement>('.seek-row');
+  const row1Accept = rows[0]?.querySelector<FakeDOMElement>('.seek-accept');
+  assert.ok(row1Accept);
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, row1Accept, 'focus fell back to surviving row');
+
+  // Next poll removes s-1 (rowless filtered): focus recovers to stable select element
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seek3];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => seekList.querySelectorAll('.seek-row').length === 0, 'rowless reached');
+  assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, select, 'rowless recovery moves focus to stable select');
+
+  // Status dedup on own + hidden opponent offers:
+  const seekOwn = makeSeek({ id: 'own-1', creatorId: 'user-me', variant: 'atomic' });
+  (fake.client.session as unknown as { current: unknown }).current = { user: { id: 'user-me', handle: 'alice' } };
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seekOwn, seek3];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => statusEl.textContent === testI18n.t('lobby.filterEmpty'), 'own+hidden status set');
+
+  // Verify current external node is still the captured node
+  assert.equal(filterHost.querySelector('.seek-filter-status'), statusEl);
+
+  let textWrites = 0;
+  let currentText = statusEl.textContent;
+  Object.defineProperty(statusEl, 'textContent', {
+    get: () => currentText,
+    set: (v: string) => {
+      textWrites++;
+      currentText = v;
+    },
+    configurable: true,
+  });
+
+  textWrites = 0;
+  await mounted.lobby.refresh();
+  await Promise.resolve();
+  assert.equal(textWrites, 0, 'unchanged poll on own+hidden must not rewrite status textContent');
+});
+
+test('lobby variant filter (7): action delegation dispatches exact seek IDs under nonmatching filter and matched navigation works', async () => {
+  const { doc, elements } = createTestDoc();
+  const seekOwnStd = makeSeek({ id: 'own-action-1', creatorId: 'user-me', variant: 'standard' });
+  const seekOppAtom = makeSeek({ id: 'opp-action-2', creatorId: 'user-other', variant: 'atomic' });
+
+  let currentSeeks = [seekOwnStd, seekOppAtom];
+  const fake = makeFakeClient({
+    userId: 'user-me',
+    listSeeks: async () => currentSeeks,
+  });
+
+  const locationState = { href: '' };
+  const target = globalThis as unknown as Record<string, unknown>;
+  const originalWindow = target['window'];
+  target['window'] = { location: locationState };
+
+  try {
+    const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => true });
+    mounted.lobby.stop();
+    const seekList = elements.get('seek-list')!;
+    await waitForCondition(() => seekList.children.length === 2, 'seeks loaded');
+
+    const filterHost = elements.get('seek-filter')!;
+    const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+    select.value = 'atomic';
+    select.dispatchEvent(new Event('change'));
+
+    // Cancel own nonmatching offer:
+    currentSeeks = [seekOppAtom];
+    const cancelBtn = seekList.querySelector<FakeDOMElement>('.seek-cancel');
+    assert.ok(cancelBtn);
+    cancelBtn.click();
+    await waitForCondition(() => fake.canceledSeeks.includes('own-action-1'), 'cancel recorded');
+    await waitForCondition(() => seekList.querySelectorAll('.seek-row').length === 1, 'cancel refresh completed');
+    assert.deepEqual(fake.canceledSeeks, ['own-action-1'], 'exact cancel ID dispatched for own nonmatching seek');
+    assert.equal(elements.get('lobby-error')?.textContent, '', 'no lobby error on cancel');
+
+    // Accept opponent atomic offer:
+    const acceptBtn = seekList.querySelector<FakeDOMElement>('.seek-accept');
+    assert.ok(acceptBtn);
+    acceptBtn.click();
+    await waitForCondition(() => locationState.href === '/game/game-matched-1', 'accept navigated');
+    assert.deepEqual(fake.acceptedSeeks, ['opp-action-2'], 'exact accept ID dispatched for opponent seek');
+    assert.equal(elements.get('lobby-error')?.textContent, '', 'no lobby error on accept');
+
+    // Deliver matched receipt through real lobby.refresh() under active atomic filter:
+    locationState.href = '';
+    const matchedNonmatchingSeek = makeSeek({
+      id: 'own-matched',
+      creatorId: 'user-me',
+      variant: 'crazyhouse',
+      gameId: 'game-matched-999',
+    });
+    currentSeeks = [matchedNonmatchingSeek];
+
+    await mounted.lobby.refresh();
+    await waitForCondition(() => locationState.href === '/game/game-matched-999', 'matched game navigated');
+    assert.equal(locationState.href, '/game/game-matched-999', 'matched receipt navigates regardless of active variant filter');
+    assert.equal(elements.get('lobby-error')?.textContent, '');
+  } finally {
+    if (originalWindow === undefined) delete target['window'];
+    else target['window'] = originalWindow;
+  }
+});
+
+test('lobby variant filter (8): persistent-DOM remount clears stale rows, isolates rejected load, and ignores old controls', async () => {
+  const { doc, elements } = createTestDoc();
+  const seek1 = makeSeek({ id: 'route1-seek', creatorId: 'p-1', creatorHandle: null, variant: 'atomic' });
+
+  let resolveRoute1Gql!: (val: ReadonlyMap<string, SocialPlayer>) => void;
+  const route1GqlPromise = new Promise<ReadonlyMap<string, SocialPlayer>>((res) => {
+    resolveRoute1Gql = res;
+  });
+  let route1Settled = false;
+
+  const fake1 = makeFakeClient({
+    seeks: [seek1],
+    resolvePlayers: async () => {
+      const result = await route1GqlPromise;
+      route1Settled = true;
+      return result;
+    },
+  });
+
+  const mounted1 = mountTestLobby({ doc, client: fake1.client, isAuthenticated: () => true });
+  mounted1.lobby.stop();
+  const seekList = elements.get('seek-list')!;
+  await waitForCondition(() => seekList.children.length === 1, 'route 1 seek loaded');
+  assert.equal(fake1.getGraphqlCalls(), 1, 'route 1 pending player resolution');
+
+  const filterHost = elements.get('seek-filter')!;
+  const oldSelect = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+  const oldReset = filterHost.querySelector<FakeDOMElement>('.seek-filter-reset')!;
+
+  oldSelect.value = 'atomic';
+  oldSelect.dispatchEvent(new Event('change'));
+
+  // Dispose route 1 while route 1 GraphQL is still pending
+  mounted1.lobby.dispose();
+  assert.equal(oldSelect.listenerCount('change'), 0);
+  assert.equal(oldReset.listenerCount('click'), 0);
+  assert.equal(oldSelect.disabled, true);
+  assert.equal(oldReset.disabled, true);
+
+  // Mount route 2 on the same document with deferred then rejected load:
+  let rejectSecondLoad!: (err: Error) => void;
+  const secondLoadPromise = new Promise<SeekView[]>((_, reject) => {
+    rejectSecondLoad = reject;
+  });
+  const fake2 = makeFakeClient({ listSeeks: () => secondLoadPromise });
+
+  const mounted2 = mountTestLobby({ doc, client: fake2.client, isAuthenticated: () => true });
+  mounted2.lobby.stop();
+
+  // Before second load finishes: stale rows from route 1 must be cleared immediately, no false empty
+  assert.equal(seekList.children.length, 0, 'stale route 1 rows cleared on remount');
+  assert.equal(seekList.querySelector('.empty'), null, 'no false empty notice before second load completes');
+
+  const newSelect = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+  const newReset = filterHost.querySelector<FakeDOMElement>('.seek-filter-reset')!;
+  assert.notEqual(newSelect, oldSelect, 'fresh select created');
+  assert.equal(newSelect.value, 'all', 'fresh mount defaults to all');
+
+  const route2StatusNode = filterHost.querySelector<FakeDOMElement>('.seek-filter-status');
+  const route2StatusText = route2StatusNode?.textContent;
+  const route2ListCalls = fake2.getListCalls();
+  const route2GqlCalls = fake2.getGraphqlCalls();
+
+  // Resolve old route 1 response after new mount is established:
+  resolveRoute1Gql(new Map([['p-1', { id: 'p-1', handle: 'late-stale-p1' }]]));
+  await waitForCondition(() => route1Settled, 'route 1 GraphQL resolver settled');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // Route 2 state must remain stable after old response resolves
+  assert.equal(seekList.children.length, 0, 'route 2 still clean after late route 1 resolution');
+  assert.equal(newSelect.value, 'all', 'route 2 selection preserved');
+  assert.equal(filterHost.querySelector('.seek-filter-status'), route2StatusNode, 'route 2 status node preserved');
+  assert.equal(route2StatusNode?.textContent, route2StatusText, 'route 2 status text preserved');
+  assert.equal(fake2.getListCalls(), route2ListCalls, 'route 2 list counter unchanged');
+  assert.equal(fake2.getGraphqlCalls(), route2GqlCalls, 'route 2 graphql counter unchanged');
+
+  // Reject second load:
+  rejectSecondLoad(new Error('Second load failed'));
+  await waitForCondition(() => elements.get('lobby-error')?.textContent === 'Second load failed', 'second load error set');
+
+  // Stale route 1 rows must NOT reappear on failure
+  assert.equal(seekList.children.length, 0);
+  assert.equal(elements.get('lobby-error')?.textContent, 'Second load failed');
+
+  // Dispatching old controls must not affect route 2:
+  oldSelect.value = 'crazyhouse';
+  oldSelect.dispatchEvent(new Event('change'));
+  oldReset.click();
+  assert.equal(newSelect.value, 'all');
+  assert.equal(seekList.children.length, 0);
+
+  // Verify exactly one active listener set
+  assert.equal(newSelect.listenerCount('change'), 1);
+  assert.equal(newReset.listenerCount('click'), 1);
+  assert.equal(seekList.listenerCount('click'), 1);
+
+  mounted2.lobby.dispose();
+  assert.equal(newSelect.listenerCount('change'), 0);
+  assert.equal(newReset.listenerCount('click'), 0);
+  assert.equal(seekList.listenerCount('click'), 0);
+});
 
 test('renderSeeks: renders empty state when no seeks are open', () => {
   const { doc } = createTestDoc();
