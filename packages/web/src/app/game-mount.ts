@@ -1301,7 +1301,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (metaVariantEl && state.variant) {
       const label = getVariantLabel(state.variant, i18n);
       metaVariantEl.textContent =
-        typeof state.chess960StartId === 'number'
+        typeof state.chess960StartId === 'number' &&
+        Number.isInteger(state.chess960StartId) &&
+        state.chess960StartId >= 0 &&
+        state.chess960StartId <= 959
           ? `${label} · #${state.chess960StartId}`
           : label;
     }

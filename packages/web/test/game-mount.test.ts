@@ -318,6 +318,64 @@ test('withdrawn draw controls return focus to game status only when they contain
   }
 });
 
+test('mountGame renders canonical chess960 start ID label suffix and rejects out-of-range IDs', () => {
+  for (const { id, hasSuffix } of [
+    { id: -1, hasSuffix: false },
+    { id: 960, hasSuffix: false },
+    { id: 0, hasSuffix: true },
+    { id: 959, hasSuffix: true },
+  ]) {
+    const sockets = new FakeSocketFactory();
+    const app = createTestApp(sockets);
+    const { doc, elements } = createGameDocument();
+    const variantEl = elements.get('meta-variant')!;
+    const mounted = mountGame({
+      doc,
+      boardEl: elements.get('board')! as unknown as HTMLElement,
+      gameId: 'mount-label',
+      ...gameServices(app),
+      token: 'test-token',
+      restorePromise: Promise.resolve(null),
+    });
+    try {
+      sockets.last.open();
+      sockets.last.emit({
+        t: 'joined',
+        gameId: 'mount-label',
+        role: 'white',
+        state: {
+          gameId: 'mount-label',
+          variant: 'chess960',
+          players: { white: 'u1', black: 'u2' },
+          timeControl: { initialMs: 600_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          fenHash: 'h0',
+          ply: 0,
+          turn: 'w',
+          clock: { w: 600_000, b: 600_000 },
+          turnStartedAt: null,
+          status: { over: false },
+          drawOffer: null,
+          moves: [],
+          legalMoves: {},
+          chess960StartId: id,
+        },
+      });
+      if (hasSuffix) {
+        assert.equal(variantEl.textContent?.endsWith(`· #${id}`), true, `expected #${id} suffix`);
+      } else {
+        assert.equal(variantEl.textContent?.includes('#'), false, `invalid id ${id} must not render suffix`);
+        assert.equal(variantEl.textContent, 'Chess960');
+      }
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      app.dispose();
+    }
+  }
+});
+
 test('mountGame opens WebSocket immediately when token is provided', () => {
   const sockets = new FakeSocketFactory();
   const app = createTestApp(sockets);
