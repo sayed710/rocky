@@ -25,7 +25,9 @@ However, prior to D1-B, client-side recovery on observing gap frames was naive:
 
 This increment delivers bounded, coalesced client core recovery (D1-B) within `packages/web`,
 with server foundation dependency in `ADR-0164`. Companion lifecycle, boundary, and cross-node
-GameSync integration tests remain pending as a separate companion TOP layer (not shipped in C).
+GameSync integration tests (not shipped in core PR C) are now supplied in the composite TOP PR #130
+layer across `packages/web/test/known-gap-boundaries.test.ts`,
+`packages/web/test/known-gap-session-receipts.test.ts`, and `packages/web/test/draw-state-fanout.test.ts`.
 
 ## Decisions
 
@@ -149,8 +151,10 @@ Uncorrelated command rejections received during recovery do not abort recovery o
   or authentication configuration changes are made.
 - **Client core scope and layer dependencies:** Confined to client core recovery components
   (`game-sync.ts`, `game-controller.ts`, `game-mount.ts`, and core unit suites). It depends on the server
-  foundation in `ADR-0164`. Companion lifecycle, boundary, and cross-node GameSync integration tests are
-  not included in this layer and remain pending in the separate TOP layer (PR #130).
+  foundation in `ADR-0164`. While core PR C intentionally excludes companion lifecycle, boundary, and
+  cross-node GameSync integration suites, those tests are now supplied in the composite TOP PR #130 branch
+  (`packages/web/test/known-gap-boundaries.test.ts`, `packages/web/test/known-gap-session-receipts.test.ts`,
+  and `packages/web/test/draw-state-fanout.test.ts`).
 - **Silent final-publication loss:** If the final broadcast of a game is lost silently by the network
   and no subsequent frame or user action creates an observable gap, client-side gap detection cannot
   discover the lost frame until an explicit user action (e.g. reload or reconnect) queries the gateway.
