@@ -29,7 +29,6 @@ import { Room } from './room';
 import { gameChannel, SubscriptionCancelledError, type PubSub, type Unsubscribe } from './pubsub';
 import type { Connection } from './transport';
 import type {
-  Broadcast,
   ClientMessage,
   MoveMessage,
   RejectCode,
@@ -59,6 +58,7 @@ interface Session {
 interface RoomEntry {
   readonly room: Room;
   readonly unsubscribe: Unsubscribe;
+  lastFullStateRevision?: number;
 }
 
 /** How many times a join's readiness is routed before the failure is reported to the client. */
@@ -646,20 +646,30 @@ export class RealtimeGateway {
     let entry = this.rooms.get(gameId);
     if (entry) return entry;
     const room = new Room(gameId);
-    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (rawMsg) => {
-      const msg = rawMsg as unknown as Broadcast | StateMessage;
+    let unsub: Unsubscribe = () => {};
+    const roomEntry: RoomEntry = {
+      room,
+      unsubscribe: () => unsub(),
+    };
+    unsub = this.pubsub.subscribe(gameChannel(gameId), (rawMsg) => {
+      const msg = rawMsg;
       if (isStateMessage(msg)) {
         const currentRev = this.observedRevision.get(gameId);
-        if (currentRev !== undefined && msg.state.stateRevision <= currentRev) {
+        if (currentRev !== undefined && msg.state.stateRevision < currentRev) {
           return;
+        }
+        if (roomEntry.lastFullStateRevision !== undefined && msg.state.stateRevision <= roomEntry.lastFullStateRevision) {
+          return;
+        }
+        if (room.size > 0) {
+          roomEntry.lastFullStateRevision = Math.max(roomEntry.lastFullStateRevision ?? -1, msg.state.stateRevision);
         }
       }
       this.observe(gameId, msg);
       room.broadcast(msg);
     });
-    entry = { room, unsubscribe };
-    this.rooms.set(gameId, entry);
-    return entry;
+    this.rooms.set(gameId, roomEntry);
+    return roomEntry;
   }
 
   private observe(gameId: string, msg: ServerMessage): void {
@@ -791,7 +801,14 @@ export class RealtimeGateway {
     const msg: ServerMessage = { t: 'state', gameId, state };
     this.observe(gameId, msg);
     if (entry) {
-      entry.room.sendAll(msg);
+      const isDuplicate =
+        entry.lastFullStateRevision !== undefined && state.stateRevision <= entry.lastFullStateRevision;
+      if (!isDuplicate) {
+        if (entry.room.size > 0) {
+          entry.lastFullStateRevision = Math.max(entry.lastFullStateRevision ?? -1, state.stateRevision);
+        }
+        entry.room.sendAll(msg);
+      }
     }
     if (buffers) {
       for (const buf of buffers) {

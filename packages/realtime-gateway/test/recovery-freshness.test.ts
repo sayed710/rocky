@@ -624,6 +624,11 @@ test('RF1 transient failure: the first refresh read throws, the second succeeds 
   white.deliver({ t: 'offerDraw', gameId });
   await awaitGate(gate, 'offerDraw committed on writer');
 
+  const preOvertakeStates = spec.all('state');
+  assert.equal(preOvertakeStates.length, 1, 'room receives valid post-commit draw push');
+  assert.equal(preOvertakeStates[0]!.state.stateRevision, 2);
+  assert.equal(preOvertakeStates[0]!.state.drawOffer, 'w');
+
   // A newer frame overtakes the held draw response: writer commits readiness for Black (rev 3).
   await writer.apply(gameId, 'bob', { kind: 'ready' });
   await flush();
@@ -640,14 +645,17 @@ test('RF1 transient failure: the first refresh read throws, the second succeeds 
   gate.release.resolve();
   await flush();
 
-  // The room gets exactly one state frame with drawOffer 'w' at revision >= floor.
+  // The room receives the initial post-commit draw push (rev 2) followed by the refreshed state frame (rev 3 >= floor).
   const stateFrames = spec.sent.filter((m): m is ServerMessage & { t: 'state' } => m.t === 'state');
-  assert.equal(stateFrames.length, 1, 'room gets exactly one state frame');
+  assert.equal(stateFrames.length, 2, 'room gets post-commit draw push plus refreshed state frame');
+  assert.equal(stateFrames[0]!.state.stateRevision, 2);
   assert.equal(stateFrames[0]!.state.drawOffer, 'w');
+  assert.equal(stateFrames[1]!.state.drawOffer, 'w');
   assert.ok(
-    stateFrames[0]!.state.stateRevision >= specReady.stateRevision,
-    `state revision ${stateFrames[0]!.state.stateRevision} >= floor ${specReady.stateRevision}`,
+    stateFrames[1]!.state.stateRevision >= specReady.stateRevision,
+    `state revision ${stateFrames[1]!.state.stateRevision} >= floor ${specReady.stateRevision}`,
   );
+  assert.equal(stateFrames[1]!.state.stateRevision, 3);
 });
 
 test('RF2 all attempts fail on a non-owner edge (resident stale) -> exactly STATE_REFRESH_ATTEMPTS refresh reads, onStateRefreshFailed called exactly once with the gameId, NO state frame below the floor reaches anyone, the commanding client receives no reject and no outcomeUnknown, and the writers append count is unchanged after the command committed (no resubmission)', async () => {
@@ -706,12 +714,18 @@ test('RF2 all attempts fail on a non-owner edge (resident stale) -> exactly STAT
   white.deliver({ t: 'offerDraw', gameId });
   await awaitGate(gate, 'offerDraw committed on writer');
 
+  const preFloorStates = spec.all('state');
+  assert.equal(preFloorStates.length, 1, 'room receives valid pre-floor draw push');
+  assert.equal(preFloorStates[0]!.state.stateRevision, 1);
+  assert.equal(preFloorStates[0]!.state.drawOffer, 'w');
+
   // Overtake with move 1 (rev 2).
   await writer.apply(gameId, 'alice', { kind: 'move', uci: 'e2e4' });
   await flush();
 
   const appendsAfterCommit = writerLog.appends;
   const loadsBeforeRefresh = deferredLog.loads;
+  const statesBeforeRelease = spec.all('state').length;
 
   // Every refresh read throws.
   deferredLog.throwLoadTimes = 10;
@@ -723,7 +737,7 @@ test('RF2 all attempts fail on a non-owner edge (resident stale) -> exactly STAT
   assert.equal(deferredLog.loads - loadsBeforeRefresh, 3, 'exactly STATE_REFRESH_ATTEMPTS refresh reads');
   assert.equal(failedCalls.length, 1, 'onStateRefreshFailed called exactly once');
   assert.equal(failedCalls[0]!.gameId, gameId);
-  assert.equal(spec.all('state').length, 0, 'no state frame below floor reaches anyone');
+  assert.equal(spec.all('state').length, statesBeforeRelease, 'no state frame below floor reaches anyone after refresh failure');
   assert.equal(white.all('reject').length, 0, 'no reject to commanding client');
   assert.equal(white.all('outcomeUnknown').length, 0, 'no outcomeUnknown to commanding client');
   assert.equal(writerLog.appends, appendsAfterCommit, 'writer append count unchanged (no resubmission)');
@@ -785,6 +799,11 @@ test('RF3 owner-node fallback: every read throws, but the gateways authority is 
   white.deliver({ t: 'offerDraw', gameId });
   await awaitGate(gate, 'offerDraw committed on owner');
 
+  const preFloorStates = spec.all('state');
+  assert.equal(preFloorStates.length, 1, 'pre-floor post-commit draw push delivered');
+  assert.equal(preFloorStates[0]!.state.stateRevision, 2);
+  assert.equal(preFloorStates[0]!.state.drawOffer, 'w');
+
   // Black commits readiness on owner (rev 3); observedRevision becomes 3.
   await owner.apply(gameId, 'bob', { kind: 'ready' });
   await flush();
@@ -797,8 +816,11 @@ test('RF3 owner-node fallback: every read throws, but the gateways authority is 
   await flush();
 
   const stateFrames = spec.all('state');
-  assert.equal(stateFrames.length, 1, 'one state frame delivered via resident fallback');
+  assert.equal(stateFrames.length, 2, 'post-commit push plus resident fallback delivered');
+  assert.equal(stateFrames[0]!.state.stateRevision, 2);
   assert.equal(stateFrames[0]!.state.drawOffer, 'w');
+  assert.equal(stateFrames[1]!.state.stateRevision, 3);
+  assert.equal(stateFrames[1]!.state.drawOffer, 'w');
   assert.equal(failedCalls.length, 0, 'onStateRefreshFailed NOT called');
 });
 
@@ -865,6 +887,11 @@ test('RF4 stale revision: a gated read returning below the floor is followed by 
   white.deliver({ t: 'offerDraw', gameId });
   await awaitGate(gate, 'offerDraw committed on writer');
 
+  const preFloorStates = spec.all('state');
+  assert.equal(preFloorStates.length, 1, 'pre-floor post-commit draw push delivered');
+  assert.equal(preFloorStates[0]!.state.stateRevision, 2);
+  assert.equal(preFloorStates[0]!.state.drawOffer, 'w');
+
   // Black commits readiness on writer (rev 3); observedRevision on edge becomes 3.
   await writer.apply(gameId, 'bob', { kind: 'ready' });
   await flush();
@@ -888,9 +915,11 @@ test('RF4 stale revision: a gated read returning below the floor is followed by 
   // Attempt 1 was below floor (rev 2 < floor 3) so it did not deliver.
   // Attempt 2 succeeds and reads rev 3 (preserving drawOffer 'w').
   const stateFrames = spec.all('state');
-  assert.equal(stateFrames.length, 1, 'room gets state frame from second attempt');
+  assert.equal(stateFrames.length, 2, 'room gets pre-floor push plus state frame from second attempt');
+  assert.equal(stateFrames[0]!.state.stateRevision, 2);
   assert.equal(stateFrames[0]!.state.drawOffer, 'w');
-  assert.equal(stateFrames[0]!.state.stateRevision, 3);
+  assert.equal(stateFrames[1]!.state.drawOffer, 'w');
+  assert.equal(stateFrames[1]!.state.stateRevision, 3);
   assert.equal(failedCalls.length, 0, 'onStateRefreshFailed not called when retry succeeds');
 });
 
@@ -2751,8 +2780,8 @@ test('QJ1 regression: cold join whose hydration snapshot predates a remote draw 
   assert.equal(edge.has(gameId), true);
 });
 
-test("CR2 boundary characterization: D2 boundary — an offer committed after the FINAL read's snapshot (cold or warm) is not delivered cross-node; must flip when D2 lands", async () => {
-  // D2 boundary — an offer committed after the FINAL read's snapshot (cold or warm) is not delivered cross-node; must flip when D2 lands.
+test("CR2 boundary characterization: draw state fanout delivers cross-node state frame when offer committed after final read's snapshot (cold or warm)", async () => {
+  // Draw state fanout delivers cross-node state frame even when offer committed after final read's snapshot.
 
   // 1. Cold path: gate the final read (post-hydration recovery read) after its snapshot
   {
@@ -2800,7 +2829,10 @@ test("CR2 boundary characterization: D2 boundary — an offer committed after th
     assert.ok(resumed);
     assert.equal(resumed.state.drawOffer, null, 'cold resumed snapshot omits draw offer committed after snapshot');
     assert.equal(resumed.state.stateRevision, 0);
-    assert.equal(conn.all('state').length, 0, 'no state frame reaches edge client afterwards');
+    const states = conn.all('state');
+    assert.equal(states.length, 1, 'draw state fanout delivers state frame to edge client after cold resumption');
+    assert.equal(states[0]!.state.drawOffer, 'w');
+    assert.equal(states[0]!.state.stateRevision, 1);
   }
 
   // 2. Warm path: gate readRecovery after its snapshot
@@ -2840,7 +2872,10 @@ test("CR2 boundary characterization: D2 boundary — an offer committed after th
     assert.ok(resumed);
     assert.equal(resumed.state.drawOffer, null, 'warm resumed snapshot omits draw offer committed after snapshot');
     assert.equal(resumed.state.stateRevision, 0);
-    assert.equal(conn.all('state').length, 0, 'no state frame reaches edge client afterwards');
+    const states = conn.all('state');
+    assert.equal(states.length, 1, 'draw state fanout delivers state frame to edge client after warm resumption');
+    assert.equal(states[0]!.state.drawOffer, 'w');
+    assert.equal(states[0]!.state.stateRevision, 1);
   }
 });
 
