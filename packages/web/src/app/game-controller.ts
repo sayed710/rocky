@@ -43,6 +43,7 @@ export interface GameActionState {
   readonly lastReject: string | null;
   readonly pendingAction: GameSyncState['pendingAction'];
   readonly recovering?: boolean;
+  readonly conclusiveJoinRejected?: boolean;
 }
 
 export interface GameMetadataState {
@@ -474,6 +475,7 @@ export class GameController {
     const lastReject = state.lastReject ? state.lastReject.message : null;
     const pendingAction = state.pendingAction;
     const recovering = state.recovering;
+    const conclusiveJoinRejected = this.gameSync.isConclusiveJoinRejected();
 
     const actionChanged = this.currentActionState === undefined
       || this.currentActionState.isPlayer !== isPlayer
@@ -484,7 +486,8 @@ export class GameController {
       || this.currentActionState.drawOffer !== drawOffer
       || this.currentActionState.lastReject !== lastReject
       || this.currentActionState.pendingAction !== pendingAction
-      || this.currentActionState.recovering !== recovering;
+      || this.currentActionState.recovering !== recovering
+      || this.currentActionState.conclusiveJoinRejected !== conclusiveJoinRejected;
 
     if (actionChanged) {
       this.currentActionState = {
@@ -497,6 +500,7 @@ export class GameController {
         lastReject,
         pendingAction,
         recovering,
+        conclusiveJoinRejected,
       };
       if (this.callbacks.onActionState) {
         this.callbacks.onActionState(this.currentActionState);

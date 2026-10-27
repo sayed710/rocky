@@ -1338,6 +1338,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     isHumanGame = state.isHumanGame;
     gameOver = state.isOver;
     pgnExport.setFinished(state.isOver);
+    if (state.conclusiveJoinRejected) {
+      gameReviewController.invalidate();
+    }
     refreshGameReview();
     refreshAnalysisControls();
     refreshPuzzleControls();

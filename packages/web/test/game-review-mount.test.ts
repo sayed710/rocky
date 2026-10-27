@@ -1109,6 +1109,379 @@ test('RET-06: Sign-out via session reset and onSessionChange(null) clears select
     dispose(g);
   }
 });
+
+for (const rejectCode of ['unknown_game', 'unauthorized'] as const) {
+  test(`RET-06 regression: Conclusive reconnect join rejection (${rejectCode}) restores retained state and fences review ownership`, async () => {
+    const afterE5Fen = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
+    const retainedMoves = [
+      { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' as const },
+      { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' as const },
+    ];
+    const g = setup({ fen: afterE5Fen });
+    try {
+      g.socket.emit({
+        t: 'state',
+        gameId: 'g-test-1',
+        state: makeFinishedState(afterE5Fen, 2, 'w', retainedMoves),
+      });
+      await settle();
+
+      g.elements.get('flip')!.click();
+      const flippedBaselineBoard = g.elements.get('board')!.innerHTML;
+      const baselineStatus = g.elements.get('status')!.textContent;
+      const baselineControllerFen = g.mounted.controller.fen;
+
+      const hasLastHighlight = (html: string, sq: string) =>
+        new RegExp(`cb-last[^>]*\\b${sq}\\b|\\b${sq}\\b[^>]*cb-last`).test(html);
+
+      assert.equal(hasLastHighlight(flippedBaselineBoard, 'e7'), true);
+      assert.equal(hasLastHighlight(flippedBaselineBoard, 'e5'), true);
+      assert.equal(hasLastHighlight(flippedBaselineBoard, 'e2'), false);
+
+      await loadSelectableReview(g);
+      const reviewContainer = g.elements.get('game-review')!;
+      const movesEl = g.elements.get('game-review-moves')!;
+      const returnBtn = g.elements.get('game-review-return-final')!;
+      const statusEl = g.elements.get('status')!;
+
+      // Capture REQUIRED actual orphan review row BEFORE rejection
+      assert.ok(movesEl.children.length > 0, 'review moves must exist before rejection');
+      const orphanRow = movesEl.children[0]!;
+
+      // Select row 0 (move e2e4 highlight, FEN placement)
+      orphanRow.click();
+      assert.equal(returnBtn.hidden, false);
+      const selectedBoardHtml = g.elements.get('board')!.innerHTML;
+      const selectedStatusText = statusEl.textContent;
+      assert.notEqual(selectedBoardHtml, flippedBaselineBoard);
+      assert.equal(hasLastHighlight(selectedBoardHtml, 'e2'), true);
+      assert.equal(hasLastHighlight(selectedBoardHtml, 'e4'), true);
+      assert.equal(hasLastHighlight(selectedBoardHtml, 'e7'), false);
+
+      const rejectMessage = 'Join rejected';
+      const actionErrorEl = g.elements.get('action-error')!;
+
+      // Seed ordinary command reject while joined with code illegal_move and the SAME message string
+      g.socket.emit({
+        t: 'reject',
+        gameId: 'g-test-1',
+        ref: null,
+        code: 'illegal_move',
+        message: rejectMessage,
+      });
+      await settle();
+      assert.equal(actionErrorEl.textContent, rejectMessage);
+      assert.equal(actionErrorEl.hidden, false);
+
+      const httpBefore = g.transport.calls.length;
+      statusEl.focused = false;
+      returnBtn.focused = false;
+
+      // Same-user session change triggers reconnect
+      g.mounted.onSessionChange({ userId: 'user-1', handle: 'alice' });
+      await settle();
+
+      // Explicitly assert state remains intact and action-error text unchanged during pending same-user rejoin BEFORE reject
+      assert.equal(actionErrorEl.textContent, rejectMessage);
+      assert.equal(returnBtn.hidden, true, 'return button hidden during unjoined reconnect');
+      assert.equal(g.elements.get('board')!.innerHTML, selectedBoardHtml, 'board remains in review position while pending rejoin');
+      assert.equal(statusEl.textContent, selectedStatusText, 'review status retained while pending rejoin');
+      assert.equal(movesEl.childElementCount, 2, 'cached review rows preserved while pending rejoin');
+
+      // Wait for serialized join on new socket
+      g.sockets.last.open();
+      await waitUntil(() =>
+        g.sockets.last.sent.some((raw) => {
+          try {
+            return (JSON.parse(raw) as { t?: string }).t === 'join';
+          } catch {
+            return false;
+          }
+        }),
+      );
+
+      const wsSentCountBeforeReject = g.sockets.last.sent.length;
+
+      // Server conclusively rejects the join with the SAME message string
+      g.sockets.last.emit({
+        t: 'reject',
+        gameId: 'g-test-1',
+        ref: null,
+        code: rejectCode,
+        message: rejectMessage,
+      });
+      await settle();
+
+      // Confirm action-error text unchanged across conclusive rejection
+      assert.equal(actionErrorEl.textContent, rejectMessage);
+
+      // Board, highlight, status restored to retained game state
+      assert.equal(g.elements.get('board')!.innerHTML, flippedBaselineBoard);
+      assert.equal(hasLastHighlight(g.elements.get('board')!.innerHTML, 'e7'), true);
+      assert.equal(hasLastHighlight(g.elements.get('board')!.innerHTML, 'e5'), true);
+      assert.equal(hasLastHighlight(g.elements.get('board')!.innerHTML, 'e2'), false);
+      assert.equal(statusEl.textContent, baselineStatus);
+      assert.equal(g.mounted.controller.fen, baselineControllerFen);
+
+      // Private review and Return controls hidden
+      assert.equal(returnBtn.hidden, true);
+      assert.equal(reviewContainer.hidden, true);
+
+      // Unconditionally click orphan row: cannot alter restored board or reveal Return
+      orphanRow.click();
+      assert.equal(returnBtn.hidden, true, 'orphan row click cannot reveal Return');
+      assert.equal(g.elements.get('board')!.innerHTML, flippedBaselineBoard, 'orphan row click cannot alter restored board');
+
+      // No focus stealing
+      assert.equal(statusEl.focused, false);
+      assert.equal(returnBtn.focused, false);
+
+      // No cleanup-induced HTTP calls or outbound WS commands
+      assert.equal(g.transport.calls.length, httpBefore);
+      assert.equal(g.sockets.last.sent.length, wsSentCountBeforeReject);
+    } finally {
+      dispose(g);
+    }
+  });
+}
+
+for (const tool of POSITION_TOOLS) {
+  for (const staleStatus of [200, 503] as const) {
+    test(`RET-04 regression: ${tool.name} tool in-flight request aborted and fenced on reconnect join rejection (late ${staleStatus})`, async () => {
+      const g = setup();
+      try {
+        await loadSelectableReview(g);
+        const movesEl = g.elements.get('game-review-moves')!;
+        const returnBtn = g.elements.get('game-review-return-final')!;
+        const resultEl = g.elements.get(tool.result)!;
+        const noteEl = g.elements.get(tool.name === 'Analyse' ? 'analysis-note' : 'puzzle-note')!;
+        const errorEl = g.elements.get(tool.name === 'Analyse' ? 'analysis-error' : 'puzzle-error')!;
+        const buttonEl = g.elements.get(tool.button)!;
+        const statusEl = g.elements.get('status')!;
+        const getPending = () => (tool.pending === 'pendingAnalysis' ? g.pendingAnalysis : g.pendingPuzzles);
+
+        // Borrow equal-FEN review ownership
+        movesEl.children[0]!.click();
+        assert.equal(returnBtn.hidden, false);
+        const selectedBoardHtml = g.elements.get('board')!.innerHTML;
+        const selectedStatusText = statusEl.textContent;
+
+        // Launch tool request for review position
+        buttonEl.click();
+        await waitUntil(() => getPending().length === 1);
+        const inFlight = getPending()[0]!;
+        assert.equal(inFlight.request.signal!.aborted, false);
+
+        // Same-user reconnect triggered while tool is pending
+        g.mounted.onSessionChange({ userId: 'user-1', handle: 'alice' });
+        await settle();
+
+        // Explicitly assert in-flight request and review presentation remain pending during rejoin interval BEFORE reject
+        assert.equal(inFlight.request.signal!.aborted, false, 'tool request must remain pending during same-user unjoined reconnect');
+        assert.equal(g.elements.get('board')!.innerHTML, selectedBoardHtml, 'board must remain in review position while pending rejoin');
+        assert.equal(statusEl.textContent, selectedStatusText, 'review status retained while pending rejoin');
+        assert.equal(movesEl.childElementCount, 2, 'cached review rows preserved while pending rejoin');
+        assert.equal(returnBtn.hidden, true, 'return button hidden during unjoined reconnect');
+
+        g.sockets.last.open();
+        await waitUntil(() =>
+          g.sockets.last.sent.some((raw) => {
+            try {
+              return (JSON.parse(raw) as { t?: string }).t === 'join';
+            } catch {
+              return false;
+            }
+          }),
+        );
+
+        // Server conclusively rejects the join
+        g.sockets.last.emit({
+          t: 'reject',
+          gameId: 'g-test-1',
+          ref: null,
+          code: 'unknown_game',
+          message: 'Game not found',
+        });
+        await settle();
+
+        // In-flight request must be aborted specifically upon conclusive rejection
+        assert.equal(inFlight.request.signal!.aborted, true, 'tool request must be aborted upon conclusive join rejection');
+
+        const noteAfterReject = noteEl.textContent;
+        const errorAfterReject = errorEl.textContent;
+        const errorHiddenAfterReject = errorEl.hidden;
+        const btnDisabledAfterReject = buttonEl.disabled;
+
+        // Late response arrives after rejection
+        inFlight.resolve(json(staleStatus, staleStatus === 200 ? tool.response(FEN) : { error: 'Service Unavailable' }));
+        await settle();
+        await settle();
+
+        // Presentation cannot revive from stale response
+        assert.equal(resultEl.childElementCount, 0);
+        assert.equal(noteEl.textContent, noteAfterReject);
+        assert.equal(errorEl.textContent, errorAfterReject);
+        assert.equal(errorEl.hidden, errorHiddenAfterReject);
+        assert.equal(buttonEl.disabled, btnDisabledAfterReject);
+        assert.equal(returnBtn.hidden, true);
+      } finally {
+        dispose(g);
+      }
+    });
+  }
+}
+
+test('RET-06 negative control: immediate transient invalid_command reconnect reject does not clear review ownership or abort tool work', async () => {
+  const g = setup();
+  let inFlightRequest: PendingReview | null = null;
+  try {
+    const baselineBoard = g.elements.get('board')!.innerHTML;
+
+    await loadSelectableReview(g);
+    const movesEl = g.elements.get('game-review-moves')!;
+    const returnBtn = g.elements.get('game-review-return-final')!;
+    const statusEl = g.elements.get('status')!;
+
+    // Select row 1 (AFTER_E4_FEN)
+    movesEl.children[1]!.click();
+    assert.equal(returnBtn.hidden, false);
+    const selectedBoardHtml = g.elements.get('board')!.innerHTML;
+    const selectedStatusText = statusEl.textContent;
+    assert.notEqual(selectedBoardHtml, baselineBoard);
+
+    // Start in-flight analysis tool request for borrowed review position
+    g.elements.get('analysis-run')!.click();
+    await waitUntil(() => g.pendingAnalysis.length === 1);
+    const inFlight = g.pendingAnalysis[0]!;
+    inFlightRequest = inFlight;
+    assert.equal(inFlight.request.signal!.aborted, false);
+
+    // Same-user session change triggers reconnect
+    g.mounted.onSessionChange({ userId: 'user-1', handle: 'alice' });
+    await settle();
+    assert.equal(returnBtn.hidden, true, 'return button hidden while unjoined');
+    assert.equal(inFlight.request.signal!.aborted, false, 'tool request remains pending during reconnect');
+
+    g.sockets.last.open();
+    await waitUntil(() =>
+      g.sockets.last.sent.some((raw) => {
+        try {
+          return (JSON.parse(raw) as { t?: string }).t === 'join';
+        } catch {
+          return false;
+        }
+      }),
+    );
+
+    // Server emits transient hydration reject (invalid_command)
+    g.sockets.last.emit({
+      t: 'reject',
+      gameId: 'g-test-1',
+      ref: null,
+      code: 'invalid_command',
+      message: 'Hydration retry',
+    });
+    await settle();
+
+    // Immediate non-cleanup: transient reject does NOT clear review ownership or abort tool work
+    assert.equal(inFlight.request.signal!.aborted, false, 'transient reject must not abort in-flight tool request');
+    assert.equal(g.elements.get('board')!.innerHTML, selectedBoardHtml, 'transient reject must not clear selected board');
+    assert.equal(statusEl.textContent, selectedStatusText, 'transient reject must not clear review status');
+    assert.equal(movesEl.childElementCount, 2, 'cached review rows preserved across transient reject');
+    assert.equal(returnBtn.hidden, true, 'return button remains hidden until authorized join');
+    assert.equal(statusEl.focused, false);
+    assert.equal(returnBtn.focused, false);
+  } finally {
+    dispose(g);
+    if (inFlightRequest) {
+      // Resolve pending fake request after dispose with valid selected AFTER_E4_FEN payload and assert no revival
+      inFlightRequest.resolve(json(200, { ...sampleAnalysisResponse(), fen: AFTER_E4_FEN }));
+      await settle();
+      assert.equal(g.elements.get('analysis-results')!.childElementCount, 0, 'disposed analysis results cannot revive');
+    }
+  }
+});
+
+for (const staleStatus of [200, 503] as const) {
+  test(`RET-06 regression: in-flight Game Review request aborted on conclusive join rejection and fenced against late ${staleStatus}`, async () => {
+    const g = setup();
+    try {
+      await waitUntil(() => g.elements.get('game-review-run')!.disabled === false);
+      const reviewContainer = g.elements.get('game-review')!;
+      const movesEl = g.elements.get('game-review-moves')!;
+      const summaryEl = g.elements.get('game-review-summary')!;
+      const noteEl = g.elements.get('game-review-note')!;
+      const errorEl = g.elements.get('game-review-error')!;
+      const returnBtn = g.elements.get('game-review-return-final')!;
+      const statusEl = g.elements.get('status')!;
+      const idleNoteText = enMessages['game.review.noteSignedIn'];
+
+      // Start actual Game Review request with no selected row
+      runReview(g.elements);
+      await waitUntil(() => g.pendingReviews.length === 1);
+      const inFlightReview = g.pendingReviews[0]!;
+      assert.equal(inFlightReview.request.signal!.aborted, false);
+      assert.equal(movesEl.childElementCount, 0);
+      assert.equal(movesEl.getAttribute('aria-busy'), 'true');
+
+      // Same-user session change triggers reconnect while review request is pending
+      g.mounted.onSessionChange({ userId: 'user-1', handle: 'alice' });
+      await settle();
+
+      // Negative reconnect precondition: request is not already aborted during pending rejoin
+      assert.equal(inFlightReview.request.signal!.aborted, false, 'review request must remain pending during same-user unjoined reconnect');
+
+      g.sockets.last.open();
+      await waitUntil(() =>
+        g.sockets.last.sent.some((raw) => {
+          try {
+            return (JSON.parse(raw) as { t?: string }).t === 'join';
+          } catch {
+            return false;
+          }
+        }),
+      );
+
+      // Server conclusively rejects the join
+      g.sockets.last.emit({
+        t: 'reject',
+        gameId: 'g-test-1',
+        ref: null,
+        code: 'unknown_game',
+        message: 'Game not found',
+      });
+      await settle();
+
+      // Conclusive rejection aborts pending review request and resets/clears review state
+      assert.equal(inFlightReview.request.signal!.aborted, true, 'pending review request must be aborted upon conclusive join rejection');
+      assert.equal(movesEl.getAttribute('aria-busy'), 'false', 'moves container busy state must reset');
+      assert.equal(g.elements.get('game-review-run')!.disabled, true, 'review run button remains disabled while not a player');
+      assert.equal(movesEl.childElementCount, 0, 'review moves must remain empty');
+      assert.equal(summaryEl.hidden, true, 'summary must remain hidden');
+      assert.equal(noteEl.textContent, idleNoteText, 'idle signed-in note displayed');
+      assert.equal(errorEl.hidden, true, 'review error must remain hidden');
+      assert.equal(returnBtn.hidden, true, 'return button must remain hidden');
+      assert.equal(reviewContainer.hidden, true, 'review container must be hidden');
+      assert.equal(statusEl.focused, false);
+      assert.equal(g.pendingReviews.length, 1, 'no new review request initiated');
+
+      // Deliver late valid review response (200 or 503)
+      inFlightReview.resolve(staleStatus === 200 ? json(200, COMPLETED_REVIEW_WITH_MOVE) : json(503, { error: 'Service Unavailable' }));
+      await settle();
+      await settle();
+
+      // Stale response cannot revive or repopulate review rows, summary, note, or error
+      assert.equal(movesEl.childElementCount, 0, 'stale review response must not populate moves');
+      assert.equal(summaryEl.hidden, true, 'stale review response must not reveal summary');
+      assert.equal(noteEl.textContent, idleNoteText, 'stale review response must not overwrite idle note');
+      assert.equal(errorEl.hidden, true, 'stale review response must not reveal error');
+      assert.equal(returnBtn.hidden, true, 'stale review response must not show return button');
+      assert.equal(g.pendingReviews.length, 1, 'no new review request initiated');
+    } finally {
+      dispose(g);
+    }
+  });
+}
 test('review centipawn values retain their sign and unit in either locale', async () => {
   for (const loss of [-1, 0, 10, null]) {
     const g = setup();
