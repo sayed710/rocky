@@ -104,6 +104,7 @@ import type { AuthSession } from './auth-controller.js';
 import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
 import { mountGamePgnExport } from './game-pgn-export.js';
+import { mountGameLinkShare } from './game-link-share.js';
 import { isEngineBotUserId } from '@chess-platform/game';
 import { applyAutoDirection, applyLtrIsolation, renderInterpolatedText, renderGameStatusText } from '../i18n/bidi.js';
 import { createI18nManager } from '../i18n/manager.js';
@@ -221,6 +222,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     i18n,
     requestPgn: (requestedGameId, signal) => deps.client.games.exportPgn(requestedGameId, signal),
   });
+  const gameLinkShare = mountGameLinkShare({ doc, gameId, i18n });
   let gameReviewCapabilities: unknown = null;
   let gameOver = false;
   let isGamePlayer = false;
@@ -1395,6 +1397,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const unsubscribeLocale = i18n.onLocaleChange(() => {
     refreshGameReview();
     pgnExport.relocalize();
+    gameLinkShare.relocalize();
     if (lastMetadataState) {
       renderMetadata(lastMetadataState);
     }
@@ -1840,6 +1843,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       openingController.dispose();
       coachController.dispose();
       pgnExport.dispose();
+      gameLinkShare.dispose();
     },
   };
 

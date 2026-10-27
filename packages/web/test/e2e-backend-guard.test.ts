@@ -41,6 +41,7 @@ const STATIC_SPECS = new Set([
   'seek-creator-rating.spec.ts',
   'public-documents.spec.ts',
   'review-position.spec.ts',
+  'game-link-share.spec.ts',
 ]);
 
 /**

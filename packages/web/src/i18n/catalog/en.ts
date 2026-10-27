@@ -243,6 +243,10 @@ export const enMessages = {
   'game.export.copying': 'Copying the PGN…',
   'game.export.copied': 'PGN copied to the clipboard.',
   'game.export.copyError': 'The PGN could not be copied. Please try again.',
+  'game.share.copyLink': 'Copy game link',
+  'game.share.copying': 'Copying the game link…',
+  'game.share.copied': 'Game link copied to the clipboard.',
+  'game.share.copyError': 'The game link could not be copied. Please try again.',
 
   // Game Review
   'game.review.title': 'Game review',
