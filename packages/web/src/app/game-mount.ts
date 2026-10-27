@@ -215,6 +215,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const gameReviewErrorEl = doc.getElementById('game-review-error');
   const gameReviewSummaryEl = doc.getElementById('game-review-summary');
   const gameReviewMovesEl = doc.getElementById('game-review-moves');
+  const gameReviewReturnFinalBtn = doc.getElementById('game-review-return-final');
   // Public and engine-free, so it is offered to players and spectators alike once the game is over.
   const pgnExport = mountGamePgnExport({
     doc,
@@ -237,6 +238,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   let authoritativeGameTurn = false;
   let authoritativeGameStatus = '';
   let authoritativeLastMove: readonly [string, string] | null = null;
+  let selectedReviewPresentation: { san: string; bestMove: string | null } | null = null;
+  let refreshReturnFinalVisibility = (): void => {
+    if (gameReviewReturnFinalBtn) {
+      gameReviewReturnFinalBtn.hidden = true;
+    }
+  };
 
   /** Recompute visibility and availability from game, capability, session, and request state. */
   const refreshGameReview = (): void => {
@@ -260,6 +267,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       gameReviewErrorEl.hidden = currentReviewErrorKey === null;
       gameReviewErrorEl.textContent = currentReviewErrorKey ? i18n.t(currentReviewErrorKey) : '';
     }
+    refreshReturnFinalVisibility();
   };
 
   /** Remove all private review nodes from persistent route DOM. */
@@ -267,6 +275,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     lastReviewResult = null;
     currentReviewNoteKey = null;
     currentReviewErrorKey = null;
+    if (gameReviewReturnFinalBtn) {
+      gameReviewReturnFinalBtn.hidden = true;
+    }
     if (gameReviewErrorEl) {
       gameReviewErrorEl.hidden = true;
       gameReviewErrorEl.textContent = '';
@@ -1174,10 +1185,13 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   /** End borrowed review ownership even when its FEN matches the restored authoritative position. */
   const clearReviewSelection = (): void => {
-    if (selectedReviewFen === null) return;
-    selectedReviewFen = null;
-    analysisController.invalidate();
-    puzzleController.invalidate();
+    selectedReviewPresentation = null;
+    if (selectedReviewFen !== null) {
+      selectedReviewFen = null;
+      analysisController.invalidate();
+      puzzleController.invalidate();
+    }
+    refreshReturnFinalVisibility();
   };
 
   const gameSync = createGameSync({ gameId, session: deps.client.session, ...(token !== undefined ? { token } : {}) });
@@ -1396,6 +1410,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
 
   const unsubscribeLocale = i18n.onLocaleChange(() => {
     refreshGameReview();
+    if (gameReviewReturnFinalBtn) {
+      gameReviewReturnFinalBtn.textContent = i18n.t('game.review.returnFinal');
+    }
     pgnExport.relocalize();
     gameLinkShare.relocalize();
     if (lastMetadataState) {
@@ -1406,6 +1423,12 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (lastReviewResult) {
       renderGameReview(lastReviewResult);
+    }
+    if (statusEl && selectedReviewPresentation !== null) {
+      renderInterpolatedText(statusEl, i18n.t('game.review.statusReviewing'), {
+        san: selectedReviewPresentation.san,
+        bestMove: selectedReviewPresentation.bestMove ?? i18n.t('game.review.bestMoveNotAvailable'),
+      });
     }
     refreshAnalysisControls();
     refreshPuzzleControls();
@@ -1477,7 +1500,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       },
       onStatus: (text: string) => {
         authoritativeGameStatus = text;
-        if (statusEl) renderGameStatusText(statusEl, text);
+        if (statusEl && selectedReviewPresentation === null) renderGameStatusText(statusEl, text);
       },
       onLastMove: (from: string | null, to: string | null) => {
         authoritativeLastMove = from !== null && to !== null ? [from, to] : null;
@@ -1602,6 +1625,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
           if (analysisDisposed || disposed || lastReviewResult !== review
             || !gameOver || !isGamePlayer || gameReviewSessionId === null) return;
           selectedReviewFen = move.fenBefore;
+          selectedReviewPresentation = {
+            san: move.san,
+            bestMove: move.assessment.bestMove ?? null,
+          };
           analysisController.positionChanged(move.fenBefore);
           if (currentVariant) puzzleController.positionChanged({ fen: move.fenBefore, variant: currentVariant });
           board.setPosition(move.fenBefore);
@@ -1613,6 +1640,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
               bestMove: move.assessment.bestMove ?? i18n.t('game.review.bestMoveNotAvailable'),
             });
           }
+          refreshReturnFinalVisibility();
         });
         return row;
       }));
@@ -1821,6 +1849,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       if (disposed) return;
       disposed = true;
       gameRouteActive = false;
+      refreshReturnFinalVisibility();
       connectivityTarget?.removeEventListener('offline', onOffline);
       connectivityTarget?.removeEventListener('online', onOnline);
       for (const unbind of unbinds) {
@@ -1834,6 +1863,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     dispose: (): void => {
       if (analysisDisposed) return;
       analysisDisposed = true;
+      refreshReturnFinalVisibility();
       // Clear private selection and its derived panels while their view callbacks still exist.
       gameReviewController.dispose();
       analysisController.dispose();
@@ -1846,6 +1876,40 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       gameLinkShare.dispose();
     },
   };
+
+  const canReturnToFinal = (): boolean =>
+    selectedReviewFen !== null
+    && authoritativeGameFen !== null
+    && gameOver
+    && isGamePlayer
+    && gameReviewSessionId !== null
+    && !disposed
+    && !analysisDisposed;
+
+  refreshReturnFinalVisibility = (): void => {
+    if (gameReviewReturnFinalBtn) {
+      gameReviewReturnFinalBtn.hidden = !canReturnToFinal();
+    }
+  };
+
+  const handleReturnFinal = (): void => {
+    if (!canReturnToFinal()) return;
+    clearReviewSelection();
+    if (authoritativeGameFen !== null) {
+      board.setPosition(authoritativeGameFen);
+      board.setTurn(authoritativeGameTurn);
+      board.setLastMove(authoritativeLastMove?.[0] ?? null, authoritativeLastMove?.[1] ?? null);
+      refreshAnalysisControls();
+      refreshPuzzleControls();
+    }
+    if (statusEl) {
+      renderGameStatusText(statusEl, authoritativeGameStatus);
+      statusEl.focus();
+    }
+    refreshReturnFinalVisibility();
+  };
+
+  bindClick(gameReviewReturnFinalBtn, handleReturnFinal);
 
   if (token !== undefined) {
     gameSync.start();
