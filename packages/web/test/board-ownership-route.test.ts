@@ -4,7 +4,7 @@ import { createApp } from '../src/app/composition.js';
 import { mountGame } from '../src/app/game-mount.js';
 import type { StateView } from '../src/net/ws-protocol.js';
 import { createGameDocument, makeFinishedState, makeState } from './support/analysis-fixtures.js';
-import { FakeSocketFactory } from './support/fake-socket.js';
+import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
 import { FakeTransport, json } from './support/fake-transport.js';
 import { adoptGameSession } from './support/game-session.js';
 
@@ -17,7 +17,37 @@ import { adoptGameSession } from './support/game-session.js';
 
 const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const AFTER_E4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
+const AFTER_E5 = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
+const AFTER_NF3 = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2';
 const BOARD_PX = 800;
+
+class FakeWindowEvents {
+  private readonly listeners = new Map<string, Set<EventListener>>();
+
+  addEventListener(type: string, listener: EventListener): void {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  listenerCount(type: string): number {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+
+  dispatchEvent(event: Event): boolean {
+    const listeners = this.listeners.get(event.type);
+    if (listeners) {
+      for (const fn of listeners) {
+        fn(event);
+      }
+    }
+    return true;
+  }
+}
 
 type Role = 'white' | 'black' | 'spectator';
 
@@ -25,7 +55,7 @@ function live(fen: string, turn: 'w' | 'b', legalMoves: StateView['legalMoves'])
   return { ...makeState(fen, turn === 'w' ? 0 : 1, turn), legalMoves };
 }
 
-function setup(options: { open?: boolean; userId?: string } = {}) {
+function setup(options: { open?: boolean; userId?: string; scheduler?: ManualScheduler } = {}) {
   const sockets = new FakeSocketFactory();
   const app = createApp({
     config: { apiBaseUrl: 'https://api.test', wsUrl: 'wss://api.test/ws' },
@@ -42,7 +72,8 @@ function setup(options: { open?: boolean; userId?: string } = {}) {
     doc,
     boardEl: boardEl as unknown as HTMLElement,
     gameId: 'g-test-1',
-    createGameSync: app.createGameSync,
+    createGameSync: (syncOptions) =>
+      app.createGameSync(options.scheduler ? { ...syncOptions, scheduler: options.scheduler } : syncOptions),
     createGameOracle: app.createGameOracle,
     getAccessToken: () => app.api.session.current?.tokens.accessToken,
     client: app.api,
@@ -92,6 +123,9 @@ function setup(options: { open?: boolean; userId?: string } = {}) {
   const sync = (state: StateView): void => {
     sockets.last.emit({ t: 'state', gameId: 'g-test-1', state });
   };
+  const emit = (msg: unknown): void => {
+    sockets.last.emit(msg);
+  };
   return {
     logout: () => {
       mounted.onLogoutRequested();
@@ -104,7 +138,7 @@ function setup(options: { open?: boolean; userId?: string } = {}) {
       sockets.last.open();
     },
     open: () => sockets.last.open(),
-    elements, mounted, submitted, enabled, click, cellAttr, selected, premoves, moveFrames, join, sync, orientation,
+    elements, mounted, submitted, enabled, click, cellAttr, selected, premoves, moveFrames, join, sync, emit, sockets, orientation,
     feedback: () => elements.get('move-feedback')?.innerHTML ?? '',
     dispose: () => {
       mounted.dispose?.();
@@ -320,5 +354,185 @@ test('route: a Chess960 game keeps the same ownership boundary', () => {
     assert.deepEqual(r.submitted, []);
   } finally {
     r.dispose();
+  }
+});
+
+test('route: gap recovery lifecycle disables input, clears premoves, manages retry, and restores gestures on target sync', () => {
+  const originalWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const fakeWindow = new FakeWindowEvents();
+  Object.defineProperty(globalThis, 'window', {
+    value: fakeWindow,
+    configurable: true,
+    writable: true,
+  });
+
+  try {
+  const scheduler = new ManualScheduler();
+  const r = setup({ scheduler, userId: 'u1' });
+  try {
+    const players = { white: 'u1', black: 'u2' };
+    const move1 = { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' as const };
+    const move2 = { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' as const };
+    const move3 = { ply: 3, uci: 'g1f3', san: 'Nf3', by: 'w' as const };
+
+    const stateFloor1: StateView = {
+      ...makeState(AFTER_E4, 1, 'b', [move1], players),
+      legalMoves: { e7: ['e6', 'e5'], d7: ['d6', 'd5'] },
+    };
+    const partial2: StateView = {
+      ...makeState(AFTER_E5, 2, 'w', [move1, move2], players),
+      legalMoves: { g1: ['f3', 'e2'] },
+    };
+    const sufficient3: StateView = {
+      ...makeState(AFTER_NF3, 3, 'b', [move1, move2, move3], players),
+      legalMoves: { b8: ['c6', 'a6'], g8: ['f6'] },
+    };
+
+    r.join('white', stateFloor1);
+    assert.equal(r.enabled.at(-1), true, 'white player input enabled at floor 1');
+
+    // Pre-gap: White is off-turn; own-colour premove queues.
+    r.click('d2');
+    assert.deepEqual(r.selected(), ['d2']);
+    r.click('d4');
+    assert.deepEqual(r.premoves().sort(), ['d2', 'd4']);
+    assert.deepEqual(r.submitted, []);
+
+    // Server sends move ply 3 while client is at ply 1 (floor 1 -> ply 3 jump).
+    r.emit({
+      t: 'move',
+      gameId: 'g-test-1',
+      ply: 3,
+      uci: 'g1f3',
+      san: 'Nf3',
+      by: 'w',
+      clock: { w: 60000, b: 60000 },
+      serverTs: 1000,
+      fenHash: 'h3',
+      legalMoves: { b8: ['c6', 'a6'], g8: ['f6'], d7: ['d6', 'd5'] },
+    });
+
+    // Recovery detected: pre-gap premove and selection clear; board input disabled.
+    assert.deepEqual(r.premoves(), [], 'pre-gap premove cleared when recovery detected');
+    assert.deepEqual(r.selected(), [], 'pre-gap selection cleared when recovery detected');
+    assert.equal(r.enabled.at(-1), false, 'board input disabled during recovery');
+
+    // No selections, premoves, or submissions under flight.
+    r.click('d2');
+    r.click('d4');
+    assert.deepEqual(r.selected(), []);
+    assert.deepEqual(r.premoves(), []);
+    assert.deepEqual(r.submitted, []);
+
+    const countResumes = (): number =>
+      r.sockets.last.sent
+        .map((f) => JSON.parse(f) as { t: string })
+        .filter((f) => f.t === 'resume').length;
+
+    assert.equal(countResumes(), 1, '1 initial resume sent on gap detection');
+    assert.equal(scheduler.nextDelayMs, 2000);
+
+    // Online event during active flight has no effect on already-open transport
+    fakeWindow.dispatchEvent(new Event('online'));
+    assert.equal(countResumes(), 1, 'online event during first flight does not send extra resume');
+    assert.equal(scheduler.nextDelayMs, 2000, 'online event does not alter active flight timeout');
+
+    // Expected recovery scheduler sequence: 2000, 1000, 2000, 2000, 2000 with 5 runNext total.
+    assert.equal(scheduler.nextDelayMs, 2000);
+    scheduler.runNext();
+    assert.equal(scheduler.nextDelayMs, 1000);
+
+    // Online event during backoff delay has no effect
+    fakeWindow.dispatchEvent(new Event('online'));
+    assert.equal(countResumes(), 1, 'online event during backoff does not send extra resume');
+    assert.equal(scheduler.nextDelayMs, 1000, 'online event does not alter backoff delay');
+
+    scheduler.runNext();
+    assert.equal(scheduler.nextDelayMs, 2000);
+    scheduler.runNext();
+    assert.equal(scheduler.nextDelayMs, 2000);
+    scheduler.runNext();
+    assert.equal(scheduler.nextDelayMs, 2000);
+    scheduler.runNext();
+
+    assert.equal(scheduler.pending, 0, '0 recovery tasks remaining in scheduler after exhaustion');
+    const initialResumes = r.sockets.last.sent
+      .map((f) => JSON.parse(f) as { t: string })
+      .filter((f) => f.t === 'resume');
+    assert.equal(initialResumes.length, 3, '3 automatic resumes sent before exhaustion');
+
+    const reconnectBtn = r.elements.get('game-reconnect')!;
+    const resignBtn = r.elements.get('action-resign')!;
+    const drawBtn = r.elements.get('action-offer-draw')!;
+    const claimBtn = r.elements.get('action-claim-flag')!;
+    assert.ok(reconnectBtn, 'game-reconnect element exists');
+    assert.ok(resignBtn, 'action-resign element exists');
+    assert.ok(drawBtn, 'action-offer-draw element exists');
+    assert.ok(claimBtn, 'action-claim-flag element exists');
+
+    assert.equal(reconnectBtn.hidden, false, 'retry button is visible upon exhaustion');
+    assert.equal(resignBtn.disabled, true, 'resign button disabled during recovery');
+    assert.equal(drawBtn.disabled, true, 'draw offer button disabled during recovery');
+    assert.equal(claimBtn.disabled, true, 'claim flag button disabled during recovery');
+
+    // Online event after exhaustion does not dispatch resume on open transport; retry button remains visible
+    fakeWindow.dispatchEvent(new Event('online'));
+    assert.equal(countResumes(), 3, 'online event after exhaustion does not send resume');
+    assert.equal(scheduler.pending, 0, 'no timer scheduled by online event');
+    assert.equal(reconnectBtn.hidden, false, 'retry button remains visible after online event');
+
+    // No selections, premoves, or submissions under exhaustion.
+    r.click('d2');
+    r.click('d4');
+    assert.deepEqual(r.selected(), []);
+    assert.deepEqual(r.premoves(), []);
+    assert.deepEqual(r.submitted, []);
+
+    // Delayed valid partial2 arrives; insufficient to reach ply 3 so retry stays visible.
+    r.sync(partial2);
+    assert.equal(reconnectBtn.hidden, false, 'retry stays visible through accepted insufficient partial2');
+    assert.equal(resignBtn.disabled, true);
+    assert.equal(drawBtn.disabled, true);
+    assert.equal(claimBtn.disabled, true);
+
+    // Gestures still disabled while waiting for sufficient target ply 3.
+    r.click('d2');
+    r.click('d4');
+    assert.deepEqual(r.selected(), []);
+    assert.deepEqual(r.premoves(), []);
+    assert.deepEqual(r.submitted, []);
+
+    // Explicit retry triggers a 4th resume attempt and new timer.
+    reconnectBtn.click();
+    const resumesAfterRetry = r.sockets.last.sent
+      .map((f) => JSON.parse(f) as { t: string })
+      .filter((f) => f.t === 'resume');
+    assert.equal(resumesAfterRetry.length, 4, 'explicit retry dispatched 4th resume');
+    assert.equal(scheduler.pending, 1, 'new timer scheduled for 4th resume attempt');
+    assert.equal(scheduler.nextDelayMs, 2000);
+
+    // Delivery of sufficient3 restores clean gestures and completes recovery.
+    r.sync(sufficient3);
+    assert.equal(reconnectBtn.hidden, true, 'retry button hidden after full recovery');
+    assert.equal(r.enabled.at(-1), true, 'board input re-enabled after full recovery');
+    assert.deepEqual(r.premoves(), [], 'no queued replay from before gap');
+    assert.deepEqual(r.submitted, [], 'no queued moves submitted');
+
+    // Post-recovery gesture chooses legal own-color move at current board/turn.
+    // Note: promotion coverage is absent from this route regression suite; not fabricated here.
+    r.click('d2');
+    assert.deepEqual(r.selected(), ['d2']);
+    r.click('d4');
+    assert.deepEqual(r.premoves().sort(), ['d2', 'd4']);
+    assert.deepEqual(r.submitted, []);
+  } finally {
+    r.dispose();
+  }
+  } finally {
+    if (originalWindowDescriptor) {
+      Object.defineProperty(globalThis, 'window', originalWindowDescriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, 'window');
+    }
   }
 });

@@ -42,11 +42,13 @@ export interface GameActionState {
   readonly drawOffer: 'none' | 'sent' | 'received';
   readonly lastReject: string | null;
   readonly pendingAction: GameSyncState['pendingAction'];
+  readonly recovering?: boolean;
 }
 
 export interface GameMetadataState {
   readonly connected: boolean;
   readonly recoveryAvailable: boolean;
+  readonly recovering?: boolean;
   readonly role: Role | null;
   readonly myColor: WsColor | null;
   readonly players: { readonly white: string; readonly black: string } | null;
@@ -283,7 +285,8 @@ export class GameController {
     return this.currentActionState?.isPlayer === true &&
            this.currentActionState?.connected === true &&
            !this.currentActionState?.isOver &&
-           this.currentActionState?.pendingAction === null;
+           this.currentActionState?.pendingAction === null &&
+           !this.currentActionState?.recovering;
   }
 
   private canAbort(): boolean {
@@ -420,6 +423,7 @@ export class GameController {
       && state.turn === state.myColor
       && state.pending === null
       && !awaitingReadiness(state)
+      && !state.recovering
       // `ended` empties the legal-move map but keeps `turn`: a finished game is nobody's turn.
       && state.status?.over !== true;
     if (myTurn !== this.currentMyTurn) {
@@ -461,14 +465,15 @@ export class GameController {
     const isHumanGame = players !== undefined && isHumanGamePlayers(players);
     const connected = state.connected;
     const isOver = state.status?.over ?? false;
-    const canAbort = state.ply < 2;
-    const drawOffer: 'none' | 'sent' | 'received' = state.myColor === null || state.drawOffer === null
+    const canAbort = state.ply < 2 && !state.recovering;
+    const drawOffer: 'none' | 'sent' | 'received' = state.myColor === null || state.drawOffer === null || state.recovering
       ? 'none'
       : state.drawOffer === state.myColor
         ? 'sent'
         : 'received';
     const lastReject = state.lastReject ? state.lastReject.message : null;
     const pendingAction = state.pendingAction;
+    const recovering = state.recovering;
 
     const actionChanged = this.currentActionState === undefined
       || this.currentActionState.isPlayer !== isPlayer
@@ -478,7 +483,8 @@ export class GameController {
       || this.currentActionState.canAbort !== canAbort
       || this.currentActionState.drawOffer !== drawOffer
       || this.currentActionState.lastReject !== lastReject
-      || this.currentActionState.pendingAction !== pendingAction;
+      || this.currentActionState.pendingAction !== pendingAction
+      || this.currentActionState.recovering !== recovering;
 
     if (actionChanged) {
       this.currentActionState = {
@@ -490,6 +496,7 @@ export class GameController {
         drawOffer,
         lastReject,
         pendingAction,
+        recovering,
       };
       if (this.callbacks.onActionState) {
         this.callbacks.onActionState(this.currentActionState);
@@ -511,6 +518,7 @@ export class GameController {
     const metadataChanged = this.currentMetadataState === undefined
       || this.currentMetadataState.connected !== state.connected
       || this.currentMetadataState.recoveryAvailable !== state.recoveryAvailable
+      || this.currentMetadataState.recovering !== state.recovering
       || this.currentMetadataState.role !== state.role
       || this.currentMetadataState.myColor !== state.myColor
       || this.currentMetadataState.players?.white !== state.snapshot?.players.white
@@ -526,6 +534,7 @@ export class GameController {
       this.currentMetadataState = {
         connected: state.connected,
         recoveryAvailable: state.recoveryAvailable,
+        recovering: state.recovering,
         role: state.role,
         myColor: state.myColor,
         players: state.snapshot?.players ?? null,

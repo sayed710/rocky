@@ -1199,11 +1199,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   // cannot open a window between them; and an ended game never goes live again.
   let boardFinished = false;
   const syncBoardOwnership = (): void => {
-    const { myColor, status } = gameSync.getState();
+    const { myColor, status, recovering } = gameSync.getState();
     if (status?.over === true) boardFinished = true;
     const owner = boardFinished || myColor === null ? null : myColor === 'w' ? 'white' : 'black';
     board.setPlayerColor(owner);
-    board.setInputEnabled(owner !== null);
+    board.setInputEnabled(owner !== null && !recovering);
   };
 
   const renderMetadata = (state: GameMetadataState): void => {
@@ -1301,7 +1301,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (metaVariantEl && state.variant) {
       const label = getVariantLabel(state.variant, i18n);
       metaVariantEl.textContent =
-        typeof state.chess960StartId === 'number'
+        typeof state.chess960StartId === 'number' &&
+        Number.isInteger(state.chess960StartId) &&
+        state.chess960StartId >= 0 &&
+        state.chess960StartId <= 959
           ? `${label} · #${state.chess960StartId}`
           : label;
     }
@@ -1338,7 +1341,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (!state.isPlayer) return;
 
-    const disabled = !state.connected || state.isOver || state.pendingAction !== null;
+    const disabled = !state.connected || state.isOver || state.pendingAction !== null || state.recovering === true;
 
     if (btnOfferDraw) {
       if (state.drawOffer === 'sent') {
@@ -1801,9 +1804,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const connectivityTarget = typeof window !== 'undefined' ? window : null;
   const onOffline = (): void => gameSync.networkOffline();
   const onOnline = (): void => gameSync.networkOnline();
+  const onRetry = (): void => gameSync.retryRecovery();
   if (reconnectButton) {
-    reconnectButton.addEventListener('click', onOnline);
-    unbinds.push(() => reconnectButton.removeEventListener('click', onOnline));
+    reconnectButton.addEventListener('click', onRetry);
+    unbinds.push(() => reconnectButton.removeEventListener('click', onRetry));
   }
   if (connectivityTarget) {
     connectivityTarget.addEventListener('offline', onOffline);
