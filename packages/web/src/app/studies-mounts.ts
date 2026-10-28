@@ -10,6 +10,9 @@ import { mountBoard } from './board.js';
 import type { MountedBoard } from './board.js';
 import { StudiesController } from './studies-controller.js';
 import type { StudiesCallbacks } from './studies-controller.js';
+import type { ClipboardWriter } from './game-pgn-export.js';
+import { mountStudyPositionCopy } from './study-position-copy.js';
+import type { MountedStudyPositionCopy } from './study-position-copy.js';
 import { renderChapterDetail, renderStudyDetail, renderStudyList } from './studies-view.js';
 
 interface StudiesListMountDependencies {
@@ -25,6 +28,7 @@ interface StudyDetailMountDependencies extends StudiesListMountDependencies {
 
 interface StudyChapterMountDependencies extends StudyDetailMountDependencies {
   readonly chapterId: string;
+  readonly writeClipboard?: ClipboardWriter | null | undefined;
 }
 
 interface MountedStudyChapter {
@@ -250,28 +254,52 @@ function studyChapterElements(doc: Document): StudyChapterElements {
   };
 }
 
-function createStudyChapterCallbacks(
-  elements: StudyChapterElements,
-  board: MountedBoard | null,
-  showUnavailable: () => void,
-  i18n: I18nManager,
-  onChapterLoaded?: (state: {
+interface StudyChapterCallbacksOptions {
+  readonly elements: StudyChapterElements;
+  readonly board: MountedBoard | null;
+  readonly showUnavailable: () => void;
+  readonly i18n: I18nManager;
+  readonly positionCopy: MountedStudyPositionCopy;
+  readonly onChapterLoaded?: (state: {
     study: StudyView;
     chapter: ChapterView;
     tree: readonly TreeNodeView[];
     chapters: readonly ChapterView[];
     exportUrl: string;
-  }) => void,
-  onNodeSelected?: (nodeId: string | null) => void,
-): StudiesCallbacks {
+  }) => void;
+  readonly onNodeSelected?: (nodeId: string | null) => void;
+  readonly onLoadStart?: () => void;
+  readonly getGeneration: () => number;
+  readonly isDisposed: () => boolean;
+  readonly hasValidState: () => boolean;
+}
+
+function createStudyChapterCallbacks(options: StudyChapterCallbacksOptions): StudiesCallbacks {
+  const {
+    elements,
+    board,
+    showUnavailable,
+    i18n,
+    positionCopy,
+    onChapterLoaded,
+    onNodeSelected,
+    onLoadStart,
+    getGeneration,
+    isDisposed,
+    hasValidState,
+  } = options;
+
   return {
     onStudyList: () => {},
     onStudy: () => {},
     onChapterDetail: (study, chapter, tree, chapters, exportUrl) => {
+      if (isDisposed()) return;
       onChapterLoaded?.({ study, chapter, tree, chapters, exportUrl });
       onNodeSelected?.(null);
       if (elements.error) elements.error.textContent = '';
       board?.setPosition(chapter.startingFen);
+      positionCopy.setPosition(chapter.startingFen);
+      const currentGeneration = getGeneration();
       renderChapterDetail(
         elements,
         study,
@@ -280,20 +308,32 @@ function createStudyChapterCallbacks(
         chapters,
         exportUrl,
         (fenAfter, nodeId) => {
+          if (isDisposed() || !hasValidState() || currentGeneration !== getGeneration()) return;
           onNodeSelected?.(nodeId);
           board?.setPosition(fenAfter);
+          positionCopy.setPosition(fenAfter);
         },
         i18n,
         null,
       );
     },
     onLoading: (loading) => {
+      if (loading) {
+        onLoadStart?.();
+        positionCopy.setPosition(null);
+      }
       if (elements.treeEl) elements.treeEl.setAttribute('aria-busy', loading ? 'true' : 'false');
     },
     onError: (message) => {
+      onLoadStart?.();
+      positionCopy.setPosition(null);
       if (elements.error) elements.error.textContent = message;
     },
-    onUnavailable: showUnavailable,
+    onUnavailable: () => {
+      onLoadStart?.();
+      positionCopy.setPosition(null);
+      showUnavailable();
+    },
   };
 }
 
@@ -304,10 +344,17 @@ export function mountStudyChapter({
   studyId,
   chapterId,
   i18n,
+  writeClipboard,
 }: StudyChapterMountDependencies): MountedStudyChapter {
   const boardElement = doc.getElementById('chapter-board');
   const board = boardElement ? mountBoard({ boardEl: boardElement }, { i18n }) : null;
   board?.setTurn(false);
+
+  const positionCopy = mountStudyPositionCopy({
+    doc,
+    i18n,
+    ...(writeClipboard !== undefined ? { writeClipboard } : {}),
+  });
 
   const elements = studyChapterElements(doc);
   let lastChapterState: {
@@ -318,29 +365,51 @@ export function mountStudyChapter({
     exportUrl: string;
   } | null = null;
   let selectedNodeId: string | null = null;
+  let selectionGeneration = 0;
   let unsubscribeLocale: (() => void) | undefined;
+  let disposed = false;
 
   const controller = new StudiesController({
     client,
-    callbacks: createStudyChapterCallbacks(
+    callbacks: createStudyChapterCallbacks({
       elements,
       board,
-      () => renderUnavailable(doc, surface, i18n),
+      showUnavailable: () => renderUnavailable(doc, surface, i18n),
       i18n,
-      (state) => {
+      positionCopy,
+      onChapterLoaded: (state) => {
+        selectionGeneration++;
         lastChapterState = state;
       },
-      (nodeId) => {
+      onNodeSelected: (nodeId) => {
         selectedNodeId = nodeId;
       },
-    ),
+      onLoadStart: () => {
+        selectionGeneration++;
+        lastChapterState = null;
+        selectedNodeId = null;
+      },
+      getGeneration: () => selectionGeneration,
+      isDisposed: () => disposed,
+      hasValidState: () => lastChapterState !== null,
+    }),
     onDispose: () => {
+      if (disposed) return;
+      disposed = true;
+      selectionGeneration++;
+      lastChapterState = null;
+      selectedNodeId = null;
       unsubscribeLocale?.();
+      positionCopy.dispose();
     },
   });
 
   unsubscribeLocale = i18n.onLocaleChange(() => {
+    if (disposed) return;
+    positionCopy.relocalize();
     if (lastChapterState) {
+      selectionGeneration++;
+      const currentGeneration = selectionGeneration;
       renderChapterDetail(
         elements,
         lastChapterState.study,
@@ -349,8 +418,10 @@ export function mountStudyChapter({
         lastChapterState.chapters,
         lastChapterState.exportUrl,
         (fenAfter, nodeId) => {
+          if (disposed || !lastChapterState || currentGeneration !== selectionGeneration) return;
           selectedNodeId = nodeId;
           board?.setPosition(fenAfter);
+          positionCopy.setPosition(fenAfter);
         },
         i18n,
         selectedNodeId,
