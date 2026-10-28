@@ -14,6 +14,29 @@ export interface MountedStudyPositionCopy {
 }
 
 type CopyState = 'idle' | 'copying' | 'copied' | 'error';
+type ReadyTextWriter = (fen: string) => Promise<void>;
+
+function resolveReadyTextWriter(options: StudyPositionCopyOptions): ReadyTextWriter | null {
+  if (options.writeClipboard !== undefined) {
+    const injected = options.writeClipboard;
+    if (!injected) return null;
+    return (fen: string) => injected(Promise.resolve(fen));
+  }
+
+  const navigator = options.doc.defaultView?.navigator;
+  const clipboard = navigator?.clipboard;
+
+  if (typeof clipboard?.writeText === 'function') {
+    return (fen: string) => clipboard.writeText(fen);
+  }
+
+  const fallback = browserClipboardWriter(navigator);
+  if (fallback) {
+    return (fen: string) => fallback(Promise.resolve(fen));
+  }
+
+  return null;
+}
 
 export function mountStudyPositionCopy(options: StudyPositionCopyOptions): MountedStudyPositionCopy {
   const { doc, i18n } = options;
@@ -21,10 +44,7 @@ export function mountStudyPositionCopy(options: StudyPositionCopyOptions): Mount
   const statusEl = doc.getElementById('study-position-status');
   const errorEl = doc.getElementById('study-position-error');
 
-  const writer =
-    options.writeClipboard !== undefined
-      ? options.writeClipboard
-      : browserClipboardWriter(doc.defaultView?.navigator);
+  const writer = resolveReadyTextWriter(options);
 
   if (!copyButton || !writer) {
     if (copyButton) copyButton.hidden = true;
@@ -84,7 +104,7 @@ export function mountStudyPositionCopy(options: StudyPositionCopyOptions): Mount
 
     let writePromise: Promise<void>;
     try {
-      writePromise = writer(Promise.resolve(targetFen));
+      writePromise = writer(targetFen);
     } catch (err) {
       writePromise = Promise.reject(err);
     }

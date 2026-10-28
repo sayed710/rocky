@@ -7,16 +7,40 @@ import { FakeElement, createFakeDoc } from './support/localization-dom.js';
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function createHarness(options?: { locale?: 'en' | 'ar'; writer?: ClipboardWriter | null }) {
+interface FakeWindow {
+  navigator: {
+    clipboard?: {
+      writeText?: (text: string) => Promise<void>;
+      write?: (items: unknown[]) => Promise<void>;
+    };
+  };
+}
+
+function createHarness(options?: {
+  locale?: 'en' | 'ar';
+  writer?: ClipboardWriter | null;
+  navigator?: FakeWindow['navigator'];
+  omitInjectedWriter?: boolean;
+}) {
   const btn = new FakeElement('button', 'study-position-copy');
   const status = new FakeElement('div', 'study-position-status');
   const error = new FakeElement('div', 'study-position-error');
   const doc = createFakeDoc(new Map([['study-position-copy', btn], ['study-position-status', status], ['study-position-error', error]])) as unknown as Document;
+  if (options?.navigator) {
+    Object.defineProperty(doc, 'defaultView', {
+      value: { navigator: options.navigator },
+      configurable: true,
+    });
+  }
   const i18n = createI18nManager({ initialLocale: options?.locale ?? 'en' });
   const writes: string[] = [];
   const defaultWriter: ClipboardWriter = async (p) => { writes.push(await p); };
-  const writeClipboard = options?.writer !== undefined ? options.writer : defaultWriter;
-  const mount = mountStudyPositionCopy({ doc, i18n, writeClipboard });
+  const writeClipboard = options?.omitInjectedWriter
+    ? undefined
+    : (options?.writer !== undefined ? options.writer : defaultWriter);
+  const mount = mountStudyPositionCopy(
+    writeClipboard !== undefined ? { doc, i18n, writeClipboard } : { doc, i18n },
+  );
   return { doc, btn, status, error, i18n, writes, mount };
 }
 
@@ -231,4 +255,141 @@ describe('mountStudyPositionCopy', () => {
     assert.equal(status.textContent, i18n.t('learning.studies.copiedFen'));
     mount2.dispose();
   });
+
+  it('default browser: invokes writeText synchronously before click returns and suppresses duplicates', async () => {
+    let nativeCalls = 0;
+    let capturedReceiver: unknown = null;
+    const written: string[] = [];
+    let resolvePending!: () => void;
+    const pendingPromise = new Promise<void>((res) => { resolvePending = res; });
+    const clipboard = {
+      writeText(this: unknown, text: string): Promise<void> {
+        capturedReceiver = this;
+        nativeCalls += 1;
+        written.push(text);
+        return pendingPromise;
+      },
+    };
+    const { doc, btn, status, i18n, mount } = createHarness({
+      omitInjectedWriter: true,
+      navigator: { clipboard },
+    });
+
+    const variantFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR[QQqq] w KQkq - 0 1';
+    mount.setPosition(variantFen);
+    assert.equal(btn.hidden, false);
+    assert.equal(btn.getAttribute('aria-disabled'), 'false');
+    assert.equal(nativeCalls, 0);
+    assert.deepEqual(written, []);
+
+    btn.focus();
+    assert.equal(doc.activeElement, btn);
+
+    btn.click();
+    assert.equal(nativeCalls, 1);
+    assert.equal(capturedReceiver, clipboard);
+    assert.deepEqual(written, [variantFen]);
+    assert.equal(doc.activeElement, btn);
+    assert.equal(btn.disabled, false);
+    assert.equal(btn.getAttribute('aria-disabled'), 'true');
+    assert.equal(btn.textContent, i18n.t('learning.studies.copyingFen'));
+    assert.equal(status.textContent, '');
+
+    btn.click();
+    assert.equal(nativeCalls, 1);
+
+    resolvePending();
+    await flush();
+
+    assert.equal(btn.getAttribute('aria-disabled'), 'false');
+    assert.equal(btn.textContent, i18n.t('learning.studies.copyFen'));
+    assert.equal(status.textContent, i18n.t('learning.studies.copiedFen'));
+    mount.dispose();
+  });
+
+  it('default browser: respects precedence of explicit writer and handles absent capability', async () => {
+    let nativeCalls = 0;
+    const clipboard = {
+      writeText(_text: string): Promise<void> {
+        nativeCalls += 1;
+        return Promise.resolve();
+      },
+    };
+    const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+    const explicitNull = createHarness({
+      writer: null,
+      navigator: { clipboard },
+    });
+    explicitNull.mount.setPosition(fen);
+    assert.equal(explicitNull.btn.hidden, true);
+    explicitNull.btn.click();
+    assert.equal(nativeCalls, 0);
+    explicitNull.mount.dispose();
+
+    const absent = createHarness({
+      omitInjectedWriter: true,
+      navigator: {},
+    });
+    absent.mount.setPosition(fen);
+    assert.equal(absent.btn.hidden, true);
+    absent.btn.click();
+    assert.equal(nativeCalls, 0);
+    absent.mount.dispose();
+
+    const injected = createHarness({
+      navigator: { clipboard },
+    });
+    injected.mount.setPosition(fen);
+    assert.equal(injected.btn.hidden, false);
+    injected.btn.click();
+    await flush();
+    assert.deepEqual(injected.writes, [fen]);
+    assert.equal(nativeCalls, 0);
+    injected.mount.dispose();
+  });
+
+  for (const failure of [
+    { name: 'sync throw', fail: (): Promise<void> => { throw new Error('sync writeText error'); } },
+    { name: 'promise rejection', fail: (): Promise<void> => Promise.reject(new Error('async writeText error')) },
+  ]) {
+    it(`default browser (${failure.name}): handles error and allows retry`, async () => {
+      let shouldFail = true;
+      let nativeCalls = 0;
+      let capturedReceiver: unknown = null;
+      const written: string[] = [];
+      const clipboard = {
+        writeText(this: unknown, text: string): Promise<void> {
+          capturedReceiver = this;
+          nativeCalls += 1;
+          if (shouldFail) return failure.fail();
+          written.push(text);
+          return Promise.resolve();
+        },
+      };
+      const { mount, btn, error, status, i18n } = createHarness({
+        omitInjectedWriter: true,
+        navigator: { clipboard },
+      });
+      const fen = '8/8/8/8/8/8/8/k6K w - - 0 1';
+      mount.setPosition(fen);
+
+      btn.click();
+      assert.equal(nativeCalls, 1);
+      assert.equal(capturedReceiver, clipboard);
+      await flush();
+      assert.equal(error.textContent, i18n.t('learning.studies.copyFenError'));
+      assert.equal(btn.getAttribute('aria-disabled'), 'false');
+      assert.equal(status.textContent, '');
+
+      shouldFail = false;
+      btn.click();
+      assert.equal(nativeCalls, 2);
+      await flush();
+      assert.deepEqual(written, [fen]);
+      assert.equal(status.textContent, i18n.t('learning.studies.copiedFen'));
+      assert.equal(error.textContent, '');
+      mount.dispose();
+    });
+  }
 });
