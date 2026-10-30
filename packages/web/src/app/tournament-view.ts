@@ -39,9 +39,18 @@ export function renderTournamentList(
   container: HTMLElement,
   items: readonly TournamentSummary[],
   i18n: I18n,
+  totalLoaded?: number,
 ): void {
   container.innerHTML = '';
   if (items.length === 0) {
+    if (totalLoaded !== undefined && totalLoaded > 0) {
+      renderEmpty(container, {
+        mark: '🏆',
+        title: i18n.t('tournaments.noMatchTitle'),
+        body: i18n.t('tournaments.noMatchBody'),
+      });
+      return;
+    }
     renderEmpty(container, {
       mark: '🏆',
       title: i18n.t('tournaments.emptyListTitle'),

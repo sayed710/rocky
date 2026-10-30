@@ -185,10 +185,51 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
 interface TournamentListElements {
   readonly list: HTMLElement | null;
   readonly error: HTMLElement | null;
+  readonly filter: HTMLSelectElement | null;
+  readonly status: HTMLElement | null;
+  readonly label: HTMLElement | null;
 }
 
 interface TournamentListRenderState {
   listRendered: boolean;
+  isLoading: boolean;
+  hasError: boolean;
+}
+
+type TournamentState = TournamentSummary['state'];
+type TournamentFilter = 'all' | TournamentState;
+
+function renderTournamentFilterOptions(
+  select: HTMLSelectElement,
+  current: TournamentFilter,
+  i18n: I18n,
+): void {
+  const doc = select.ownerDocument ?? document;
+  const hadFocus = doc.activeElement === select;
+
+  const options: readonly [TournamentFilter, string][] = [
+    ['all', i18n.t('tournaments.filterAll')],
+    ['registration', i18n.t('tournaments.state.registration')],
+    ['running', i18n.t('tournaments.state.running')],
+    ['finished', i18n.t('tournaments.state.finished')],
+  ];
+
+  const optionNodes = options.map(([value, label]) => {
+    const opt = doc.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    if (value === current) {
+      opt.selected = true;
+    }
+    return opt;
+  });
+
+  select.replaceChildren(...optionNodes);
+  select.value = current;
+
+  if (hadFocus && doc.activeElement !== select) {
+    select.focus();
+  }
 }
 
 function setTournamentListLoading(
@@ -212,28 +253,6 @@ function setTournamentListLoading(
   if (!state.listRendered) elements.list.replaceChildren();
 }
 
-function createTournamentListCallbacks(
-  elements: TournamentListElements,
-  onTournaments: (tournaments: readonly TournamentSummary[]) => void,
-  i18n: I18n,
-): TournamentCallbacks {
-  const state: TournamentListRenderState = { listRendered: false };
-  return {
-    onList: (tournaments) => {
-      state.listRendered = true;
-      onTournaments(tournaments);
-      if (elements.list) renderTournamentList(elements.list, tournaments, i18n);
-    },
-    onDetail: () => {},
-    onStandings: () => {},
-    onLiveGames: () => {},
-    onLoading: (loading) => setTournamentListLoading(elements, state, loading, i18n),
-    onError: (message) => {
-      if (elements.error) elements.error.textContent = message;
-    },
-  };
-}
-
 export function mountTournamentList(
   doc: Document,
   client: GambitClient,
@@ -242,28 +261,119 @@ export function mountTournamentList(
   const elements: TournamentListElements = {
     list: doc.getElementById('tournament-list'),
     error: doc.getElementById('tournaments-error'),
+    filter: doc.getElementById('tournament-state-filter') as HTMLSelectElement | null,
+    status: doc.getElementById('tournaments-status'),
+    label: doc.getElementById('tournament-state-filter-label'),
   };
 
+  let currentFilter: TournamentFilter = 'all';
   let lastTournaments: readonly TournamentSummary[] | null = null;
+  let disposed = false;
+  const state: TournamentListRenderState = {
+    listRendered: false,
+    isLoading: true,
+    hasError: false,
+  };
+
+  if (elements.error) elements.error.textContent = '';
+  if (elements.status) elements.status.textContent = '';
+  if (elements.filter) {
+    renderTournamentFilterOptions(elements.filter, currentFilter, i18n);
+  }
+
+  function renderView(): void {
+    if (disposed) return;
+    if (state.isLoading || state.hasError || lastTournaments === null) return;
+    const items =
+      currentFilter === 'all'
+        ? lastTournaments
+        : lastTournaments.filter((t) => t.state === currentFilter);
+    if (elements.list) {
+      renderTournamentList(elements.list, items, i18n, lastTournaments.length);
+    }
+    if (elements.status) {
+      elements.status.textContent = i18n.t('tournaments.filterStatus', {
+        visible: items.length,
+        total: lastTournaments.length,
+      });
+    }
+  }
+
+  function onFilterChange(): void {
+    if (disposed || !elements.filter) return;
+    const val = elements.filter.value;
+    if (val !== 'all' && val !== 'registration' && val !== 'running' && val !== 'finished') {
+      elements.filter.value = currentFilter;
+      return;
+    }
+    currentFilter = val;
+    renderView();
+  }
+
+  if (elements.filter) {
+    elements.filter.addEventListener('change', onFilterChange);
+  }
 
   const unsubscribeLocale = i18n.onLocaleChange(() => {
-    if (lastTournaments !== null && elements.list) {
-      renderTournamentList(elements.list, lastTournaments, i18n);
+    if (disposed) return;
+    if (elements.filter) {
+      renderTournamentFilterOptions(elements.filter, currentFilter, i18n);
     }
+    if (elements.label) {
+      elements.label.textContent = i18n.t('tournaments.filterLabel');
+    }
+    if (state.isLoading) {
+      setTournamentListLoading(elements, state, true, i18n);
+      return;
+    }
+    renderView();
   });
+
+  const cleanup = (): void => {
+    if (disposed) return;
+    disposed = true;
+    unsubscribeLocale();
+    if (elements.filter) {
+      elements.filter.removeEventListener('change', onFilterChange);
+    }
+  };
 
   const controller = new TournamentController({
     client,
-    callbacks: createTournamentListCallbacks(
-      elements,
-      (tournaments) => {
+    callbacks: {
+      onList: (tournaments) => {
+        if (disposed) return;
+        state.isLoading = false;
+        state.hasError = false;
+        state.listRendered = true;
         lastTournaments = tournaments;
+        renderView();
       },
-      i18n,
-    ),
-    onDispose: () => {
-      unsubscribeLocale();
+      onDetail: () => {},
+      onStandings: () => {},
+      onLiveGames: () => {},
+      onLoading: (loading) => {
+        if (disposed) return;
+        state.isLoading = loading;
+        if (loading) {
+          state.hasError = false;
+          state.listRendered = false;
+          if (elements.error) elements.error.textContent = '';
+          if (elements.status) elements.status.textContent = '';
+        }
+        setTournamentListLoading(elements, state, loading, i18n);
+      },
+      onError: (message) => {
+        if (disposed) return;
+        state.isLoading = false;
+        state.hasError = true;
+        state.listRendered = false;
+        if (elements.error) elements.error.textContent = message;
+        if (elements.status) elements.status.textContent = '';
+        if (elements.list) elements.list.replaceChildren();
+      },
     },
+    onDispose: cleanup,
   });
   void controller.loadList();
   return controller;
