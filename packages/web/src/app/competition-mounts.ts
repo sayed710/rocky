@@ -22,6 +22,7 @@ import {
   renderSpeedSelector,
   renderVariantSelector,
 } from './leaderboard-view.js';
+import { leaderboardPoolUrl, parseLeaderboardQuery } from './leaderboard-query.js';
 import { TournamentController } from './tournament-controller.js';
 import type { TournamentCallbacks } from './tournament-controller.js';
 import {
@@ -86,17 +87,23 @@ function createLeaderboardCallbacks(
     speed: Speed,
   ) => void,
   i18n: I18n,
+  isDisposed: () => boolean,
 ): LeaderboardCallbacks {
   const state: LeaderboardRenderState = { resultsRendered: false };
   return {
     onResults: (entries, names, variant, speed) => {
+      if (isDisposed()) return;
       state.resultsRendered = true;
       onEntries(entries, names, variant, speed);
       if (elements.error) elements.error.textContent = '';
       if (elements.results) renderLeaderboard(elements.results, entries, names, i18n);
     },
-    onLoading: (loading) => setLeaderboardLoading(elements, state, loading),
+    onLoading: (loading) => {
+      if (isDisposed()) return;
+      setLeaderboardLoading(elements, state, loading);
+    },
     onError: (message) => {
+      if (isDisposed()) return;
       if (elements.error) elements.error.textContent = message;
     },
   };
@@ -110,9 +117,15 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
     results: doc.getElementById('leaderboard-results'),
     error: doc.getElementById('leaderboard-error'),
   };
-  let activeVariant: Variant = 'standard';
-  // No speed is chosen for the viewer: a pool is a variant and a speed, and there is no default pool.
-  let activeSpeed: Speed | null = null;
+  let disposed = false;
+  const isDisposed = (): boolean => disposed;
+
+  const initialPool = doc.defaultView
+    ? parseLeaderboardQuery(doc.defaultView.location.search)
+    : { variant: 'standard' as const, speed: null };
+  let activeVariant: Variant = initialPool.variant;
+  // No speed is chosen for the viewer unless specified in query: a pool is a variant and a speed, and there is no default pool.
+  let activeSpeed: Speed | null = initialPool.speed;
   let currentLoadedPool: {
     variant: Variant;
     speed: Speed;
@@ -120,11 +133,19 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
     names: ReadonlyMap<string, SocialPlayer>;
   } | null = null;
 
+  if (elements.loading) elements.loading.hidden = true;
+  if (elements.error) elements.error.textContent = '';
+  if (elements.results) {
+    elements.results.hidden = false;
+    elements.results.setAttribute('aria-busy', 'false');
+  }
+
   if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
   if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
-  if (elements.results) renderChooseSpeed(elements.results, i18n);
+  if (elements.results && activeSpeed === null) renderChooseSpeed(elements.results, i18n);
 
   const unsubscribeLocale = i18n.onLocaleChange(() => {
+    if (disposed) return;
     if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
     if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
     if (elements.results) {
@@ -152,28 +173,51 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
         }
       },
       i18n,
+      isDisposed,
     ),
   });
+
+  const syncUrl = (): void => {
+    if (doc.defaultView) {
+      const nextUrl = leaderboardPoolUrl(doc.defaultView.location.href, {
+        variant: activeVariant,
+        speed: activeSpeed,
+      });
+      doc.defaultView.history.replaceState(doc.defaultView.history.state, '', nextUrl);
+    }
+  };
+
   const load = (): void => {
     if (activeSpeed !== null) void controller.loadLeaderboard(activeVariant, activeSpeed);
   };
+
   const unbindVariant = elements.select
     ? bindVariantSelector(elements.select, (variant) => {
+        if (disposed) return;
         activeVariant = variant;
         currentLoadedPool = null;
+        syncUrl();
         load();
       })
     : () => {};
   const unbindSpeed = elements.speedSelect
     ? bindSpeedSelector(elements.speedSelect, (speed) => {
+        if (disposed) return;
         activeSpeed = speed;
         currentLoadedPool = null;
+        syncUrl();
         load();
       })
     : () => {};
 
+  if (activeSpeed !== null) {
+    load();
+  }
+
   return {
     dispose: () => {
+      if (disposed) return;
+      disposed = true;
       unbindVariant();
       unbindSpeed();
       unsubscribeLocale();
@@ -185,10 +229,51 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
 interface TournamentListElements {
   readonly list: HTMLElement | null;
   readonly error: HTMLElement | null;
+  readonly filter: HTMLSelectElement | null;
+  readonly status: HTMLElement | null;
+  readonly label: HTMLElement | null;
 }
 
 interface TournamentListRenderState {
   listRendered: boolean;
+  isLoading: boolean;
+  hasError: boolean;
+}
+
+type TournamentState = TournamentSummary['state'];
+type TournamentFilter = 'all' | TournamentState;
+
+function renderTournamentFilterOptions(
+  select: HTMLSelectElement,
+  current: TournamentFilter,
+  i18n: I18n,
+): void {
+  const doc = select.ownerDocument ?? document;
+  const hadFocus = doc.activeElement === select;
+
+  const options: readonly [TournamentFilter, string][] = [
+    ['all', i18n.t('tournaments.filterAll')],
+    ['registration', i18n.t('tournaments.state.registration')],
+    ['running', i18n.t('tournaments.state.running')],
+    ['finished', i18n.t('tournaments.state.finished')],
+  ];
+
+  const optionNodes = options.map(([value, label]) => {
+    const opt = doc.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    if (value === current) {
+      opt.selected = true;
+    }
+    return opt;
+  });
+
+  select.replaceChildren(...optionNodes);
+  select.value = current;
+
+  if (hadFocus && doc.activeElement !== select) {
+    select.focus();
+  }
 }
 
 function setTournamentListLoading(
@@ -212,28 +297,6 @@ function setTournamentListLoading(
   if (!state.listRendered) elements.list.replaceChildren();
 }
 
-function createTournamentListCallbacks(
-  elements: TournamentListElements,
-  onTournaments: (tournaments: readonly TournamentSummary[]) => void,
-  i18n: I18n,
-): TournamentCallbacks {
-  const state: TournamentListRenderState = { listRendered: false };
-  return {
-    onList: (tournaments) => {
-      state.listRendered = true;
-      onTournaments(tournaments);
-      if (elements.list) renderTournamentList(elements.list, tournaments, i18n);
-    },
-    onDetail: () => {},
-    onStandings: () => {},
-    onLiveGames: () => {},
-    onLoading: (loading) => setTournamentListLoading(elements, state, loading, i18n),
-    onError: (message) => {
-      if (elements.error) elements.error.textContent = message;
-    },
-  };
-}
-
 export function mountTournamentList(
   doc: Document,
   client: GambitClient,
@@ -242,28 +305,119 @@ export function mountTournamentList(
   const elements: TournamentListElements = {
     list: doc.getElementById('tournament-list'),
     error: doc.getElementById('tournaments-error'),
+    filter: doc.getElementById('tournament-state-filter') as HTMLSelectElement | null,
+    status: doc.getElementById('tournaments-status'),
+    label: doc.getElementById('tournament-state-filter-label'),
   };
 
+  let currentFilter: TournamentFilter = 'all';
   let lastTournaments: readonly TournamentSummary[] | null = null;
+  let disposed = false;
+  const state: TournamentListRenderState = {
+    listRendered: false,
+    isLoading: true,
+    hasError: false,
+  };
+
+  if (elements.error) elements.error.textContent = '';
+  if (elements.status) elements.status.textContent = '';
+  if (elements.filter) {
+    renderTournamentFilterOptions(elements.filter, currentFilter, i18n);
+  }
+
+  function renderView(): void {
+    if (disposed) return;
+    if (state.isLoading || state.hasError || lastTournaments === null) return;
+    const items =
+      currentFilter === 'all'
+        ? lastTournaments
+        : lastTournaments.filter((t) => t.state === currentFilter);
+    if (elements.list) {
+      renderTournamentList(elements.list, items, i18n, lastTournaments.length);
+    }
+    if (elements.status) {
+      elements.status.textContent = i18n.t('tournaments.filterStatus', {
+        visible: items.length,
+        total: lastTournaments.length,
+      });
+    }
+  }
+
+  function onFilterChange(): void {
+    if (disposed || !elements.filter) return;
+    const val = elements.filter.value;
+    if (val !== 'all' && val !== 'registration' && val !== 'running' && val !== 'finished') {
+      elements.filter.value = currentFilter;
+      return;
+    }
+    currentFilter = val;
+    renderView();
+  }
+
+  if (elements.filter) {
+    elements.filter.addEventListener('change', onFilterChange);
+  }
 
   const unsubscribeLocale = i18n.onLocaleChange(() => {
-    if (lastTournaments !== null && elements.list) {
-      renderTournamentList(elements.list, lastTournaments, i18n);
+    if (disposed) return;
+    if (elements.filter) {
+      renderTournamentFilterOptions(elements.filter, currentFilter, i18n);
     }
+    if (elements.label) {
+      elements.label.textContent = i18n.t('tournaments.filterLabel');
+    }
+    if (state.isLoading) {
+      setTournamentListLoading(elements, state, true, i18n);
+      return;
+    }
+    renderView();
   });
+
+  const cleanup = (): void => {
+    if (disposed) return;
+    disposed = true;
+    unsubscribeLocale();
+    if (elements.filter) {
+      elements.filter.removeEventListener('change', onFilterChange);
+    }
+  };
 
   const controller = new TournamentController({
     client,
-    callbacks: createTournamentListCallbacks(
-      elements,
-      (tournaments) => {
+    callbacks: {
+      onList: (tournaments) => {
+        if (disposed) return;
+        state.isLoading = false;
+        state.hasError = false;
+        state.listRendered = true;
         lastTournaments = tournaments;
+        renderView();
       },
-      i18n,
-    ),
-    onDispose: () => {
-      unsubscribeLocale();
+      onDetail: () => {},
+      onStandings: () => {},
+      onLiveGames: () => {},
+      onLoading: (loading) => {
+        if (disposed) return;
+        state.isLoading = loading;
+        if (loading) {
+          state.hasError = false;
+          state.listRendered = false;
+          if (elements.error) elements.error.textContent = '';
+          if (elements.status) elements.status.textContent = '';
+        }
+        setTournamentListLoading(elements, state, loading, i18n);
+      },
+      onError: (message) => {
+        if (disposed) return;
+        state.isLoading = false;
+        state.hasError = true;
+        state.listRendered = false;
+        if (elements.error) elements.error.textContent = message;
+        if (elements.status) elements.status.textContent = '';
+        if (elements.list) elements.list.replaceChildren();
+      },
     },
+    onDispose: cleanup,
   });
   void controller.loadList();
   return controller;

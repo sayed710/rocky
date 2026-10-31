@@ -43,6 +43,7 @@ const STATIC_SPECS = new Set([
   'review-position.spec.ts',
   'game-link-share.spec.ts',
   'tournament-standings-links.spec.ts',
+  'tournament-state-filter.spec.ts',
 ]);
 
 /**
