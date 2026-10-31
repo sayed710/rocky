@@ -269,7 +269,9 @@ export function renderChapterDetail(
     startBtn.className = 'notation-start-btn button';
     startBtn.textContent = i18n.t('learning.studies.startPosition');
     startBtn.setAttribute('aria-label', i18n.t('learning.studies.startPositionAria'));
+    const isCurrentRender = (): boolean => elements.treeEl !== null && elements.treeEl.contains(startBtn);
     startBtn.addEventListener('click', () => {
+      if (!isCurrentRender()) return;
       updateActiveButton(null);
       onNodeSelect(chapter.startingFen, null);
     });
@@ -292,6 +294,7 @@ export function renderChapterDetail(
       tree,
       { isStartOfBranch: true, afterCommentOrVariation: false },
       (node) => {
+        if (!isCurrentRender()) return;
         updateActiveButton(node.id);
         onNodeSelect(node.fenAfter, node.id);
       },
