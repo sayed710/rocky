@@ -1,6 +1,6 @@
 # D1-A — current-main oracle check
 
-**Session:** `01a134ec-852d-7699-9aec-d55d8ce3e59b`  
+**Session:** `<REVIEW_SESSION_ID>`  
 **Source attribution:** main `4ccf8f48869335e06ac1b1de467d2161869f8fd7`, supplied, not independently verified.
 
 **Critical conclusion:** #112 supplies durable revisions and wire validation, but the supplied production `GameSync` **does not compare revisions when applying snapshots or broadcasts**. Do not import a lower/equal-revision suppression invariant into this reproduction.
