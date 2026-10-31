@@ -118,6 +118,14 @@ export const enMessages = {
   'lobby.subtitle': 'Create a game, challenge the computer, or accept an open seek.',
   'lobby.createGame': 'Create a game',
   'lobby.playComputer': 'Play vs Computer',
+  'lobby.filterLabel': 'Filter by variant',
+  'lobby.filterAll': 'All variants',
+  'lobby.filterReset': 'Show all',
+  'lobby.filterHelp': 'Filter applies to loaded opponent offers. Your own offers always remain visible.',
+  'lobby.filterEmpty': 'No loaded opponent challenges match the selected variant.',
+  'lobby.filterStatus': 'Showing {shown} of {total} loaded opponent offers',
+  'lobby.filterStatusAll': 'Showing {total} loaded opponent offers',
+  'lobby.filterStatusNone': 'No loaded opponent offers',
   'lobby.openSeeks': 'Open seeks',
   'lobby.emptySeeksTitle': 'No open seeks right now',
   'lobby.emptySeeksBody': 'Create a game above — the first player to accept joins you.',
@@ -254,6 +262,7 @@ export const enMessages = {
   'game.review.run': 'Review my game',
   'game.review.loading': 'Reviewing game…',
   'game.review.ownMovesOnly': 'Analysis is for your own games.',
+  'game.review.returnFinal': 'Return to final position',
 
   // Engine Analysis
   'game.analysis.title': 'Engine',
