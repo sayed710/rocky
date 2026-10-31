@@ -189,6 +189,14 @@ const mockChapter = {
   startingFen: START_FEN,
 };
 
+const mockChapter2 = {
+  id: 'c2',
+  studyId: 's1',
+  name: 'Chapter 2',
+  orderIndex: 1,
+  startingFen: START_FEN,
+};
+
 const mockTree = [
   { id: 'n1', chapterId: 'c1', parentId: null, san: 'e4', fenAfter: E4_FEN, nags: [], orderIndex: 0 },
   { id: 'n2', chapterId: 'c1', parentId: null, san: 'd4', fenAfter: D4_FEN, nags: [], orderIndex: 1 },
@@ -260,7 +268,7 @@ async function mockStudyRoutes(page: Page, opts?: { failChapter?: boolean; empty
     }
     if (path === '/v1/studies/s1/chapters') {
       chapterRequests.push(path);
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [mockChapter] }) });
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [mockChapter, mockChapter2] }) });
       return;
     }
     if (path.includes('/auth/')) {
@@ -375,8 +383,109 @@ test('Study Copy FEN: empty tree starting FEN exact, and failed chapter load hid
   await expect(status).toHaveText('FEN copied.');
   const copied = await page.evaluate(() => (window as TestClipboardWindow).__copied ?? []);
   expect(copied).toContain(START_FEN);
-  await mockStudyRoutes(page, { failChapter: true });
+
+  await mockStudyRoutes(page);
   await page.goto('/studies/s1/chapters/c1');
+  await expect(copyBtn).toBeVisible();
+  await expect(page.locator('#chapter-board')).toBeVisible();
+  await expect(page.locator('#chapter-name')).toBeVisible();
+  await expect(page.locator('#chapter-export-link')).toBeVisible();
+  await expect(page.locator('#chapter-study-link')).toBeVisible();
+  await expect(page.locator('#chapter-list-nav')).toBeVisible();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(2);
+
+  const oldMoveHandle = await page.evaluateHandle(() => document.querySelector<HTMLElement>('.notation-move[data-node-id="n1"]'));
+
+  let unblockC2!: () => void;
+  const c2Gate = new Promise<void>((resolve) => {
+    unblockC2 = resolve;
+  });
+  await page.route('**/v1/studies/s1/chapters/c2', async (route) => {
+    await c2Gate;
+    await route.fulfill({
+      status: 403,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'FORBIDDEN', message: 'Denied' } }),
+    });
+  });
+
+  await page.locator('#chapter-list-nav a').first().click();
+
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+  await expect(page.locator('#chapter-name')).toBeHidden();
+  await expect(page.locator('#chapter-export-link')).toBeHidden();
+  await expect(page.locator('#chapter-study-link')).toBeHidden();
+  await expect(page.locator('#chapter-list-nav')).toBeHidden();
+
+  await page.evaluate((el: HTMLElement | null) => el?.click(), oldMoveHandle);
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+
+  unblockC2();
   await expect(page.locator('#study-chapter-error')).not.toBeEmpty();
   await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+  await expect(page.locator('#chapter-name')).toBeHidden();
+  await expect(page.locator('#chapter-export-link')).toBeHidden();
+  await expect(page.locator('#chapter-study-link')).toBeHidden();
+  await expect(page.locator('#chapter-list-nav')).toBeHidden();
+
+  await page.evaluate((el: HTMLElement | null) => el?.click(), oldMoveHandle);
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+
+  await page.evaluate(() => {
+    const select = document.querySelector<HTMLSelectElement>('#locale-select');
+    if (select) {
+      select.value = 'ar';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+  await expect(page.locator('#chapter-name')).toBeHidden();
+  await expect(page.locator('#chapter-export-link')).toBeHidden();
+  await expect(page.locator('#chapter-study-link')).toBeHidden();
+  await expect(page.locator('#chapter-list-nav')).toBeHidden();
+
+  await page.evaluate((el: HTMLElement | null) => el?.click(), oldMoveHandle);
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+
+  await oldMoveHandle.dispose();
+
+  await page.evaluate(() => {
+    const select = document.querySelector<HTMLSelectElement>('#locale-select');
+    if (select) {
+      select.value = 'en';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+
+  await page.goto('/studies/s1/chapters/c1');
+  await expect(copyBtn).toBeVisible();
+  await expect(page.locator('#chapter-board')).toBeVisible();
+  await expect(page.locator('#chapter-name')).toBeVisible();
+  await expect(page.locator('#chapter-export-link')).toBeVisible();
+  await expect(page.locator('#chapter-study-link')).toBeVisible();
+  await expect(page.locator('#chapter-list-nav')).toBeVisible();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(2);
+
+  await copyBtn.click();
+  await expect(status).toHaveText('FEN copied.');
+  const recoveredCopied = await page.evaluate(() => (window as TestClipboardWindow).__copied ?? []);
+  expect(recoveredCopied[recoveredCopied.length - 1]).toBe(START_FEN);
+
+  await page.locator('.notation-move[data-node-id="n1"]').click();
+  await copyBtn.click();
+  const movedCopied = await page.evaluate(() => (window as TestClipboardWindow).__copied ?? []);
+  expect(movedCopied[movedCopied.length - 1]).toBe(E4_FEN);
 });

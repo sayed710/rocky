@@ -133,6 +133,7 @@ test('chapter route disposal detaches its board and suppresses a stale response'
     setAttribute: (name: string, value: string) => {
       if (name === 'aria-busy') busyStates.push(value);
     },
+    replaceChildren: () => undefined,
   };
   const doc = {
     getElementById: (id: string) => {
@@ -201,20 +202,54 @@ function createStudyFixture() {
   const errorEl = new FakeElement('div', 'study-position-error');
   const treeEl = new FakeElement('div', 'chapter-tree');
   const chapterErrorEl = new FakeElement('div', 'study-chapter-error');
+  const boardEl = new FakeElement('div', 'chapter-board');
+  const studyLinkEl = new FakeElement('a', 'chapter-study-link');
+  const nameEl = new FakeElement('h2', 'chapter-name');
+  const exportBtn = new FakeElement('a', 'chapter-export-link');
+  const navEl = new FakeElement('nav', 'chapter-list-nav');
   const elements = new Map<string, FakeElement>([
     ['study-position-copy', copyBtn],
     ['study-position-status', statusEl],
     ['study-position-error', errorEl],
     ['chapter-tree', treeEl],
     ['study-chapter-error', chapterErrorEl],
+    ['chapter-board', boardEl],
+    ['chapter-study-link', studyLinkEl],
+    ['chapter-name', nameEl],
+    ['chapter-export-link', exportBtn],
+    ['chapter-list-nav', navEl],
   ]);
   const doc = createFakeDoc(elements);
   const surface = new FakeElement('section') as unknown as HTMLElement;
-  return { copyBtn, statusEl, errorEl, treeEl, chapterErrorEl, doc, surface };
+  return {
+    copyBtn,
+    statusEl,
+    errorEl,
+    treeEl,
+    chapterErrorEl,
+    boardEl,
+    studyLinkEl,
+    nameEl,
+    exportBtn,
+    navEl,
+    doc,
+    surface,
+  };
 }
 
 test('study position copy button hides during reload failure and recovers', async () => {
-  const { copyBtn, treeEl, chapterErrorEl, doc, surface } = createStudyFixture();
+  const {
+    copyBtn,
+    treeEl,
+    chapterErrorEl,
+    boardEl,
+    studyLinkEl,
+    nameEl,
+    exportBtn,
+    navEl,
+    doc,
+    surface,
+  } = createStudyFixture();
   const requests: HttpRequest[] = [];
   let resolveC2!: (res: HttpResponse) => void;
   const c2Deferred = new Promise<HttpResponse>((resolve) => { resolveC2 = resolve; });
@@ -241,6 +276,11 @@ test('study position copy button hides during reload failure and recovers', asyn
     try {
       await settleRequests();
       assert.equal(requests.length, 3);
+      assert.equal(boardEl.hidden, false);
+      assert.equal(exportBtn.hidden, false);
+      assert.equal(studyLinkEl.hidden, false);
+      assert.equal(nameEl.hidden, false);
+      assert.equal(navEl.hidden, false);
 
       const oldNotation = treeEl.querySelectorAll('.notation-move')[0] as FakeElement;
       assert.ok(oldNotation);
@@ -250,27 +290,71 @@ test('study position copy button hides during reload failure and recovers', asyn
 
       const loadPromise = mounted.studies.loadChapter('s1', 'c2');
       assert.equal(copyBtn.hidden, true);
+      assert.equal(boardEl.hidden, true);
+      assert.equal(exportBtn.hidden, true);
+      assert.equal(studyLinkEl.hidden, true);
+      assert.equal(nameEl.hidden, true);
+      assert.equal(navEl.hidden, true);
+      assert.equal(treeEl.querySelectorAll('.notation-move').length, 0);
+
       oldNotation.click();
       assert.equal(copyBtn.hidden, true);
+      assert.equal(boardEl.hidden, true);
+      assert.equal(oldNotation.classList.contains('active'), false);
+
       await i18n.setLocale('ar');
       assert.equal(copyBtn.hidden, true);
+      assert.equal(boardEl.hidden, true);
+      assert.equal(exportBtn.hidden, true);
+      assert.equal(treeEl.querySelectorAll('.notation-move').length, 0);
 
       resolveC2(json(403, { error: { code: 'FORBIDDEN', message: 'Denied' } }));
       await loadPromise;
       await settleRequests();
       assert.equal(copyBtn.hidden, true);
+      assert.equal(boardEl.hidden, true);
+      assert.equal(exportBtn.hidden, true);
+      assert.equal(studyLinkEl.hidden, true);
+      assert.equal(nameEl.hidden, true);
+      assert.equal(navEl.hidden, true);
+      assert.equal(treeEl.querySelectorAll('.notation-move').length, 0);
       assert.ok(chapterErrorEl.textContent);
+
+      oldNotation.click();
+      assert.equal(copyBtn.hidden, true);
+      assert.equal(exportBtn.hidden, true);
 
       await mounted.studies.loadChapter('s1', 'c1');
       await settleRequests();
       assert.equal(copyBtn.hidden, false);
+      assert.equal(boardEl.hidden, false);
+      assert.equal(exportBtn.hidden, false);
+      assert.equal(studyLinkEl.hidden, false);
+      assert.equal(nameEl.hidden, false);
+      assert.equal(navEl.hidden, false);
+
+      const freshNotation = treeEl.querySelectorAll('.notation-move')[0] as FakeElement;
+      assert.ok(freshNotation);
 
       const callsAfterLoad = requests.length;
       copyBtn.click();
       await settleRequests();
       assert.equal(requests.length, callsAfterLoad);
       assert.equal(copied.at(-1), START);
+
+      freshNotation.click();
+      await settleRequests();
+      copyBtn.click();
+      await settleRequests();
+      assert.equal(copied.at(-1), E4);
+
+      oldNotation.click();
+      await settleRequests();
+      copyBtn.click();
+      await settleRequests();
+      assert.equal(copied.at(-1), E4);
     } finally {
+      mounted.board?.dispose();
       mounted.studies.dispose();
     }
   });
@@ -342,7 +426,9 @@ test('retained callbacks and double cleanup do not corrupt remounted study state
       assert.deepEqual(newCopied, [D4, D4]);
       assert.equal(statusEl.textContent, snapshotStatus);
     } finally {
+      first.board?.dispose();
       first.studies.dispose();
+      second?.board?.dispose();
       second?.studies.dispose();
     }
   });

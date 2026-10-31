@@ -254,9 +254,54 @@ function studyChapterElements(doc: Document): StudyChapterElements {
   };
 }
 
+function resetStudyChapterPresentation(
+  doc: Document,
+  elements: StudyChapterElements,
+  boardElement?: HTMLElement | null,
+): void {
+  if (boardElement) {
+    boardElement.hidden = true;
+  }
+  if (elements.studyLinkEl) {
+    elements.studyLinkEl.hidden = true;
+    elements.studyLinkEl.textContent = '';
+    elements.studyLinkEl.removeAttribute('href');
+  }
+  if (elements.chapterNameEl) {
+    elements.chapterNameEl.hidden = true;
+    elements.chapterNameEl.textContent = '';
+  }
+  if (elements.exportEl) {
+    elements.exportEl.hidden = true;
+    elements.exportEl.removeAttribute('href');
+  }
+  if (elements.navEl) {
+    elements.navEl.hidden = true;
+    elements.navEl.replaceChildren?.();
+  }
+  if (elements.treeEl) {
+    const active = doc.activeElement;
+    const isFocusedInsideTree = Boolean(
+      active && elements.treeEl.contains?.(active),
+    );
+    elements.treeEl.replaceChildren?.();
+    if (isFocusedInsideTree) {
+      const target =
+        (elements.error && elements.error.textContent ? elements.error : null) ??
+        elements.treeEl;
+      if (target) {
+        target.tabIndex = -1;
+        target.focus?.({ preventScroll: true });
+      }
+    }
+  }
+}
+
 interface StudyChapterCallbacksOptions {
+  readonly doc: Document;
   readonly elements: StudyChapterElements;
   readonly board: MountedBoard | null;
+  readonly boardElement?: HTMLElement | null;
   readonly showUnavailable: () => void;
   readonly i18n: I18nManager;
   readonly positionCopy: MountedStudyPositionCopy;
@@ -276,8 +321,10 @@ interface StudyChapterCallbacksOptions {
 
 function createStudyChapterCallbacks(options: StudyChapterCallbacksOptions): StudiesCallbacks {
   const {
+    doc,
     elements,
     board,
+    boardElement,
     showUnavailable,
     i18n,
     positionCopy,
@@ -297,6 +344,11 @@ function createStudyChapterCallbacks(options: StudyChapterCallbacksOptions): Stu
       onChapterLoaded?.({ study, chapter, tree, chapters, exportUrl });
       onNodeSelected?.(null);
       if (elements.error) elements.error.textContent = '';
+      if (boardElement) boardElement.hidden = false;
+      if (elements.studyLinkEl) elements.studyLinkEl.hidden = false;
+      if (elements.chapterNameEl) elements.chapterNameEl.hidden = false;
+      if (elements.exportEl) elements.exportEl.hidden = false;
+      if (elements.navEl) elements.navEl.hidden = false;
       board?.setPosition(chapter.startingFen);
       positionCopy.setPosition(chapter.startingFen);
       const currentGeneration = getGeneration();
@@ -318,20 +370,27 @@ function createStudyChapterCallbacks(options: StudyChapterCallbacksOptions): Stu
       );
     },
     onLoading: (loading) => {
+      if (elements.treeEl) elements.treeEl.setAttribute('aria-busy', loading ? 'true' : 'false');
+      if (isDisposed()) return;
       if (loading) {
+        if (elements.error) elements.error.textContent = '';
         onLoadStart?.();
         positionCopy.setPosition(null);
+        resetStudyChapterPresentation(doc, elements, boardElement);
       }
-      if (elements.treeEl) elements.treeEl.setAttribute('aria-busy', loading ? 'true' : 'false');
     },
     onError: (message) => {
+      if (isDisposed()) return;
+      if (elements.error) elements.error.textContent = message;
       onLoadStart?.();
       positionCopy.setPosition(null);
-      if (elements.error) elements.error.textContent = message;
+      resetStudyChapterPresentation(doc, elements, boardElement);
     },
     onUnavailable: () => {
+      if (isDisposed()) return;
       onLoadStart?.();
       positionCopy.setPosition(null);
+      resetStudyChapterPresentation(doc, elements, boardElement);
       showUnavailable();
     },
   };
@@ -357,6 +416,7 @@ export function mountStudyChapter({
   });
 
   const elements = studyChapterElements(doc);
+  resetStudyChapterPresentation(doc, elements, boardElement);
   let lastChapterState: {
     study: StudyView;
     chapter: ChapterView;
@@ -372,8 +432,10 @@ export function mountStudyChapter({
   const controller = new StudiesController({
     client,
     callbacks: createStudyChapterCallbacks({
+      doc,
       elements,
       board,
+      boardElement,
       showUnavailable: () => renderUnavailable(doc, surface, i18n),
       i18n,
       positionCopy,
