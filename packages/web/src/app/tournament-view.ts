@@ -165,6 +165,15 @@ export function renderStandings(
   names: ReadonlyMap<string, { id: string; handle: string }>,
   i18n: I18n,
 ): void {
+  const doc = container.ownerDocument;
+  const active = doc.activeElement;
+  const focusedPlayerId =
+    active instanceof HTMLAnchorElement &&
+    container.contains(active) &&
+    typeof active.dataset.playerId === 'string'
+      ? active.dataset.playerId
+      : null;
+
   container.innerHTML = '';
   if (standings.length === 0) {
     renderEmpty(container, {
@@ -172,14 +181,38 @@ export function renderStandings(
       body: i18n.t('tournaments.emptyStandingsBody'),
       inline: true,
     });
+    if (focusedPlayerId !== null) {
+      container.tabIndex = -1;
+      container.focus();
+    }
     return;
   }
 
-  const doc = container.ownerDocument;
+  let anchorToFocus: HTMLAnchorElement | null = null;
   for (const s of standings) {
-    const handle = names.get(s.playerId)?.handle ?? shortId(s.playerId);
-    const playerSpan = el(doc, 'span', {});
-    renderInterpolatedText(playerSpan, '{rank} {handle}', { rank: `#${s.rank}`, handle });
+    const rankSpan = createLtrElement(doc, 'span', `#${s.rank}`);
+    const resolved = names.get(s.playerId);
+    let playerSpan: HTMLElement;
+    if (resolved) {
+      const link = el(
+        doc,
+        'a',
+        {
+          href: `/profile/${encodeURIComponent(resolved.handle)}`,
+          'data-route': 'profile',
+          class: 'row-link',
+          dir: 'auto',
+        },
+        resolved.handle,
+      );
+      link.dataset.playerId = s.playerId;
+      if (s.playerId === focusedPlayerId) {
+        anchorToFocus = link;
+      }
+      playerSpan = el(doc, 'span', {}, rankSpan, ' ', link);
+    } else {
+      playerSpan = el(doc, 'span', {}, rankSpan, ' ', el(doc, 'bdi', {}, shortId(s.playerId)));
+    }
 
     const ptsStr = i18n.t('tournaments.standings.points', { points: s.points });
     const statsSpan = el(doc, 'span', { class: 'count' });
@@ -199,6 +232,15 @@ export function renderStandings(
 
     const row = el(doc, 'div', { class: 'panel-row' }, playerSpan, statsSpan);
     container.appendChild(row);
+  }
+
+  if (focusedPlayerId !== null) {
+    if (anchorToFocus) {
+      anchorToFocus.focus();
+    } else {
+      container.tabIndex = -1;
+      container.focus();
+    }
   }
 }
 

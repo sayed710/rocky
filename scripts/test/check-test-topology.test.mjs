@@ -450,7 +450,7 @@ test('topology: extractPlaywrightPatterns fails closed on non-literal static exp
 
 test('topology: getPlaywrightDiscoveredFiles derives reachable files directly from Playwright CLI', () => {
   const discovered = getPlaywrightDiscoveredFiles('packages/web');
-  assert.equal(discovered.size, 37);
+  assert.equal(discovered.size, 38);
   assert.ok(discovered.has('packages/web/e2e/review-position.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/service-worker-update.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/arabic-shell.spec.ts'));
@@ -463,12 +463,13 @@ test('topology: getPlaywrightDiscoveredFiles derives reachable files directly fr
   assert.ok(discovered.has('packages/web/e2e/seek-creator-rating.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/public-documents.spec.ts'));
   assert.ok(discovered.has('packages/web/e2e/game-link-share.spec.ts'));
+  assert.ok(discovered.has('packages/web/e2e/tournament-standings-links.spec.ts'));
 });
 
-test('topology: backend-free Playwright discovers only the fifteen offline specs', () => {
+test('topology: backend-free Playwright discovers only the sixteen offline specs', () => {
   const offline = getPlaywrightDiscoveredFiles('packages/web', { backend: false });
   const full = getPlaywrightDiscoveredFiles('packages/web');
-  assert.equal(offline.size, 15);
+  assert.equal(offline.size, 16);
   assert.ok(offline.has('packages/web/e2e/review-position.spec.ts'));
   assert.ok(offline.has('packages/web/e2e/service-worker-update.spec.ts'));
   assert.ok(offline.has('packages/web/e2e/arabic-shell.spec.ts'));
@@ -479,10 +480,11 @@ test('topology: backend-free Playwright discovers only the fifteen offline specs
   assert.ok(offline.has('packages/web/e2e/rtl-layout-reliability.spec.ts'));
   assert.ok(offline.has('packages/web/e2e/localization-state.spec.ts'));
   assert.ok(offline.has('packages/web/e2e/seek-creator-rating.spec.ts'));
+  assert.ok(offline.has('packages/web/e2e/tournament-standings-links.spec.ts'));
   assert.ok(!offline.has('packages/web/e2e/game-actions.spec.ts'));
   assert.ok(!offline.has('packages/web/e2e/illegal-move-feedback.spec.ts'));
   assert.ok(!offline.has('packages/web/e2e/board-ownership.spec.ts'));
-  assert.equal(full.size, 37);
+  assert.equal(full.size, 38);
 });
 
 test('topology: falsification regression proves validation flags ignored test files unreachable', () => {
