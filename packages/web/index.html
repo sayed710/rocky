@@ -410,7 +410,16 @@
       <p id="leaderboard-error" class="error" role="alert"></p>
     </section>
     <section id="tournaments" class="tournaments" aria-label="Tournaments" data-i18n-aria-label="tournaments.aria" hidden>
-      <h2 data-i18n="tournaments.title">Tournaments</h2>
+      <header class="section-header">
+        <h2 data-i18n="tournaments.title">Tournaments</h2>
+        <div class="tournaments-controls leaderboard-controls">
+          <div class="tournaments-control leaderboard-control">
+            <label id="tournament-state-filter-label" for="tournament-state-filter" data-i18n="tournaments.filterLabel">Filter loaded tournaments</label>
+            <select id="tournament-state-filter" class="cg-select"></select>
+          </div>
+        </div>
+      </header>
+      <div id="tournaments-status" role="status" aria-live="polite" class="count"></div>
       <div id="tournament-list" class="panel-list" aria-label="Tournaments list" data-i18n-aria-label="tournaments.listAria"></div>
       <p id="tournaments-error" class="error" role="alert"></p>
     </section>
