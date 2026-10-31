@@ -1044,6 +1044,22 @@ a.button.primary:active {
   flex-direction: column;
   gap: 4px;
 }
+.profile-games-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 0.875rem;
+}
+.profile-games-filter-help {
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+.profile-games-filter-status {
+  font-size: 0.75rem;
+  margin-inline-start: auto;
+}
 .game-list,
 .panel-list {
   display: flex;
