@@ -6,9 +6,10 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-31 — Sequential integration of PR #137; verification evidence tracked in the pull request._
-Prior: _Last updated: 2026-10-31 — Study reload presentation reset: PR #137 addresses Qodo 6544313965 stale board/notation on reload; web 1,713/1,713 pass; browser execution and final PR gates pending._
+_Last updated: 2026-10-31 — Sequential integration of PR #140; verification evidence tracked in the pull request._
+Prior: _Last updated: 2026-10-31 — Standings player profile links._
 Prior: _Last updated: 2026-10-31 — Sequential integration of PR #137; verification evidence tracked in the pull request._
+Prior: _Last updated: 2026-10-31 — Study reload presentation reset: PR #137 addresses Qodo 6544313965 stale board/notation on reload; web 1,713/1,713 pass; browser execution and final PR gates pending._
 Prior: _Last updated: 2026-10-28 — Study chapter Copy FEN direct ready-text native call implemented, async PGN contract preserved; evidence tracked per published SHA in PR #137._
 Prior: _Last updated: 2026-10-28 — Study chapter Copy FEN feature contract implemented: root build and lint exit 0, browser e2e/arabic-shell.spec.ts 37 pass; test gates and provider receipts tracked per published SHA in PR._
 Prior: _Last updated: 2026-10-31 — Sequential integration of PR #136; verification evidence tracked in the pull request._
@@ -5950,3 +5951,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 ## Milestone: Study Reload Presentation Reset (2026-10-31)
 
 - Addressed PR #137 Qodo finding (comment 6544313965) for stale notation/board display after chapter reload. Board, metadata, tree, and sharing state now detach and hide on reload or failure; only successful current chapter presentation restores them, preventing stale notation or locale changes from reactivating old content. Fixtures match production `chapter-export-link` and `chapter-list-nav`. Mounted regression reproduced defect; full web 1,713/1,713 passes (zero skips, build/lint 0). Unit tests cover same-controller reload. Browser assertions (pending/403, retained handles, start/e4 recovery) remain pending without PASS claims; no OS clipboard or AT certification. Native review found 0 P1/P2 findings; final core tests, CI, Qodo, and merge are tracked in PR record.
+
+## Milestone: Standings Player Profile Links (2026-10-31)
+
+- **Feature implementation & native profile anchor contract**: Implemented resolved native profile anchors in standings (authored by Gemini as sole project author). Profile anchors render canonical encoded paths with literal handle text and `dir="auto"`, while rank numbers maintain explicit `dir="ltr"`; unresolved players and short IDs render as non-interactive, bidi-isolated plain text. Router changes are strictly confined to the profile route branch decoding the encoded handle exactly once via `decodeSegment`; zero changes to API, controller, external dependencies, timers, window/document listeners, or new fetch calls, preserving existing contracts.
+- **Focus retention & accessibility lifecycle**: Active standings focus is retained by `playerId` across rank shifts, handle updates, and table reorders. All three focus recoveries enforce `preventScroll: true` for viewport-preserving safe async focus without page jumps. When a focused player is removed, becomes unresolved, or standings become empty, focus transitions to programmatic container focus (`tabIndex=-1`) without introducing a new tab stop or stealing external focus when focus originates outside the component.
+- **Verification scope & governance policy**: Verification scope encompasses meaningful DOM renderer and offline Chromium browser testing for keyboard navigation, viewport scroll preservation, focus retention across reordering, bidirectional EN/AR rendering, and Unicode profile route request handling; exact results and provider receipts will be recorded in the PR when published rather than claimed before known. Qodo on PR #140 head `84e7c20` identified two valid bugs resolved by `preventScroll: true` and single segment decoding; repository owner alone merges; Qodo remains the temporary sole review bot per latest owner directive without reimposing Graphite block or modifying docs/REVIEW_POLICY.md; zero new dependencies, and no unrelated features or ADRs introduced.
