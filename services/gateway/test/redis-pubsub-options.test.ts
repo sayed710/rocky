@@ -4,18 +4,21 @@ import { pubSubConnectionOptions } from '../src/redis-pubsub.js';
 
 // The subscriber-mode race this guards against appeared once in CI and does not reproduce on
 // demand, so the configuration that prevents it is pinned directly.
-test('pub/sub connections: only the subscriber skips the ready check', () => {
+test('pub/sub connections: only the subscriber skips the ready check and autoResubscribe', () => {
   const { pub, sub } = pubSubConnectionOptions({ tls: {} });
 
   assert.equal(sub['enableReadyCheck'], false, 'subscriber: no ready check');
   assert.equal(pub['enableReadyCheck'], undefined, 'publisher: ioredis default (ready check on)');
+  assert.equal(sub['autoResubscribe'], false, 'subscriber: no auto-resubscribe (handled by RedisPubSub)');
+  assert.equal(pub['autoResubscribe'], undefined, 'publisher: ioredis default (auto-resubscribe on)');
   for (const options of [pub, sub]) {
     assert.equal(options['lazyConnect'], false);
     assert.deepEqual(options['tls'], {}, 'caller options pass through');
   }
 });
 
-test('pub/sub connections: a caller cannot turn the subscriber ready check back on', () => {
-  const { sub } = pubSubConnectionOptions({ enableReadyCheck: true });
+test('pub/sub connections: a caller cannot turn the subscriber ready check or autoResubscribe back on', () => {
+  const { sub } = pubSubConnectionOptions({ enableReadyCheck: true, autoResubscribe: true });
   assert.equal(sub['enableReadyCheck'], false);
+  assert.equal(sub['autoResubscribe'], false);
 });

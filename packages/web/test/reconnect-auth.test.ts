@@ -45,16 +45,17 @@ async function harness(anonymous = false) {
   const sync = new GameSync(client, { gameId: 'g1', session, scheduler,
     ...(!anonymous ? { token: tokenA.tokens.accessToken } : {}) });
   let serverConnection: InMemoryConnection | null = null;
-  const exchange = (): InMemoryConnection => {
+  const exchange = async (): Promise<InMemoryConnection> => {
     const connection = new InMemoryConnection();
     serverConnection = connection;
     gateway.handleConnection(connection);
     for (const frame of factory.last.sent) connection.deliver(JSON.parse(frame));
+    await flush();
     for (const frame of connection.sent) factory.last.emit(frame);
     return connection;
   };
   sync.start(); factory.last.open(); await flush();
-  const first = exchange();
+  const first = await exchange();
   assert.equal(first.last('joined')?.role, anonymous ? 'spectator' : 'white', 'initial server-assigned role');
   return { session, sync, factory, scheduler, client, tokens, tokenA, issue, exchange, first,
     closeServer: () => serverConnection?.close(),
@@ -72,7 +73,7 @@ test('R-04 control: reconnect before token expiry restores the player without re
   const h = await harness();
   try {
     h.advance(10_000); await h.reconnect();
-    assert.equal(h.exchange().last('joined')?.role, 'white');
+    assert.equal((await h.exchange()).last('joined')?.role, 'white');
     assert.equal(h.refreshes(), 0);
   } finally { dispose(h); }
 });
@@ -82,10 +83,10 @@ test('server-expired but locally fresh token is refreshed before explicit recove
   h.expireOnServerOnly();
   assert.equal(h.session.isAccessTokenExpired(), false, 'browser still considers the token fresh');
   await h.reconnect();
-  assert.equal(h.exchange().last('reject')?.code, 'unauthorized', 'real verifier rejects server-expired token');
+  assert.equal((await h.exchange()).last('reject')?.code, 'unauthorized', 'real verifier rejects server-expired token');
   h.closeServer(); h.sync.networkOnline(); h.factory.last.open(); await flush();
   assert.equal(h.refreshes(), 1);
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
 });
 
 test('server-rejected fresh credentials retain identity during refresh backoff without resending the token', async (t) => {
@@ -93,15 +94,15 @@ test('server-rejected fresh credentials retain identity during refresh backoff w
   await h.reconnect();
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'rejected' });
   h.setRefresh(async () => { throw new NetworkError(); });
-  h.sync.networkOnline(); h.factory.last.open(); await flush();
+  h.sync.retryRecovery(); h.factory.last.open(); await flush();
   assert.equal(h.refreshes(), 1);
   assert.equal(h.factory.last.sent.length, 0);
   assert.equal(h.session.current?.user.id, 'alice');
-  h.sync.networkOnline(); await flush();
+  h.sync.retryRecovery(); await flush();
   assert.equal(h.refreshes(), 1, 'explicit retry cannot bypass manager cooldown');
   h.advance(10_000); h.setRefresh(async () => h.issue());
   h.scheduler.runNext(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
 });
 
 test('refresh returning a previously rejected token cannot resend it or create an unbounded loop', async (t) => {
@@ -109,7 +110,7 @@ test('refresh returning a previously rejected token cannot resend it or create a
   await h.reconnect();
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'rejected' });
   h.setRefresh(async () => h.tokenA);
-  h.sync.networkOnline(); h.factory.last.open(); await flush();
+  h.sync.retryRecovery(); h.factory.last.open(); await flush();
   for (let attempt = 0; attempt < 3; attempt++) { h.advance(4_000); h.scheduler.runNext(); await flush(); }
   assert.equal(h.refreshes(), 4);
   assert.equal(h.scheduler.pending, 0);
@@ -124,7 +125,7 @@ test('R-04: mounted game reconnect after expiry obtains a current token and rest
     h.advance(60_000);
     assert.deepEqual(h.tokens.verify(h.tokenA.tokens.accessToken), { ok: false, reason: 'expired' });
     await h.reconnect();
-    const connection = h.exchange();
+    const connection = await h.exchange();
     assert.equal(connection.last('joined')?.role, 'white',
       `gateway rejected reconnect: ${connection.last('reject')?.code}`);
     assert.equal(h.refreshes(), 1);
@@ -163,7 +164,7 @@ test('R-03 + R-04: expiry refresh retains uncertainty, gates commands and accept
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown', 'obsolete socket cannot settle the request');
   release(h.issue()); await flush();
   assert.equal(h.sync.getState().connected, false, 'refresh alone does not authorize');
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
   assert.equal(h.sync.getState().connected, true);
   assert.equal(h.sync.getState().pending, null);
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown', 'unchanged authorized snapshot is not a receipt');
@@ -181,7 +182,7 @@ test('R-03 + R-04: fresh reconnect preserves multiple unknown outcomes and refus
   for (const requestId of ['draw-first', 'draw-second']) h.factory.last.emit({ t: 'outcomeUnknown',
     code: 'outcome_unknown', gameId: 'g1', ref: null, requestId, action: 'offerDraw', message: 'Unknown draw.' });
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'invalid_command', message: 'New gesture refused.' });
-  h.advance(10_000); await h.reconnect(); h.exchange();
+  h.advance(10_000); await h.reconnect(); await h.exchange();
   assert.match(h.sync.getState().lastReject?.message ?? '', /2 command outcomes remain unknown/);
   assert.match(h.sync.getState().lastReject?.message ?? '', /New gesture refused/);
   h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'draw-second' });
@@ -197,7 +198,7 @@ test('R-03 + R-04: rejected reconnect retains uncertainty alongside authenticati
   unknownMove(h);
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'illegal_move', message: 'Earlier gesture refused.' });
   h.expireOnServerOnly(); await h.reconnect();
-  assert.equal(h.exchange().last('reject')?.code, 'unauthorized');
+  assert.equal((await h.exchange()).last('reject')?.code, 'unauthorized');
   assert.equal(h.sync.getState().connected, false);
   assert.equal(h.sync.getState().myColor, null);
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
@@ -205,7 +206,7 @@ test('R-03 + R-04: rejected reconnect retains uncertainty alongside authenticati
   assert.match(h.sync.getState().lastReject?.message ?? '', /Join rejected/);
   assert.equal(h.sync.submitMove('d2d4'), null);
   h.closeServer(); h.sync.networkOnline(); h.factory.last.open(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
   assert.match(h.sync.getState().lastReject?.message ?? '', /Earlier gesture refused/);
   assert.doesNotMatch(h.sync.getState().lastReject?.message ?? '', /Join rejected/);
@@ -218,8 +219,8 @@ test('R-03 + R-04: rejected reconnect retains uncertainty alongside authenticati
 test('R-03 + R-04: successful reauthorization clears only the join refusal, then an exact receipt clears uncertainty', async (t) => {
   const h = await harness(); t.after(() => dispose(h));
   unknownMove(h);
-  h.expireOnServerOnly(); await h.reconnect(); h.exchange();
-  h.closeServer(); h.sync.networkOnline(); h.factory.last.open(); await flush(); h.exchange();
+  h.expireOnServerOnly(); await h.reconnect(); await h.exchange();
+  h.closeServer(); h.sync.networkOnline(); h.factory.last.open(); await flush(); await h.exchange();
   assert.equal(h.sync.getState().connected, true);
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
   assert.doesNotMatch(h.sync.getState().lastReject?.message ?? '', /rejected/i);
@@ -246,7 +247,7 @@ for (const boundary of ['logout', 'account switch'] as const) {
     release(h.issue()); await flush();
     obsolete.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'original-move' });
     assert.equal(h.sync.getState().connected, false, 'old completion does not authorize');
-    assert.equal(h.exchange().last('joined')?.role, boundary === 'logout' ? 'spectator' : 'black');
+    assert.equal((await h.exchange()).last('joined')?.role, boundary === 'logout' ? 'spectator' : 'black');
     assert.equal(h.sync.getState().myColor, boundary === 'logout' ? null : 'b');
     assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
     h.factory.last.emit({ t: 'commandConfirmed', gameId: 'g1', requestId: 'original-move' });
@@ -264,7 +265,7 @@ test('R-03 + R-04: transient refresh retains unknown outcomes until recovery wit
   assert.equal(h.session.current?.user.id, 'alice');
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
   h.advance(10_000); h.setRefresh(async () => h.issue());
-  h.scheduler.runNext(); await flush(); h.exchange();
+  h.scheduler.runNext(); await flush(); await h.exchange();
   assert.equal(h.sync.getState().role, 'white');
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
   assertNoReplay(h);
@@ -276,7 +277,7 @@ test('R-03 + R-04: switched seat readiness cannot reconcile the original seat re
     requestId: 'original-white-ready', action: 'ready', readyColor: 'w', message: 'Unknown readiness.' });
   h.session.adopt(h.issue('bob'), false); h.sync.sessionChanged('bob');
   h.closeServer(); h.factory.last.open(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'black');
+  assert.equal((await h.exchange()).last('joined')?.role, 'black');
   h.factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: false, b: true }, serverTs: 1 });
   assert.equal(h.sync.getState().lastReject?.t, 'outcomeUnknown');
   h.factory.last.emit({ t: 'ready', gameId: 'g1', ready: { w: true, b: true }, serverTs: 2 });
@@ -289,7 +290,7 @@ test('R-03 + R-04: switched seat readiness cannot reconcile the original seat re
 test('near-expiry reconnect uses proactive session leeway', async (t) => {
   const h = await harness(); t.after(() => dispose(h));
   h.advance(55_000); await h.reconnect();
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
   assert.equal(h.refreshes(), 1);
 });
 
@@ -306,7 +307,7 @@ test('repeated socket opens share refresh with authenticated requests and only j
   release(h.issue()); await request; await flush();
   assert.equal(obsolete.sent.length, 0);
   assert.equal(h.factory.last.sent.filter((frame) => JSON.parse(frame).t === 'join').length, 1);
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
 });
 
 test('transient refresh failure retains identity, respects cooldown, and later recovers', async (t) => {
@@ -321,7 +322,7 @@ test('transient refresh failure retains identity, respects cooldown, and later r
   assert.equal(h.refreshes(), 1, 'repeated reconnect respects session cooldown');
   h.setRefresh(async () => h.issue()); h.advance(10_000);
   h.scheduler.runNext(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
   assert.equal(h.refreshes(), 2);
 });
 
@@ -335,7 +336,7 @@ test('definitive refresh denial requires a new anonymous server authorization', 
   assert.equal(h.sync.getState().myColor, null);
   h.factory.last.open(); await flush();
   assert.equal(h.factory.last.sent.some((frame) => JSON.parse(frame).token !== undefined), false);
-  assert.equal(h.exchange().last('joined')?.role, 'spectator');
+  assert.equal((await h.exchange()).last('joined')?.role, 'spectator');
   assert.equal(h.sync.resign(), false);
 });
 
@@ -374,7 +375,7 @@ test('a logout barrier observed during joined delivery cannot restore the cleare
     h.session.reset(false); h.sync.sessionChanged(null);
     return capture();
   };
-  h.exchange();
+  await h.exchange();
   assert.equal(h.sync.getState().connected, false);
   assert.equal(h.sync.getState().myColor, null);
 });
@@ -382,7 +383,7 @@ test('a logout barrier observed during joined delivery cannot restore the cleare
 test('anonymous spectator reconnect stays anonymous without refresh', async (t) => {
   const h = await harness(true); t.after(() => dispose(h));
   h.advance(60_000); await h.reconnect();
-  assert.equal(h.exchange().last('joined')?.role, 'spectator');
+  assert.equal((await h.exchange()).last('joined')?.role, 'spectator');
   assert.equal(h.refreshes(), 0);
   assert.equal(h.sync.getState().connected, true);
   assert.equal(h.sync.submitMove('e2e4'), null);
@@ -392,7 +393,7 @@ test('anonymous spectator reconnect stays anonymous without refresh', async (t) 
   assert.equal(h.sync.declineDraw(), false);
   assert.equal(h.sync.claimFlag(), false);
   assert.equal(h.sync.abort(), false);
-  const server = h.exchange();
+  const server = await h.exchange();
   server.deliver({ t: 'resign', gameId: 'g1' });
   assert.equal(server.last('reject')?.code, 'not_a_player', 'real gateway independently denies spectator commands');
 });
@@ -423,7 +424,7 @@ test('completed logout immediately revokes commands and only a fresh join grants
   h.factory.last.open(); await flush();
   assert.equal(h.factory.last.sent.some((frame) => JSON.parse(frame).token !== undefined), false);
   assert.equal(h.sync.getState().role, null, 'transport open does not authorize spectator access');
-  assert.equal(h.exchange().last('joined')?.role, 'spectator');
+  assert.equal((await h.exchange()).last('joined')?.role, 'spectator');
   assert.equal(h.sync.getState().myColor, null);
   assert.equal(h.sync.submitMove('e2e4'), null);
 });
@@ -446,7 +447,7 @@ test('late refresh completion after completed logout cannot restore spectator pr
   const obsolete = h.factory.last;
   h.sync.logoutRequested(); h.session.reset(false); h.sync.sessionChanged(null);
   h.factory.last.open(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'spectator');
+  assert.equal((await h.exchange()).last('joined')?.role, 'spectator');
   release(h.issue()); await flush();
   obsolete.emit({ t: 'joined', gameId: 'g1', role: 'white', state: h.sync.getState().snapshot });
   assert.equal(h.session.current === null, true);
@@ -461,7 +462,7 @@ test('account replacement requires a new socket and the server assigns the new s
   h.session.adopt(h.issue('bob'), false); h.sync.sessionChanged('bob');
   obsolete.emit({ t: 'joined', gameId: 'g1', role: 'white', state: h.sync.getState().snapshot });
   h.factory.last.open(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'black');
+  assert.equal((await h.exchange()).last('joined')?.role, 'black');
   assert.equal(h.sync.getState().myColor, 'b');
 });
 
@@ -477,7 +478,7 @@ test('same-account peer adoption supersedes an in-flight refresh and starts a cu
   release(h.issue()); await flush();
   assert.equal(h.session.current?.tokens.accessToken === peer.tokens.accessToken, true);
   assert.equal(h.factory.last.sent.filter((frame) => JSON.parse(frame).t === 'join').length, 1);
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
 });
 
 test('transient gateway hydration rejection retries the pending join with a bound', async (t) => {
@@ -486,7 +487,7 @@ test('transient gateway hydration rejection retries the pending join with a boun
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'invalid_command', message: 'failed to load game' });
   assert.equal(h.scheduler.pending, 1);
   h.advance(1_000); h.scheduler.runNext(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
 });
 
 test('explicit recovery can reopen a server-rejected join without reload or session replacement', async (t) => {
@@ -494,10 +495,10 @@ test('explicit recovery can reopen a server-rejected join without reload or sess
   await h.reconnect();
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unauthorized', message: 'invalid or expired token' });
   const sockets = h.factory.sockets.length;
-  h.sync.networkOnline();
+  h.sync.retryRecovery();
   assert.equal(h.factory.sockets.length, sockets + 1);
   h.factory.last.open(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
 });
 
 test('bounded retries stop during a persistent refresh outage', async (t) => {
@@ -513,8 +514,8 @@ test('bounded retries stop during a persistent refresh outage', async (t) => {
   assert.equal(h.session.current?.user.id, 'alice');
   assert.equal(h.sync.getState().recoveryAvailable, true);
   h.setRefresh(async () => h.issue()); h.advance(30_000);
-  h.sync.networkOnline(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  h.sync.retryRecovery(); await flush();
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
   assert.equal(h.sync.getState().recoveryAvailable, false);
 });
 
@@ -522,7 +523,7 @@ test('unknown game rejection stays terminal without a reconnect storm', async (t
   const h = await harness(); t.after(() => dispose(h)); await h.reconnect();
   h.factory.last.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'unknown_game', message: 'unknown game' });
   const sockets = h.factory.sockets.length;
-  h.sync.networkOnline();
+  h.sync.retryRecovery();
   assert.equal(h.factory.sockets.length, sockets);
   assert.equal(h.scheduler.pending, 0);
   assert.equal(h.sync.getState().recoveryAvailable, false);
@@ -535,7 +536,7 @@ test('bounded recovery waits for a long server cooldown before spending its next
   assert.equal(h.scheduler.nextDelayMs, 30_000);
   assert.equal(h.refreshes(), 1);
   h.setRefresh(async () => h.issue()); h.advance(30_000); h.scheduler.runNext(); await flush();
-  assert.equal(h.exchange().last('joined')?.role, 'white');
+  assert.equal((await h.exchange()).last('joined')?.role, 'white');
   assert.equal(h.refreshes(), 2);
 });
 
@@ -544,7 +545,7 @@ test('successful rejoin uses a snapshot, never resubmits a pending move, and acc
   assert.ok(h.sync.submitMove('e2e4'));
   h.advance(60_000); await h.reconnect();
   assert.equal(h.factory.last.sent.filter((frame) => JSON.parse(frame).t === 'move').length, 0);
-  const connection = h.exchange();
+  const connection = await h.exchange();
   assert.equal(h.sync.getState().pending, null);
   assert.deepEqual(h.sync.submitMove('e2e4'), { uci: 'e2e4', clientSeq: 2 });
   connection.deliver(JSON.parse(h.factory.last.sent.at(-1)!)); await flush();
@@ -558,13 +559,34 @@ test('refreshed player rejoin resumes from the last observed ply after a missed 
   h.first.deliver({ t: 'move', gameId: 'g1', uci: 'e2e4', clientSeq: 1 }); await flush();
   assert.equal(h.sync.getState().ply, 0, 'the controlled transport withholds the broadcast');
   h.advance(60_000); await h.reconnect();
-  const connection = h.exchange();
+  const connection = await h.exchange();
   assert.equal(h.sync.getState().ply, 1);
   const resume = JSON.parse(h.factory.last.sent.at(-1)!);
   assert.deepEqual(resume, { t: 'resume', gameId: 'g1', lastPly: 0 } as const);
-  connection.deliver(resume);
+  connection.deliver(resume); await flush();
   const resumed = connection.last('resumed'); assert.ok(resumed);
   h.factory.last.emit(resumed);
   assert.equal(h.sync.getState().ply, 1);
   assert.equal(h.sync.getState().connected, true);
+});
+
+test('a permanently refused hydration (a pre-#127 atomic game, option ii) stops after three join retries on the same socket', async (t) => {
+  const h = await harness(); t.after(() => dispose(h));
+  await h.reconnect();
+  const socket = h.factory.last;
+  const sockets = h.factory.sockets.length;
+  const joins = (): number => socket.sent.filter((frame) => (JSON.parse(frame) as { t: string }).t === 'join').length;
+  const refuse = (): void => socket.emit({ t: 'reject', gameId: 'g1', ref: null, code: 'invalid_command', message: 'failed to load game' });
+  assert.equal(joins(), 1);
+  refuse();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    assert.equal(h.scheduler.pending, 1, `retry ${attempt + 1} is scheduled`);
+    h.advance(10_000); h.scheduler.runNext(); await flush();
+    refuse();
+  }
+  assert.equal(joins(), 4, 'the first join plus three bounded retries, then no more');
+  assert.equal(h.scheduler.pending, 0);
+  assert.equal(h.factory.sockets.length, sockets, 'no reconnect storm: no new socket is opened');
+  assert.equal(h.sync.getState().connected, false);
+  assert.equal(h.sync.getState().recoveryAvailable, true, 'the player can retry explicitly');
 });

@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   findDeployedRevision,
+  findNewestRevision,
   formatGithubOutput,
   resolveDeployedImageTags,
 } from '../lib/deployed-image-tags.mjs';
@@ -93,6 +94,15 @@ test('the deployed revision is the newest one whose status is deployed', () => {
   assert.throws(() => findDeployedRevision({}), /not a JSON array/);
 });
 
+test('the newest revision is the last entry\'s, as written (the canary/blueGreen gate\'s comparand)', () => {
+  assert.equal(findNewestRevision([{ revision: 4, status: 'deployed' }, { revision: 5, status: 'failed' }]), '5');
+  assert.equal(findNewestRevision([{ revision: '05', status: 'deployed' }]), '05');
+  assert.throws(() => findNewestRevision([]), /non-empty JSON array/);
+  assert.throws(() => findNewestRevision({}), /non-empty JSON array/);
+  assert.throws(() => findNewestRevision([{ revision: 'x' }]), /no readable revision/);
+  assert.throws(() => findNewestRevision([null]), /no readable revision/);
+});
+
 test('output lines are exactly the keys deploy.yml reads', () => {
   const text = formatGithubOutput(resolveDeployedImageTags(deployedValues({ strategy: 'blueGreen', green: '1.2.3' })));
   assert.equal(text, [
@@ -110,7 +120,10 @@ test('the CLI prints outputs on success and fails closed on bad input', () => {
   const revision = spawnSync(process.execPath, [CLI, '--deployed-revision'], { input: '[{"revision":2,"status":"deployed"}]', encoding: 'utf8' });
   assert.equal(revision.stdout, '2\n');
 
-  for (const [args, input] of [[[], ''], [[], '{"images":{}}'], [['--bogus'], '{}'], [['--deployed-revision'], '[]']]) {
+  const newest = spawnSync(process.execPath, [CLI, '--newest-revision'], { input: '[{"revision":2,"status":"deployed"},{"revision":3,"status":"failed"}]', encoding: 'utf8' });
+  assert.equal(newest.stdout, '3\n');
+
+  for (const [args, input] of [[[], ''], [[], '{"images":{}}'], [['--bogus'], '{}'], [['--deployed-revision'], '[]'], [['--newest-revision'], '[]']]) {
     const bad = spawnSync(process.execPath, [CLI, ...args], { input, encoding: 'utf8' });
     assert.equal(bad.status, 1, `expected failure for ${JSON.stringify(args)} ${input}`);
     assert.equal(bad.stdout, '');

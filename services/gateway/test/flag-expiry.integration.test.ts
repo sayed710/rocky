@@ -154,11 +154,18 @@ async function project(pool: Pool): Promise<void> {
 }
 
 /** A seek game both players joined on different replicas, with White's first move played through A. */
-async function seekGameUnderway(s: Stack): Promise<{ gameId: string; alice: InMemoryConnection; bob: InMemoryConnection }> {
+async function seekGameUnderway(s: Stack, preferredOwner?: Node): Promise<{ gameId: string; alice: InMemoryConnection; bob: InMemoryConnection }> {
   const gameId = randomUUID();
   await s.a.authority.createGame({
     gameId, timeControl: TC, players: { white: 'alice', black: 'bob' }, rated: true, at: T0, source: 'seek', noShowAfterMs: 60_000,
   });
+  if (preferredOwner) {
+    const claim = await preferredOwner.registry.claim(gameId);
+    assert.equal(claim.owned, true, 'claimed preferred owner');
+    if (!claim.owned) throw new Error('failed to claim preferred owner');
+    assert.equal(claim.nodeId, preferredOwner.nodeId);
+    assert.equal(await s.redis.get(ownerKey(gameId)), preferredOwner.nodeId);
+  }
   const alice = s.a.connect();
   const bob = s.b.connect();
   s.a.join(alice, gameId, 'alice');
@@ -324,39 +331,61 @@ stackTest('a tournament timeout is recorded once by the reporter from the durabl
 
 stackTest('an owner lets go of a copy it loaded only to answer a late forwarded expiry; a player command keeps its copy', async () => {
   await withStack(async (s) => {
-    const { gameId, alice, bob } = await seekGameUnderway(s);
-    alice.close();
-    bob.close();
-    s.clock.now = DEADLINE;
-    await s.a.router.route(gameId, FLAG_ACTOR_ID, { kind: 'expireFlag' }); // A now owns the ended game
-    const forward = async (userId: string): Promise<void> => {
-      s.a.authority.evict(gameId); // as after an unwatched expiry
-      s.a.consumer.startConsumer(gameId);
-      const responseKey = `game:resp:test-${randomUUID()}`;
-      const requestId = randomUUID();
-      await s.redis.eval(ENQUEUE_REQUEST, 2, requestKey(requestId), `game:cmd:v2:${gameId}`,
-        JSON.stringify({ version: 2, requestId, gameId, userId, cmd: { kind: 'expireFlag' }, responseKey }), 5000, REQUEST_RETENTION_MS);
-      const blocking = s.redis.duplicate();
-      let reply: [string, string] | null;
-      try {
-        reply = await blocking.blpop(responseKey, 5);
-      } finally {
-        blocking.disconnect();
-      }
-      assert.ok(reply, 'the owner answered');
-      assert.equal(JSON.parse(reply[1]).ok, false, 'the game is already over');
-    };
-    await forward(FLAG_ACTOR_ID); // the losing replica's duplicate expiry
-    assert.equal(s.a.authority.has(gameId), false, 'evicted before the reply');
-    await forward('alice'); // a player's forwarded command
-    assert.equal(s.a.authority.has(gameId), true, 'a player command keeps what it loaded');
+    for (const preferredOwner of [s.a, s.b]) {
+      s.clock.now = T0;
+      const { gameId, alice, bob } = await seekGameUnderway(s, preferredOwner);
+      alice.close();
+      bob.close();
+      await waitFor('both rooms to be empty', () => !s.a.gateway.hasLocalSessions(gameId) && !s.b.gateway.hasLocalSessions(gameId));
+      assert.equal(s.a.gateway.hasLocalSessions(gameId), false);
+      assert.equal(s.b.gateway.hasLocalSessions(gameId), false);
 
-    // Someone on the owner is watching (joined while the expiry was in flight): the copy stays.
-    const watcher = s.a.connect();
-    s.a.join(watcher, gameId, 'alice');
-    await waitFor('the watcher to join', () => watcher.last('joined') !== undefined);
-    await forward(FLAG_ACTOR_ID);
-    assert.equal(s.a.authority.has(gameId), true, 'a watched game is never evicted');
+      s.clock.now = DEADLINE;
+      await s.a.router.route(gameId, FLAG_ACTOR_ID, { kind: 'expireFlag' });
+
+      const ownerNodeId = await s.redis.get(ownerKey(gameId));
+      assert.equal(ownerNodeId, preferredOwner.nodeId, 'redis owner matches preferred node');
+      const ownerNode = ownerNodeId === s.a.nodeId ? s.a : s.b;
+
+      const forward = async (userId: string): Promise<void> => {
+        ownerNode.authority.evict(gameId); // as after an unwatched expiry
+        ownerNode.consumer.startConsumer(gameId);
+        const responseKey = `game:resp:test-${randomUUID()}`;
+        const requestId = randomUUID();
+        await s.redis.eval(ENQUEUE_REQUEST, 2, requestKey(requestId), `game:cmd:v2:${gameId}`,
+          JSON.stringify({ version: 2, requestId, gameId, userId, cmd: { kind: 'expireFlag' }, responseKey }), 5000, REQUEST_RETENTION_MS);
+        const blocking = s.redis.duplicate();
+        let reply: [string, string] | null;
+        try {
+          reply = await blocking.blpop(responseKey, 5);
+        } finally {
+          blocking.disconnect();
+        }
+        assert.ok(reply, 'the owner answered');
+        const res = JSON.parse(reply[1]);
+        assert.equal(res.ok, false);
+        if (userId === FLAG_ACTOR_ID) {
+          assert.equal(res.error.code, 'invalid_command');
+          assert.equal(res.error.message, 'Flag expiry refused: not due');
+        } else {
+          assert.equal(res.error.code, 'not_a_player');
+          assert.equal(res.error.message, 'only the server may expire a clock');
+        }
+      };
+
+      await forward(FLAG_ACTOR_ID); // the losing replica's duplicate expiry
+      assert.equal(ownerNode.authority.has(gameId), false, 'evicted before the reply');
+      await forward('alice'); // a player's forwarded command
+      assert.equal(ownerNode.authority.has(gameId), true, 'a player command keeps what it loaded');
+
+      // Someone on the owner is watching (joined while the expiry was in flight): the copy stays.
+      const watcher = ownerNode.connect();
+      ownerNode.join(watcher, gameId, 'alice');
+      await waitFor('the watcher to join', () => watcher.last('joined') !== undefined);
+      await forward(FLAG_ACTOR_ID);
+      assert.equal(ownerNode.authority.has(gameId), true, 'a watched game is never evicted');
+      watcher.close();
+    }
   });
 });
 
@@ -398,19 +427,23 @@ stackTest('R-03: a late unowned expiry evicts its temporary copy without executi
 stackTest('R-03: expired forwarded resignation leaves the actual PostgreSQL event log unchanged', async () => {
   await withStack(async (s) => {
     const { gameId } = await seekGameUnderway(s);
-    assert.equal((await s.a.registry.claim(gameId)).owned, true);
-    s.a.consumer.stopConsumer(gameId);
+    // Either replica may own the game after both seats' readiness (see the owner lookups above); the
+    // owner holds the stopped consumer and the other replica forwards.
+    const owner = await s.redis.get(ownerKey(gameId));
+    const [ownerNode, other] = owner === s.a.nodeId ? [s.a, s.b] : [s.b, s.a];
+    assert.equal((await ownerNode.registry.claim(gameId)).owned, true);
+    ownerNode.consumer.stopConsumer(gameId);
     const before = await s.store.load(gameId); let payload: string | null = null;
-    const routed = assert.rejects(s.b.router.route(gameId, 'alice', { kind: 'resign' }), /expired before execution/);
+    const routed = assert.rejects(other.router.route(gameId, 'alice', { kind: 'resign' }), /expired before execution/);
     await waitFor('the forwarded resignation in Redis', async () => {
       payload = await s.redis.lindex(`game:cmd:v2:${gameId}`, 0); return payload !== null;
     });
     await routed;
     assert.ok(payload);
     // @ts-expect-error production receiver handles the delayed original envelope
-    await s.a.consumer.processCommand(payload);
+    await ownerNode.consumer.processCommand(payload);
     assert.deepEqual(await s.store.load(gameId), before);
-    assert.equal(s.a.authority.getState(gameId).status.over, false);
+    assert.equal(ownerNode.authority.getState(gameId).status.over, false);
     const envelope = JSON.parse(payload) as { requestId: string; responseKey: string };
     await s.redis.del(requestKey(envelope.requestId), envelope.responseKey, `game:cmd:v2:${gameId}`);
   });

@@ -26,14 +26,16 @@ import type { Color } from '@chess-platform/core';
 import { GameAuthority, AuthorityError, AuthorityCommitError, CommandOutcomeUnknownError, type Command } from './authority';
 import { LocalCommandRouter, type CommandRouter } from './command-router';
 import { Room } from './room';
-import { gameChannel, type PubSub, type Unsubscribe } from './pubsub';
+import { gameChannel, SubscriptionCancelledError, type PubSub, type Unsubscribe } from './pubsub';
 import type { Connection } from './transport';
 import type {
   ClientMessage,
   MoveMessage,
   RejectCode,
   Role,
+  ServerMessage,
   SimpleCommandMessage,
+  StateMessage,
   StateView,
   TokenVerifier,
 } from './protocol';
@@ -48,15 +50,22 @@ interface Membership {
 interface Session {
   readonly conn: Connection;
   readonly games: Map<string, Membership>;
+  readonly joinReads: Map<string, symbol>;
+  readonly resumeReads: Map<string, symbol>;
+  readonly joinBuffers: Map<string, () => void>;
 }
 
 interface RoomEntry {
   readonly room: Room;
   readonly unsubscribe: Unsubscribe;
+  lastFullStateRevision?: number;
 }
 
 /** How many times a join's readiness is routed before the failure is reported to the client. */
 const READINESS_ATTEMPTS = 3;
+
+/** Bounded attempts for refreshing an overtaken draw-only state; mirrors READINESS_ATTEMPTS; no timers/backoff. */
+const STATE_REFRESH_ATTEMPTS = 3;
 
 const SIMPLE_TO_COMMAND: Record<SimpleCommandMessage['t'], Command['kind']> = {
   resign: 'resign',
@@ -67,10 +76,40 @@ const SIMPLE_TO_COMMAND: Record<SimpleCommandMessage['t'], Command['kind']> = {
   abort: 'abort',
 };
 
+/** Returns true if a buffered message was published after the snapshot's stateRevision or carries no revision. */
+function isNewerThanSnapshot(msg: ServerMessage, snapshotRevision: number): boolean {
+  if (msg.t === 'state') {
+    return msg.state.stateRevision > snapshotRevision;
+  }
+  if ('stateRevision' in msg && typeof msg.stateRevision === 'number') {
+    return msg.stateRevision > snapshotRevision;
+  }
+  return true;
+}
+
+function isStateMessage(msg: unknown): msg is StateMessage {
+  return typeof msg === 'object' && msg !== null && (msg as { t?: unknown }).t === 'state';
+}
+
+/** Optional host hooks for Redis subscription health (diagnostics only; never delivery). */
+export interface RealtimeGatewayOptions {
+  /** Called once per episode when a local game's channel subscription cannot be confirmed. */
+  readonly onSubscriptionUnconfirmed?: (gameId: string, reason: 'timeout' | 'failed') => void;
+  /** Called when a previously unconfirmed game's subscription is confirmed. */
+  readonly onSubscriptionConfirmed?: (gameId: string) => void;
+}
+
+/** Raised internally when a readiness wait outlives the durable read deadline. */
+class SubscriptionReadinessTimeout extends Error {}
+
 export class RealtimeGateway {
   private readonly sessions = new Map<string, Session>();
   private readonly rooms = new Map<string, RoomEntry>();
   private readonly loadedGames = new Set<string>();
+  private readonly joinBuffers = new Map<string, Set<ServerMessage[]>>();
+  private readonly observedRevision = new Map<string, number>();
+  private readonly stateRefreshes = new Map<string, { again: boolean }>();
+  private readonly unconfirmedSubscriptionsSet = new Set<string>();
   /**
    * Command router: directs game commands to the owning node. Defaults to
    * {@link LocalCommandRouter} (direct authority.apply) for single-node and
@@ -78,6 +117,7 @@ export class RealtimeGateway {
    * router that forwards non-owned commands (see ADR-0010).
    */
   private readonly commandRouter: CommandRouter;
+  private readonly unregisterReconnect?: () => void;
 
   constructor(
     private readonly authority: GameAuthority,
@@ -89,16 +129,76 @@ export class RealtimeGateway {
     private readonly onGameLoaded?: (gameId: string, state: StateView) => void,
     /** Called when the last session in a game leaves this node — the pair of `onGameLoaded`. */
     private readonly onGameUnloaded?: (gameId: string) => void,
+    /**
+     * Called once when every bounded refresh attempt for an overtaken draw-only command state
+     * failed; the command itself committed - the gateway sends no frame for it (no stale snapshot, no
+     * false reject) and the host should log/alert.
+     */
+    private readonly onStateRefreshFailed?: (gameId: string, error: unknown) => void,
+    private readonly options: RealtimeGatewayOptions = {},
   ) {
     // Fall back to local routing when no router is injected. This preserves
     // backward compatibility: existing callers that don't pass a router get
     // the same direct-authority behavior.
     this.commandRouter = commandRouter ?? new LocalCommandRouter(this.authority);
+    // After a subscriber reconnect, re-check every local game's channel once: a channel whose
+    // resubscribe failed is re-issued by ready() (one retry per reconnect), healthy ones resolve.
+    this.unregisterReconnect = this.pubsub.onReconnect?.(() => {
+      for (const gameId of this.localGameIds()) {
+        void this.pubsub.ready?.(gameChannel(gameId))?.then(
+          () => this.markSubscriptionConfirmed(gameId),
+          (err: unknown) => {
+            if (!(err instanceof SubscriptionCancelledError) && this.isLocalGame(gameId)) {
+              this.markSubscriptionUnconfirmed(gameId, 'failed');
+            }
+          },
+        );
+      }
+    });
+  }
+
+  /** Games with a room or a pending join buffer on this node. */
+  private localGameIds(): Set<string> {
+    const ids = new Set(this.rooms.keys());
+    for (const [gameId, buffers] of this.joinBuffers) {
+      if (buffers.size > 0) ids.add(gameId);
+    }
+    return ids;
+  }
+
+  private isLocalGame(gameId: string): boolean {
+    return this.rooms.has(gameId) || (this.joinBuffers.get(gameId)?.size ?? 0) > 0;
+  }
+
+  /** Marks a game unconfirmed and reports it only when the episode starts (no log storm). */
+  private markSubscriptionUnconfirmed(gameId: string, reason: 'timeout' | 'failed'): void {
+    if (this.unconfirmedSubscriptionsSet.has(gameId)) return;
+    this.unconfirmedSubscriptionsSet.add(gameId);
+    try {
+      this.options.onSubscriptionUnconfirmed?.(gameId, reason);
+    } catch {
+      // A diagnostic hook must not affect the join.
+    }
+  }
+
+  /** Clears an unconfirmed mark and reports the recovery; a healthy game reports nothing. */
+  private markSubscriptionConfirmed(gameId: string): void {
+    if (!this.unconfirmedSubscriptionsSet.delete(gameId)) return;
+    try {
+      this.options.onSubscriptionConfirmed?.(gameId);
+    } catch {
+      // A diagnostic hook must not affect delivery.
+    }
+  }
+
+  /** Unregister background subscriptions and lifecycle listeners. */
+  close(): void {
+    this.unregisterReconnect?.();
   }
 
   /** Register a new connection and wire its lifecycle handlers. */
   handleConnection(conn: Connection): void {
-    const session: Session = { conn, games: new Map() };
+    const session: Session = { conn, games: new Map(), joinReads: new Map(), resumeReads: new Map(), joinBuffers: new Map() };
     this.sessions.set(conn.id, session);
     conn.onMessage((msg) => {
       try {
@@ -127,6 +227,21 @@ export class RealtimeGateway {
   /** Whether any connection on this node is in `gameId`'s room. */
   hasLocalSessions(gameId: string): boolean {
     return this.rooms.has(gameId);
+  }
+
+  /** Games whose Redis subscription has not been confirmed ready (diagnostics/tests). */
+  get unconfirmedSubscriptions(): ReadonlySet<string> {
+    return this.unconfirmedSubscriptionsSet;
+  }
+
+  /** Number of unconfirmed subscriptions on this gateway (diagnostics/tests). */
+  unconfirmedSubscriptionCount(): number {
+    return this.unconfirmedSubscriptionsSet.size;
+  }
+
+  /** Observed revision for a game (test inspection). */
+  observedRevisionFor(gameId: string): number | undefined {
+    return this.observedRevision.get(gameId);
   }
 
   private onMessage(session: Session, msg: ClientMessage): void {
@@ -159,38 +274,173 @@ export class RealtimeGateway {
   }
 
   /**
+   * Starts buffering pubsub and room state frames synchronously before any snapshot is read.
+   * Every commit after the snapshot (which publishes after its append) is either in the snapshot
+   * or in the buffer; the join reuses resident state only if loaded after this buffer started.
+   * Known limitation: on a node with no existing subscription for the game, the first Redis
+   * SUBSCRIBE is fire-and-forget, so a commit published by another node in that short window
+   * can still be missed (pre-existing on main for cold joins; closing it needs a PubSub API change).
+   */
+  private startJoinBuffer(session: Session, gameId: string): { stop: () => void; take: () => ServerMessage[] } {
+    const prevStop = session.joinBuffers.get(gameId);
+    if (prevStop) {
+      prevStop();
+      session.joinBuffers.delete(gameId);
+    }
+    const buffered: ServerMessage[] = [];
+    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => {
+      this.observe(gameId, msg);
+      buffered.push(msg);
+    });
+    let set = this.joinBuffers.get(gameId);
+    if (!set) {
+      set = new Set();
+      this.joinBuffers.set(gameId, set);
+    }
+    set.add(buffered);
+
+    let stopped = false;
+    const stop = (): void => {
+      if (stopped) return;
+      stopped = true;
+      unsubscribe();
+      const currentSet = this.joinBuffers.get(gameId);
+      if (currentSet) {
+        currentSet.delete(buffered);
+        if (currentSet.size === 0) {
+          this.joinBuffers.delete(gameId);
+          if (!this.rooms.has(gameId)) {
+            this.observedRevision.delete(gameId);
+            this.unconfirmedSubscriptionsSet.delete(gameId);
+          }
+        }
+      }
+      if (session.joinBuffers.get(gameId) === stop) {
+        session.joinBuffers.delete(gameId);
+      }
+    };
+
+    session.joinBuffers.set(gameId, stop);
+
+    const take = (): ServerMessage[] => {
+      stop();
+      return buffered;
+    };
+
+    return { stop, take };
+  }
+
+  private async awaitSubscriptionReady(gameId: string, current: () => boolean): Promise<void> {
+    if (!this.pubsub.ready) return;
+    const timeoutMs = this.authority.durableReadTimeoutMs;
+    let cancel: (() => void) | undefined;
+    const readyPromise = this.pubsub.ready(gameChannel(gameId));
+    try {
+      if (timeoutMs !== undefined) {
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          cancel = this.authority.schedule(() => {
+            reject(new SubscriptionReadinessTimeout('subscription readiness timed out'));
+          }, timeoutMs);
+        });
+        await Promise.race([readyPromise, timeoutPromise]);
+      } else {
+        await readyPromise;
+      }
+      this.markSubscriptionConfirmed(gameId);
+    } catch (err: unknown) {
+      if (err instanceof SubscriptionCancelledError) {
+        return;
+      }
+      if (!current()) return;
+      if (err instanceof SubscriptionReadinessTimeout) {
+        this.markSubscriptionUnconfirmed(gameId, 'timeout');
+        // The acknowledgement may still arrive: clear the mark then, while the game is local.
+        readyPromise.then(
+          () => {
+            if (this.isLocalGame(gameId)) this.markSubscriptionConfirmed(gameId);
+          },
+          () => {
+            // Still unconfirmed; a later join or reconnect re-checks it.
+          },
+        );
+      } else {
+        this.markSubscriptionUnconfirmed(gameId, 'failed');
+      }
+    } finally {
+      cancel?.();
+    }
+  }
+
+  /**
    * Handle a join request. Identity is derived from the token (never from a
    * client-asserted userId). When the token is absent, the connection joins
    * as an anonymous spectator. When the token is present but invalid, the
    * join is rejected with `unauthorized`.
    */
   private onJoin(session: Session, gameId: string, token: string | undefined): void {
-    // Hot path: a resident game joins synchronously (no microtask deferral), so
-    // the `joined` frame is emitted in the same turn the client's message
-    // arrives. Only a game evicted from the cache (or lost to a restart) takes
-    // the async hydration path below.
-    if (this.authority.hasFresh(gameId)) {
-      this.completeJoin(session, gameId, token);
-      return;
-    }
-    void this.authority.ensureLoaded(gameId)
-      .then(async (loaded) => {
+    const intent = Symbol('join');
+    session.joinReads.set(gameId, intent);
+    const current = (): boolean =>
+      this.sessions.get(session.conn.id) === session && session.joinReads.get(gameId) === intent;
+    const buffer = this.startJoinBuffer(session, gameId);
+    void (async () => {
+      try {
+        await this.awaitSubscriptionReady(gameId, current);
+        if (!current()) return;
+
+        let loaded = await this.authority.ensureLoaded(gameId);
         // A copy loaded for background work (the no-show worker) can be evicted between the load
         // and this continuation; load once more rather than failing a valid join.
         if (loaded && !this.authority.has(gameId)) loaded = await this.authority.ensureLoaded(gameId);
         if (!loaded) {
-          this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+          if (current()) {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+          }
           return;
         }
-        this.completeJoin(session, gameId, token);
-      })
-      .catch(() => {
-        this.reject(session, gameId, null, 'invalid_command', 'failed to load game');
-      });
+        if (!current()) return;
+        const state = (await this.authority.readRecovery(gameId, 0)).state;
+        if (!current()) return;
+        if (!this.authority.has(gameId)) { // An eviction (e.g. the deadline-expiry worker) during the read would leave the joined player without a resident slot for local commands; re-hydrate once.
+          const reloaded = await this.authority.ensureLoaded(gameId);
+          if (!current()) return;
+          if (!reloaded) {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+            return;
+          }
+        }
+        this.completeJoin(session, gameId, token, state, buffer.take);
+      } catch (err: unknown) {
+        if (current()) {
+          if (err instanceof AuthorityError && err.code === 'unknown_game') {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+          } else {
+            this.reject(session, gameId, null, 'invalid_command', 'failed to load game');
+          }
+        }
+      } finally {
+        buffer.stop();
+        if (session.joinBuffers.get(gameId) === buffer.stop) {
+          session.joinBuffers.delete(gameId);
+        }
+        if (session.joinReads.get(gameId) === intent) {
+          session.joinReads.delete(gameId);
+        }
+      }
+    })();
   }
 
-  /** Finish a join once the game is known to be resident in the authority. */
-  private completeJoin(session: Session, gameId: string, token: string | undefined): void {
+  /**
+   * Finish a join once the game is resident and recovery state has been read.
+   * State comes from a detached recovery read; the resident slot exists for commands and host hooks.
+   */
+  private completeJoin(
+    session: Session,
+    gameId: string,
+    token: string | undefined,
+    state: StateView,
+    takeBuffer: () => ServerMessage[],
+  ): void {
     if (this.sessions.get(session.conn.id) !== session) return;
     // Derive identity from the token. No token → anonymous spectator.
     let userId: string;
@@ -212,15 +462,22 @@ export class RealtimeGateway {
       userId = `anon-${session.conn.id}`;
     }
 
-    const color = this.authority.colorOf(gameId, userId);
+    const color = state.players.white === userId ? 'w' : state.players.black === userId ? 'b' : null;
     const role: Role = color === 'w' ? 'white' : color === 'b' ? 'black' : 'spectator';
 
     const entry = this.ensureRoom(gameId);
     entry.room.add(session.conn, userId, role);
+    const pending = takeBuffer();
+
     session.games.set(gameId, { userId, role, lastSeq: 0 });
 
-    const state = this.authority.getState(gameId);
     session.conn.send({ t: 'joined', gameId, role, state });
+    this.observe(gameId, { t: 'state', gameId, state });
+    for (const msg of pending) {
+      if (isNewerThanSnapshot(msg, state.stateRevision)) {
+        session.conn.send(msg);
+      }
+    }
     entry.room.broadcastPresence();
     if (color !== null) this.commitReadiness(session, gameId, userId, color, state);
 
@@ -304,7 +561,7 @@ export class RealtimeGateway {
         // still change shared state; push an authoritative snapshot so both
         // sides see the updated draw offer.
         if (result.broadcasts.length === 0) {
-          this.sendStateToRoom(msg.gameId);
+          this.sendStateToRoom(msg.gameId, result.state);
         }
       })
       .catch((err: unknown) => {
@@ -318,32 +575,52 @@ export class RealtimeGateway {
       this.reject(session, gameId, null, 'not_joined', 'join before resuming');
       return;
     }
-    if (!this.authority.hasFresh(gameId)) {
-      void this.authority.ensureLoaded(gameId)
-        .then((loaded) => {
-          if (!loaded) {
+    const intent = Symbol('resume');
+    session.resumeReads.set(gameId, intent);
+    const current = (): boolean =>
+      this.sessions.get(session.conn.id) === session &&
+      session.resumeReads.get(gameId) === intent &&
+      session.games.get(gameId) === membership;
+    void (async () => {
+      try {
+        const loaded = await this.authority.ensureLoaded(gameId);
+        if (!loaded) {
+          if (current()) {
             this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
-            return;
           }
-          this.completeResume(session, gameId, lastPly);
-        })
-        .catch(() => this.reject(session, gameId, null, 'invalid_command', 'failed to load game'));
-      return;
-    }
-    this.completeResume(session, gameId, lastPly);
-  }
-
-  private completeResume(session: Session, gameId: string, lastPly: number): void {
-    if (this.sessions.get(session.conn.id) !== session || !session.games.has(gameId)) return;
-    session.conn.send({
-      t: 'resumed',
-      gameId,
-      state: this.authority.getState(gameId),
-      missed: this.authority.getMissedSince(gameId, lastPly),
-    });
+          return;
+        }
+        if (!current()) return;
+        const read = await this.authority.readRecovery(gameId, lastPly);
+        if (current()) {
+          session.conn.send({
+            t: 'resumed',
+            gameId,
+            state: read.state,
+            missed: read.missed,
+          });
+        }
+      } catch (err: unknown) {
+        if (current()) {
+          if (err instanceof AuthorityError && err.code === 'unknown_game') {
+            this.reject(session, gameId, null, 'unknown_game', `no such game ${gameId}`);
+          } else {
+            this.reject(session, gameId, null, 'invalid_command', 'failed to load game');
+          }
+        }
+      } finally {
+        if (session.resumeReads.get(gameId) === intent) {
+          session.resumeReads.delete(gameId);
+        }
+      }
+    })();
   }
 
   private onClose(session: Session): void {
+    for (const stop of session.joinBuffers.values()) {
+      stop();
+    }
+    session.joinBuffers.clear();
     for (const gameId of session.games.keys()) {
       const entry = this.rooms.get(gameId);
       if (!entry) continue;
@@ -353,6 +630,11 @@ export class RealtimeGateway {
         this.rooms.delete(gameId);
         this.loadedGames.delete(gameId);
         this.onGameUnloaded?.(gameId);
+        const buffers = this.joinBuffers.get(gameId);
+        if (!buffers || buffers.size === 0) {
+          this.observedRevision.delete(gameId);
+          this.unconfirmedSubscriptionsSet.delete(gameId);
+        }
       } else {
         entry.room.broadcastPresence();
       }
@@ -364,16 +646,175 @@ export class RealtimeGateway {
     let entry = this.rooms.get(gameId);
     if (entry) return entry;
     const room = new Room(gameId);
-    const unsubscribe = this.pubsub.subscribe(gameChannel(gameId), (msg) => room.broadcast(msg));
-    entry = { room, unsubscribe };
-    this.rooms.set(gameId, entry);
-    return entry;
+    let unsub: Unsubscribe = () => {};
+    const roomEntry: RoomEntry = {
+      room,
+      unsubscribe: () => unsub(),
+    };
+    unsub = this.pubsub.subscribe(gameChannel(gameId), (rawMsg) => {
+      const msg = rawMsg;
+      if (isStateMessage(msg)) {
+        const currentRev = this.observedRevision.get(gameId);
+        if (currentRev !== undefined && msg.state.stateRevision < currentRev) {
+          return;
+        }
+        if (roomEntry.lastFullStateRevision !== undefined && msg.state.stateRevision <= roomEntry.lastFullStateRevision) {
+          return;
+        }
+        if (room.size > 0) {
+          roomEntry.lastFullStateRevision = Math.max(roomEntry.lastFullStateRevision ?? -1, msg.state.stateRevision);
+        }
+      }
+      this.observe(gameId, msg);
+      room.broadcast(msg);
+    });
+    this.rooms.set(gameId, roomEntry);
+    return roomEntry;
   }
 
-  private sendStateToRoom(gameId: string): void {
+  private observe(gameId: string, msg: ServerMessage): void {
+    let rev: number | undefined;
+    if (msg.t === 'move' || msg.t === 'ended' || msg.t === 'ready') {
+      rev = msg.stateRevision;
+    } else if (msg.t === 'state') {
+      rev = msg.state.stateRevision;
+    }
+    if (rev !== undefined) {
+      const current = this.observedRevision.get(gameId);
+      if (current === undefined || rev > current) {
+        this.observedRevision.set(gameId, rev);
+      }
+    }
+  }
+
+  private sendStateToRoom(gameId: string, state: StateView): void {
+    const highest = this.observedRevision.get(gameId) ?? -1;
+    if (state.stateRevision >= highest) {
+      this.deliverState(gameId, state);
+      return;
+    }
+    const existing = this.stateRefreshes.get(gameId);
+    if (existing) {
+      existing.again = true;
+      return;
+    }
+    this.stateRefreshes.set(gameId, { again: false });
+    void this.refreshState(gameId);
+  }
+
+  /**
+   * Bounded server-side refresh for an overtaken draw-only command state.
+   * Retries up to STATE_REFRESH_ATTEMPTS with resident fallback on the owner node.
+   * If all attempts fail, notifies onStateRefreshFailed so the host can alert/log.
+   */
+  private async refreshState(gameId: string): Promise<void> {
+    try {
+      while (true) {
+        let lastError: unknown;
+        let succeeded = false;
+
+        for (let attempt = 1; attempt <= STATE_REFRESH_ATTEMPTS; attempt++) {
+          const room = this.rooms.get(gameId);
+          const buffers = this.joinBuffers.get(gameId);
+          if (!room && (!buffers || buffers.size === 0)) {
+            this.stateRefreshes.delete(gameId);
+            return;
+          }
+
+          let stateToDeliver: StateView | undefined;
+
+          try {
+            const latest = await this.authority.readRecovery(gameId, 0);
+            const activeRoom = this.rooms.get(gameId);
+            const activeBuffers = this.joinBuffers.get(gameId);
+            if (!activeRoom && (!activeBuffers || activeBuffers.size === 0)) {
+              this.stateRefreshes.delete(gameId);
+              return;
+            }
+            const floor = this.observedRevision.get(gameId) ?? -1;
+            if (latest.state.stateRevision >= floor) {
+              stateToDeliver = latest.state;
+            } else {
+              lastError = new Error('state refresh read below observed revision');
+            }
+          } catch (err: unknown) {
+            lastError = err;
+            const activeRoom = this.rooms.get(gameId);
+            const activeBuffers = this.joinBuffers.get(gameId);
+            if (!activeRoom && (!activeBuffers || activeBuffers.size === 0)) {
+              this.stateRefreshes.delete(gameId);
+              return;
+            }
+            if (this.authority.hasFresh(gameId)) {
+              try {
+                const resident = this.authority.getState(gameId);
+                const floor = this.observedRevision.get(gameId) ?? -1;
+                if (resident.stateRevision >= floor) {
+                  stateToDeliver = resident;
+                } else {
+                  lastError = new Error('resident state below observed revision');
+                }
+              } catch {
+                // Ignore getState error and continue to next attempt
+              }
+            }
+          }
+
+          if (stateToDeliver) {
+            succeeded = true;
+            this.deliverState(gameId, stateToDeliver);
+            break;
+          }
+        }
+
+        if (!succeeded) {
+          try {
+            this.onStateRefreshFailed?.(gameId, lastError);
+          } catch {
+            // Protect gateway from throwing host hook
+          }
+        }
+
+        const entry = this.stateRefreshes.get(gameId);
+        if (entry?.again) {
+          entry.again = false;
+        } else {
+          this.stateRefreshes.delete(gameId);
+          return;
+        }
+      }
+    } catch (err: unknown) {
+      this.stateRefreshes.delete(gameId);
+      // Unexpected errors (e.g. from delivery) are reported, never swallowed.
+      try {
+        this.onStateRefreshFailed?.(gameId, err);
+      } catch {
+        /* a throwing host hook must not break the gateway */
+      }
+    }
+  }
+
+  private deliverState(gameId: string, state: StateView): void {
     const entry = this.rooms.get(gameId);
-    if (!entry) return;
-    entry.room.sendAll({ t: 'state', gameId, state: this.authority.getState(gameId) });
+    const buffers = this.joinBuffers.get(gameId);
+    if (!entry && (!buffers || buffers.size === 0)) return;
+    const msg: ServerMessage = { t: 'state', gameId, state };
+    this.observe(gameId, msg);
+    if (entry) {
+      const isDuplicate =
+        entry.lastFullStateRevision !== undefined && state.stateRevision <= entry.lastFullStateRevision;
+      if (!isDuplicate) {
+        if (entry.room.size > 0) {
+          entry.lastFullStateRevision = Math.max(entry.lastFullStateRevision ?? -1, state.stateRevision);
+        }
+        entry.room.sendAll(msg);
+      }
+    }
+    if (buffers) {
+      for (const buf of buffers) {
+        buf.push(msg);
+      }
+    }
   }
 
   private reject(

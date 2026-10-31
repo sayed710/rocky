@@ -764,3 +764,33 @@ test('a partial review truthfully displays bounded analysis notice with move cou
     dispose(mountedGame);
   }
 });
+
+test('a review cut short by a stored pre-#127 atomic move says so instead of blaming the move limit', async () => {
+  const historicalPartial: GameReviewResponse = {
+    ...COMPLETED_REVIEW_WITH_MOVE,
+    variant: 'atomic',
+    result: '0-1',
+    termination: 'variant',
+    isPartial: true,
+    totalPlayerMoves: 2,
+    analyzedPlayerMoves: 1,
+    cutoffReason: 'historical_move',
+  };
+  const mountedGame = setup();
+  try {
+    await waitUntil(() => mountedGame.elements.get('game-review-run')!.disabled === false);
+    runReview(mountedGame.elements);
+    await waitUntil(() => mountedGame.pendingReviews.length === 1);
+    mountedGame.pendingReviews[0]!.resolve(json(200, historicalPartial));
+    await waitUntil(() => mountedGame.elements.get('game-review-moves')!.childElementCount === 1);
+
+    const note = mountedGame.elements.get('game-review-note')!.textContent;
+    assert.equal(
+      note,
+      'Partial review: 1 of 2 player moves analyzed. Your final move was recorded under earlier Atomic rules that no longer allow it, so it cannot be analyzed. Select a move to see the position before it was played.',
+    );
+    assert.doesNotMatch(note, /move limit/);
+  } finally {
+    dispose(mountedGame);
+  }
+});

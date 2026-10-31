@@ -101,6 +101,12 @@ interface GameRecord {
   stale: boolean;
 }
 
+interface Waiter {
+  started: boolean;
+  cancelled: boolean;
+  reject: (e: unknown) => void;
+}
+
 /** The serialization boundary outlives every replaceable resident snapshot. */
 interface GameSlot {
   record: GameRecord | undefined;
@@ -111,6 +117,8 @@ interface GameSlot {
   reloads: number;
   reload: { generation: number; done: Promise<boolean> } | undefined;
   coldLoad: { generation: number; done: Promise<LoadOutcome> } | undefined;
+  stalled: { op: 'append' | 'create'; since: number } | undefined;
+  waiters: Set<Waiter>;
 }
 
 type LoadOutcome = 'loaded' | 'missing' | 'invalidated';
@@ -163,9 +171,55 @@ export interface ApplyOptions {
   readonly lifecycleGeneration?: number;
 }
 
+// provisional creation-only budget: preserves the store's 60 s player-lock contention allowance plus 15 s margin; not an approved production configuration (PR #119 owner direction 2026-10-20)
+export const DEFAULT_CREATE_TIMEOUT_MS = 75_000;
+
+function invokeSafely<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return fn();
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
+interface CommitContext {
+  rejectCaller(err: unknown): void;
+}
+
+function validateTimeout(val: number | undefined, name: string): void {
+  if (val === undefined) return;
+  if (!Number.isInteger(val) || val < 1 || val > 600000) {
+    throw new RangeError(`${name} must be an integer between 1 and 600000`);
+  }
+}
+
+const defaultSchedule = (fn: () => void, ms: number): (() => void) => {
+  const timer = setTimeout(fn, ms);
+  if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
+    timer.unref();
+  }
+  return () => clearTimeout(timer);
+};
+
+export interface GameAuthorityOptions {
+  durableReadTimeoutMs?: number;
+  durableWriteTimeoutMs?: number;
+  schedule?: (fn: () => void, ms: number) => () => void;
+  durableCreateTimeoutMs?: number;
+  onDurableWriteStalled?: (gameId: string, op: 'append' | 'create') => void;
+  onDurableWriteSettled?: (gameId: string, op: 'append' | 'create', outcome: 'committed' | 'failed') => void;
+}
+
 export class GameAuthority {
   private readonly games = new Map<string, GameSlot>();
   private lifecycleSequence = 0;
+  private readonly _durableReadTimeoutMs?: number;
+  private readonly durableWriteTimeoutMs?: number;
+  private readonly durableCreateTimeoutMs: number;
+  private readonly _schedule: (fn: () => void, ms: number) => () => void;
+  private readonly onDurableWriteStalled?: (gameId: string, op: 'append' | 'create') => void;
+  private readonly onDurableWriteSettled?: (gameId: string, op: 'append' | 'create', outcome: 'committed' | 'failed') => void;
+  private _abandonedReadCount = 0;
 
   constructor(
     private readonly pubsub: PubSub,
@@ -178,7 +232,71 @@ export class GameAuthority {
      * Postgres store (`@chess-platform/persistence`).
      */
     private readonly store: EventLog = new InMemoryEventLog(),
-  ) {}
+    options: GameAuthorityOptions = {},
+  ) {
+    validateTimeout(options.durableReadTimeoutMs, 'durableReadTimeoutMs');
+    validateTimeout(options.durableWriteTimeoutMs, 'durableWriteTimeoutMs');
+    validateTimeout(options.durableCreateTimeoutMs, 'durableCreateTimeoutMs');
+    this._durableReadTimeoutMs = options.durableReadTimeoutMs;
+    this.durableWriteTimeoutMs = options.durableWriteTimeoutMs;
+    this.durableCreateTimeoutMs = options.durableCreateTimeoutMs ?? DEFAULT_CREATE_TIMEOUT_MS;
+    this._schedule = options.schedule ?? defaultSchedule;
+    this.onDurableWriteStalled = options.onDurableWriteStalled;
+    this.onDurableWriteSettled = options.onDurableWriteSettled;
+  }
+
+  get durableReadTimeoutMs(): number | undefined {
+    return this._durableReadTimeoutMs;
+  }
+
+  get schedule(): (fn: () => void, ms: number) => () => void {
+    return this._schedule;
+  }
+
+  private notifyWriteStalled(gameId: string, op: 'append' | 'create'): void {
+    try {
+      this.onDurableWriteStalled?.(gameId, op);
+    } catch (err) {
+      // A throwing host hook must not break the write fence; report it instead of ignoring it.
+      console.error('[GameAuthority] onDurableWriteStalled hook threw:', err);
+    }
+  }
+
+  private notifyWriteSettled(gameId: string, op: 'append' | 'create', outcome: 'committed' | 'failed'): void {
+    try {
+      this.onDurableWriteSettled?.(gameId, op, outcome);
+    } catch (err) {
+      // A throwing host hook must not break the write fence; report it instead of ignoring it.
+      console.error('[GameAuthority] onDurableWriteSettled hook threw:', err);
+    }
+  }
+
+  private unavailableError(gameId: string): AuthorityError {
+    return new AuthorityError('invalid_command', `game ${gameId} is unavailable: an earlier durable write has not settled`);
+  }
+
+  private failUnavailable(gameId: string): never {
+    throw this.unavailableError(gameId);
+  }
+
+  stalledWriteCount(): number {
+    let count = 0;
+    for (const slot of this.games.values()) {
+      if (slot.stalled !== undefined) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+
+  abandonedReadCount(): number {
+    return this._abandonedReadCount;
+  }
+
+  pendingCommandCount(gameId: string): number {
+    return this.games.get(gameId)?.pending ?? 0;
+  }
 
   /** Whether a live game is currently held in the hot cache. */
   has(gameId: string): boolean {
@@ -192,12 +310,66 @@ export class GameAuthority {
     return slot?.record !== undefined && !slot.record.stale && !slot.dispose && slot.reloads === 0;
   }
 
+  private async withDeadline<T>(
+    label: string,
+    ms: number | undefined,
+    op: (signal?: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    if (ms === undefined) {
+      return invokeSafely(() => op(undefined));
+    }
+    const controller = new AbortController();
+    // reads have no durable effect; a late read result is discarded; writes are fenced instead (see commit)
+    let settled = false;
+    let timedOut = false;
+    let cancelTimer: (() => void) | undefined;
+    let rejectCaller!: (err: unknown) => void;
+    const callerOutcome = new Promise<never>((_, reject) => {
+      rejectCaller = reject;
+    });
+
+    const opPromise = invokeSafely(() => op(controller.signal));
+    opPromise
+      .then(
+        () => {
+          settled = true;
+          if (timedOut) {
+            this._abandonedReadCount--;
+          }
+        },
+        () => {
+          settled = true;
+          if (timedOut) {
+            this._abandonedReadCount--;
+          }
+        },
+      );
+
+    cancelTimer = this.schedule(() => {
+      if (!settled) {
+        timedOut = true;
+        this._abandonedReadCount++;
+        controller.abort();
+        rejectCaller(new AuthorityError('invalid_command', `durable ${label} timed out`));
+      }
+    }, ms);
+
+    void opPromise.catch(() => {});
+    void callerOutcome.catch(() => {});
+
+    try {
+      return await Promise.race([opPromise, callerOutcome]);
+    } finally {
+      cancelTimer?.();
+    }
+  }
+
   /**
    * Whether a game exists at all — in the hot cache or the durable log.
    * Unlike {@link has} this consults the store, so an evicted/cold game counts.
    */
   async knows(gameId: string): Promise<boolean> {
-    return this.has(gameId) || this.store.exists(gameId);
+    return this.has(gameId) || this.withDeadline('exists', this.durableReadTimeoutMs, (s) => this.store.exists(gameId, s));
   }
 
   /**
@@ -208,47 +380,107 @@ export class GameAuthority {
    */
   async createGame(params: Omit<CreateGameParams, 'at'> & { at?: number }): Promise<StateView> {
     const slot = this.slotFor(params.gameId);
-    return this.enqueue(params.gameId, slot, async () => {
-      if (slot.record) {
-        throw new AuthorityError('invalid_command', `game ${params.gameId} already exists`);
-      }
-      const at = params.at ?? this.now();
-      // Wrapped for the same reason the persist below is: this function's contract is that a refused
-      // creation surfaces as `AuthorityError`, and `Game.create` refuses some of them itself — a
-      // `chess960` game without a starting-position id, or any other variant carrying one (ADR-0137).
-      // `codeOf` in `gateway.ts` does fall back to `invalid_command` for an unrecognised error, so an
-      // escaping `GameError` would already reach the client as the right reject code; this makes that
-      // a stated guarantee rather than a lucky default, and keeps the two failure paths in this one
-      // function consistent. Raised in the Qodo review of PR #145.
-      let game: Game;
-      let events: GameEvent[];
-      try {
-        ({ game, events } = Game.create({ ...params, at }));
-      } catch (err) {
-        throw new AuthorityError('invalid_command', `cannot create game ${params.gameId}: ${(err as Error).message}`);
-      }
-      // Persist first: an append against a fresh id fails if the game already
-      // exists in the durable log, so the store is the single source of truth for
-      // uniqueness across restarts.
-      let persistedSeq: number;
-      try {
-        persistedSeq = await this.store.append(params.gameId, -1, events);
-        this.validateAppendHead(persistedSeq, nextEventHead(-1, events.length));
-      } catch (err) {
-        throw new AuthorityError('invalid_command', `cannot create game ${params.gameId}: ${(err as Error).message}`);
-      }
-      slot.record = {
-        game,
-        events: [...events],
-        broadcasts: [],
-        broadcastSeq: 0,
-        persistedSeq,
-        stale: false,
-      };
-      // Eviction of a not-yet-created game must not discard a successful creation.
-      slot.dispose = false;
-      return this.viewOf(game, persistedSeq);
+    if (slot.stalled) {
+      this.failUnavailable(params.gameId);
+    }
+
+    let rejectCaller!: (err: unknown) => void;
+    const callerOutcome = new Promise<never>((_, reject) => {
+      rejectCaller = reject;
     });
+    const waiter: Waiter = { started: false, cancelled: false, reject: rejectCaller };
+    slot.waiters.add(waiter);
+
+    const run = this.enqueue(params.gameId, slot, async () => {
+      try {
+        if (waiter.cancelled) {
+          this.failUnavailable(params.gameId);
+        }
+        waiter.started = true;
+        if (slot.record) {
+          throw new AuthorityError('invalid_command', `game ${params.gameId} already exists`);
+        }
+        const at = params.at ?? this.now();
+        // Wrapped for the same reason the persist below is: this function's contract is that a refused
+        // creation surfaces as `AuthorityError`, and `Game.create` refuses some of them itself — a
+        // `chess960` game without a starting-position id, or any other variant carrying one (ADR-0137).
+        // `codeOf` in `gateway.ts` does fall back to `invalid_command` for an unrecognised error, so an
+        // escaping `GameError` would already reach the client as the right reject code; this makes that
+        // a stated guarantee rather than a lucky default, and keeps the two failure paths in this one
+        // function consistent. Raised in the Qodo review of PR #145.
+        let game: Game;
+        let events: GameEvent[];
+        try {
+          ({ game, events } = Game.create({ ...params, at }));
+        } catch (err) {
+          throw new AuthorityError('invalid_command', `cannot create game ${params.gameId}: ${(err as Error).message}`);
+        }
+
+        const controller = new AbortController();
+        let timedOut = false;
+        const cancelTimer = this.schedule(() => {
+          timedOut = true;
+          controller.abort();
+          slot.stalled = { op: 'create', since: this.now() };
+          for (const w of slot.waiters) {
+            if (!w.started) {
+              w.cancelled = true;
+              w.reject(this.unavailableError(params.gameId));
+            }
+          }
+          this.notifyWriteStalled(params.gameId, 'create');
+          rejectCaller(
+            new AuthorityCommitError(
+              'invalid_command',
+              `game creation for ${params.gameId} timed out; the outcome is unknown and it may still commit`,
+            ),
+          );
+        }, this.durableCreateTimeoutMs);
+
+        // Persist first: an append against a fresh id fails if the game already
+        // exists in the durable log, so the store is the single source of truth for
+        // uniqueness across restarts.
+        const appendP = invokeSafely(() => this.store.append(params.gameId, -1, events, controller.signal));
+        let persistedSeq: number;
+        try {
+          persistedSeq = await appendP;
+          this.validateAppendHead(persistedSeq, nextEventHead(-1, events.length));
+          slot.record = {
+            game,
+            events: [...events],
+            broadcasts: [],
+            broadcastSeq: 0,
+            persistedSeq,
+            stale: false,
+          };
+          // Eviction of a not-yet-created game must not discard a successful creation.
+          slot.dispose = false;
+          if (timedOut) {
+            slot.stalled = undefined;
+            this.notifyWriteSettled(params.gameId, 'create', 'committed');
+          }
+          return this.viewOf(game, persistedSeq);
+        } catch (err) {
+          if (timedOut) {
+            slot.stalled = undefined;
+            this.notifyWriteSettled(params.gameId, 'create', 'failed');
+          }
+          const message = `cannot create game ${params.gameId}: ${(err as Error).message}`;
+          if (err !== null && typeof err === 'object' && 'appendRejected' in err && err.appendRejected === true) {
+            throw new AuthorityError('invalid_command', message);
+          }
+          throw new AuthorityCommitError('invalid_command', message);
+        } finally {
+          cancelTimer();
+        }
+      } finally {
+        slot.waiters.delete(waiter);
+      }
+    });
+
+    void run.catch(() => {});
+    void callerOutcome.catch(() => {});
+    return Promise.race([run, callerOutcome]);
   }
 
   /**
@@ -257,9 +489,20 @@ export class GameAuthority {
    * game exists anywhere. Safe to call repeatedly; a cache hit is a no-op.
    */
   async ensureLoaded(gameId: string): Promise<boolean> {
+    const entrySlot = this.games.get(gameId);
+    if (entrySlot?.stalled) {
+      this.failUnavailable(gameId);
+    }
     for (;;) {
+      const loopSlot = this.games.get(gameId);
+      if (loopSlot?.stalled) {
+        this.failUnavailable(gameId);
+      }
       if (this.hasFresh(gameId)) return true;
       const slot = this.slotFor(gameId);
+      if (slot.stalled) {
+        this.failUnavailable(gameId);
+      }
       const generation = slot.generation;
       const current = (): boolean => this.games.get(gameId) === slot && slot.generation === generation;
       try {
@@ -326,6 +569,9 @@ export class GameAuthority {
    */
   async reloadFromLog(gameId: string): Promise<boolean> {
     const slot = this.slotFor(gameId);
+    if (slot.stalled) {
+      this.failUnavailable(gameId);
+    }
     const generation = slot.generation;
     if (slot.record) slot.record.stale = true;
     slot.reloads++;
@@ -341,7 +587,7 @@ export class GameAuthority {
   private async refreshSlot(gameId: string, slot: GameSlot, generation = slot.generation, revive = true): Promise<boolean> {
     if (generation !== slot.generation) return false;
     if (slot.record) slot.record.stale = true;
-    const logged = await this.store.load(gameId);
+    const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) => this.store.load(gameId, s));
     if (generation !== slot.generation || this.games.get(gameId) !== slot) return false;
     if (logged.length === 0) {
       slot.record = undefined;
@@ -368,8 +614,18 @@ export class GameAuthority {
   private slotFor(gameId: string): GameSlot {
     let slot = this.games.get(gameId);
     if (!slot) {
-      slot = { record: undefined, tail: Promise.resolve(), pending: 0, generation: ++this.lifecycleSequence,
-        dispose: false, reloads: 0, reload: undefined, coldLoad: undefined };
+      slot = {
+        record: undefined,
+        tail: Promise.resolve(),
+        pending: 0,
+        generation: ++this.lifecycleSequence,
+        dispose: false,
+        reloads: 0,
+        reload: undefined,
+        coldLoad: undefined,
+        stalled: undefined,
+        waiters: new Set<Waiter>(),
+      };
       this.games.set(gameId, slot);
     }
     return slot;
@@ -398,7 +654,7 @@ export class GameAuthority {
   }
 
   private releaseSlot(gameId: string, slot: GameSlot): void {
-    if (slot.pending === 0 && (slot.dispose || !slot.record) && this.games.get(gameId) === slot) {
+    if (slot.pending === 0 && slot.stalled === undefined && (slot.dispose || !slot.record) && this.games.get(gameId) === slot) {
       this.games.delete(gameId);
     }
   }
@@ -409,37 +665,82 @@ export class GameAuthority {
    * produced it, so resume/catch-up ({@link getMissedSince}) works after a
    * restart.
    */
-  private rebuildRecord(gameId: string, logged: readonly LoggedEvent[]): GameRecord {
-    let previous = -1;
-    for (const entry of logged) {
+  private isValidSuffix(suffix: readonly LoggedEvent[], baseSeq: number): boolean {
+    if (suffix.length === 0) return false;
+    let expected = baseSeq + 1;
+    for (const entry of suffix) {
+      if (!isStateRevision(entry.seq) || entry.seq !== expected) {
+        return false;
+      }
+      expected++;
+    }
+    return true;
+  }
+
+  private extendRecord(
+    gameId: string,
+    base: {
+      game: Game;
+      broadcasts: readonly BroadcastLogEntry[];
+      broadcastSeq: number;
+      persistedSeq: number;
+    },
+    suffix: readonly LoggedEvent[],
+  ): GameRecord {
+    let previous = base.persistedSeq;
+    for (const entry of suffix) {
       if (!isStateRevision(entry.seq) || entry.seq !== previous + 1) {
         throw new Error(`invalid durable event sequence for ${gameId}`);
       }
       previous = entry.seq;
     }
-    const events = logged.map((e) => e.event);
-    let game = Game.fromEvents(events.slice(0, 1));
-    const broadcasts: BroadcastLogEntry[] = [];
-    let broadcastSeq = 0;
-    // Replay incrementally: a MovePlayed/GameEnded broadcast carries the
-    // fenHash + legalMoves of the position *after* that event, exactly as the
-    // live path computes them.
-    for (let i = 1; i < events.length; i++) {
-      const ev = events[i]!;
+    let game = base.game;
+    const broadcasts = [...base.broadcasts];
+    let broadcastSeq = base.broadcastSeq;
+    for (const entry of suffix) {
+      const ev = entry.event;
       game = game.withEvents([ev]);
       if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded' && ev.type !== 'PlayerReady') continue;
-      const msg = this.toBroadcast(gameId, ev, game, logged[i]!.seq);
+      const msg = this.toBroadcast(gameId, ev, game, entry.seq);
       if (!msg) continue;
       const seq = ++broadcastSeq;
       broadcasts.push({ seq, ply: msg.t === 'move' ? msg.ply : null, msg });
     }
     return {
       game,
-      events,
+      events: [],
       broadcasts,
       broadcastSeq,
       persistedSeq: previous,
       stale: false,
+    };
+  }
+
+  /**
+   * Rebuild a full {@link GameRecord} from a durable event log: the folded
+   * {@link Game}, plus the broadcast history replayed exactly as the live path
+   * produced it, so resume/catch-up ({@link getMissedSince}) works after a
+   * restart.
+   */
+  private rebuildRecord(gameId: string, logged: readonly LoggedEvent[]): GameRecord {
+    if (logged.length === 0) {
+      throw new Error(`invalid durable event sequence for ${gameId}`);
+    }
+    const first = logged[0]!;
+    if (!isStateRevision(first.seq) || first.seq !== 0) {
+      throw new Error(`invalid durable event sequence for ${gameId}`);
+    }
+    const baseGame = Game.fromEvents([first.event]);
+    const base = {
+      game: baseGame,
+      broadcasts: [] as BroadcastLogEntry[],
+      broadcastSeq: 0,
+      persistedSeq: 0,
+    };
+    const record = this.extendRecord(gameId, base, logged.slice(1));
+    return {
+      ...record,
+      events: logged.map((e) => e.event),
     };
   }
 
@@ -451,18 +752,134 @@ export class GameAuthority {
   }
 
   /**
+   * Detached read of one committed prefix of the game log.
+   *
+   * A commit occurring after the load may be absent. This method never installs or reconciles
+   * the resident command cache.
+   */
+  async readRecovery(gameId: string, lastPly: number): Promise<{ state: StateView; missed: GameBroadcast[] }> {
+    const slot = this.games.get(gameId);
+    if (slot?.stalled) {
+      this.failUnavailable(gameId);
+    }
+    const residentUsable =
+      slot?.record !== undefined && !slot.record.stale && !slot.dispose && slot.reloads === 0;
+
+    if (residentUsable && typeof this.store.head === 'function') {
+      const R = slot.record!;
+      const baseGame = R.game;
+      const baseSeq = R.persistedSeq;
+      const baseBroadcastLen = R.broadcasts.length;
+      const baseBroadcastSeq = R.broadcastSeq;
+      const baseBroadcasts = R.broadcasts.slice(0, baseBroadcastLen);
+
+      const h = await this.withDeadline('head', this.durableReadTimeoutMs, (s) =>
+        this.store.head!(gameId, s),
+      );
+      if (h === -1) {
+        throw new AuthorityError('unknown_game', `no such game ${gameId}`);
+      }
+
+      const currentSlot = this.games.get(gameId);
+      const isResidentStillCurrent =
+        currentSlot === slot &&
+        slot.record === R &&
+        !R.stale &&
+        !slot.dispose &&
+        slot.reloads === 0 &&
+        R.persistedSeq >= h;
+
+      if (isResidentStillCurrent) {
+        return {
+          state: this.viewOf(R.game, R.persistedSeq),
+          missed: this.missedFromRecord(R, lastPly),
+        };
+      }
+
+      if (baseSeq >= h) {
+        return {
+          state: this.viewOf(baseGame, baseSeq),
+          missed: this.missedFromBroadcasts(baseBroadcasts, lastPly),
+        };
+      }
+
+      if (typeof this.store.loadSince === 'function') {
+        const suffix = await this.withDeadline('suffix read', this.durableReadTimeoutMs, (s) =>
+          this.store.loadSince!(gameId, baseSeq, s),
+        );
+        if (this.isValidSuffix(suffix, baseSeq)) {
+          const detached = this.extendRecord(
+            gameId,
+            {
+              game: baseGame,
+              broadcasts: baseBroadcasts,
+              broadcastSeq: baseBroadcastSeq,
+              persistedSeq: baseSeq,
+            },
+            suffix,
+          );
+          const activeSlot = this.games.get(gameId);
+          const activeUsable =
+            activeSlot?.record !== undefined &&
+            !activeSlot.record.stale &&
+            !activeSlot.dispose &&
+            activeSlot.reloads === 0;
+          const chosen =
+            activeUsable && activeSlot.record!.persistedSeq > detached.persistedSeq
+              ? activeSlot.record!
+              : detached;
+          return {
+            state: this.viewOf(chosen.game, chosen.persistedSeq),
+            missed: this.missedFromRecord(chosen, lastPly),
+          };
+        }
+      }
+    }
+
+    const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) =>
+      this.store.load(gameId, s),
+    );
+    if (logged.length === 0) {
+      throw new AuthorityError('unknown_game', `no such game ${gameId}`);
+    }
+    const loaded = this.rebuildRecord(gameId, logged);
+    const fallbackSlot = this.games.get(gameId);
+    const fallbackUsable =
+      fallbackSlot?.record !== undefined &&
+      !fallbackSlot.record.stale &&
+      !fallbackSlot.dispose &&
+      fallbackSlot.reloads === 0;
+    const chosen =
+      fallbackUsable && fallbackSlot.record!.persistedSeq > loaded.persistedSeq
+        ? fallbackSlot.record!
+        : loaded;
+    return {
+      state: this.viewOf(chosen.game, chosen.persistedSeq),
+      missed: this.missedFromRecord(chosen, lastPly),
+    };
+  }
+
+  /**
    * Every broadcast a resuming client missed: all broadcasts recorded after the
    * move whose ply equals `lastPly`. `lastPly <= 0` returns the full history.
    */
   getMissedSince(gameId: string, lastPly: number): GameBroadcast[] {
     const rec = this.require(gameId);
     if (rec.stale) throw new AuthorityError('invalid_command', 'durable game reload is required');
-    if (lastPly <= 0) return rec.broadcasts.map((e) => e.msg);
+    return this.missedFromRecord(rec, lastPly);
+  }
+
+  private missedFromRecord(rec: GameRecord, lastPly: number): GameBroadcast[] {
+    return this.missedFromBroadcasts(rec.broadcasts, lastPly);
+  }
+
+  private missedFromBroadcasts(broadcasts: readonly BroadcastLogEntry[], lastPly: number): GameBroadcast[] {
+    if (lastPly <= 0) return broadcasts.map((e) => e.msg);
     let cutSeq = -1;
-    for (const e of rec.broadcasts) {
+    for (const e of broadcasts) {
       if (e.ply === lastPly) cutSeq = e.seq;
     }
-    return rec.broadcasts.filter((e) => e.seq > cutSeq).map((e) => e.msg);
+    return broadcasts.filter((e) => e.seq > cutSeq).map((e) => e.msg);
   }
 
   /** Resolve a user's seat in a game, or `null` if they are a spectator. */
@@ -483,51 +900,76 @@ export class GameAuthority {
   apply(gameId: string, userId: string, cmd: Command, options: ApplyOptions = {}): Promise<ApplyResult> {
     const slot = this.games.get(gameId);
     if (!slot || slot.dispose) throw new AuthorityError('unknown_game', `no such game ${gameId}`);
-    return this.enqueue(gameId, slot, async () => {
-      const checkLifecycle = (): void => {
-        if (options.lifecycleGeneration !== undefined &&
-          !this.isLifecycleCurrent(gameId, options.lifecycleGeneration)) {
-          throw new AuthorityError('command_expired', 'Command ownership lifecycle changed before execution.');
-        }
-      };
-      checkLifecycle();
-      if (slot.record?.stale && !(await this.refreshSlot(gameId, slot, slot.generation, false))) {
-        throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
-      }
-      checkLifecycle();
-      if (!slot.record) throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
-      // Admission may await external validation, but must never enqueue a reload
-      // behind the slot it already holds. Select the resident only after admission.
-      if (options.beforeExecute) await options.beforeExecute();
-      options.recheckAdmission?.();
-      checkLifecycle();
-      if (options.lifecycleGeneration !== undefined && (slot.record?.stale || slot.reloads > 0)) {
-        throw new AuthorityError('command_expired', 'Command requires a fresh ownership attempt after reload.');
-      }
-      const rec = slot.record;
-      if (!rec) throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
-      const result = await this.applyNow(gameId, rec, userId, cmd);
-      // Only a successful authoritative execution confirms this exact identity.
-      // Position similarity, including a different request's same move, cannot.
-      if (options.requestId) this.pubsub.publish(gameChannel(gameId), { t: 'commandConfirmed', gameId, requestId: options.requestId });
-      return result;
+    // Refused before queueing and never executed. Returned as a rejection, not thrown: routers call
+    // apply() without an async boundary, and a synchronous throw would escape as a malformed message.
+    if (slot.stalled) return Promise.reject(this.unavailableError(gameId));
+
+    let rejectCaller!: (err: unknown) => void;
+    const callerOutcome = new Promise<never>((_, reject) => {
+      rejectCaller = reject;
     });
+    const waiter: Waiter = { started: false, cancelled: false, reject: rejectCaller };
+    slot.waiters.add(waiter);
+
+    const ctx: CommitContext = { rejectCaller };
+
+    const run = this.enqueue(gameId, slot, async () => {
+      try {
+        if (waiter.cancelled) {
+          this.failUnavailable(gameId);
+        }
+        waiter.started = true;
+        const checkLifecycle = (): void => {
+          if (options.lifecycleGeneration !== undefined &&
+            !this.isLifecycleCurrent(gameId, options.lifecycleGeneration)) {
+            throw new AuthorityError('command_expired', 'Command ownership lifecycle changed before execution.');
+          }
+        };
+        checkLifecycle();
+        if (slot.record?.stale && !(await this.refreshSlot(gameId, slot, slot.generation, false))) {
+          throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
+        }
+        checkLifecycle();
+        if (!slot.record) throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
+        // Admission may await external validation, but must never enqueue a reload
+        // behind the slot it already holds. Select the resident only after admission.
+        if (options.beforeExecute) await options.beforeExecute();
+        options.recheckAdmission?.();
+        checkLifecycle();
+        if (options.lifecycleGeneration !== undefined && (slot.record?.stale || slot.reloads > 0)) {
+          throw new AuthorityError('command_expired', 'Command requires a fresh ownership attempt after reload.');
+        }
+        const rec = slot.record;
+        if (!rec) throw new AuthorityError('unknown_game', `no durable game ${gameId}`);
+        const result = await this.applyNow(gameId, rec, userId, cmd, ctx);
+        // Only a successful authoritative execution confirms this exact identity.
+        // Position similarity, including a different request's same move, cannot.
+        if (options.requestId) this.pubsub.publish(gameChannel(gameId), { t: 'commandConfirmed', gameId, requestId: options.requestId });
+        return result;
+      } finally {
+        slot.waiters.delete(waiter);
+      }
+    });
+
+    void run.catch(() => {});
+    void callerOutcome.catch(() => {});
+    return Promise.race([run, callerOutcome]);
   }
 
-  private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command): Promise<ApplyResult> {
+  private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command, ctx?: CommitContext): Promise<ApplyResult> {
     const at = this.now();
     if (cmd.kind === 'expireNoShow') {
       // Checked before anything else so a player can never issue it, and the worker never as a seat.
       // The deadline is the game's own durable one; the caller supplies none.
       if (userId !== NO_SHOW_ACTOR) throw new AuthorityError('not_a_player', 'only the server may expire a no-show');
-      return this.commit(gameId, rec, this.guard(() => rec.game.expireNoShow(at)));
+      return this.commit(gameId, rec, this.guard(() => rec.game.expireNoShow(at)), ctx);
     }
     if (cmd.kind === 'expireFlag') {
       if (userId !== FLAG_ACTOR) throw new AuthorityError('not_a_player', 'only the server may expire a clock');
       // Decided here, on the owner's clock and its freshest copy: refused unless the side to move has
       // flagged on a clock the first move started, so a move that committed first always wins.
       if (!rec.game.timeoutDue(at)) throw new AuthorityError('invalid_command', 'Flag expiry refused: not due');
-      return this.commit(gameId, rec, rec.game.claimFlag(at));
+      return this.commit(gameId, rec, rec.game.claimFlag(at), ctx);
     }
     const players = rec.game.snapshot().players;
     const color = players.white === userId ? 'w' : players.black === userId ? 'b' : null;
@@ -537,12 +979,12 @@ export class GameAuthority {
     // A player command arriving after a due no-show deadline records the no-show instead, as a move
     // after a flag fall records the timeout. The outcome never depends on how late the worker runs.
     if (rec.game.noShowVerdict(at).kind === 'expire') {
-      return this.commit(gameId, rec, rec.game.expireNoShow(at));
+      return this.commit(gameId, rec, rec.game.expireNoShow(at), ctx);
     }
     // Likewise once the side to move has flagged: a late move cannot rescue them, and neither can a
     // resignation or draw that reaches the owner before the flag worker does (ADR-0149).
     if (rec.game.timeoutDue(at)) {
-      return this.commit(gameId, rec, rec.game.claimFlag(at));
+      return this.commit(gameId, rec, rec.game.claimFlag(at), ctx);
     }
     let result: { game: Game; events: GameEvent[] };
 
@@ -588,7 +1030,7 @@ export class GameAuthority {
         throw new AuthorityError('invalid_command', `unknown command ${JSON.stringify(_exhaustive)}`);
       }
     }
-    return this.commit(gameId, rec, result);
+    return this.commit(gameId, rec, result, ctx);
   }
 
   /** Persist a command's events, then commit them to the hot record and publish their broadcasts. */
@@ -596,6 +1038,7 @@ export class GameAuthority {
     gameId: string,
     rec: GameRecord,
     result: { game: Game; events: GameEvent[] },
+    ctx?: CommitContext,
   ): Promise<ApplyResult> {
     // A no-op (a repeated readiness) changes nothing, so it neither touches the log nor broadcasts.
     if (result.events.length === 0) return { events: [], broadcasts: [], state: this.viewOf(rec.game, rec.persistedSeq) };
@@ -616,28 +1059,70 @@ export class GameAuthority {
       pending.push({ seq: ++nextSeq, ply: msg.t === 'move' ? msg.ply : null, msg });
     }
 
-    // Persist the emitted events *before* mutating the hot record or publishing,
-    // so a durable-log failure leaves the in-memory game and the store in lock
-    // step (nothing committed, nothing broadcast) rather than ahead of disk.
+    const slot = this.games.get(gameId);
+    const controller = new AbortController();
+    let timedOut = false;
+    let cancelTimer: (() => void) | undefined;
+
+    if (this.durableWriteTimeoutMs !== undefined) {
+      cancelTimer = this.schedule(() => {
+        timedOut = true;
+        controller.abort();
+        if (slot) {
+          slot.stalled = { op: 'append', since: this.now() };
+          for (const waiter of slot.waiters) {
+            if (!waiter.started) {
+              waiter.cancelled = true;
+              waiter.reject(this.unavailableError(gameId));
+            }
+          }
+        }
+        rec.stale = true;
+        this.notifyWriteStalled(gameId, 'append');
+        ctx?.rejectCaller(
+          new AuthorityCommitError(
+            'invalid_command',
+            `durable append for ${gameId} timed out; the outcome is unknown and it may still commit`,
+          ),
+        );
+      }, this.durableWriteTimeoutMs);
+    }
+
+    const appendP = invokeSafely(() => this.store.append(gameId, rec.persistedSeq, result.events, controller.signal));
+
     try {
-      const returnedHead = await this.store.append(gameId, rec.persistedSeq, result.events);
-      this.validateAppendHead(returnedHead, expectedHead);
-      rec.persistedSeq = returnedHead;
-    } catch (err) {
-      rec.stale = true;
       try {
-        const slot = this.games.get(gameId);
-        if (slot) await this.refreshSlot(gameId, slot, slot.generation, false);
-      } catch {
-        // A later command must retry the durable reload before using this cache entry.
+        const returnedHead = await appendP;
+        this.validateAppendHead(returnedHead, expectedHead);
+        rec.persistedSeq = returnedHead;
+        if (timedOut) {
+          // Only the write-deadline timer marked the copy untrusted; an independent reload request
+          // (reloadFromLog) keeps its own stale mark and refresh.
+          rec.stale = false;
+          if (slot) slot.stalled = undefined;
+          this.notifyWriteSettled(gameId, 'append', 'committed');
+        }
+      } catch (err) {
+        rec.stale = true;
+        try {
+          const s = this.games.get(gameId);
+          if (s) await this.refreshSlot(gameId, s, s.generation, false);
+        } catch {
+          // A later command must retry the durable reload before using this cache entry.
+        } finally {
+          if (timedOut) {
+            if (slot) slot.stalled = undefined;
+            this.notifyWriteSettled(gameId, 'append', 'failed');
+          }
+        }
+        const message = `failed to persist events for ${gameId}: ${(err as Error).message}`;
+        if (err !== null && typeof err === 'object' && 'appendRejected' in err && err.appendRejected === true) {
+          throw new AuthorityError('invalid_command', message);
+        }
+        throw new AuthorityCommitError('invalid_command', message);
       }
-      const message = `failed to persist events for ${gameId}: ${(err as Error).message}`;
-      // Both EventLog and persistence's structural implementation mark known
-      // optimistic conflicts. An opaque I/O error can hide a successful COMMIT.
-      if (err !== null && typeof err === 'object' && 'appendRejected' in err && err.appendRejected === true) {
-        throw new AuthorityError('invalid_command', message);
-      }
-      throw new AuthorityCommitError('invalid_command', message);
+    } finally {
+      cancelTimer?.();
     }
 
     // Commit to the hot record only after the durable append succeeded.
@@ -654,7 +1139,12 @@ export class GameAuthority {
       if (msg.t === 'ended') this.pubsub.publish(gamesEndedChannel(), msg);
     }
 
-    return { events: result.events, broadcasts, state: this.viewOf(rec.game, rec.persistedSeq) };
+    const state = this.viewOf(rec.game, rec.persistedSeq);
+    if (result.events.some((ev) => ev.type === 'DrawOffered' || ev.type === 'DrawDeclined')) {
+      this.pubsub.publish(gameChannel(gameId), { t: 'state', gameId, state });
+    }
+
+    return { events: result.events, broadcasts, state };
   }
 
   private guard(fn: () => { game: Game; events: GameEvent[] }): { game: Game; events: GameEvent[] } {
@@ -735,6 +1225,9 @@ export class GameAuthority {
 
   private require(gameId: string): GameRecord {
     const slot = this.games.get(gameId);
+    if (slot?.stalled) {
+      this.failUnavailable(gameId);
+    }
     const rec = slot?.record;
     if (!rec || slot?.dispose) throw new AuthorityError('unknown_game', `no such game ${gameId}`);
     if (slot.reloads > 0) throw new AuthorityError('invalid_command', 'durable game reload is required');

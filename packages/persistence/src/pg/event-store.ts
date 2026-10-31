@@ -170,13 +170,46 @@ export class PostgresEventStore implements EventStore {
     return res.rows.map(toStored);
   }
 
-  async loadSince(gameId: string, afterSeq: number): Promise<StoredEvent[]> {
-    const res = await this.pool.query<EventRow>(
+  async loadSince(gameId: string, afterSeq: number, signal?: AbortSignal): Promise<StoredEvent[]> {
+    const res = await abortableQuery<EventRow>(
+      this.pool,
+      signal,
       `SELECT game_id, seq, type, event_version, payload, server_ts
        FROM game_events WHERE game_id = $1 AND seq > $2 ORDER BY seq ASC`,
       [gameId, afterSeq],
     );
     return res.rows.map(toStored);
+  }
+
+  async head(gameId: string, signal?: AbortSignal): Promise<number> {
+    const res = await abortableQuery<{ head: string }>(
+      this.pool,
+      signal,
+      'SELECT COALESCE(MAX(seq), -1)::text AS head FROM game_events WHERE game_id = $1',
+      [gameId],
+    );
+    return parseInt(res.rows[0]!.head, 10);
+  }
+
+  async heads(gameIds: readonly string[], signal?: AbortSignal): Promise<ReadonlyMap<string, number>> {
+    signal?.throwIfAborted();
+    if (gameIds.length === 0) return new Map();
+    const res = await abortableQuery<{ game_id: string; head: string | null }>(
+      this.pool,
+      signal,
+      'SELECT g.id::text AS game_id, (SELECT MAX(e.seq) FROM game_events e WHERE e.game_id = g.id) AS head FROM unnest($1::uuid[]) AS g(id)',
+      [gameIds],
+    );
+    // PostgreSQL returns the canonical lowercase UUID text; key results by the ids the caller passed.
+    const byCanonical = new Map<string, number>();
+    for (const row of res.rows) {
+      byCanonical.set(row.game_id, row.head === null || row.head === undefined ? -1 : Number(row.head));
+    }
+    const map = new Map<string, number>();
+    for (const gameId of gameIds) {
+      map.set(gameId, byCanonical.get(gameId.toLowerCase()) ?? -1);
+    }
+    return map;
   }
 
   async exists(gameId: string, signal?: AbortSignal): Promise<boolean> {

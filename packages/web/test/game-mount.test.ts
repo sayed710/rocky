@@ -39,8 +39,11 @@ class FakeElement {
     this.focused = true;
   };
 
-  setAttribute = () => {};
-  getAttribute = () => null;
+  attributes: Record<string, string> = {};
+  setAttribute = (name: string, value: string): void => {
+    this.attributes[name] = value;
+  };
+  getAttribute = (name: string): string | null => this.attributes[name] ?? null;
 
   appendChild = (child: FakeElement) => {
     this.children.push(child);
@@ -225,6 +228,240 @@ for (const completedBeforeRestore of [false, true]) {
   });
 }
 
+function ensureGameSharingElements(elements: Map<string, FakeElement>) {
+  if (!elements.has('game-link-copy')) {
+    const copyButton = new FakeElement();
+    copyButton.classList.add('button');
+    copyButton.hidden = true;
+    copyButton.setAttribute('aria-disabled', 'false');
+    copyButton.setAttribute('data-i18n', 'game.share.copyLink');
+    elements.set('game-link-copy', copyButton);
+  }
+  if (!elements.has('game-link-status')) {
+    const status = new FakeElement();
+    status.classList.add('count');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    elements.set('game-link-status', status);
+  }
+  if (!elements.has('game-link-error')) {
+    const error = new FakeElement();
+    error.classList.add('error');
+    error.setAttribute('role', 'alert');
+    error.hidden = true;
+    elements.set('game-link-error', error);
+  }
+  if (!elements.has('game-export')) {
+    const gameExport = new FakeElement();
+    gameExport.hidden = true;
+    elements.set('game-export', gameExport);
+  }
+  if (!elements.has('game-pgn-download')) {
+    elements.set('game-pgn-download', new FakeElement());
+  }
+  if (!elements.has('game-pgn-copy')) {
+    const pgnCopy = new FakeElement();
+    pgnCopy.hidden = true;
+    elements.set('game-pgn-copy', pgnCopy);
+  }
+  if (!elements.has('game-pgn-status')) {
+    elements.set('game-pgn-status', new FakeElement());
+  }
+  if (!elements.has('game-pgn-error')) {
+    elements.set('game-pgn-error', new FakeElement());
+  }
+}
+
+for (const scenario of [
+  { role: 'white', over: false },
+  { role: 'white', over: true },
+  { role: 'spectator', over: false },
+  { role: 'spectator', over: true },
+] as const) {
+  test(`mountGame preserves game link share availability and PGN gating (${scenario.role}, over: ${scenario.over})`, async () => {
+    const sockets = new FakeSocketFactory();
+    const app = createTestApp(sockets);
+    const { doc, elements } = createGameDocument();
+    ensureGameSharingElements(elements);
+
+    const clipboardWrites: string[] = [];
+    const defaultView = {
+      location: { href: 'https://chess.test/game/share-matrix' },
+      navigator: {
+        clipboard: {
+          writeText: async (text: string) => {
+            clipboardWrites.push(text);
+          },
+        },
+      },
+    };
+    Object.defineProperty(doc, 'defaultView', {
+      value: defaultView,
+      writable: true,
+      configurable: true,
+    });
+
+    adoptGameSession(app.api.session, 'test-token');
+    const mounted = mountGame({
+      doc,
+      boardEl: elements.get('board')! as unknown as HTMLElement,
+      gameId: 'share-matrix',
+      ...gameServices(app),
+      token: 'test-token',
+      restorePromise: Promise.resolve(null),
+    });
+
+    try {
+      const copyButton = elements.get('game-link-copy')!;
+      assert.equal(copyButton.hidden, false, 'link share button must be visible before joined');
+      assert.equal(copyButton.getAttribute('aria-disabled'), 'false');
+      assert.equal(copyButton.textContent, app.i18n.t('game.share.copyLink'));
+
+      const sentBeforeCopy = sockets.sockets.flatMap((s) => s.sent).length;
+      copyButton.click();
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      assert.equal(clipboardWrites.length, 1);
+      assert.equal(clipboardWrites[0], 'https://chess.test/game/share-matrix');
+      const sentAfterCopy = sockets.sockets.flatMap((s) => s.sent).length;
+      assert.equal(sentAfterCopy, sentBeforeCopy, 'copying must not emit realtime commands');
+
+      sockets.last.open();
+      sockets.last.emit({
+        t: 'joined',
+        gameId: 'share-matrix',
+        role: scenario.role,
+        state: {
+          gameId: 'share-matrix',
+          variant: 'standard',
+          players: { white: 'u1', black: 'u2' },
+          timeControl: { initialMs: 600_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          fenHash: 'share-matrix',
+          ply: 0,
+          turn: 'w',
+          clock: { w: 60_000, b: 60_000 },
+          turnStartedAt: null,
+          status: scenario.over
+            ? { over: true, result: '1-0', termination: 'resignation', winner: 'w' }
+            : { over: false },
+          drawOffer: null,
+          moves: [],
+          legalMoves: {},
+          chess960StartId: null,
+        },
+      });
+
+      assert.equal(copyButton.hidden, false, 'link share button must stay visible in all states and roles');
+      const pgnSection = elements.get('game-export')!;
+      assert.equal(pgnSection.hidden, !scenario.over, 'PGN section must be hidden when live and shown when finished');
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      mounted.analysis.dispose();
+      app.dispose();
+    }
+  });
+}
+
+test('mountGame isolates single-page remount lifecycle, deferred completion, and relocalizes to Arabic', async () => {
+  const { doc, elements } = createGameDocument();
+  ensureGameSharingElements(elements);
+
+  let resolveWriteA!: () => void;
+  const writePromiseA = new Promise<void>((resolve) => {
+    resolveWriteA = resolve;
+  });
+  const clipboardWrites: string[] = [];
+  let currentWritePromise: Promise<void> | null = writePromiseA;
+
+  const defaultView = {
+    location: { href: 'https://chess.test/game/game-a' },
+    navigator: {
+      clipboard: {
+        writeText: async (text: string) => {
+          clipboardWrites.push(text);
+          if (currentWritePromise) {
+            await currentWritePromise;
+          }
+        },
+      },
+    },
+  };
+  Object.defineProperty(doc, 'defaultView', {
+    value: defaultView,
+    writable: true,
+    configurable: true,
+  });
+
+  const socketsA = new FakeSocketFactory();
+  const appA = createTestApp(socketsA);
+  adoptGameSession(appA.api.session, 'token-a');
+  const mountedA = mountGame({
+    doc,
+    boardEl: elements.get('board')! as unknown as HTMLElement,
+    gameId: 'game-a',
+    ...gameServices(appA),
+    token: 'token-a',
+    restorePromise: Promise.resolve(null),
+  });
+
+  const copyButton = elements.get('game-link-copy')!;
+  const statusEl = elements.get('game-link-status')!;
+
+  try {
+    copyButton.click();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    assert.equal(clipboardWrites.length, 1);
+    assert.equal(clipboardWrites[0], 'https://chess.test/game/game-a');
+  } finally {
+    mountedA.controller.dispose();
+    mountedA.board.dispose();
+    mountedA.connectivity.dispose();
+    mountedA.analysis.dispose();
+    appA.dispose();
+  }
+
+  defaultView.location.href = 'https://chess.test/game/game-b';
+  currentWritePromise = null;
+  statusEl.textContent = '';
+
+  const socketsB = new FakeSocketFactory();
+  const appB = createTestApp(socketsB);
+  adoptGameSession(appB.api.session, 'token-b');
+  const mountedB = mountGame({
+    doc,
+    boardEl: elements.get('board')! as unknown as HTMLElement,
+    gameId: 'game-b',
+    ...gameServices(appB),
+    token: 'token-b',
+    restorePromise: Promise.resolve(null),
+  });
+
+  try {
+    resolveWriteA();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(statusEl.textContent, '', 'late resolution of game A write must not alter game B status');
+
+    copyButton.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(clipboardWrites.length, 2);
+    assert.equal(clipboardWrites[1], 'https://chess.test/game/game-b');
+    assert.equal(statusEl.textContent, appB.i18n.t('game.share.copied'));
+
+    appB.i18n.setLocale('ar');
+    assert.equal(copyButton.textContent, appB.i18n.t('game.share.copyLink'));
+    assert.equal(copyButton.textContent, 'نسخ رابط المباراة');
+  } finally {
+    mountedB.controller.dispose();
+    mountedB.board.dispose();
+    mountedB.connectivity.dispose();
+    mountedB.analysis.dispose();
+    appB.dispose();
+  }
+});
+
 test('mountGame clock updates preserve colour labels and update only the time spans', () => {
   for (const labels of [['White', 'Black'], ['الأبيض', 'الأسود']]) {
     const sockets = new FakeSocketFactory();
@@ -309,6 +546,64 @@ test('withdrawn draw controls return focus to game status only when they contain
       sockets.last.emit({ t: 'joined', gameId: 'draw-focus', role: 'white', state: { ...state, drawOffer: null } });
       assert.equal(drawControls.hidden, true);
       assert.equal(elements.get('status')!.focused, focusedId !== 'board');
+    } finally {
+      mounted.controller.dispose();
+      mounted.board.dispose();
+      mounted.connectivity.dispose();
+      app.dispose();
+    }
+  }
+});
+
+test('mountGame renders canonical chess960 start ID label suffix and rejects out-of-range IDs', () => {
+  for (const { id, hasSuffix } of [
+    { id: -1, hasSuffix: false },
+    { id: 960, hasSuffix: false },
+    { id: 0, hasSuffix: true },
+    { id: 959, hasSuffix: true },
+  ]) {
+    const sockets = new FakeSocketFactory();
+    const app = createTestApp(sockets);
+    const { doc, elements } = createGameDocument();
+    const variantEl = elements.get('meta-variant')!;
+    const mounted = mountGame({
+      doc,
+      boardEl: elements.get('board')! as unknown as HTMLElement,
+      gameId: 'mount-label',
+      ...gameServices(app),
+      token: 'test-token',
+      restorePromise: Promise.resolve(null),
+    });
+    try {
+      sockets.last.open();
+      sockets.last.emit({
+        t: 'joined',
+        gameId: 'mount-label',
+        role: 'white',
+        state: {
+          gameId: 'mount-label',
+          variant: 'chess960',
+          players: { white: 'u1', black: 'u2' },
+          timeControl: { initialMs: 600_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          fenHash: 'h0',
+          ply: 0,
+          turn: 'w',
+          clock: { w: 600_000, b: 600_000 },
+          turnStartedAt: null,
+          status: { over: false },
+          drawOffer: null,
+          moves: [],
+          legalMoves: {},
+          chess960StartId: id,
+        },
+      });
+      if (hasSuffix) {
+        assert.equal(variantEl.textContent?.endsWith(`· #${id}`), true, `expected #${id} suffix`);
+      } else {
+        assert.equal(variantEl.textContent?.includes('#'), false, `invalid id ${id} must not render suffix`);
+        assert.equal(variantEl.textContent, 'Chess960');
+      }
     } finally {
       mounted.controller.dispose();
       mounted.board.dispose();

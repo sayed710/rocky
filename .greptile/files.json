@@ -1,0 +1,30 @@
+{
+  "files": [
+    {
+      "path": "docs/REVIEW_POLICY.md",
+      "description": "Review evidence policy and adoption status; independent requirements traceability is distinct from code-review confidence."
+    },
+    {
+      "path": "docs/adr/0161-durable-state-revision-foundation.md",
+      "description": "Technical stateRevision constraints; historical deferral is not standalone approval of later GameSync scope. Read the PR-specific owner-approved requirements too.",
+      "scope": [
+        "packages/web/src/net/game-sync.ts",
+        "packages/web/src/net/ws-protocol.ts",
+        "packages/web/test/game-sync.test.ts",
+        "packages/web/test/state-revision.test.ts",
+        "packages/realtime-gateway/src/protocol.ts",
+        "packages/realtime-gateway/src/authority.ts",
+        "packages/realtime-gateway/test/state-revision.test.ts",
+        "packages/realtime-gateway/src/event-log.ts",
+        "packages/persistence/src/event-store.ts",
+        "packages/persistence/src/pg/event-store.ts",
+        "packages/persistence/src/pg/games-projector.ts",
+        "packages/persistence/test/event-store.test.ts",
+        "packages/persistence/test/pg.integration.test.ts",
+        "packages/persistence/test/games-projector.integration.test.ts",
+        "packages/persistence/src/games-projection.ts",
+        "packages/persistence/test/games-projection.test.ts"
+      ]
+    }
+  ]
+}

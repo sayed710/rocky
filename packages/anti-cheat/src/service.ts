@@ -1,4 +1,4 @@
-import { analyzeGame, type GameCorrelationReport, type AnalyzedPly } from './analyzer';
+import { analyzeGame, type GameCorrelationReport, type AnalyzedPly, type Player } from './analyzer';
 import { aggregatePlayer, type PlayerAggregateReport, type PlayerAggregateInput } from './aggregate';
 import type { PositionEvaluator } from './port';
 import type { AntiCheatReportRepository } from './repository';
@@ -11,6 +11,8 @@ export interface AnalyzeAndStoreInput {
   };
   readonly plies: readonly AnalyzedPly[];
   readonly depth: number;
+  /** The player whose stored final move was left out of `plies` as pre-#127 history (#127). */
+  readonly historicalExcluded?: Player;
 }
 
 export class AntiCheatService {
@@ -26,11 +28,13 @@ export class AntiCheatService {
       );
     }
 
-    const report = await analyzeGame({
+    const analyzed = await analyzeGame({
       plies: input.plies,
       depth: input.depth,
       evaluator: this.evaluator,
     });
+    const side = input.historicalExcluded;
+    const report = side === undefined ? analyzed : { ...analyzed, [side]: { ...analyzed[side], historicalExcludedPlies: 1 } };
 
     await this.repository.saveBatch([
       {

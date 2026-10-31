@@ -228,11 +228,14 @@ test.describe('Game actions flow', () => {
     }
   });
 
-  test('a finished game downloads exactly the server PGN, for players and anonymous spectators', async ({ browser, request }) => {
-    const ctx1 = await browser.newContext({ acceptDownloads: true });
+  test('a finished game downloads and copies exactly the server PGN, for players and anonymous spectators', async ({ browser, request }) => {
+    const ctx1 = await browser.newContext({ acceptDownloads: true, permissions: ['clipboard-read', 'clipboard-write'] });
     const ctx2 = await browser.newContext();
     // An anonymous spectator on a phone-sized, coarse-pointer screen with the document forced to RTL.
-    const ctx3 = await browser.newContext({ acceptDownloads: true, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+    const ctx3 = await browser.newContext({
+      acceptDownloads: true, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true,
+      permissions: ['clipboard-read', 'clipboard-write'],
+    });
     const page1 = await ctx1.newPage();
     const page2 = await ctx2.newPage();
     const page3 = await ctx3.newPage();
@@ -273,8 +276,10 @@ test.describe('Game actions flow', () => {
       // A live game offers no PGN control at all, to players or spectators, and the API refuses it.
       const download1 = page1.getByRole('button', { name: 'Download PGN' });
       const download3 = page3.getByRole('button', { name: 'Download PGN' });
+      const copy1 = page1.getByRole('button', { name: 'Copy PGN' });
       await expect(download1).toHaveCount(0);
       await expect(download3).toHaveCount(0);
+      await expect(copy1).toHaveCount(0);
       expect((await request.get(`/v1/games/${gameId}/export.pgn`)).status()).toBe(409);
 
       await page1.locator('[data-square="e2"]').click();
@@ -309,6 +314,16 @@ test.describe('Game actions flow', () => {
       await expect(page1.locator('#game-pgn-status')).toHaveText('PGN download started.');
       await expect(page1).toHaveURL(new RegExp(`/game/${gameId}$`));
 
+      // Copy PGN, by keyboard, puts exactly the served text on the clipboard and keeps focus.
+      await copy1.focus();
+      await page1.keyboard.press('Enter');
+      await expect(page1.locator('#game-pgn-status')).toHaveText('PGN copied to the clipboard.');
+      // The Windows clipboard stores plain text with CRLF line ends; every other byte must match.
+      const clipped = await page1.evaluate(() => navigator.clipboard.readText());
+      expect(process.platform === 'win32' ? clipped.replaceAll('\r\n', '\n') : clipped).toBe(servedText);
+      await expect(copy1).toBeFocused();
+      await expect(page1).toHaveURL(new RegExp(`/game/${gameId}$`));
+
       // The anonymous RTL spectator gets the same public document, with a 44px coarse-pointer target
       // and no horizontal overflow.
       await expect(page3.locator('html')).toHaveAttribute('dir', 'rtl');
@@ -319,6 +334,14 @@ test.describe('Game actions flow', () => {
       const [saved3] = await Promise.all([page3.waitForEvent('download'), download3.tap()]);
       expect(saved3.suggestedFilename()).toBe(`game-${gameId}.pgn`);
       expect(Buffer.compare(await readFile(await saved3.path()), servedBytes)).toBe(0);
+      const copy3 = page3.getByRole('button', { name: 'Copy PGN' });
+      const copyBox = await copy3.boundingBox();
+      expect(copyBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+      await copy3.tap();
+      await expect(page3.locator('#game-pgn-status')).toHaveText('PGN copied to the clipboard.');
+      const clipped3 = await page3.evaluate(() => navigator.clipboard.readText());
+      expect(process.platform === 'win32' ? clipped3.replaceAll('\r\n', '\n') : clipped3).toBe(servedText);
+      expect(await page3.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 
       // A refused request is a perceivable alert, and nothing is saved.
       await page1.route('**/v1/games/*/export.pgn', (route) =>
@@ -329,6 +352,13 @@ test.describe('Game actions flow', () => {
       const alert = page1.getByRole('alert').filter({ hasText: 'The PGN file could not be downloaded. Please try again.' });
       await expect(alert).toBeVisible();
       expect(unexpectedDownload).toBe(false);
+
+      // A refused copy is an alert too, and the clipboard keeps what it held.
+      await page1.evaluate(() => navigator.clipboard.writeText('clipboard before'));
+      await copy1.click();
+      await expect(page1.getByRole('alert').filter({ hasText: 'The PGN could not be copied. Please try again.' })).toBeVisible();
+      await expect(page1.locator('#game-pgn-status')).toHaveText('');
+      expect(await page1.evaluate(() => navigator.clipboard.readText())).toBe('clipboard before');
     } finally {
       await ctx1.close();
       await ctx2.close();

@@ -409,6 +409,10 @@ const testArabicCatalog: Partial<MessagesCatalog> = {
   'game.export.preparing': 'جارٍ تجهيز ملف PGN…',
   'game.export.started': 'بدأ تنزيل PGN.',
   'game.export.unavailableError': 'تعذّر تنزيل ملف PGN. حاول مرة أخرى.',
+  'game.export.copyPgn': 'نسخ PGN',
+  'game.export.copying': 'جارٍ نسخ PGN…',
+  'game.export.copied': 'تم نسخ PGN إلى الحافظة.',
+  'game.export.copyError': 'تعذّر نسخ PGN. حاول مرة أخرى.',
   // Shell
   'shell.brand': 'روك زن',
   // Public documents (test-only strings; not an approved production translation)

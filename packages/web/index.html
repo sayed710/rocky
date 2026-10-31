@@ -143,10 +143,18 @@
         </section>
         <section id="game-export" class="analysis-panel game-export" aria-labelledby="game-export-heading" hidden>
           <h2 id="game-export-heading" class="analysis-title" data-i18n="game.export.title">Export</h2>
-          <button id="game-pgn-download" type="button" class="button" aria-disabled="false" data-i18n="game.export.downloadPgn">Download PGN</button>
+          <div class="analysis-controls">
+            <button id="game-pgn-download" type="button" class="button" aria-disabled="false" data-i18n="game.export.downloadPgn">Download PGN</button>
+            <button id="game-pgn-copy" type="button" class="button" aria-disabled="false" data-i18n="game.export.copyPgn" hidden>Copy PGN</button>
+          </div>
           <p id="game-pgn-status" class="count" role="status" aria-live="polite"></p>
           <div id="game-pgn-error" class="error" role="alert" hidden></div>
         </section>
+        <div id="game-sharing" class="game-sharing">
+          <button id="game-link-copy" type="button" class="button" aria-disabled="false" data-i18n="game.share.copyLink" hidden>Copy game link</button>
+          <p id="game-link-status" class="count" role="status" aria-live="polite"></p>
+          <div id="game-link-error" class="error" role="alert" hidden></div>
+        </div>
         <section id="analysis" class="analysis-panel" aria-labelledby="analysis-heading" hidden>
           <h2 id="analysis-heading" class="analysis-title" data-i18n="game.analysis.title">Engine</h2>
           <div class="analysis-controls">
@@ -401,7 +409,16 @@
       <p id="leaderboard-error" class="error" role="alert"></p>
     </section>
     <section id="tournaments" class="tournaments" aria-label="Tournaments" data-i18n-aria-label="tournaments.aria" hidden>
-      <h2 data-i18n="tournaments.title">Tournaments</h2>
+      <header class="section-header">
+        <h2 data-i18n="tournaments.title">Tournaments</h2>
+        <div class="tournaments-controls leaderboard-controls">
+          <div class="tournaments-control leaderboard-control">
+            <label id="tournament-state-filter-label" for="tournament-state-filter" data-i18n="tournaments.filterLabel">Filter loaded tournaments</label>
+            <select id="tournament-state-filter" class="cg-select"></select>
+          </div>
+        </div>
+      </header>
+      <div id="tournaments-status" role="status" aria-live="polite" class="count"></div>
       <div id="tournament-list" class="panel-list" aria-label="Tournaments list" data-i18n-aria-label="tournaments.listAria"></div>
       <p id="tournaments-error" class="error" role="alert"></p>
     </section>

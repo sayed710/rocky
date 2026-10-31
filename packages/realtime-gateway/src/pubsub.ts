@@ -24,6 +24,20 @@ export interface PubSub {
   publish(channel: string, msg: Broadcast): void;
   /** Subscribe to `channel`; returns an unsubscribe handle. */
   subscribe(channel: string, handler: (msg: Broadcast) => void): Unsubscribe;
+  /**
+   * Resolves once the channel's CURRENT Redis subscription is acknowledged;
+   * rejects if that SUBSCRIBE failed; also rejects with {@link SubscriptionCancelledError} when the subscription is cancelled (last handler unsubscribed or pub/sub closed).
+   */
+  ready?(channel: string): Promise<void>;
+  /**
+   * Called after the subscriber connection came back and every channel with
+   * local handlers has been re-subscribed (all settled). Returns a remove function.
+   */
+  onReconnect?(listener: () => void): () => void;
+  /**
+   * Called when `publish` fails/rejects, with the channel name. Returns a remove function.
+   */
+  onPublishFailed?(listener: (channel: string) => void): () => void;
 }
 
 /** Channel name for a game's authoritative event stream. */
@@ -104,8 +118,12 @@ export interface RedisLike {
   unsubscribe(channel: string): Promise<void> | void;
   /** Register a listener for messages arriving on subscribed channels. */
   on(event: 'message', listener: (channel: string, message: string) => void): void;
+  /** Register a listener for lifecycle events ('close' or 'ready'). */
+  on(event: 'close' | 'ready', listener: () => void): void;
   /** Remove a previously registered message listener. */
   off(event: 'message', listener: (channel: string, message: string) => void): void;
+  /** Remove a previously registered lifecycle listener. */
+  off(event: 'close' | 'ready', listener: () => void): void;
   /** Close the connection. */
   quit(): Promise<void> | void;
 }
@@ -121,6 +139,25 @@ interface RedisEnvelope {
   readonly origin: string;
   /** The broadcast payload. */
   readonly msg: Broadcast;
+}
+
+/**
+ * Thrown when a pending subscription is cancelled because the last local subscriber
+ * unsubscribed or the pub/sub connection was closed before Redis acknowledged it.
+ */
+export class SubscriptionCancelledError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SubscriptionCancelledError';
+  }
+}
+
+interface ChannelSubscriptionEntry {
+  generation: number;
+  promise: Promise<void>;
+  settled: 'pending' | 'ok' | 'failed' | 'cancelled';
+  resolve: () => void;
+  reject: (err: unknown) => void;
 }
 
 /**
@@ -143,7 +180,14 @@ interface RedisEnvelope {
  */
 export class RedisPubSub implements PubSub {
   private readonly subHandlers = new Map<string, Set<(msg: Broadcast) => void>>();
+  private readonly subscriptionEntries = new Map<string, ChannelSubscriptionEntry>();
+  private readonly reconnectListeners = new Set<() => void>();
+  private readonly publishFailedListeners = new Set<(channel: string) => void>();
   private readonly messageListener: (channel: string, payload: string) => void;
+  private readonly closeListener: () => void;
+  private readonly readyListener: () => void;
+  private generationSeq = 0;
+  private sawClose = false;
   private closed = false;
 
   /**
@@ -178,7 +222,138 @@ export class RedisPubSub implements PubSub {
       }
     };
 
+    this.closeListener = (): void => {
+      if (this.closed) return;
+      this.sawClose = true;
+      for (const [channel, subs] of this.subHandlers.entries()) {
+        if (subs.size > 0) {
+          this.createPendingEntry(channel);
+        }
+      }
+    };
+
+    this.readyListener = (): void => {
+      if (this.closed) return;
+      if (!this.sawClose) return;
+      this.sawClose = false;
+      void this.handleReconnect();
+    };
+
     this.sub.on('message', this.messageListener);
+    this.sub.on('close', this.closeListener);
+    this.sub.on('ready', this.readyListener);
+  }
+
+  private createPendingEntry(channel: string): ChannelSubscriptionEntry {
+    const gen = ++this.generationSeq;
+    let resolvePromise!: () => void;
+    let rejectPromise!: (err: unknown) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    });
+    // Never leave an unhandled rejection
+    promise.catch(() => {});
+
+    const oldEntry = this.subscriptionEntries.get(channel);
+
+    const entry: ChannelSubscriptionEntry = {
+      generation: gen,
+      promise,
+      settled: 'pending',
+      resolve: resolvePromise,
+      reject: rejectPromise,
+    };
+    this.subscriptionEntries.set(channel, entry);
+
+    if (oldEntry && oldEntry.settled === 'pending') {
+      entry.promise.then(oldEntry.resolve, oldEntry.reject);
+    }
+
+    return entry;
+  }
+
+  private issueSubscribe(channel: string): Promise<void> {
+    const entry = this.createPendingEntry(channel);
+    const gen = entry.generation;
+
+    void Promise.resolve(this.sub.subscribe(channel))
+      .then(() => {
+        const current = this.subscriptionEntries.get(channel);
+        if (current && current.generation === gen) {
+          current.settled = 'ok';
+          entry.resolve();
+        }
+      })
+      .catch((err: unknown) => {
+        console.error(`[RedisPubSub] subscribe failed on channel ${channel}:`, err);
+        const current = this.subscriptionEntries.get(channel);
+        if (current && current.generation === gen) {
+          current.settled = 'failed';
+          entry.reject(err);
+        }
+      });
+
+    return entry.promise;
+  }
+
+  private async handleReconnect(): Promise<void> {
+    const channels = Array.from(this.subHandlers.entries())
+      .filter(([_, subs]) => subs.size > 0)
+      .map(([channel]) => channel);
+
+    const promises = channels.map((channel) => this.issueSubscribe(channel));
+    await Promise.allSettled(promises);
+
+    if (this.closed) return;
+
+    for (const listener of [...this.reconnectListeners]) {
+      try {
+        listener();
+      } catch (err: unknown) {
+        console.error('[RedisPubSub] onReconnect listener threw:', err);
+      }
+    }
+  }
+
+  /**
+   * Resolves once the channel's CURRENT Redis subscription is acknowledged;
+   * rejects if that SUBSCRIBE failed; also rejects with {@link SubscriptionCancelledError} when the subscription is cancelled (last handler unsubscribed or pub/sub closed).
+   */
+  async ready(channel: string): Promise<void> {
+    const subs = this.subHandlers.get(channel);
+    if (!subs || subs.size === 0) {
+      return;
+    }
+    const entry = this.subscriptionEntries.get(channel);
+    if (entry && entry.settled === 'failed') {
+      return this.issueSubscribe(channel);
+    }
+    if (entry) {
+      return entry.promise;
+    }
+    return this.issueSubscribe(channel);
+  }
+
+  /**
+   * Register a listener called after the subscriber connection came back and
+   * every channel with local handlers has been re-subscribed (all settled).
+   */
+  onReconnect(listener: () => void): () => void {
+    this.reconnectListeners.add(listener);
+    return () => {
+      this.reconnectListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Register a listener called when `pub.publish` fails/rejects.
+   */
+  onPublishFailed(listener: (channel: string) => void): () => void {
+    this.publishFailedListeners.add(listener);
+    return () => {
+      this.publishFailedListeners.delete(listener);
+    };
   }
 
   publish(channel: string, msg: Broadcast): void {
@@ -200,6 +375,13 @@ export class RedisPubSub implements PubSub {
     const envelope: RedisEnvelope = { origin: this.nodeId, msg };
     void Promise.resolve(this.pub.publish(channel, JSON.stringify(envelope))).catch((err: unknown) => {
       console.error(`[RedisPubSub] publish failed on channel ${channel}:`, err);
+      for (const listener of [...this.publishFailedListeners]) {
+        try {
+          listener(channel);
+        } catch (listenerErr: unknown) {
+          console.error('[RedisPubSub] onPublishFailed listener threw:', listenerErr);
+        }
+      }
     });
   }
 
@@ -216,9 +398,7 @@ export class RedisPubSub implements PubSub {
 
     if (isFirst) {
       // First local subscriber for this channel → issue Redis SUBSCRIBE.
-      void Promise.resolve(this.sub.subscribe(channel)).catch((err: unknown) => {
-        console.error(`[RedisPubSub] subscribe failed on channel ${channel}:`, err);
-      });
+      this.issueSubscribe(channel);
     }
 
     return () => {
@@ -228,6 +408,12 @@ export class RedisPubSub implements PubSub {
       if (set.size === 0) {
         // Last local subscriber gone → issue Redis UNSUBSCRIBE.
         this.subHandlers.delete(channel);
+        const oldEntry = this.subscriptionEntries.get(channel);
+        if (oldEntry && oldEntry.settled === 'pending') {
+          oldEntry.settled = 'cancelled';
+          oldEntry.reject(new SubscriptionCancelledError(`Subscription cancelled on channel ${channel}`));
+        }
+        this.subscriptionEntries.delete(channel);
         void Promise.resolve(this.sub.unsubscribe(channel)).catch((err: unknown) => {
           console.error(`[RedisPubSub] unsubscribe failed on channel ${channel}:`, err);
         });
@@ -236,14 +422,25 @@ export class RedisPubSub implements PubSub {
   }
 
   /**
-   * Close the pub/sub: removes the message listener and quits both Redis
+   * Close the pub/sub: removes the message and lifecycle listeners and quits both Redis
    * connections. After closing, publish and subscribe are no-ops.
    */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     this.sub.off('message', this.messageListener);
+    this.sub.off('close', this.closeListener);
+    this.sub.off('ready', this.readyListener);
     this.subHandlers.clear();
+    for (const [channel, entry] of this.subscriptionEntries.entries()) {
+      if (entry.settled === 'pending') {
+        entry.settled = 'cancelled';
+        entry.reject(new SubscriptionCancelledError(`Subscription cancelled on channel ${channel} due to close`));
+      }
+    }
+    this.subscriptionEntries.clear();
+    this.reconnectListeners.clear();
+    this.publishFailedListeners.clear();
     await Promise.all([
       Promise.resolve(this.pub.quit()),
       Promise.resolve(this.sub.quit()),
@@ -253,5 +450,10 @@ export class RedisPubSub implements PubSub {
   /** Number of local subscribers on a channel (diagnostics/tests). */
   subscriberCount(channel: string): number {
     return this.subHandlers.get(channel)?.size ?? 0;
+  }
+
+  /** Subscription state for a channel ('pending' | 'ok' | 'failed' | 'cancelled' | undefined). */
+  subscriptionState(channel: string): 'pending' | 'ok' | 'failed' | 'cancelled' | undefined {
+    return this.subscriptionEntries.get(channel)?.settled;
   }
 }

@@ -6,7 +6,7 @@
  */
 
 import type { Connection } from './transport';
-import type { Broadcast, PresenceMessage, Role, ServerMessage } from './protocol';
+import type { Broadcast, PresenceMessage, Role, ServerMessage, StateMessage } from './protocol';
 
 interface Member {
   readonly conn: Connection;
@@ -38,7 +38,7 @@ export class Room {
   }
 
   /** Fan a broadcast out to every member of the room. */
-  broadcast(msg: Broadcast): void {
+  broadcast(msg: Broadcast | StateMessage): void {
     for (const m of this.members.values()) m.conn.send(msg);
   }
 

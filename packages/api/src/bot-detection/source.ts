@@ -1,6 +1,6 @@
 import type { MoveTiming } from '@chess-platform/anti-cheat';
 import type { EventStore } from '@chess-platform/persistence';
-import { Game } from '@chess-platform/game';
+import { replayStoredHistory } from '@chess-platform/game/stored-history';
 
 export interface BotFinishedGame {
   readonly white: string;
@@ -20,7 +20,7 @@ export class EventStoreBotTimingSource implements BotGameTimingSource {
     const stored = await this.events.load(gameId);
     signal?.throwIfAborted();
     if (stored.length === 0) return null;
-    const state = Game.fromEvents(stored.map((e) => e.event)).snapshot();
+    const state = replayStoredHistory(gameId, stored).game.snapshot();
     if (!state.status.over) return null;
     if (!state.players.white || !state.players.black) return null;
     return {

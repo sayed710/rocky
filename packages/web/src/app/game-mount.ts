@@ -104,6 +104,7 @@ import type { AuthSession } from './auth-controller.js';
 import { gameReviewAnnotation } from './game-review-annotation.js';
 import { GameReviewController } from './game-review-controller.js';
 import { mountGamePgnExport } from './game-pgn-export.js';
+import { mountGameLinkShare } from './game-link-share.js';
 import { isEngineBotUserId } from '@chess-platform/game';
 import { applyAutoDirection, applyLtrIsolation, renderInterpolatedText, renderGameStatusText } from '../i18n/bidi.js';
 import { createI18nManager } from '../i18n/manager.js';
@@ -221,6 +222,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     i18n,
     requestPgn: (requestedGameId, signal) => deps.client.games.exportPgn(requestedGameId, signal),
   });
+  const gameLinkShare = mountGameLinkShare({ doc, gameId, i18n });
   let gameReviewCapabilities: unknown = null;
   let gameOver = false;
   let isGamePlayer = false;
@@ -1199,11 +1201,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   // cannot open a window between them; and an ended game never goes live again.
   let boardFinished = false;
   const syncBoardOwnership = (): void => {
-    const { myColor, status } = gameSync.getState();
+    const { myColor, status, recovering } = gameSync.getState();
     if (status?.over === true) boardFinished = true;
     const owner = boardFinished || myColor === null ? null : myColor === 'w' ? 'white' : 'black';
     board.setPlayerColor(owner);
-    board.setInputEnabled(owner !== null);
+    board.setInputEnabled(owner !== null && !recovering);
   };
 
   const renderMetadata = (state: GameMetadataState): void => {
@@ -1301,7 +1303,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     if (metaVariantEl && state.variant) {
       const label = getVariantLabel(state.variant, i18n);
       metaVariantEl.textContent =
-        typeof state.chess960StartId === 'number'
+        typeof state.chess960StartId === 'number' &&
+        Number.isInteger(state.chess960StartId) &&
+        state.chess960StartId >= 0 &&
+        state.chess960StartId <= 959
           ? `${label} · #${state.chess960StartId}`
           : label;
     }
@@ -1338,7 +1343,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (!state.isPlayer) return;
 
-    const disabled = !state.connected || state.isOver || state.pendingAction !== null;
+    const disabled = !state.connected || state.isOver || state.pendingAction !== null || state.recovering === true;
 
     if (btnOfferDraw) {
       if (state.drawOffer === 'sent') {
@@ -1392,6 +1397,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const unsubscribeLocale = i18n.onLocaleChange(() => {
     refreshGameReview();
     pgnExport.relocalize();
+    gameLinkShare.relocalize();
     if (lastMetadataState) {
       renderMetadata(lastMetadataState);
     }
@@ -1615,7 +1621,9 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       if (review.isPartial) {
         const analyzed = review.analyzedPlayerMoves ?? review.moves.length;
         const total = review.totalPlayerMoves ?? analyzed;
-        renderInterpolatedText(gameReviewNoteEl, i18n.t('game.review.partialNote'), {
+        // A stored pre-#127 atomic final move is excluded for a different reason than the move limit (#127).
+        const note = review.cutoffReason === 'historical_move' ? 'game.review.historicalNote' : 'game.review.partialNote';
+        renderInterpolatedText(gameReviewNoteEl, i18n.t(note), {
           analyzed: String(analyzed),
           total: String(total),
         });
@@ -1799,9 +1807,10 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   const connectivityTarget = typeof window !== 'undefined' ? window : null;
   const onOffline = (): void => gameSync.networkOffline();
   const onOnline = (): void => gameSync.networkOnline();
+  const onRetry = (): void => gameSync.retryRecovery();
   if (reconnectButton) {
-    reconnectButton.addEventListener('click', onOnline);
-    unbinds.push(() => reconnectButton.removeEventListener('click', onOnline));
+    reconnectButton.addEventListener('click', onRetry);
+    unbinds.push(() => reconnectButton.removeEventListener('click', onRetry));
   }
   if (connectivityTarget) {
     connectivityTarget.addEventListener('offline', onOffline);
@@ -1834,6 +1843,7 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
       openingController.dispose();
       coachController.dispose();
       pgnExport.dispose();
+      gameLinkShare.dispose();
     },
   };
 

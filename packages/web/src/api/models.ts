@@ -1265,8 +1265,9 @@ export interface GameReviewMove {
 /**
  * The complete or partial game-review API response.
  *
- * Discriminated on `isPartial`: when false the review covers every player move; when true it was
- * capped at the server move limit and `cutoffReason` names the cause.
+ * Discriminated on `isPartial`: when false the review covers every player move; when true some were
+ * not analysed and `cutoffReason` names why: the server move limit, or a stored pre-#127 atomic move
+ * today's rules reject.
  */
 export type GameReviewResponse = {
   readonly gameId: string;
@@ -1280,7 +1281,7 @@ export type GameReviewResponse = {
   readonly analyzedPlayerMoves: number;
 } & (
   | { readonly isPartial: false; readonly cutoffReason?: never }
-  | { readonly isPartial: true; readonly cutoffReason: 'move_limit' }
+  | { readonly isPartial: true; readonly cutoffReason: 'move_limit' | 'historical_move' }
 );
 
 // --- Study Partner v1 -------------------------------------------------------
