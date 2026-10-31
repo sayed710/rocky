@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { build } from 'vite';
 import { fileURLToPath } from 'node:url';
 import type { render } from '../test/support/arabic-browser.js';
@@ -157,4 +157,568 @@ test('mixed Arabic prose isolates SAN, UCI, FEN, handle, rating and hostile text
   expect(evidence.ai.text).toContain('متقدم');
   expect(evidence.ai.text).toContain('toString · 1/2-1/2');
   expect(evidence.ai.text).not.toMatch(/Hard|advanced|faster mate|Win|stalemate/);
+});
+
+import type { GameSummary, UserProfile } from '../src/api/models.js';
+
+function makeGame(id: string, variant: GameSummary['variant'], whiteId: string, result: string | null = '1-0'): GameSummary {
+  return {
+    id,
+    variant,
+    rated: true,
+    speed: 'blitz',
+    whiteId,
+    blackId: 'u-alice',
+    result,
+    termination: 'normal',
+    plyCount: 20,
+    startedAt: '2026-10-20T10:00:00Z',
+    endedAt: '2026-10-20T10:05:00Z',
+  };
+}
+
+const aliceProfile: UserProfile = {
+  user: { id: 'u-alice', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z' },
+  ratings: [],
+};
+
+const reservedGameId = 'g/1?q=a&ل';
+const aliceGames: readonly GameSummary[] = [
+  makeGame(reservedGameId, 'standard', 'u-alice', '1-0'),
+  makeGame('g-std', 'standard', 'u-alice', '1-0'),
+  makeGame('g-atomic', 'atomic', 'u-bob', '0-1'),
+  makeGame('g-c960', 'chess960', 'u-alice', '1/2-1/2'),
+];
+
+const canonicalVariants: readonly GameSummary['variant'][] = ['standard', 'chess960', 'kingofthehill', 'atomic', 'crazyhouse', 'threecheck', 'horde', 'racingkings'];
+
+for (const journey of [{ lang: 'en', width: 768, height: 900, dir: 'ltr' }, { lang: 'ar', width: 320, height: 844, dir: 'rtl' }] as const) {
+  test(`profile games filter journey (${journey.lang} ${journey.width}px)`, async ({ page }) => {
+    let gamesRequests = 0;
+    await page.setViewportSize({ width: journey.width, height: journey.height });
+    await page.addInitScript((loc) => localStorage.setItem('rookzen_locale_v1', loc), journey.lang);
+
+    await page.route('**/v1/users/alice**', async (route) => {
+      const { pathname } = new URL(route.request().url());
+      if (pathname === '/v1/users/alice/games') {
+        gamesRequests++;
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(aliceGames) });
+      } else if (pathname === '/v1/users/alice') {
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(aliceProfile) });
+      } else {
+        await route.fallback();
+      }
+    });
+
+    await page.goto('/profile/alice');
+    await expect(page.locator('html')).toHaveAttribute('lang', journey.lang);
+    await expect(page.locator('html')).toHaveAttribute('dir', journey.dir);
+
+    const filterHost = page.locator('#profile-games-filter');
+    const variantSelect = page.locator('#profile-games-variant');
+    const resetButton = page.locator('button.profile-games-filter-reset');
+    const filterStatus = page.locator('.profile-games-filter-status');
+    const filterAnnouncer = page.locator('.profile-games-filter-announcement');
+    const rows = page.locator('#profile-games a.game-row');
+
+    await expect(filterHost).toBeVisible();
+    await expect(variantSelect).toHaveValue('all');
+    await expect(resetButton).toBeVisible();
+    await expect(filterStatus).not.toHaveAttribute('aria-live', /polite|assertive/);
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 4 من 4' : 'Showing 4 of 4');
+    await expect(filterAnnouncer).toHaveClass(/\bsr-only\b/);
+    await expect(filterAnnouncer).toHaveAttribute('role', 'status');
+    await expect(filterAnnouncer).toHaveAttribute('aria-live', 'polite');
+    await expect(filterAnnouncer).toHaveText('');
+
+    await expect(rows).toHaveCount(4);
+    await expect(rows.nth(0)).toHaveAttribute('href', `/game/${encodeURIComponent(reservedGameId)}`);
+    await expect(rows.nth(1)).toHaveAttribute('href', '/game/g-std');
+    await expect(rows.nth(2)).toHaveAttribute('href', '/game/g-atomic');
+    await expect(rows.nth(3)).toHaveAttribute('href', '/game/g-c960');
+    expect(gamesRequests).toBe(1);
+
+    await variantSelect.focus();
+    await page.keyboard.press('Home');
+    for (let i = 0; i < 4; i++) await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await expect(variantSelect).toHaveValue('atomic');
+
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toHaveAttribute('href', '/game/g-atomic');
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 1 من 4' : 'Showing 1 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'الشطرنج الذري: عرض 1 من 4' : 'Atomic: Showing 1 of 4');
+    await expect(variantSelect).toBeFocused();
+    expect(gamesRequests).toBe(1);
+    expect(page.url()).toContain('/profile/alice');
+    expect(await page.evaluate(() => localStorage.getItem('rookzen_locale_v1'))).toBe(journey.lang);
+
+    await variantSelect.selectOption('chess960');
+    await expect(variantSelect).toHaveValue('chess960');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toHaveAttribute('href', '/game/g-c960');
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 1 من 4' : 'Showing 1 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'Chess960: عرض 1 من 4' : 'Chess960: Showing 1 of 4');
+    await expect(variantSelect).toBeFocused();
+    expect(gamesRequests).toBe(1);
+
+    await variantSelect.selectOption('horde');
+    await expect(variantSelect).toHaveValue('horde');
+    await expect(rows).toHaveCount(0);
+    await expect(page.locator('#profile-games a, #profile-games button')).toHaveCount(0);
+    await expect(page.locator('#profile-games')).toContainText(journey.lang === 'ar' ? 'لم يتم العثور على مباريات' : 'No games');
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 0 من 4' : 'Showing 0 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'الحشد: عرض 0 من 4' : 'Horde: Showing 0 of 4');
+    expect(gamesRequests).toBe(1);
+
+    await variantSelect.selectOption('racingkings');
+    await expect(variantSelect).toHaveValue('racingkings');
+    await expect(rows).toHaveCount(0);
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 0 من 4' : 'Showing 0 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'سباق الملوك: عرض 0 من 4' : 'Racing Kings: Showing 0 of 4');
+    expect(gamesRequests).toBe(1);
+
+    await resetButton.focus();
+    await resetButton.click();
+    await expect(variantSelect).toBeFocused();
+    await expect(variantSelect).toHaveValue('all');
+    await expect(rows).toHaveCount(4);
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 4 من 4' : 'Showing 4 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'جميع الأنواع: عرض 4 من 4' : 'All variants: Showing 4 of 4');
+    expect(gamesRequests).toBe(1);
+
+    await variantSelect.selectOption('all');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'جميع الأنواع: عرض 4 من 4' : 'All variants: Showing 4 of 4');
+    expect(gamesRequests).toBe(1);
+
+    if (journey.width === 320) {
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+      await variantSelect.focus();
+      await expect(variantSelect).toBeFocused();
+    }
+  });
+}
+
+test('profile games pending route, live locale switch and reload reset', async ({ page }) => {
+  let resolveGames: () => void = () => {};
+  const gamesGate = new Promise<void>((resolve) => { resolveGames = resolve; });
+
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.addInitScript(() => localStorage.setItem('rookzen_locale_v1', 'en'));
+
+  await page.route('**/v1/users/alice**', async (route) => {
+    const { pathname } = new URL(route.request().url());
+    if (pathname === '/v1/users/alice/games') {
+      await gamesGate;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(aliceGames) });
+    } else if (pathname === '/v1/users/alice') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(aliceProfile) });
+    } else {
+      await route.fallback();
+    }
+  });
+
+  await page.goto('/profile/alice');
+  const variantSelect = page.locator('#profile-games-variant');
+  const filterStatus = page.locator('.profile-games-filter-status');
+  const filterAnnouncer = page.locator('.profile-games-filter-announcement');
+  const rows = page.locator('#profile-games a.game-row');
+
+  await expect(filterStatus).not.toHaveText(/\b0\b/);
+  await expect(variantSelect).toBeVisible();
+  await variantSelect.selectOption('atomic');
+  await expect(filterAnnouncer).toHaveText('');
+
+  resolveGames();
+
+  await expect(variantSelect).toHaveValue('atomic');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute('href', '/game/g-atomic');
+  await expect(filterAnnouncer).toHaveText('');
+
+  await variantSelect.selectOption('chess960');
+  await expect(variantSelect).toHaveValue('chess960');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute('href', '/game/g-c960');
+  await expect(filterAnnouncer).toHaveText('Chess960: Showing 1 of 4');
+
+  await variantSelect.selectOption('atomic');
+  await expect(variantSelect).toHaveValue('atomic');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute('href', '/game/g-atomic');
+  await expect(filterAnnouncer).toHaveText('Atomic: Showing 1 of 4');
+
+  const selectHandle = await variantSelect.elementHandle();
+  const enOptions = variantSelect.locator('option');
+  await expect(enOptions).toHaveCount(9);
+  const enLabels = await enOptions.allInnerTexts();
+  expect(enLabels[0]).toMatch(/^(All|All variants)$/);
+  expect(enLabels.slice(1)).toEqual(['Standard', 'Chess960', 'King of the Hill', 'Atomic', 'Crazyhouse', 'Three-check', 'Horde', 'Racing Kings']);
+  for (let i = 0; i < canonicalVariants.length; i++) {
+    await expect(enOptions.nth(i + 1)).toHaveAttribute('value', canonicalVariants[i]!);
+  }
+
+  const localeSelect = page.locator('#locale-select');
+  await localeSelect.focus();
+  await localeSelect.selectOption('ar');
+  await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+  await expect(localeSelect).toBeFocused();
+  await expect(variantSelect).toHaveValue('atomic');
+  expect(await page.evaluate((el) => el === document.querySelector('#profile-games-variant'), selectHandle)).toBe(true);
+  await expect(filterAnnouncer).toHaveText('الشطرنج الذري: عرض 1 من 4');
+  await expect(filterStatus).toHaveText('عرض 1 من 4');
+
+  const arOptions = variantSelect.locator('option');
+  await expect(arOptions).toHaveCount(9);
+  const arLabels = await arOptions.allInnerTexts();
+  expect(arLabels[0]).toMatch(/^(الكل|جميع الأنواع)$/);
+  expect(arLabels.slice(1)).toEqual(['الشطرنج التقليدي', 'Chess960', 'ملك التل', 'الشطرنج الذري', 'كريزي هاوس', 'الكش الثلاثي', 'الحشد', 'سباق الملوك']);
+  for (let i = 0; i < canonicalVariants.length; i++) {
+    await expect(arOptions.nth(i + 1)).toHaveAttribute('value', canonicalVariants[i]!);
+  }
+
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+
+  await localeSelect.focus();
+  await localeSelect.selectOption('en');
+  await expect(localeSelect).toBeFocused();
+  await expect(variantSelect).toHaveValue('atomic');
+  await expect(filterAnnouncer).toHaveText('Atomic: Showing 1 of 4');
+  await expect(filterStatus).toHaveText('Showing 1 of 4');
+
+  await page.reload();
+  await expect(page.locator('#profile-games-variant')).toHaveValue('all');
+  await expect(page.locator('#profile-games a.game-row')).toHaveCount(4);
+  await expect(page.locator('.profile-games-filter-announcement')).toHaveText('');
+});
+
+type TestClipboardWindow = Window & {
+  __copied?: string[];
+  __rejectNext?: boolean;
+  __holdOldWrite?: boolean;
+  __resolveOldWrite?: (() => void) | null;
+};
+
+const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const E4_FEN = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1';
+const D4_FEN = 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1';
+
+const mockStudy = {
+  id: 's1',
+  ownerId: 'owner-1',
+  name: 'Openings',
+  description: 'test',
+  visibility: 'public',
+  variant: 'standard',
+  createdAt: '2026-08-14T00:00:00Z',
+  updatedAt: '2026-08-14T00:00:00Z',
+};
+
+const mockChapter = {
+  id: 'c1',
+  studyId: 's1',
+  name: 'Chapter',
+  orderIndex: 0,
+  startingFen: START_FEN,
+};
+
+const mockChapter2 = {
+  id: 'c2',
+  studyId: 's1',
+  name: 'Chapter 2',
+  orderIndex: 1,
+  startingFen: START_FEN,
+};
+
+const mockTree = [
+  { id: 'n1', chapterId: 'c1', parentId: null, san: 'e4', fenAfter: E4_FEN, nags: [], orderIndex: 0 },
+  { id: 'n2', chapterId: 'c1', parentId: null, san: 'd4', fenAfter: D4_FEN, nags: [], orderIndex: 1 },
+];
+
+async function attachClipboard(page: Page) {
+  await page.addInitScript(() => {
+    type Win = Window & {
+      __copied?: string[];
+      __rejectNext?: boolean;
+      __holdOldWrite?: boolean;
+      __resolveOldWrite?: (() => void) | null;
+    };
+    const win = window as Win;
+    win.__copied = [];
+    win.__rejectNext = false;
+    win.__holdOldWrite = false;
+    win.__resolveOldWrite = null;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: (text: string): Promise<void> => {
+          if (win.__rejectNext) {
+            win.__rejectNext = false;
+            return Promise.reject(new Error('Rejected'));
+          }
+          if (win.__holdOldWrite) {
+            win.__holdOldWrite = false;
+            return new Promise<void>((resolve) => {
+              win.__resolveOldWrite = () => {
+                win.__copied?.push(text);
+                resolve();
+              };
+            });
+          }
+          win.__copied?.push(text);
+          return Promise.resolve();
+        },
+      },
+    });
+  });
+}
+
+async function mockStudyRoutes(page: Page, opts?: { failChapter?: boolean; emptyTree?: boolean }) {
+  const chapterRequests: string[] = [];
+  await page.route('**/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/v1/capabilities') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ capabilities: { learning: true, community: false, messaging: false, studies: true, search: false } }) });
+      return;
+    }
+    if (path === '/v1/studies/s1/collaborators') {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [] }) });
+      return;
+    }
+    if (path === '/v1/studies/s1') {
+      chapterRequests.push(path);
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockStudy) });
+      return;
+    }
+    if (path === '/v1/studies/s1/chapters/c1') {
+      chapterRequests.push(path);
+      if (opts?.failChapter) {
+        await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Chapter load failed' }) });
+        return;
+      }
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ chapter: mockChapter, tree: opts?.emptyTree ? [] : mockTree }) });
+      return;
+    }
+    if (path === '/v1/studies/s1/chapters') {
+      chapterRequests.push(path);
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [mockChapter, mockChapter2] }) });
+      return;
+    }
+    if (path.includes('/auth/')) {
+      await route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify([]) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) });
+  });
+  return chapterRequests;
+}
+
+test('Study Copy FEN: Arabic 320px layout, keyboard focus, mainline and variation, and locale switch', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.addInitScript(() => localStorage.setItem('rookzen_locale_v1', 'ar'));
+  await attachClipboard(page);
+  const chapterRequests = await mockStudyRoutes(page);
+  await page.goto('/studies/s1/chapters/c1');
+  await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+  const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+  expect(scrollWidth).toBeLessThanOrEqual(320);
+  const copyBtn = page.locator('#study-position-copy');
+  const status = page.locator('#study-position-status');
+  await expect(copyBtn).toBeVisible();
+  const box = await copyBtn.boundingBox();
+  expect(box).not.toBeNull();
+  if (box) {
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(320);
+  }
+  await expect(copyBtn).toHaveText('نسخ FEN');
+  const getCopied = () => page.evaluate(() => (window as TestClipboardWindow).__copied ?? []);
+  await copyBtn.focus();
+  await expect(copyBtn).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(copyBtn).toBeFocused();
+  await expect(status).not.toBeEmpty();
+  await expect.poll(getCopied).toEqual([START_FEN]);
+  await page.locator('.notation-move[data-node-id="n1"]').click();
+  await copyBtn.click();
+  await expect.poll(getCopied).toEqual([START_FEN, E4_FEN]);
+  await page.locator('.notation-move[data-node-id="n2"]').click();
+  await copyBtn.click();
+  await expect.poll(getCopied).toEqual([START_FEN, E4_FEN, D4_FEN]);
+  await copyBtn.focus();
+  await expect(copyBtn).toBeFocused();
+  await page.evaluate(() => {
+    const select = document.querySelector<HTMLSelectElement>('#locale-select');
+    if (select) {
+      select.value = 'en';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+  await expect(copyBtn).toBeFocused();
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+  await expect(copyBtn).toHaveText('Copy FEN');
+  await copyBtn.click();
+  await expect(status).toHaveText('FEN copied.');
+  await expect.poll(getCopied).toEqual([START_FEN, E4_FEN, D4_FEN, D4_FEN]);
+  await page.locator('#chapter-tree .notation-start-btn').click();
+  await copyBtn.click();
+  await expect.poll(getCopied).toEqual([START_FEN, E4_FEN, D4_FEN, D4_FEN, START_FEN]);
+  expect(chapterRequests).toEqual(expect.arrayContaining(['/v1/studies/s1', '/v1/studies/s1/chapters/c1', '/v1/studies/s1/chapters']));
+  expect(chapterRequests.length).toBe(3);
+  expect(new URL(page.url()).pathname).toBe('/studies/s1/chapters/c1');
+});
+
+test('Study Copy FEN: single-flight retry and SPA route leave late completion feedback suppression', async ({ page }) => {
+  await attachClipboard(page);
+  await mockStudyRoutes(page);
+  await page.goto('/studies/s1/chapters/c1');
+  const copyBtn = page.locator('#study-position-copy');
+  const status = page.locator('#study-position-status');
+  const errorAlert = page.locator('#study-position-error');
+  await expect(copyBtn).toBeVisible();
+  await page.evaluate(() => {
+    (window as TestClipboardWindow).__rejectNext = true;
+  });
+  await copyBtn.click();
+  await expect(errorAlert).toBeVisible();
+  await expect(errorAlert).toHaveText('Could not copy FEN. Try again.');
+  await copyBtn.click();
+  await expect(status).toHaveText('FEN copied.');
+  await expect(errorAlert).toBeHidden();
+  await page.evaluate(() => {
+    (window as TestClipboardWindow).__holdOldWrite = true;
+  });
+  await copyBtn.click();
+  await expect(copyBtn).toHaveAttribute('aria-disabled', 'true');
+  await expect(copyBtn).toBeFocused();
+  await page.locator('#chapter-study-link').click();
+  await expect(page.locator('#study-chapters')).toBeVisible();
+  await page.locator('#study-chapters a').first().click();
+  await expect(copyBtn).toBeVisible();
+  await copyBtn.click();
+  await expect(status).toHaveText('FEN copied.');
+  await page.evaluate(() => {
+    (window as TestClipboardWindow).__resolveOldWrite?.();
+  });
+  await expect(status).toHaveText('FEN copied.');
+  await expect(errorAlert).toBeHidden();
+});
+
+test('Study Copy FEN: empty tree starting FEN exact, and failed chapter load hides controls', async ({ page }) => {
+  await attachClipboard(page);
+  await mockStudyRoutes(page, { emptyTree: true });
+  await page.goto('/studies/s1/chapters/c1');
+  const copyBtn = page.locator('#study-position-copy');
+  const status = page.locator('#study-position-status');
+  await expect(copyBtn).toBeVisible();
+  await expect(page.locator('#chapter-tree')).toBeVisible();
+  await copyBtn.click();
+  await expect(status).toHaveText('FEN copied.');
+  const copied = await page.evaluate(() => (window as TestClipboardWindow).__copied ?? []);
+  expect(copied).toContain(START_FEN);
+
+  await mockStudyRoutes(page);
+  await page.goto('/studies/s1/chapters/c1');
+  await expect(copyBtn).toBeVisible();
+  await expect(page.locator('#chapter-board')).toBeVisible();
+  await expect(page.locator('#chapter-name')).toBeVisible();
+  await expect(page.locator('#chapter-export-link')).toBeVisible();
+  await expect(page.locator('#chapter-study-link')).toBeVisible();
+  await expect(page.locator('#chapter-list-nav')).toBeVisible();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(2);
+
+  const oldMoveHandle = await page.evaluateHandle(() => document.querySelector<HTMLElement>('.notation-move[data-node-id="n1"]'));
+
+  let unblockC2!: () => void;
+  const c2Gate = new Promise<void>((resolve) => {
+    unblockC2 = resolve;
+  });
+  await page.route('**/v1/studies/s1/chapters/c2', async (route) => {
+    await c2Gate;
+    await route.fulfill({
+      status: 403,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'FORBIDDEN', message: 'Denied' } }),
+    });
+  });
+
+  await page.locator('#chapter-list-nav a').first().click();
+
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+  await expect(page.locator('#chapter-name')).toBeHidden();
+  await expect(page.locator('#chapter-export-link')).toBeHidden();
+  await expect(page.locator('#chapter-study-link')).toBeHidden();
+  await expect(page.locator('#chapter-list-nav')).toBeHidden();
+
+  await page.evaluate((el: HTMLElement | null) => el?.click(), oldMoveHandle);
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+
+  unblockC2();
+  await expect(page.locator('#study-chapter-error')).not.toBeEmpty();
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+  await expect(page.locator('#chapter-name')).toBeHidden();
+  await expect(page.locator('#chapter-export-link')).toBeHidden();
+  await expect(page.locator('#chapter-study-link')).toBeHidden();
+  await expect(page.locator('#chapter-list-nav')).toBeHidden();
+
+  await page.evaluate((el: HTMLElement | null) => el?.click(), oldMoveHandle);
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+
+  await page.evaluate(() => {
+    const select = document.querySelector<HTMLSelectElement>('#locale-select');
+    if (select) {
+      select.value = 'ar';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+  await expect(page.locator('#chapter-name')).toBeHidden();
+  await expect(page.locator('#chapter-export-link')).toBeHidden();
+  await expect(page.locator('#chapter-study-link')).toBeHidden();
+  await expect(page.locator('#chapter-list-nav')).toBeHidden();
+
+  await page.evaluate((el: HTMLElement | null) => el?.click(), oldMoveHandle);
+  await expect(copyBtn).toBeHidden();
+  await expect(page.locator('#chapter-board')).toBeHidden();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(0);
+
+  await oldMoveHandle.dispose();
+
+  await page.evaluate(() => {
+    const select = document.querySelector<HTMLSelectElement>('#locale-select');
+    if (select) {
+      select.value = 'en';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  });
+
+  await page.goto('/studies/s1/chapters/c1');
+  await expect(copyBtn).toBeVisible();
+  await expect(page.locator('#chapter-board')).toBeVisible();
+  await expect(page.locator('#chapter-name')).toBeVisible();
+  await expect(page.locator('#chapter-export-link')).toBeVisible();
+  await expect(page.locator('#chapter-study-link')).toBeVisible();
+  await expect(page.locator('#chapter-list-nav')).toBeVisible();
+  await expect(page.locator('#chapter-tree .notation-move')).toHaveCount(2);
+
+  await copyBtn.click();
+  await expect(status).toHaveText('FEN copied.');
+  const recoveredCopied = await page.evaluate(() => (window as TestClipboardWindow).__copied ?? []);
+  expect(recoveredCopied[recoveredCopied.length - 1]).toBe(START_FEN);
+
+  await page.locator('.notation-move[data-node-id="n1"]').click();
+  await copyBtn.click();
+  const movedCopied = await page.evaluate(() => (window as TestClipboardWindow).__copied ?? []);
+  expect(movedCopied[movedCopied.length - 1]).toBe(E4_FEN);
 });

@@ -169,6 +169,7 @@ export const GAME_ELEMENT_IDS = [
   'game-review-error',
   'game-review-summary',
   'game-review-moves',
+  'game-review-return-final',
   'analysis',
   'analysis-heading',
   'analysis-run',
@@ -221,6 +222,9 @@ export function createGameDocument(): {
   const elements = new Map<string, FakeElement>();
   for (const id of GAME_ELEMENT_IDS) {
     const el = new FakeElement(id);
+    if (id === 'game-review-return-final') {
+      el.textContent = 'Return to final position';
+    }
     if (
       id === 'game-actions' ||
       id === 'action-error' ||
@@ -232,6 +236,7 @@ export function createGameDocument(): {
       id === 'game-review' ||
       id === 'game-review-error' ||
       id === 'game-review-summary' ||
+      id === 'game-review-return-final' ||
       id === 'analysis' ||
       id === 'analysis-error' ||
       id === 'analysis-reached' ||

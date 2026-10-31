@@ -118,7 +118,7 @@ export class GameReviewController {
   }
 
   /** Advance the generation, abort work, and synchronously clear private presentation state. */
-  private invalidate(): void {
+  invalidate(): void {
     this.generation += 1;
     this.inFlight?.abort();
     this.inFlight = null;
