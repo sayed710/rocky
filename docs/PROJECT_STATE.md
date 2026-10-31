@@ -6,7 +6,8 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-10-31 — Sequential integration of PR #135; verification evidence tracked in the pull request._
+_Last updated: 2026-10-31 — Lobby filter variant-qualified announcements verified locally (web 1707 pass); full root gates and CI receipts tracked in PR._
+Prior: _Last updated: 2026-10-31 — Sequential integration of PR #135; verification evidence tracked in the pull request._
 Prior: _Last updated: 2026-10-28 — Lobby filter announcement policy locally verified: mounted 85/85 pass, Chromium 10/10 pass; verified local checkpoint, publication and provider evidence tracked in PR record._
 Prior: _Last updated: 2026-10-27 — Lobby opponent variant filter locally verified: 13 core checks pass, scripts suite 614, web 1692/root 19 workspaces exit 0, Chromium 10/10 pass; verified local checkpoint, publication and provider evidence tracked separately._
 Prior: _Last updated: 2026-10-28 — Loaded tournament state filter: local selection over cached tournaments; final verification and exact-head receipts recorded in PR._
@@ -5886,3 +5887,9 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Architectural boundaries & zero-footprint retention**: Preserves existing cached projection, own-offer retention, keyboard focus, option node identity, and lifecycle teardown. Zero changes to backend services, dependencies, provider bindings, hooks, or storage/history. Introduces no additional network I/O or timers. PR #134 remains separate and unchanged; no merge or deployment claimed.
 - **Verification & test progression**: Progressed from correction RED (83 PASS, 1 FAIL for missing announcer in `packages/web/test/lobby-mount.test.ts`) to 85/85 PASS with zero skips (adding focused test 6b for announcement policy). Offline Chromium suite passed 10/10 with zero retries/skips in `packages/web/e2e/seek-creator-rating.spec.ts` (with renewed affected browser tests passing 2/2 across EN/AR validating visible count, reset, and zero mutations on background polling), providing DOM MutationObserver evidence only while real assistive technology and Safari remain unverified.
 - **Review governance & provider status**: Initial PR #135 head passed remote CI (`40579634966`) with Qodo reporting 1 Bug, 0 Rules, and Graphite holding execution-only scope (0 comments, not a waiver). Corrective announcement changes are locally verified; final provider binding and acceptance are tracked in the PR decision record.
+
+## Milestone: Lobby Filter Variant-Qualified Announcements (2026-10-31)
+
+- **Announcement contract & historical correction**: Resolved Qodo P2 finding where generic count deduplication suppressed differing filter choices with identical counts. Announcements now format as localized variant/All + ": " + result with message deduplication, retaining visible status and disposal/focus lifecycle. This supersedes previous qualification requiring true empty transitions between identical generic counts; differing valid choices now explicitly qualify variants without empty reset.
+- **Test execution & browser verification**: Root tests verified RED/GREEN cycle from 1705 PASS / 2 FAIL / 0 skips (prefix mismatch) to 1707 PASS / 0 FAIL / 0 skips. Offline Chromium browser test assertions covering literal EN/AR announcement text, DOM mutation count, and history/storage controls are authored and statically reviewed; browser execution receipts tracked in PR.
+- **Governance & review parity**: Native and Pi repair reviews reported 0 P1/P2 findings; screen reader speech output unverified. Renewed root workspace checks, CI parity, and final head Qodo receipts tracked in pull request; zero backend, controller, timer, storage, or dependency changes.

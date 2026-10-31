@@ -186,13 +186,43 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
     expect(await snapshot()).toEqual(snap1);
 
     await expect.poll(getAnnouncerMutations).toBeGreaterThan(0);
+    const snapMutAtomic = await getAnnouncerMutations();
     const expectedAtomicCount = locale === 'ar'
       ? 'عرض 1 من أصل 3 من عروض الخصوم المحملة'
       : 'Showing 1 of 3 loaded opponent offers';
+    const expectedAtomicAnnounce = locale === 'ar'
+      ? `الشطرنج الذري: ${expectedAtomicCount}`
+      : `Atomic: ${expectedAtomicCount}`;
     await expect(status).toHaveText(expectedAtomicCount);
-    await expect(announcer).toHaveText(expectedAtomicCount);
-    await expect(announcer).toHaveText((await status.textContent()) ?? '');
+    await expect(announcer).toHaveText(expectedAtomicAnnounce);
+
+    const snapStd = await snapshot();
+    await filterSelect.selectOption('standard');
+    await expect(filterSelect).toHaveValue('standard');
+    expect(await snapshot()).toEqual(snapStd);
+
+    await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMutAtomic);
+    const snapMutStd = await getAnnouncerMutations();
+    const expectedStdCount = locale === 'ar'
+      ? 'عرض 1 من أصل 3 من عروض الخصوم المحملة'
+      : 'Showing 1 of 3 loaded opponent offers';
+    const expectedStdAnnounce = locale === 'ar'
+      ? `الشطرنج التقليدي: ${expectedStdCount}`
+      : `Standard: ${expectedStdCount}`;
+    await expect(status).toHaveText(expectedStdCount);
+    await expect(announcer).toHaveText(expectedStdAnnounce);
+    await expect(page.locator('.seek-row')).toHaveCount(1);
+    await expect(page.locator('.seek-row[data-seek-id="seek-std"]')).toBeVisible();
+
+    const snapBackAtomic = await snapshot();
+    await filterSelect.selectOption('atomic');
+    await expect(filterSelect).toHaveValue('atomic');
+    expect(await snapshot()).toEqual(snapBackAtomic);
+
+    await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMutStd);
     const snapMut1 = await getAnnouncerMutations();
+    await expect(status).toHaveText(expectedAtomicCount);
+    await expect(announcer).toHaveText(expectedAtomicAnnounce);
 
     await expect(page.locator('.seek-row')).toHaveCount(1);
     await expect(page.locator('.seek-row[data-seek-id="seek-atomic"]')).toBeVisible();
@@ -213,7 +243,7 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
       ? 'عرض 2 من أصل 3 من عروض الخصوم المحملة'
       : 'Showing 2 of 3 loaded opponent offers';
     await expect(status).toHaveText(expectedCount2of3);
-    await expect(announcer).toHaveText(expectedAtomicCount);
+    await expect(announcer).toHaveText(expectedAtomicAnnounce);
     expect(await getAnnouncerMutations()).toBe(snapMut1);
 
     const snap2 = await snapshot();
@@ -224,12 +254,31 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
     const expectedEmpty = locale === 'ar'
       ? 'لا توجد تحديات خصوم محملة تطابق النوع المحدد.'
       : 'No loaded opponent challenges match the selected variant.';
+    const expectedHordeAnnounce = locale === 'ar'
+      ? `الحشد: ${expectedEmpty}`
+      : `Horde: ${expectedEmpty}`;
     await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMut1);
     const snapMut2 = await getAnnouncerMutations();
     await expect(page.locator('.seek-row')).toHaveCount(0);
     await expect(status).toHaveText(expectedEmpty);
     await expect(status).toBeVisible();
-    await expect(announcer).toHaveText(expectedEmpty);
+    await expect(announcer).toHaveText(expectedHordeAnnounce);
+    await expect(seekList.locator('.seek-filter-reset')).toHaveCount(0);
+
+    const snapRk = await snapshot();
+    await filterSelect.selectOption('racingkings');
+    await expect(filterSelect).toHaveValue('racingkings');
+    expect(await snapshot()).toEqual(snapRk);
+
+    await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMut2);
+    const snapMutRk = await getAnnouncerMutations();
+    const expectedRkAnnounce = locale === 'ar'
+      ? `سباق الملوك: ${expectedEmpty}`
+      : `Racing Kings: ${expectedEmpty}`;
+    await expect(page.locator('.seek-row')).toHaveCount(0);
+    await expect(status).toHaveText(expectedEmpty);
+    await expect(status).toBeVisible();
+    await expect(announcer).toHaveText(expectedRkAnnounce);
     await expect(seekList.locator('.seek-filter-reset')).toHaveCount(0);
 
     const resetBtn = page.locator('#seek-filter .seek-filter-reset');
@@ -238,13 +287,16 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
     const snap3 = await snapshot();
     await resetBtn.click();
     expect(await snapshot()).toEqual(snap3);
-    await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMut2);
+    await expect.poll(getAnnouncerMutations).toBeGreaterThan(snapMutRk);
     const snapMut3 = await getAnnouncerMutations();
     const expectedAllCount3 = locale === 'ar'
       ? 'عرض 3 من عروض الخصوم المحملة'
       : 'Showing 3 loaded opponent offers';
+    const expectedAllAnnounce3 = locale === 'ar'
+      ? `جميع الأنواع: ${expectedAllCount3}`
+      : `All variants: ${expectedAllCount3}`;
     await expect(status).toHaveText(expectedAllCount3);
-    await expect(announcer).toHaveText(expectedAllCount3);
+    await expect(announcer).toHaveText(expectedAllAnnounce3);
 
     await expect(filterSelect).toHaveValue('all');
     await expect(filterSelect).toBeFocused();
@@ -267,7 +319,7 @@ for (const { locale, width } of [{ locale: 'en', width: 768 }, { locale: 'ar', w
       ? 'عرض 4 من عروض الخصوم المحملة'
       : 'Showing 4 loaded opponent offers';
     await expect(status).toHaveText(expectedAllCount4);
-    await expect(announcer).toHaveText(expectedAllCount3);
+    await expect(announcer).toHaveText(expectedAllAnnounce3);
     expect(await getAnnouncerMutations()).toBe(snapMut3);
 
     seeks = [];
@@ -311,6 +363,8 @@ test('lobby variant filter survives live EN->AR->EN locale switching', async ({ 
 
   const filterSelect = page.locator('#lobby-variant-filter');
   const localeSelect = page.locator('select#locale-select');
+  const status = page.locator('#seek-filter .seek-filter-status');
+  const announcer = page.locator('#seek-filter .seek-filter-announcement');
   await expect(filterSelect).toBeVisible();
   await expect(localeSelect).toBeVisible();
 
@@ -320,6 +374,8 @@ test('lobby variant filter survives live EN->AR->EN locale switching', async ({ 
   await page.keyboard.press('Enter');
   await expect(filterSelect).toHaveValue('atomic');
   expect(await page.evaluate(() => localStorage.getItem('rookzen_locale_v1'))).toBe('en');
+  await expect(status).toHaveText('Showing 1 of 2 loaded opponent offers');
+  await expect(announcer).toHaveText('Atomic: Showing 1 of 2 loaded opponent offers');
 
   const filterHandle = await filterSelect.elementHandle();
   const optionHandles = await filterSelect.locator('option').elementHandles();
@@ -342,6 +398,8 @@ test('lobby variant filter survives live EN->AR->EN locale switching', async ({ 
   await expect(filterSelect).toHaveValue('atomic');
   await expect(page.locator('.seek-row')).toHaveCount(1);
   await expect(page.locator('.seek-row[data-seek-id="seek-atomic"]')).toBeVisible();
+  await expect(status).toHaveText('عرض 1 من أصل 2 من عروض الخصوم المحملة');
+  await expect(announcer).toHaveText('الشطرنج الذري: عرض 1 من أصل 2 من عروض الخصوم المحملة');
   const arOptions = await filterSelect.locator('option').allTextContents();
   expect(arOptions).toEqual([
     'جميع الأنواع', 'الشطرنج التقليدي', 'Chess960', 'ملك التل', 'الشطرنج الذري',
@@ -360,6 +418,8 @@ test('lobby variant filter survives live EN->AR->EN locale switching', async ({ 
   await expect(filterSelect).toHaveValue('atomic');
   await expect(page.locator('.seek-row')).toHaveCount(1);
   await expect(page.locator('.seek-row[data-seek-id="seek-atomic"]')).toBeVisible();
+  await expect(status).toHaveText('Showing 1 of 2 loaded opponent offers');
+  await expect(announcer).toHaveText('Atomic: Showing 1 of 2 loaded opponent offers');
   expect(await filterSelect.locator('option').allTextContents()).toEqual(enOptions);
   await expect(filterSelect).toHaveAccessibleName('Filter by variant');
 });

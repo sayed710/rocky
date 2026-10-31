@@ -968,7 +968,7 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   select.dispatchEvent(new Event('change'));
   assert.equal(
     announcerEl.textContent,
-    testI18n.t('lobby.filterStatus', { shown: '2', total: '3' }),
+    `${getVariantLabel('atomic', testI18n)}: ${testI18n.t('lobby.filterStatus', { shown: '2', total: '3' })}`,
     'explicit filter selection provides announcer feedback',
   );
 
@@ -984,7 +984,7 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   assert.equal((doc as unknown as { activeElement: FakeDOMElement | null }).activeElement, select, 'selector focus preserved');
   assert.equal(
     announcerEl.textContent,
-    i18n.t('lobby.filterStatus', { shown: '2', total: '3' }),
+    `${getVariantLabel('atomic', i18n)}: ${i18n.t('lobby.filterStatus', { shown: '2', total: '3' })}`,
     'announcer relocalized on Arabic locale change',
   );
 
@@ -994,7 +994,7 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   assert.equal(select.value, 'atomic');
   assert.equal(
     announcerEl.textContent,
-    testI18n.t('lobby.filterStatus', { shown: '2', total: '3' }),
+    `${getVariantLabel('atomic', testI18n)}: ${testI18n.t('lobby.filterStatus', { shown: '2', total: '3' })}`,
     'announcer relocalized on English locale change',
   );
 
@@ -1078,7 +1078,7 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   assert.equal(announcerWrites, 1, 'explicit reset writes announcer');
   assert.equal(
     announcerEl.textContent,
-    testI18n.t('lobby.filterStatusAll', { total: '1' }),
+    `${testI18n.t('lobby.filterAll')}: ${testI18n.t('lobby.filterStatusAll', { total: '1' })}`,
     'reset announces total opponents count',
   );
 
@@ -1122,7 +1122,7 @@ test('lobby variant filter (6): option node identity and label relocalization, r
   assert.equal(announcerWrites, 2, 'explicit choice can re-announce identical message after empty transition');
   assert.equal(
     announcerEl.textContent,
-    testI18n.t('lobby.filterStatusAll', { total: '1' }),
+    `${testI18n.t('lobby.filterAll')}: ${testI18n.t('lobby.filterStatusAll', { total: '1' })}`,
   );
 
   // Node identity and disposal
@@ -1202,6 +1202,162 @@ test('lobby variant filter (6b): deferred initial load with pre-load choices, de
   const resetBtn = filterHost.querySelector<FakeDOMElement>('.seek-filter-reset')!;
   resetBtn.click();
   assert.equal(announcerWrites, 1, 'reset when already all is no-op');
+
+  mounted.lobby.dispose();
+});
+
+test('lobby variant filter (6c): distinct user selections announce informative message even with equal status or empty result', async () => {
+  const { doc, elements } = createTestDoc();
+  const i18n = createI18nManager();
+  const seek1 = makeSeek({ id: 's-1', creatorId: 'opp-1', variant: 'atomic' });
+  const seek2 = makeSeek({ id: 's-2', creatorId: 'opp-2', variant: 'standard' });
+
+  const fake = makeFakeClient({ seeks: [seek1, seek2] });
+  const mounted = mountTestLobby({ doc, client: fake.client, isAuthenticated: () => false, i18n });
+  mounted.lobby.stop();
+  const seekList = elements.get('seek-list')!;
+  await waitForCondition(() => seekList.children.length === 2, 'seeks rendered');
+
+  const filterHost = elements.get('seek-filter')!;
+  const select = filterHost.querySelector<FakeDOMElement>('#lobby-variant-filter')!;
+  const resetBtn = filterHost.querySelector<FakeDOMElement>('.seek-filter-reset')!;
+  const statusEl = filterHost.querySelector<FakeDOMElement>('.seek-filter-status')!;
+  const announcer = filterHost.querySelector<FakeDOMElement>('.seek-filter-announcement')!;
+  assert.ok(announcer);
+  assert.equal(announcer.textContent, '', 'announcer starts silent on initial load');
+
+  let announcerWrites = 0;
+  let currentText = announcer.textContent;
+  Object.defineProperty(announcer, 'textContent', {
+    get: () => currentText,
+    set: (v: string) => {
+      announcerWrites++;
+      currentText = v;
+    },
+    configurable: true,
+  });
+
+  const snapshot = () => ({
+    listCalls: fake.getListCalls(),
+    graphqlCalls: fake.getGraphqlCalls(),
+    created: [...fake.createdSeeks],
+    canceled: [...fake.canceledSeeks],
+    accepted: [...fake.acceptedSeeks],
+    botCalls: [...fake.botGameCalls],
+    session: fake.client.session.current,
+  });
+  const baseline = snapshot();
+
+  // 1. DIFFERENT absent variants: horde -> racingkings (both produce same empty result, but distinct informative announcements)
+  select.value = 'horde';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 1, 'first absent variant selection writes announcement');
+  const expectedHordeAnnounce = `${getVariantLabel('horde', i18n)}: ${i18n.t('lobby.filterEmpty')}`;
+  assert.equal(announcer.textContent, expectedHordeAnnounce);
+  assert.ok(announcer.textContent.includes(getVariantLabel('horde', i18n)));
+  assert.ok(announcer.textContent.includes(i18n.t('lobby.filterEmpty')));
+  assert.equal(statusEl.textContent, i18n.t('lobby.filterEmpty'), 'visible status remains generic empty message');
+  assert.deepEqual(snapshot(), baseline, 'filter change produces zero I/O');
+
+  select.value = 'racingkings';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 2, 'different absent variant selection with same empty result writes second announcement');
+  const expectedRacingKingsAnnounce = `${getVariantLabel('racingkings', i18n)}: ${i18n.t('lobby.filterEmpty')}`;
+  assert.equal(announcer.textContent, expectedRacingKingsAnnounce);
+  assert.ok(announcer.textContent.includes(getVariantLabel('racingkings', i18n)));
+  assert.ok(announcer.textContent.includes(i18n.t('lobby.filterEmpty')));
+  assert.equal(statusEl.textContent, i18n.t('lobby.filterEmpty'), 'visible status text unchanged');
+  assert.deepEqual(snapshot(), baseline, 'filter change produces zero I/O');
+
+  // 2. DIFFERENT matching variants: atomic -> standard (both produce equal counts 1 of 2, but distinct informative announcements)
+  select.value = 'atomic';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 3, 'selecting atomic writes third announcement');
+  const expectedStatus1of2 = i18n.t('lobby.filterStatus', { shown: '1', total: '2' });
+  const expectedAtomicAnnounce = `${getVariantLabel('atomic', i18n)}: ${expectedStatus1of2}`;
+  assert.equal(announcer.textContent, expectedAtomicAnnounce);
+  assert.ok(announcer.textContent.includes(getVariantLabel('atomic', i18n)));
+  assert.ok(announcer.textContent.includes(expectedStatus1of2));
+  assert.equal(statusEl.textContent, expectedStatus1of2, 'visible status text has equal generic count');
+  assert.deepEqual(snapshot(), baseline, 'filter change produces zero I/O');
+
+  select.value = 'standard';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 4, 'selecting standard with equal count writes fourth announcement');
+  const expectedStandardAnnounce = `${getVariantLabel('standard', i18n)}: ${expectedStatus1of2}`;
+  assert.equal(announcer.textContent, expectedStandardAnnounce);
+  assert.ok(announcer.textContent.includes(getVariantLabel('standard', i18n)));
+  assert.ok(announcer.textContent.includes(expectedStatus1of2));
+  assert.equal(statusEl.textContent, expectedStatus1of2, 'visible status text has equal generic count');
+  assert.deepEqual(snapshot(), baseline, 'filter change produces zero I/O');
+
+  // 3. Switch to All and Reset: announce total loaded count
+  select.value = 'all';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 5, 'switching to all announces all status');
+  const expectedAllStatus = i18n.t('lobby.filterStatusAll', { total: '2' });
+  const expectedAllAnnounce = `${i18n.t('lobby.filterAll')}: ${expectedAllStatus}`;
+  assert.equal(announcer.textContent, expectedAllAnnounce);
+  assert.equal(statusEl.textContent, expectedAllStatus);
+
+  select.value = 'standard';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 6, 'switching back to standard announces standard status');
+
+  resetBtn.click();
+  assert.equal(announcerWrites, 7, 'reset button announces all status');
+  assert.equal(announcer.textContent, expectedAllAnnounce);
+  assert.equal(statusEl.textContent, expectedAllStatus);
+
+  // 4. Relocalization EN -> AR -> EN with localized labels
+  select.value = 'standard';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 8);
+
+  i18n.setLocale('ar');
+  assert.equal(announcerWrites, 9, 'locale change to ar rewrites announcement with localized Arabic name');
+  const arVariantLabel = getVariantLabel('standard', i18n);
+  const arStatus = i18n.t('lobby.filterStatus', { shown: '1', total: '2' });
+  assert.equal(announcer.textContent, `${arVariantLabel}: ${arStatus}`);
+  assert.ok(announcer.textContent.includes(arVariantLabel));
+  assert.ok(announcer.textContent.includes(arStatus));
+
+  i18n.setLocale('en');
+  assert.equal(announcerWrites, 10, 'locale change back to en rewrites announcement with English name');
+  assert.equal(announcer.textContent, expectedStandardAnnounce);
+  assert.ok(announcer.textContent.includes(getVariantLabel('standard', i18n)));
+
+  // 5. Noops: same-value selection and invalid selection remain silent
+  select.value = 'standard';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(announcerWrites, 10, 'same-value selection must be silent');
+
+  select.value = 'invalid-variant';
+  select.dispatchEvent(new Event('change'));
+  assert.equal(select.value, 'standard', 'invalid selection restored');
+  assert.equal(announcerWrites, 10, 'invalid selection must not write announcer');
+
+  // 6. Background poll with same or changed seeks stays silent
+  await mounted.lobby.refresh();
+  assert.equal(announcerWrites, 10, 'background poll must not write announcer');
+
+  const seek3 = makeSeek({ id: 's-3', creatorId: 'opp-3', variant: 'standard' });
+  (fake.client.seeks as unknown as { list: () => Promise<SeekView[]> }).list = async () => [seek1, seek2, seek3];
+  await mounted.lobby.refresh();
+  await waitForCondition(() => seekList.querySelectorAll('.seek-row').length === 2, '2 standard seeks rendered');
+  assert.equal(announcerWrites, 10, 'background poll count change must be silent on announcer');
+
+  // 7. Zero action window I/O across all filter operations
+  assert.deepEqual(
+    {
+      created: fake.createdSeeks.length,
+      canceled: fake.canceledSeeks.length,
+      accepted: fake.acceptedSeeks.length,
+      botCalls: fake.botGameCalls.length,
+    },
+    { created: 0, canceled: 0, accepted: 0, botCalls: 0 },
+    'zero action window I/O during filter and announcements',
+  );
 
   mounted.lobby.dispose();
 });

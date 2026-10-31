@@ -374,9 +374,13 @@ export function mountLobby(deps: LobbyMountDependencies): MountedLobby {
     if (!routeActive || !hasReceivedSeeks || !filterAnnouncerEl || renderedSeeks.length === 0) {
       return;
     }
-    if (lastStatusText !== lastAnnouncedText) {
-      filterAnnouncerEl.textContent = lastStatusText;
-      lastAnnouncedText = lastStatusText;
+    const label = selectedVariant === 'all'
+      ? i18n.t('lobby.filterAll')
+      : getVariantLabel(selectedVariant, i18n);
+    const message = `${label}: ${lastStatusText}`;
+    if (message !== lastAnnouncedText) {
+      filterAnnouncerEl.textContent = message;
+      lastAnnouncedText = message;
     }
   }
 
