@@ -89,6 +89,7 @@ interface SetupOptions {
   readonly gameDocument?: ReturnType<typeof createGameDocument>;
   readonly gameId?: string;
   readonly fen?: string;
+  readonly onRefresh?: (request: HttpRequest) => HttpResponse | Promise<HttpResponse>;
 }
 
 /** Mount a controllable finished-game route with a deferred private review response. */
@@ -101,6 +102,7 @@ function setup(options: SetupOptions = {}) {
     gameDocument,
     gameId = 'g-test-1',
     fen = FEN,
+    onRefresh,
   } = options;
   const pendingReviews: PendingReview[] = [];
   const pendingAnalysis: PendingReview[] = [];
@@ -121,7 +123,9 @@ function setup(options: SetupOptions = {}) {
     if (request.url.endsWith('/v1/analysis/puzzle')) {
       return new Promise<HttpResponse>((resolve) => pendingPuzzles.push({ request, resolve }));
     }
-    if (request.url.endsWith('/v1/auth/refresh')) return json(200, app.api.session.current);
+    if (request.url.endsWith('/v1/auth/refresh')) {
+      return onRefresh ? onRefresh(request) : json(200, app.api.session.current);
+    }
     return json(404, {});
   });
   const sockets = new FakeSocketFactory();
@@ -1110,7 +1114,7 @@ test('RET-06: Sign-out via session reset and onSessionChange(null) clears select
   }
 });
 
-for (const rejectCode of ['unknown_game', 'unauthorized'] as const) {
+for (const rejectCode of ['unknown_game'] as const) {
   test(`RET-06 regression: Conclusive reconnect join rejection (${rejectCode}) restores retained state and fences review ownership`, async () => {
     const afterE5Fen = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
     const retainedMoves = [
@@ -1244,6 +1248,165 @@ for (const rejectCode of ['unknown_game', 'unauthorized'] as const) {
     }
   });
 }
+
+test('RET-06 regression: Recoverable reconnect join rejection (unauthorized) preserves review presentation and allows session refresh rejoin', async () => {
+  const afterE5Fen = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
+  const retainedMoves = [
+    { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' as const },
+    { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' as const },
+  ];
+  let refreshed = false;
+  const g = setup({
+    fen: afterE5Fen,
+    onRefresh: () => {
+      refreshed = true;
+      return json(200, {
+        user: { id: 'user-1', handle: 'alice', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
+        tokens: { accessToken: 'new-token', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+      });
+    },
+  });
+  try {
+    g.socket.emit({
+      t: 'state',
+      gameId: 'g-test-1',
+      state: makeFinishedState(afterE5Fen, 2, 'w', retainedMoves),
+    });
+    await settle();
+
+    await loadSelectableReview(g);
+    const reviewContainer = g.elements.get('game-review')!;
+    const movesEl = g.elements.get('game-review-moves')!;
+    const returnBtn = g.elements.get('game-review-return-final')!;
+    const statusEl = g.elements.get('status')!;
+    const actionErrorEl = g.elements.get('action-error')!;
+    const reconnectBtn = g.elements.get('game-reconnect')!;
+
+    assert.equal(movesEl.childElementCount, 2, '2-row review loaded');
+    movesEl.children[0]!.click();
+    assert.equal(returnBtn.hidden, false);
+    const selectedBoardHtml = g.elements.get('board')!.innerHTML;
+    const selectedStatusText = statusEl.textContent;
+
+    // Optional completed analysis result for selected review FEN
+    g.elements.get('analysis-run')!.click();
+    await waitUntil(() => g.pendingAnalysis.length === 1);
+    g.pendingAnalysis[0]!.resolve(json(200, sampleAnalysisResponse()));
+    await waitUntil(() => g.elements.get('analysis-results')!.childElementCount > 0);
+    const analysisResultsHtml = g.elements.get('analysis-results')!.innerHTML;
+
+    const rejectMessage = 'Join rejected';
+
+    // Seed ordinary command reject while joined with code illegal_move and the SAME message string
+    g.socket.emit({
+      t: 'reject',
+      gameId: 'g-test-1',
+      ref: null,
+      code: 'illegal_move',
+      message: rejectMessage,
+    });
+    await settle();
+    assert.equal(actionErrorEl.textContent, rejectMessage);
+    assert.equal(actionErrorEl.hidden, false);
+
+    // Same-user session change triggers reconnect
+    g.mounted.onSessionChange({ userId: 'user-1', handle: 'alice' });
+    await settle();
+
+    // Reconnect pending: controls not actionable but review presentation retained
+    assert.equal(actionErrorEl.textContent, rejectMessage);
+    assert.equal(returnBtn.hidden, true, 'return button hidden during unjoined reconnect');
+    assert.equal(g.elements.get('board')!.innerHTML, selectedBoardHtml, 'board remains in review position');
+    assert.equal(statusEl.textContent, selectedStatusText, 'review status retained');
+    assert.equal(movesEl.childElementCount, 2, 'cached review rows preserved');
+
+    // Wait for serialized join on new socket
+    g.sockets.last.open();
+    await waitUntil(() =>
+      g.sockets.last.sent.some((raw) => {
+        try {
+          return (JSON.parse(raw) as { t?: string }).t === 'join';
+        } catch {
+          return false;
+        }
+      }),
+    );
+
+    // Server rejects join with unauthorized
+    g.sockets.last.emit({
+      t: 'reject',
+      gameId: 'g-test-1',
+      ref: null,
+      code: 'unauthorized',
+      message: rejectMessage,
+    });
+    await settle();
+
+    // Rejection notice is retained, state unjoined with recovery available
+    assert.equal(actionErrorEl.textContent, rejectMessage);
+    assert.equal(reconnectBtn.hidden, false, 'recovery available via reconnect control');
+    assert.equal(returnBtn.hidden, true, 'return button hidden while unjoined');
+    assert.equal(g.elements.get('board')!.innerHTML, selectedBoardHtml, 'review presentation retained on board');
+    assert.equal(statusEl.textContent, selectedStatusText, 'review status retained');
+    assert.equal(movesEl.childElementCount, 2, 'review rows preserved in cache');
+
+    const reviewsBefore = g.pendingReviews.length;
+    const analysisBefore = g.pendingAnalysis.length;
+
+    // Click actual game-reconnect to trigger manual recovery
+    reconnectBtn.click();
+    await settle();
+
+    // Manual recovery creates and opens a new FakeSocket
+    const recoverySocket = g.sockets.last;
+    recoverySocket.open();
+    await settle();
+
+    // SessionManager refreshes credentials via HTTP and issues join with new token
+    await waitUntil(() =>
+      recoverySocket.sent.some((raw) => {
+        try {
+          const parsed = JSON.parse(raw) as { t?: string; token?: string };
+          return parsed.t === 'join' && parsed.token === 'new-token';
+        } catch {
+          return false;
+        }
+      }),
+    );
+    assert.equal(refreshed, true, 'actual HTTP refresh was executed');
+    assert.equal(g.app.api.session.current?.tokens.accessToken, 'new-token');
+
+    // Server emits joined finished state with same FEN and role
+    recoverySocket.emit({
+      t: 'joined',
+      gameId: 'g-test-1',
+      role: 'white',
+      state: makeFinishedState(afterE5Fen, 2, 'w', retainedMoves),
+    });
+    await settle();
+
+    // Review presentation, selection, and completed analysis preserved without new requests
+    assert.equal(returnBtn.hidden, false, 'return button restored after rejoin');
+    assert.equal(g.elements.get('board')!.innerHTML, selectedBoardHtml, 'selected review board preserved');
+    assert.equal(statusEl.textContent, selectedStatusText, 'selected review status preserved');
+    assert.equal(movesEl.childElementCount, 2, 'review rows preserved');
+    assert.equal(
+      g.elements.get('analysis-results')!.innerHTML,
+      analysisResultsHtml,
+      'completed analysis result preserved without re-fetching',
+    );
+    assert.equal(g.pendingReviews.length, reviewsBefore, 'zero new review requests');
+    assert.equal(g.pendingAnalysis.length, analysisBefore, 'zero new analysis requests');
+
+    // Terminal clear boundaries still fence review: account switch clears selection and rows
+    g.mounted.onSessionChange({ userId: 'user-2', handle: 'bob' });
+    await settle();
+    assert.equal(returnBtn.hidden, true, 'account switch clears review selection');
+    assert.equal(movesEl.childElementCount, 0, 'account switch clears review rows');
+  } finally {
+    dispose(g);
+  }
+});
 
 for (const tool of POSITION_TOOLS) {
   for (const staleStatus of [200, 503] as const) {

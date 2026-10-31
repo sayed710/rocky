@@ -251,7 +251,7 @@ export class GameSync {
   }
 
   isConclusiveJoinRejected(): boolean {
-    return this.joinReject !== null && this.joinReject.code !== 'invalid_command';
+    return this.joinReject !== null && this.joinReject.code !== 'invalid_command' && this.joinReject.code !== 'unauthorized';
   }
 
   /** The highest confirmed stateRevision observed so far, or null in legacy mode. */
