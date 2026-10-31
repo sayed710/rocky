@@ -232,6 +232,7 @@ export const arMessages = {
   "game.review.run": "مراجعة مباراتي",
   "game.review.loading": "جارٍ مراجعة المباراة…",
   "game.review.ownMovesOnly": "التحليل مخصّص لمبارياتك فقط.",
+  "game.review.returnFinal": "العودة إلى الوضع النهائي",
   "game.analysis.title": "المحرّك",
   "game.analysis.run": "تحليل",
   "game.analysis.linesAria": "عدد التفرعات",

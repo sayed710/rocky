@@ -262,6 +262,7 @@ export const enMessages = {
   'game.review.run': 'Review my game',
   'game.review.loading': 'Reviewing game…',
   'game.review.ownMovesOnly': 'Analysis is for your own games.',
+  'game.review.returnFinal': 'Return to final position',
 
   // Engine Analysis
   'game.analysis.title': 'Engine',
