@@ -22,6 +22,7 @@ import {
   renderSpeedSelector,
   renderVariantSelector,
 } from './leaderboard-view.js';
+import { leaderboardPoolUrl, parseLeaderboardQuery } from './leaderboard-query.js';
 import { TournamentController } from './tournament-controller.js';
 import type { TournamentCallbacks } from './tournament-controller.js';
 import {
@@ -86,17 +87,23 @@ function createLeaderboardCallbacks(
     speed: Speed,
   ) => void,
   i18n: I18n,
+  isDisposed: () => boolean,
 ): LeaderboardCallbacks {
   const state: LeaderboardRenderState = { resultsRendered: false };
   return {
     onResults: (entries, names, variant, speed) => {
+      if (isDisposed()) return;
       state.resultsRendered = true;
       onEntries(entries, names, variant, speed);
       if (elements.error) elements.error.textContent = '';
       if (elements.results) renderLeaderboard(elements.results, entries, names, i18n);
     },
-    onLoading: (loading) => setLeaderboardLoading(elements, state, loading),
+    onLoading: (loading) => {
+      if (isDisposed()) return;
+      setLeaderboardLoading(elements, state, loading);
+    },
     onError: (message) => {
+      if (isDisposed()) return;
       if (elements.error) elements.error.textContent = message;
     },
   };
@@ -110,9 +117,15 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
     results: doc.getElementById('leaderboard-results'),
     error: doc.getElementById('leaderboard-error'),
   };
-  let activeVariant: Variant = 'standard';
-  // No speed is chosen for the viewer: a pool is a variant and a speed, and there is no default pool.
-  let activeSpeed: Speed | null = null;
+  let disposed = false;
+  const isDisposed = (): boolean => disposed;
+
+  const initialPool = doc.defaultView
+    ? parseLeaderboardQuery(doc.defaultView.location.search)
+    : { variant: 'standard' as const, speed: null };
+  let activeVariant: Variant = initialPool.variant;
+  // No speed is chosen for the viewer unless specified in query: a pool is a variant and a speed, and there is no default pool.
+  let activeSpeed: Speed | null = initialPool.speed;
   let currentLoadedPool: {
     variant: Variant;
     speed: Speed;
@@ -120,11 +133,19 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
     names: ReadonlyMap<string, SocialPlayer>;
   } | null = null;
 
+  if (elements.loading) elements.loading.hidden = true;
+  if (elements.error) elements.error.textContent = '';
+  if (elements.results) {
+    elements.results.hidden = false;
+    elements.results.setAttribute('aria-busy', 'false');
+  }
+
   if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
   if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
-  if (elements.results) renderChooseSpeed(elements.results, i18n);
+  if (elements.results && activeSpeed === null) renderChooseSpeed(elements.results, i18n);
 
   const unsubscribeLocale = i18n.onLocaleChange(() => {
+    if (disposed) return;
     if (elements.select) renderVariantSelector(elements.select, activeVariant, i18n);
     if (elements.speedSelect) renderSpeedSelector(elements.speedSelect, activeSpeed, i18n);
     if (elements.results) {
@@ -152,28 +173,51 @@ export function mountLeaderboard(doc: Document, client: GambitClient, i18n: I18n
         }
       },
       i18n,
+      isDisposed,
     ),
   });
+
+  const syncUrl = (): void => {
+    if (doc.defaultView) {
+      const nextUrl = leaderboardPoolUrl(doc.defaultView.location.href, {
+        variant: activeVariant,
+        speed: activeSpeed,
+      });
+      doc.defaultView.history.replaceState(doc.defaultView.history.state, '', nextUrl);
+    }
+  };
+
   const load = (): void => {
     if (activeSpeed !== null) void controller.loadLeaderboard(activeVariant, activeSpeed);
   };
+
   const unbindVariant = elements.select
     ? bindVariantSelector(elements.select, (variant) => {
+        if (disposed) return;
         activeVariant = variant;
         currentLoadedPool = null;
+        syncUrl();
         load();
       })
     : () => {};
   const unbindSpeed = elements.speedSelect
     ? bindSpeedSelector(elements.speedSelect, (speed) => {
+        if (disposed) return;
         activeSpeed = speed;
         currentLoadedPool = null;
+        syncUrl();
         load();
       })
     : () => {};
 
+  if (activeSpeed !== null) {
+    load();
+  }
+
   return {
     dispose: () => {
+      if (disposed) return;
+      disposed = true;
       unbindVariant();
       unbindSpeed();
       unsubscribeLocale();
