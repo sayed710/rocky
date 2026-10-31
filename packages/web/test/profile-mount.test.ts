@@ -1749,6 +1749,300 @@ test('profile variant filter retains cached snapshot on failure and resets on us
   mounted.profile.dispose();
 });
 
+test('profile games filter announcer: persistent polite announcement, variant prefix, equal-count and zero-match dedup bypass, and write-counter silence', async () => {
+  const env = setupFilterEnv([
+    makeGame('g1', 'atomic'),
+    makeGame('g2', 'chess960'),
+    makeGame('g3', 'standard'),
+    makeGame('g4', 'standard'),
+  ]);
+  const session: AuthSession = { userId: 'u1', handle: 'alice' };
+
+  const mounted = mountProfile({
+    doc: env.doc,
+    client: env.client,
+    handle: null,
+    getCurrentSession: () => session,
+    restorePromise: Promise.resolve(session),
+    webauthnAdapter: new FakeWebAuthn(),
+  });
+
+  await waitFor(() => env.elements.get('profile-games')?.querySelectorAll('a.game-row').length === 4);
+
+  const filterHost = env.elements.get('profile-games-filter')!;
+  assert.ok(filterHost, 'Filter host must exist');
+  const variantSelect = filterHost.querySelector('#profile-games-variant')!;
+  assert.ok(variantSelect, 'Variant select must exist');
+  const statusEl = filterHost.querySelector('.profile-games-filter-status')!;
+  assert.ok(statusEl, 'Status element must exist');
+  const resetBtn = filterHost.querySelector('.profile-games-filter-reset')!;
+  assert.ok(resetBtn, 'Reset button must exist');
+  const announcerEl = filterHost.querySelector('.profile-games-filter-announcement')!;
+  assert.ok(announcerEl, 'Production must create persistent .profile-games-filter-announcement');
+
+  assert.equal(announcerEl.getAttribute('role'), 'status', 'Announcer must have role=status');
+  assert.equal(announcerEl.getAttribute('aria-live'), 'polite', 'Announcer must have aria-live=polite');
+  assert.ok(announcerEl.classList.contains('sr-only'), 'Announcer must have sr-only class');
+  assert.equal(statusEl.getAttribute('role'), null, 'Visible status must NOT have role=status');
+  assert.equal(statusEl.getAttribute('aria-live'), null, 'Visible status must NOT have aria-live');
+  assert.equal(announcerEl.textContent, '', 'Initial mount must be silent');
+
+  let writeCount = 0;
+  const desc = Object.getOwnPropertyDescriptor(FakeElement.prototype, 'textContent');
+  let currentText = announcerEl.textContent;
+  Object.defineProperty(announcerEl, 'textContent', {
+    get() {
+      return desc ? desc.get!.call(this) : currentText;
+    },
+    set(val: string) {
+      writeCount++;
+      currentText = val;
+      if (desc) {
+        desc.set!.call(this, val);
+      }
+    },
+    configurable: true,
+  });
+
+  assert.equal(writeCount, 0, 'Initial mount must produce zero announcer writes');
+
+  const baseHttpCalls = env.transport.calls.length;
+
+  variantSelect.value = 'atomic';
+  variantSelect.change();
+  await turn();
+  assert.equal(env.transport.calls.length, baseHttpCalls, 'Filter change must not execute network requests');
+  assert.equal(statusEl.textContent, 'Showing 1 of 4');
+  assert.equal(announcerEl.textContent, 'Atomic: Showing 1 of 4');
+  assert.equal(writeCount, 1);
+
+  variantSelect.value = 'chess960';
+  variantSelect.change();
+  await turn();
+  assert.equal(env.transport.calls.length, baseHttpCalls);
+  assert.equal(statusEl.textContent, 'Showing 1 of 4');
+  assert.equal(announcerEl.textContent, 'Chess960: Showing 1 of 4');
+  assert.equal(writeCount, 2, 'Equal-count different variant must increment write count');
+
+  variantSelect.value = 'chess960';
+  variantSelect.change();
+  await turn();
+  assert.equal(announcerEl.textContent, 'Chess960: Showing 1 of 4');
+  assert.equal(writeCount, 2, 'Same-value selection must stay silent');
+
+  variantSelect.value = 'horde';
+  variantSelect.change();
+  await turn();
+  assert.equal(statusEl.textContent, 'Showing 0 of 4');
+  assert.equal(announcerEl.textContent, 'Horde: Showing 0 of 4');
+  assert.equal(writeCount, 3, 'Absent variant selection must increment write count');
+
+  variantSelect.value = 'racingkings';
+  variantSelect.change();
+  await turn();
+  assert.equal(statusEl.textContent, 'Showing 0 of 4');
+  assert.equal(announcerEl.textContent, 'Racing Kings: Showing 0 of 4');
+  assert.equal(writeCount, 4, 'Different absent variant must increment write count even with 0 matches');
+
+  resetBtn.click();
+  await turn();
+  assert.equal(variantSelect.value, 'all');
+  assert.equal(statusEl.textContent, 'Showing 4 of 4');
+  assert.equal(announcerEl.textContent, 'All variants: Showing 4 of 4');
+  assert.equal(writeCount, 5, 'Reset must announce all variants with count');
+
+  resetBtn.click();
+  await turn();
+  assert.equal(variantSelect.value, 'all');
+  assert.equal(writeCount, 5, 'Noop reset must stay silent');
+
+  variantSelect.value = 'invalid-variant';
+  variantSelect.change();
+  await turn();
+  assert.equal(writeCount, 5, 'Invalid value change must stay silent');
+
+  await mounted.profile.loadSelf();
+  await turn();
+  assert.equal(writeCount, 5, 'Background reload must not write to announcer');
+
+  env.setGames([]);
+  await mounted.profile.loadSelf();
+  await turn();
+  assert.equal(announcerEl.textContent, '', 'Non-empty to empty transition must clear announcer');
+  assert.equal(writeCount, 6, 'First empty reload must clear announcer once');
+
+  await mounted.profile.loadSelf();
+  await turn();
+  assert.equal(announcerEl.textContent, '');
+  assert.equal(writeCount, 6, 'Repeated empty reload must stay silent');
+
+  mounted.profile.dispose();
+});
+
+test('profile games filter announcer: AR locale, self-session synchronous clearing, public-session preservation, subject switch, and disposal', async () => {
+  const envSelf = setupFilterEnv([makeGame('g1', 'atomic'), makeGame('g2', 'standard')]);
+  let selfSession: AuthSession | null = { userId: 'u1', handle: 'alice' };
+  const arI18n = createI18nManager({ initialLocale: 'ar' });
+
+  const mountedSelf = mountProfile({
+    doc: envSelf.doc,
+    client: envSelf.client,
+    handle: null,
+    getCurrentSession: () => selfSession,
+    restorePromise: Promise.resolve(selfSession),
+    webauthnAdapter: new FakeWebAuthn(),
+    i18n: arI18n,
+  });
+
+  await waitFor(() => envSelf.elements.get('profile-games')?.querySelectorAll('a.game-row').length === 2);
+
+  const selfFilterHost = envSelf.elements.get('profile-games-filter')!;
+  assert.ok(selfFilterHost, 'Self filter host must exist');
+  const selfSelect = selfFilterHost.querySelector('#profile-games-variant')!;
+  assert.ok(selfSelect, 'Self variant select must exist');
+  const selfAnnouncer = selfFilterHost.querySelector('.profile-games-filter-announcement')!;
+  assert.ok(selfAnnouncer, 'Self announcer must exist');
+
+  selfSelect.value = 'atomic';
+  selfSelect.change();
+  await turn();
+  const expectedArStatus = arI18n.t('profile.games.filterStatus', { shown: 1, total: 2 });
+  const expectedArVariant = arI18n.t('variant.atomic');
+  assert.equal(selfAnnouncer.textContent, `${expectedArVariant}: ${expectedArStatus}`);
+
+  arI18n.setLocale('en');
+  await turn();
+  const expectedEnStatus = arI18n.t('profile.games.filterStatus', { shown: 1, total: 2 });
+  const expectedEnVariant = arI18n.t('variant.atomic');
+  assert.equal(selfAnnouncer.textContent, `${expectedEnVariant}: ${expectedEnStatus}`);
+
+  selfSession = { userId: 'u2', handle: 'bob' };
+  envSelf.client.session.adopt({
+    user: { id: 'u2', handle: 'bob', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: 'tok2', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  });
+  mountedSelf.onSessionChange(selfSession);
+  assert.equal(selfAnnouncer.textContent, '', 'Announcer must clear synchronously on self account switch');
+
+  selfSelect.value = 'atomic';
+  selfSelect.change();
+  await turn();
+  mountedSelf.onSessionChange(null);
+  assert.equal(selfAnnouncer.textContent, '', 'Announcer must clear synchronously on signout');
+
+  mountedSelf.profile.dispose();
+  selfSelect.value = 'atomic';
+  selfSelect.change();
+  await turn();
+  assert.equal(selfAnnouncer.textContent, '', 'Disposed controller must not revive announcer');
+  assert.equal(selfFilterHost.querySelector('.profile-games-filter-announcement'), null, 'Disposed filter host must be emptied');
+
+  const envPublic = setupFilterEnv([makeGame('g1', 'atomic'), makeGame('g2', 'standard')]);
+  let viewerSession: AuthSession | null = null;
+  const mountedPublic = mountProfile({
+    doc: envPublic.doc,
+    client: envPublic.client,
+    handle: 'alice',
+    getCurrentSession: () => viewerSession,
+    restorePromise: Promise.resolve(null),
+    webauthnAdapter: new FakeWebAuthn(),
+  });
+
+  await waitFor(() => envPublic.elements.get('profile-games')?.querySelectorAll('a.game-row').length === 2);
+
+  const publicFilterHost = envPublic.elements.get('profile-games-filter')!;
+  assert.ok(publicFilterHost, 'Public filter host must exist');
+  const publicSelect = publicFilterHost.querySelector('#profile-games-variant')!;
+  assert.ok(publicSelect, 'Public variant select must exist');
+  const publicAnnouncer = publicFilterHost.querySelector('.profile-games-filter-announcement')!;
+  assert.ok(publicAnnouncer, 'Public profile must create persistent announcer');
+
+  publicSelect.value = 'atomic';
+  publicSelect.change();
+  await turn();
+  assert.equal(publicAnnouncer.textContent, 'Atomic: Showing 1 of 2');
+
+  viewerSession = { userId: 'u2', handle: 'bob' };
+  envPublic.client.session.adopt({
+    user: { id: 'u2', handle: 'bob', country: null, createdAt: '2026-01-01T00:00:00Z', roles: ['user'] },
+    tokens: { accessToken: 'tok2', tokenType: 'Bearer', expiresIn: 900, refreshExpiresAt: '2030-01-01T00:00:00Z' },
+  });
+  mountedPublic.onSessionChange(viewerSession);
+  assert.equal(
+    publicAnnouncer.textContent,
+    'Atomic: Showing 1 of 2',
+    'Public profile announcer must be preserved across viewer sign-in',
+  );
+
+  viewerSession = null;
+  mountedPublic.onSessionChange(null);
+  assert.equal(
+    publicAnnouncer.textContent,
+    'Atomic: Showing 1 of 2',
+    'Public profile announcer must be preserved across viewer sign-out',
+  );
+
+  await mountedPublic.profile.load('bob');
+  await turn();
+  assert.equal(
+    publicAnnouncer.textContent,
+    '',
+    'Announcer must clear after loading different public profile subject',
+  );
+
+  publicSelect.value = 'horde';
+  publicSelect.change();
+  await turn();
+  assert.equal(publicAnnouncer.textContent, 'Horde: Showing 0 of 2');
+
+  mountedPublic.profile.dispose();
+  assert.equal(publicAnnouncer.textContent, '', 'Disposal must clear retained announcer text');
+
+  publicSelect.value = 'atomic';
+  publicSelect.change();
+  await turn();
+  assert.equal(publicAnnouncer.textContent, '', 'Late control change after disposal must not revive announcer');
+
+  const emptyEnv = setupFilterEnv([]);
+  const emptyMounted = mountProfile({
+    doc: emptyEnv.doc,
+    client: emptyEnv.client,
+    handle: 'charlie',
+    getCurrentSession: () => null,
+    restorePromise: Promise.resolve(null),
+    webauthnAdapter: new FakeWebAuthn(),
+  });
+  await waitFor(() => emptyEnv.elements.get('profile-games') !== null);
+  await turn();
+
+  const emptyHost = emptyEnv.elements.get('profile-games-filter')!;
+  assert.ok(emptyHost, 'Filter host must exist on empty profile');
+  const emptyAnnouncer = emptyHost.querySelector('.profile-games-filter-announcement')!;
+  assert.ok(emptyAnnouncer, 'Announcer must exist on empty profile');
+  assert.equal(emptyAnnouncer.textContent, '', 'Genuine empty profile must have silent announcer');
+
+  let emptyWrites = 0;
+  const emptyDesc = Object.getOwnPropertyDescriptor(FakeElement.prototype, 'textContent');
+  let emptyCurrent = emptyAnnouncer.textContent;
+  Object.defineProperty(emptyAnnouncer, 'textContent', {
+    get() {
+      return emptyDesc ? emptyDesc.get!.call(this) : emptyCurrent;
+    },
+    set(val: string) {
+      emptyWrites++;
+      emptyCurrent = val;
+      if (emptyDesc) emptyDesc.set!.call(this, val);
+    },
+    configurable: true,
+  });
+
+  await emptyMounted.profile.load('charlie');
+  await turn();
+  assert.equal(emptyWrites, 0, 'Repeated empty profile reload must produce 0 additional announcer writes');
+  assert.equal(emptyAnnouncer.textContent, '');
+  emptyMounted.profile.dispose();
+});
+
 test('passkey listener does not stack across remounts and is cleanly disposed', async () => {
   const { doc, elements } = createProfileDocument();
   let registerOptionsCalls = 0;

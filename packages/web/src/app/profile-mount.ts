@@ -244,7 +244,34 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
   let filterResetEl: HTMLButtonElement | null = null;
   let filterHelpEl: HTMLElement | null = null;
   let filterStatusEl: HTMLElement | null = null;
+  let filterAnnouncementEl: HTMLElement | null = null;
+  let lastAnnouncedMessage: string | null = null;
+  let hasAnnounced = false;
   let optionNodes: { opt: HTMLOptionElement; value: Variant | 'all' }[] = [];
+
+  const clearAnnouncement = (): void => {
+    if (filterAnnouncementEl && filterAnnouncementEl.textContent !== '') {
+      filterAnnouncementEl.textContent = '';
+    }
+    lastAnnouncedMessage = null;
+    hasAnnounced = false;
+  };
+
+  const announceFilter = (): void => {
+    if (!routeActive || !filterAnnouncementEl || lastGames === null || lastGames.length === 0) return;
+    const visibleCount = selectedVariant === 'all'
+      ? lastGames.length
+      : lastGames.filter((g) => g.variant === selectedVariant).length;
+    const variantName = selectedVariant === 'all'
+      ? i18n.t('profile.games.allVariants')
+      : getVariantLabel(selectedVariant, i18n);
+    const statusText = i18n.t('profile.games.filterStatus', { shown: visibleCount, total: lastGames.length });
+    const message = `${variantName}: ${statusText}`;
+    if (message === lastAnnouncedMessage) return;
+    lastAnnouncedMessage = message;
+    hasAnnounced = true;
+    filterAnnouncementEl.textContent = message;
+  };
 
   const updateStatus = (shown: number, total: number): void => {
     if (!filterStatusEl) return;
@@ -272,6 +299,9 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
         : lastGames.filter((g) => g.variant === selectedVariant).length;
       updateStatus(visibleCount, lastGames.length);
     }
+    if (hasAnnounced) {
+      announceFilter();
+    }
   };
 
   const onFilterChange = (): void => {
@@ -291,6 +321,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     if (filterResetEl) filterResetEl.disabled = selectedVariant === 'all';
     if (lastGames !== null) {
       renderProfileGames(lastGames);
+      announceFilter();
     }
   };
 
@@ -305,6 +336,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     }
     if (lastGames !== null) {
       renderProfileGames(lastGames);
+      announceFilter();
     }
   };
 
@@ -361,7 +393,13 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     status.id = 'profile-games-filter-status';
     filterStatusEl = status;
 
-    filterHostEl.append(label, select, resetBtn, help, status);
+    const announcement = doc.createElement('span');
+    announcement.className = 'sr-only profile-games-filter-announcement';
+    announcement.setAttribute('role', 'status');
+    announcement.setAttribute('aria-live', 'polite');
+    filterAnnouncementEl = announcement;
+
+    filterHostEl.append(label, select, resetBtn, help, status, announcement);
   };
 
   mountFilterControls();
@@ -818,6 +856,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     onDispose: () => {
       if (!routeActive) return;
       routeActive = false;
+      clearAnnouncement();
       if (filterSelectEl) {
         filterSelectEl.removeEventListener('change', onFilterChange);
         filterSelectEl = null;
@@ -829,6 +868,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
       filterLabelEl = null;
       filterHelpEl = null;
       filterStatusEl = null;
+      filterAnnouncementEl = null;
       optionNodes = [];
       if (filterHostEl) {
         filterHostEl.innerHTML = '';
@@ -848,6 +888,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
           if (filterSelectEl) filterSelectEl.value = 'all';
           if (filterResetEl) filterResetEl.disabled = true;
           updateStatus(0, 0);
+          clearAnnouncement();
           if (gamesEl) gamesEl.innerHTML = '';
           if (shouldRecoverFocus && filterSelectEl) {
             filterSelectEl.focus();
@@ -868,6 +909,9 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
       onGames: (games) => {
         if (!routeActive) return;
         lastGames = games;
+        if (games.length === 0) {
+          clearAnnouncement();
+        }
         renderProfileGames(games);
       },
       onError: (msg) => {
@@ -907,6 +951,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
       if (filterSelectEl) filterSelectEl.value = 'all';
       if (filterResetEl) filterResetEl.disabled = true;
       updateStatus(0, 0);
+      clearAnnouncement();
       lastConnections = null;
       lastSelfSocial = null;
       lastAchievements = null;

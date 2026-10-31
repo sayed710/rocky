@@ -218,12 +218,18 @@ for (const journey of [{ lang: 'en', width: 768, height: 900, dir: 'ltr' }, { la
     const variantSelect = page.locator('#profile-games-variant');
     const resetButton = page.locator('button.profile-games-filter-reset');
     const filterStatus = page.locator('.profile-games-filter-status');
+    const filterAnnouncer = page.locator('.profile-games-filter-announcement');
     const rows = page.locator('#profile-games a.game-row');
 
     await expect(filterHost).toBeVisible();
     await expect(variantSelect).toHaveValue('all');
     await expect(resetButton).toBeVisible();
     await expect(filterStatus).not.toHaveAttribute('aria-live', /polite|assertive/);
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 4 من 4' : 'Showing 4 of 4');
+    await expect(filterAnnouncer).toHaveClass(/\bsr-only\b/);
+    await expect(filterAnnouncer).toHaveAttribute('role', 'status');
+    await expect(filterAnnouncer).toHaveAttribute('aria-live', 'polite');
+    await expect(filterAnnouncer).toHaveText('');
 
     await expect(rows).toHaveCount(4);
     await expect(rows.nth(0)).toHaveAttribute('href', `/game/${encodeURIComponent(reservedGameId)}`);
@@ -240,15 +246,36 @@ for (const journey of [{ lang: 'en', width: 768, height: 900, dir: 'ltr' }, { la
 
     await expect(rows).toHaveCount(1);
     await expect(rows.first()).toHaveAttribute('href', '/game/g-atomic');
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 1 من 4' : 'Showing 1 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'الشطرنج الذري: عرض 1 من 4' : 'Atomic: Showing 1 of 4');
+    await expect(variantSelect).toBeFocused();
     expect(gamesRequests).toBe(1);
     expect(page.url()).toContain('/profile/alice');
     expect(await page.evaluate(() => localStorage.getItem('rookzen_locale_v1'))).toBe(journey.lang);
+
+    await variantSelect.selectOption('chess960');
+    await expect(variantSelect).toHaveValue('chess960');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toHaveAttribute('href', '/game/g-c960');
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 1 من 4' : 'Showing 1 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'Chess960: عرض 1 من 4' : 'Chess960: Showing 1 of 4');
+    await expect(variantSelect).toBeFocused();
+    expect(gamesRequests).toBe(1);
 
     await variantSelect.selectOption('horde');
     await expect(variantSelect).toHaveValue('horde');
     await expect(rows).toHaveCount(0);
     await expect(page.locator('#profile-games a, #profile-games button')).toHaveCount(0);
     await expect(page.locator('#profile-games')).toContainText(journey.lang === 'ar' ? 'لم يتم العثور على مباريات' : 'No games');
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 0 من 4' : 'Showing 0 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'الحشد: عرض 0 من 4' : 'Horde: Showing 0 of 4');
+    expect(gamesRequests).toBe(1);
+
+    await variantSelect.selectOption('racingkings');
+    await expect(variantSelect).toHaveValue('racingkings');
+    await expect(rows).toHaveCount(0);
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 0 من 4' : 'Showing 0 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'سباق الملوك: عرض 0 من 4' : 'Racing Kings: Showing 0 of 4');
     expect(gamesRequests).toBe(1);
 
     await resetButton.focus();
@@ -256,6 +283,12 @@ for (const journey of [{ lang: 'en', width: 768, height: 900, dir: 'ltr' }, { la
     await expect(variantSelect).toBeFocused();
     await expect(variantSelect).toHaveValue('all');
     await expect(rows).toHaveCount(4);
+    await expect(filterStatus).toHaveText(journey.lang === 'ar' ? 'عرض 4 من 4' : 'Showing 4 of 4');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'جميع الأنواع: عرض 4 من 4' : 'All variants: Showing 4 of 4');
+    expect(gamesRequests).toBe(1);
+
+    await variantSelect.selectOption('all');
+    await expect(filterAnnouncer).toHaveText(journey.lang === 'ar' ? 'جميع الأنواع: عرض 4 من 4' : 'All variants: Showing 4 of 4');
     expect(gamesRequests).toBe(1);
 
     if (journey.width === 320) {
@@ -288,17 +321,32 @@ test('profile games pending route, live locale switch and reload reset', async (
   await page.goto('/profile/alice');
   const variantSelect = page.locator('#profile-games-variant');
   const filterStatus = page.locator('.profile-games-filter-status');
+  const filterAnnouncer = page.locator('.profile-games-filter-announcement');
   const rows = page.locator('#profile-games a.game-row');
 
   await expect(filterStatus).not.toHaveText(/\b0\b/);
   await expect(variantSelect).toBeVisible();
   await variantSelect.selectOption('atomic');
+  await expect(filterAnnouncer).toHaveText('');
 
   resolveGames();
 
   await expect(variantSelect).toHaveValue('atomic');
   await expect(rows).toHaveCount(1);
   await expect(rows.first()).toHaveAttribute('href', '/game/g-atomic');
+  await expect(filterAnnouncer).toHaveText('');
+
+  await variantSelect.selectOption('chess960');
+  await expect(variantSelect).toHaveValue('chess960');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute('href', '/game/g-c960');
+  await expect(filterAnnouncer).toHaveText('Chess960: Showing 1 of 4');
+
+  await variantSelect.selectOption('atomic');
+  await expect(variantSelect).toHaveValue('atomic');
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toHaveAttribute('href', '/game/g-atomic');
+  await expect(filterAnnouncer).toHaveText('Atomic: Showing 1 of 4');
 
   const selectHandle = await variantSelect.elementHandle();
   const enOptions = variantSelect.locator('option');
@@ -317,6 +365,8 @@ test('profile games pending route, live locale switch and reload reset', async (
   await expect(localeSelect).toBeFocused();
   await expect(variantSelect).toHaveValue('atomic');
   expect(await page.evaluate((el) => el === document.querySelector('#profile-games-variant'), selectHandle)).toBe(true);
+  await expect(filterAnnouncer).toHaveText('الشطرنج الذري: عرض 1 من 4');
+  await expect(filterStatus).toHaveText('عرض 1 من 4');
 
   const arOptions = variantSelect.locator('option');
   await expect(arOptions).toHaveCount(9);
@@ -333,8 +383,11 @@ test('profile games pending route, live locale switch and reload reset', async (
   await localeSelect.selectOption('en');
   await expect(localeSelect).toBeFocused();
   await expect(variantSelect).toHaveValue('atomic');
+  await expect(filterAnnouncer).toHaveText('Atomic: Showing 1 of 4');
+  await expect(filterStatus).toHaveText('Showing 1 of 4');
 
   await page.reload();
   await expect(page.locator('#profile-games-variant')).toHaveValue('all');
   await expect(page.locator('#profile-games a.game-row')).toHaveCount(4);
+  await expect(page.locator('.profile-games-filter-announcement')).toHaveText('');
 });
