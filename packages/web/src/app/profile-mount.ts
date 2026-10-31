@@ -1,5 +1,6 @@
 import type { GambitClient } from '../api/client.js';
-import type { GameSummary, PlayerAchievement, SocialPlayer, UserProfile } from '../api/models.js';
+import { VARIANTS } from '../api/models.js';
+import type { GameSummary, PlayerAchievement, SocialPlayer, UserProfile, Variant } from '../api/models.js';
 import type { AuthSession } from './auth-controller.js';
 import { ProfileController } from './profile-controller.js';
 import { SocialController } from './social-controller.js';
@@ -168,10 +169,15 @@ interface MountedProfile {
 export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
   const { doc, client, handle, webauthnAdapter, getCurrentSession, restorePromise, i18n } = deps;
 
+  let routeActive = true;
+
   const handleEl = doc.getElementById('profile-handle');
   const ratingsEl = doc.getElementById('profile-ratings');
   const gamesEl = doc.getElementById('profile-games');
+  const filterHostEl = doc.getElementById('profile-games-filter');
   const profileErrorEl = doc.getElementById('profile-error');
+
+  if (gamesEl) gamesEl.innerHTML = '';
 
   // --- Social region (M10 inc 9) ---
   const socialActionsEl = doc.getElementById('social-actions');
@@ -230,6 +236,173 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
   let passkeysCtrl: PasskeysController | null = null;
   let passkeysUnbind = () => {};
   let sessionsCtrl: SessionsController | null = null;
+  let lastSubjectId: string | null = null;
+  const isVariant = (val: string): val is Variant => (VARIANTS as readonly string[]).includes(val);
+  let selectedVariant: Variant | 'all' = 'all';
+  let filterSelectEl: HTMLSelectElement | null = null;
+  let filterLabelEl: HTMLLabelElement | null = null;
+  let filterResetEl: HTMLButtonElement | null = null;
+  let filterHelpEl: HTMLElement | null = null;
+  let filterStatusEl: HTMLElement | null = null;
+  let filterAnnouncementEl: HTMLElement | null = null;
+  let lastAnnouncedMessage: string | null = null;
+  let hasAnnounced = false;
+  let optionNodes: { opt: HTMLOptionElement; value: Variant | 'all' }[] = [];
+
+  const clearAnnouncement = (): void => {
+    if (filterAnnouncementEl && filterAnnouncementEl.textContent !== '') {
+      filterAnnouncementEl.textContent = '';
+    }
+    lastAnnouncedMessage = null;
+    hasAnnounced = false;
+  };
+
+  const announceFilter = (): void => {
+    if (!routeActive || !filterAnnouncementEl || lastGames === null || lastGames.length === 0) return;
+    const visibleCount = selectedVariant === 'all'
+      ? lastGames.length
+      : lastGames.filter((g) => g.variant === selectedVariant).length;
+    const variantName = selectedVariant === 'all'
+      ? i18n.t('profile.games.allVariants')
+      : getVariantLabel(selectedVariant, i18n);
+    const statusText = i18n.t('profile.games.filterStatus', { shown: visibleCount, total: lastGames.length });
+    const message = `${variantName}: ${statusText}`;
+    if (message === lastAnnouncedMessage) return;
+    lastAnnouncedMessage = message;
+    hasAnnounced = true;
+    filterAnnouncementEl.textContent = message;
+  };
+
+  const updateStatus = (shown: number, total: number): void => {
+    if (!filterStatusEl) return;
+    if (lastGames === null || total === 0) {
+      filterStatusEl.textContent = '';
+      return;
+    }
+    filterStatusEl.textContent = i18n.t('profile.games.filterStatus', { shown, total });
+  };
+
+  const updateFilterLocale = (): void => {
+    if (filterLabelEl) filterLabelEl.textContent = i18n.t('profile.games.filterLabel');
+    if (filterResetEl) filterResetEl.textContent = i18n.t('profile.games.resetFilter');
+    if (filterHelpEl) filterHelpEl.textContent = i18n.t('profile.games.filterScope');
+    for (const entry of optionNodes) {
+      if (entry.value === 'all') {
+        entry.opt.textContent = i18n.t('profile.games.allVariants');
+      } else {
+        entry.opt.textContent = getVariantLabel(entry.value, i18n);
+      }
+    }
+    if (lastGames !== null) {
+      const visibleCount = selectedVariant === 'all'
+        ? lastGames.length
+        : lastGames.filter((g) => g.variant === selectedVariant).length;
+      updateStatus(visibleCount, lastGames.length);
+    }
+    if (hasAnnounced) {
+      announceFilter();
+    }
+  };
+
+  const onFilterChange = (): void => {
+    if (!routeActive || !filterSelectEl) return;
+    const rawVal = filterSelectEl.value;
+    let nextVariant: Variant | 'all';
+    if (rawVal === 'all') {
+      nextVariant = 'all';
+    } else if (isVariant(rawVal)) {
+      nextVariant = rawVal;
+    } else {
+      filterSelectEl.value = selectedVariant;
+      return;
+    }
+    if (nextVariant === selectedVariant) return;
+    selectedVariant = nextVariant;
+    if (filterResetEl) filterResetEl.disabled = selectedVariant === 'all';
+    if (lastGames !== null) {
+      renderProfileGames(lastGames);
+      announceFilter();
+    }
+  };
+
+  const onResetClick = (): void => {
+    if (!routeActive || selectedVariant === 'all') return;
+    const wasResetFocused = doc.activeElement === filterResetEl;
+    selectedVariant = 'all';
+    if (filterSelectEl) filterSelectEl.value = 'all';
+    if (filterResetEl) filterResetEl.disabled = true;
+    if (wasResetFocused && filterSelectEl) {
+      filterSelectEl.focus();
+    }
+    if (lastGames !== null) {
+      renderProfileGames(lastGames);
+      announceFilter();
+    }
+  };
+
+  const mountFilterControls = (): void => {
+    if (!filterHostEl) return;
+    filterHostEl.innerHTML = '';
+    optionNodes = [];
+
+    const label = doc.createElement('label') as HTMLLabelElement;
+    label.setAttribute('for', 'profile-games-variant');
+    label.className = 'profile-games-filter-label';
+    label.textContent = i18n.t('profile.games.filterLabel');
+    filterLabelEl = label;
+
+    const select = doc.createElement('select') as HTMLSelectElement;
+    select.id = 'profile-games-variant';
+    select.className = 'profile-games-variant';
+    select.setAttribute('aria-describedby', 'profile-games-filter-help');
+
+    const allOpt = doc.createElement('option') as HTMLOptionElement;
+    allOpt.value = 'all';
+    allOpt.textContent = i18n.t('profile.games.allVariants');
+    select.appendChild(allOpt);
+    optionNodes.push({ opt: allOpt, value: 'all' });
+
+    for (const v of VARIANTS) {
+      const opt = doc.createElement('option') as HTMLOptionElement;
+      opt.value = v;
+      opt.textContent = getVariantLabel(v, i18n);
+      select.appendChild(opt);
+      optionNodes.push({ opt, value: v });
+    }
+    select.value = selectedVariant;
+    select.addEventListener('change', onFilterChange);
+    filterSelectEl = select;
+
+    const resetBtn = doc.createElement('button') as HTMLButtonElement;
+    resetBtn.type = 'button';
+    resetBtn.className = 'profile-games-filter-reset';
+    resetBtn.id = 'profile-games-filter-reset';
+    resetBtn.textContent = i18n.t('profile.games.resetFilter');
+    resetBtn.disabled = selectedVariant === 'all';
+    resetBtn.addEventListener('click', onResetClick);
+    filterResetEl = resetBtn;
+
+    const help = doc.createElement('span');
+    help.className = 'profile-games-filter-help';
+    help.id = 'profile-games-filter-help';
+    help.textContent = i18n.t('profile.games.filterScope');
+    filterHelpEl = help;
+
+    const status = doc.createElement('span');
+    status.className = 'profile-games-filter-status';
+    status.id = 'profile-games-filter-status';
+    filterStatusEl = status;
+
+    const announcement = doc.createElement('span');
+    announcement.className = 'sr-only profile-games-filter-announcement';
+    announcement.setAttribute('role', 'status');
+    announcement.setAttribute('aria-live', 'polite');
+    filterAnnouncementEl = announcement;
+
+    filterHostEl.append(label, select, resetBtn, help, status, announcement);
+  };
+
+  mountFilterControls();
 
   const renderProfileRatings = (p: UserProfile): void => {
     if (!ratingsEl) return;
@@ -257,7 +430,27 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
 
   const renderProfileGames = (games: readonly GameSummary[]): void => {
     if (!gamesEl) return;
+
+    const activeNode = doc.activeElement;
+    let focusedGameId: string | null = null;
+    let focusedIndex = -1;
+    const isFocusInsideGames = Boolean(activeNode && gamesEl.contains(activeNode));
+
+    if (isFocusInsideGames) {
+      const rows = gamesEl.querySelectorAll<HTMLAnchorElement>('a.game-row');
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        if (row && (row === activeNode || row.contains(activeNode))) {
+          focusedIndex = i;
+          focusedGameId = row.getAttribute('data-game-id');
+          break;
+        }
+      }
+    }
+
     if (games.length === 0) {
+      updateStatus(0, 0);
+      if (filterResetEl) filterResetEl.disabled = selectedVariant === 'all';
       renderEmpty(gamesEl, {
         mark: '♞',
         title: i18n.t('profile.games.emptyTitle'),
@@ -268,11 +461,36 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
           route: 'lobby',
         },
       });
-    } else {
-      gamesEl.innerHTML = '';
-      for (const g of games) {
+      if (isFocusInsideGames && filterSelectEl) {
+        filterSelectEl.focus();
+      }
+      return;
+    }
+
+    const visibleGames = selectedVariant === 'all'
+      ? games
+      : games.filter((g) => g.variant === selectedVariant);
+
+    updateStatus(visibleGames.length, games.length);
+    if (filterResetEl) filterResetEl.disabled = selectedVariant === 'all';
+
+    gamesEl.innerHTML = '';
+    if (visibleGames.length === 0) {
+      renderEmpty(gamesEl, {
+        title: i18n.t('profile.games.filterEmptyTitle'),
+        body: i18n.t('profile.games.filterEmptyBody'),
+        inline: true,
+      });
+      if (isFocusInsideGames && filterSelectEl) {
+        filterSelectEl.focus();
+      }
+      return;
+    }
+
+    for (const g of visibleGames) {
         const row = doc.createElement('a');
         row.className = 'game-row';
+        row.setAttribute('data-game-id', g.id);
         row.setAttribute('href', `/game/${encodeURIComponent(g.id)}`);
         row.setAttribute('data-route', 'game');
         const variantStr = getVariantLabel(g.variant, i18n);
@@ -284,6 +502,27 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
         else row.append(resultStr);
         row.append(` · ${plyStr}`);
         gamesEl.appendChild(row);
+      }
+
+    if (isFocusInsideGames) {
+      const newRows = gamesEl.querySelectorAll<HTMLAnchorElement>('a.game-row');
+      let targetToFocus: HTMLAnchorElement | null = null;
+      if (focusedGameId !== null) {
+        for (let i = 0; i < visibleGames.length; i++) {
+          if (visibleGames[i]?.id === focusedGameId) {
+            targetToFocus = newRows[i] ?? null;
+            break;
+          }
+        }
+      }
+      if (!targetToFocus && focusedIndex >= 0 && newRows.length > 0) {
+        const targetIndex = Math.min(focusedIndex, newRows.length - 1);
+        targetToFocus = newRows[targetIndex] ?? null;
+      }
+      if (targetToFocus) {
+        targetToFocus.focus();
+      } else if (filterSelectEl) {
+        filterSelectEl.focus();
       }
     }
   };
@@ -588,6 +827,8 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
   };
 
   const unsubLocale = i18n.onLocaleChange(() => {
+    if (!routeActive) return;
+    updateFilterLocale();
     if (lastProfile) renderProfileRatings(lastProfile);
     if (lastGames) renderProfileGames(lastGames);
     if (lastConnections) renderConnectionsView(lastConnections);
@@ -613,10 +854,47 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
   const profile = new ProfileController({
     client,
     onDispose: () => {
+      if (!routeActive) return;
+      routeActive = false;
+      clearAnnouncement();
+      if (filterSelectEl) {
+        filterSelectEl.removeEventListener('change', onFilterChange);
+        filterSelectEl = null;
+      }
+      if (filterResetEl) {
+        filterResetEl.removeEventListener('click', onResetClick);
+        filterResetEl = null;
+      }
+      filterLabelEl = null;
+      filterHelpEl = null;
+      filterStatusEl = null;
+      filterAnnouncementEl = null;
+      optionNodes = [];
+      if (filterHostEl) {
+        filterHostEl.innerHTML = '';
+      }
       unsubLocale();
     },
     callbacks: {
       onProfile: (p) => {
+        if (!routeActive) return;
+        if (lastSubjectId !== null && lastSubjectId !== p.user.id) {
+          const activeNode = doc.activeElement;
+          const shouldRecoverFocus = Boolean(
+            activeNode && ((gamesEl && gamesEl.contains(activeNode)) || activeNode === filterResetEl),
+          );
+          lastGames = null;
+          selectedVariant = 'all';
+          if (filterSelectEl) filterSelectEl.value = 'all';
+          if (filterResetEl) filterResetEl.disabled = true;
+          updateStatus(0, 0);
+          clearAnnouncement();
+          if (gamesEl) gamesEl.innerHTML = '';
+          if (shouldRecoverFocus && filterSelectEl) {
+            filterSelectEl.focus();
+          }
+        }
+        lastSubjectId = p.user.id;
         lastProfile = p;
         if (handleEl) {
           handleEl.textContent = p.user.handle;
@@ -629,10 +907,15 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
         renderProfileRatings(p);
       },
       onGames: (games) => {
+        if (!routeActive) return;
         lastGames = games;
+        if (games.length === 0) {
+          clearAnnouncement();
+        }
         renderProfileGames(games);
       },
       onError: (msg) => {
+        if (!routeActive) return;
         if (profileErrorEl) profileErrorEl.textContent = msg;
       },
     },
@@ -646,6 +929,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     // viewer's session does, but who they are to this player does — so the
     // social region reloads while the profile above it stays put.
     onSessionChange = () => {
+      if (!routeActive) return;
       if (socialSubject !== null) loadSocialFor(socialSubject);
     };
   } else {
@@ -656,8 +940,18 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     // a user signs in while already on this route.
     let loadedUserId: string | null = null;
     const clearSelfProfile = (): void => {
+      const activeNode = doc.activeElement;
+      const shouldRecoverFocus = Boolean(
+        activeNode && ((gamesEl && gamesEl.contains(activeNode)) || activeNode === filterResetEl),
+      );
       lastProfile = null;
+      lastSubjectId = null;
       lastGames = null;
+      selectedVariant = 'all';
+      if (filterSelectEl) filterSelectEl.value = 'all';
+      if (filterResetEl) filterResetEl.disabled = true;
+      updateStatus(0, 0);
+      clearAnnouncement();
       lastConnections = null;
       lastSelfSocial = null;
       lastAchievements = null;
@@ -667,6 +961,9 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
       if (ratingsEl) ratingsEl.innerHTML = '';
       if (gamesEl) gamesEl.innerHTML = '';
       if (profileErrorEl) profileErrorEl.textContent = '';
+      if (shouldRecoverFocus && filterSelectEl) {
+        filterSelectEl.focus();
+      }
       // Signing out must take the social region with it — leaving one
       // account's friends and blocked list on screen for the next visitor
       // would be a disclosure, not a stale render.
@@ -698,6 +995,7 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
     };
 
     const handleSelfSessionChange = (session: AuthSession | null): void => {
+      if (!routeActive) return;
       if (session === null) {
         loadedUserId = null;
         profile.reset();
@@ -708,22 +1006,35 @@ export function mountProfile(deps: ProfileMountDependencies): MountedProfile {
 
       if (session.userId === loadedUserId) return;
 
+      const wasInitial = loadedUserId === null;
+      const preservedVariant = selectedVariant;
       loadedUserId = session.userId;
       profile.reset();
       clearSelfProfile();
+      if (wasInitial) {
+        selectedVariant = preservedVariant;
+        if (filterSelectEl) filterSelectEl.value = preservedVariant;
+        if (filterResetEl) filterResetEl.disabled = preservedVariant === 'all';
+      }
       void profile.loadSelf();
       if (passkeysSelfEl) passkeysSelfEl.hidden = false;
       void passkeysCtrl?.load();
       void sessionsCtrl?.load();
     };
 
-    onSessionChange = handleSelfSessionChange;
+    onSessionChange = (session: AuthSession | null): void => {
+      if (!routeActive) return;
+      handleSelfSessionChange(session);
+    };
 
     const initialSession = getCurrentSession();
     if (initialSession !== null) {
       handleSelfSessionChange(initialSession);
     } else {
-      void restorePromise.then(handleSelfSessionChange);
+      void restorePromise.then((session) => {
+        if (!routeActive) return;
+        handleSelfSessionChange(session);
+      });
     }
   }
 

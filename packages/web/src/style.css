@@ -919,6 +919,41 @@ a.button.primary:active {
 .not-found-action {
   min-width: 140px;
 }
+.seek-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.seek-filter-label {
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+.seek-filter-select {
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--panel-strong);
+  background: var(--panel);
+  color: inherit;
+  max-width: 100%;
+}
+.seek-filter-select:focus-visible {
+  outline: 3px solid var(--sel);
+}
+.seek-filter-help {
+  width: 100%;
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.seek-filter-status {
+  width: 100%;
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
 .seek-list {
   display: flex;
   flex-direction: column;
@@ -1008,6 +1043,22 @@ a.button.primary:active {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.profile-games-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 0.875rem;
+}
+.profile-games-filter-help {
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+.profile-games-filter-status {
+  font-size: 0.75rem;
+  margin-inline-start: auto;
 }
 .game-list,
 .panel-list {
