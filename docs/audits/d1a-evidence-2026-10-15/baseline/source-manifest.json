@@ -1,0 +1,257 @@
+{
+  "baseline": "4ccf8f48869335e06ac1b1de467d2161869f8fd7",
+  "files": [
+    {
+      "file": "packages/chess-core/src/board.ts",
+      "gitBlob": "2205159dfa0519f877c35e16b50d5f1550bc1528",
+      "sha256": "62e1586f9c668319285a8d557bed0d15c547682a33e439406d26e98fe71c56b0",
+      "bytes": 2529
+    },
+    {
+      "file": "packages/chess-core/src/castling.ts",
+      "gitBlob": "7e75f4e8261863df757f05bcde464ccafbe58ef9",
+      "sha256": "520b01d7b8dd08007c7fddb4a40ea69154add19f104d263cce71a7e7069fe6e9",
+      "bytes": 7643
+    },
+    {
+      "file": "packages/chess-core/src/check-counters.ts",
+      "gitBlob": "d05a7cffa60b9167fd35359fe06354cb4c8d3615",
+      "sha256": "35bf99497549024a3043916f4f918391f0be6c9cee6ffd5f3a999a1c6a74b79b",
+      "bytes": 4420
+    },
+    {
+      "file": "packages/chess-core/src/chess960.ts",
+      "gitBlob": "bba60ffe43c2c0e7196a10c095d2fb491d7eeead",
+      "sha256": "30d44e4e352eb81e0594231c25c6b24894c95f4eabf625b7d13a0de76591a243",
+      "bytes": 3665
+    },
+    {
+      "file": "packages/chess-core/src/fen-error.ts",
+      "gitBlob": "85c618729fda082658d68d2a71ea5507b9d860f7",
+      "sha256": "fcaa1d945fc3029166200acc356347bc480c1483d35a4bc69e767b7b46a4ef09",
+      "bytes": 570
+    },
+    {
+      "file": "packages/chess-core/src/fen.ts",
+      "gitBlob": "688751fa127f607abf097ff4e4861cda21cdb35c",
+      "sha256": "a2cf8fc5a8cff466a5589cb5038e63a2a9fceb34cb67a8c3461149892b91db18",
+      "bytes": 12461
+    },
+    {
+      "file": "packages/chess-core/src/index.ts",
+      "gitBlob": "5d2472a69875a70095e6c87bc478be8b94e30ffd",
+      "sha256": "1ffefe1b1239b809f39144634e10b256f4be9cd6f97fe07851135ea8d881f506",
+      "bytes": 1738
+    },
+    {
+      "file": "packages/chess-core/src/movegen.ts",
+      "gitBlob": "d4f13713f1c82710acff9d65c2bdf5fbf69e2145",
+      "sha256": "7f2db1e20bc9bbbaeb8f3cf51c7a834e84194c26e2f8f511f4ae5084cf5b7db6",
+      "bytes": 21501
+    },
+    {
+      "file": "packages/chess-core/src/position.ts",
+      "gitBlob": "a514e96765cfef7a570a1f3ca41acd83515bddeb",
+      "sha256": "5a2af6a0c77cd25f3418bd11ead63dfe8c70b77470e8cb4d84a3e3886159d55f",
+      "bytes": 17280
+    },
+    {
+      "file": "packages/chess-core/src/repetition.ts",
+      "gitBlob": "cfd2f3e6a33677f40e469a9e521ca2f8755df990",
+      "sha256": "ad0ff5f836f36acd7da238a2bb74da755539647df5a44dfd89a9d6eebca4161f",
+      "bytes": 2461
+    },
+    {
+      "file": "packages/chess-core/src/types.ts",
+      "gitBlob": "34364cea79de12c4983f6c462de2001b565dd134",
+      "sha256": "08c36d6202de49ea4f174b24579bd1ce8088915b2569e8f2904f73b0768ca953",
+      "bytes": 4194
+    },
+    {
+      "file": "packages/game/src/bot-accounts.ts",
+      "gitBlob": "013306d1d10d40981b99c9d5db5d922b6dcb87c1",
+      "sha256": "de49e546f724a311b7490d1cf46f2e770801d7bcbfc9e861210007c0687ab9c3",
+      "bytes": 830
+    },
+    {
+      "file": "packages/game/src/client.ts",
+      "gitBlob": "2abed222e860e49d9c18afe64841682ba91b4c2a",
+      "sha256": "d201ba65501f08cfbf3eced467908e982017bf30f6fb3d09a0aa5848422ad7c8",
+      "bytes": 274
+    },
+    {
+      "file": "packages/game/src/clock.ts",
+      "gitBlob": "25ccf2003bcad0b2358b101962fa7ac731195af4",
+      "sha256": "2202995882e759f22a307c06047bb154fedc4d75241d357a78ac706f7a3a4a0b",
+      "bytes": 5186
+    },
+    {
+      "file": "packages/game/src/events.ts",
+      "gitBlob": "91424b31c39b4799cd6b339929d6f03b392b3f74",
+      "sha256": "1ba72b86cc557efc02aa9ea48a35c3af417609ddf343adc02a11cd50e343ce3e",
+      "bytes": 5262
+    },
+    {
+      "file": "packages/game/src/game.ts",
+      "gitBlob": "f0ba285124a9b6905602f544981a926c4cb18b4a",
+      "sha256": "b0a119e1571d6dd476bab028915c7975136e54912bdb9972e4a4beb4e6725277",
+      "bytes": 32057
+    },
+    {
+      "file": "packages/game/src/index.ts",
+      "gitBlob": "4898347bc4af030107276bd99c079c4f3e821d2a",
+      "sha256": "19f1487a0cb40ce82b794aca2be6fe74cf5239f763bb9700bf3cd525047e8127",
+      "bytes": 554
+    },
+    {
+      "file": "packages/realtime-gateway/src/authority.ts",
+      "gitBlob": "b1f6658c0dc3ecf88677f6bbbfe4e3e4807d5c40",
+      "sha256": "e6f5150b8728070abee283b01bcd85951f277637afd146e9ccde4706410ee89f",
+      "bytes": 31035
+    },
+    {
+      "file": "packages/realtime-gateway/src/command-router.ts",
+      "gitBlob": "602d9e1969167c0fecf562728a34b53e1693a4f2",
+      "sha256": "bb9e508b6182a50fa35bf73e3c6b2035e4f72d1d60f6035fcc7a1db53fa33d8f",
+      "bytes": 1799
+    },
+    {
+      "file": "packages/realtime-gateway/src/event-log.ts",
+      "gitBlob": "545cb2c130276fd9798e9f43cc9ddaa5e963373a",
+      "sha256": "4fad06561cf21e3dade930b32c009572ab93423a865dd59cea5aad344dca1f70",
+      "bytes": 4513
+    },
+    {
+      "file": "packages/realtime-gateway/src/gateway.ts",
+      "gitBlob": "51b448a6f99356cb0fd7ee1a1a8603f449aa3f3e",
+      "sha256": "5b4d851d9d149190df6a6d3def1d36d177ddb9f6e50fd4300f241802b354d8a7",
+      "bytes": 15862
+    },
+    {
+      "file": "packages/realtime-gateway/src/index.ts",
+      "gitBlob": "8e2f65a461f8f349b31f5b737d97b4444001c4b1",
+      "sha256": "9d8208f7019bd74bf3835aa789ce1d3b1448fdcce41b829c5536b3baf9060733",
+      "bytes": 1954
+    },
+    {
+      "file": "packages/realtime-gateway/src/latency.ts",
+      "gitBlob": "e191ee3f4ea54b798da000da5f002881ec9fbf51",
+      "sha256": "a3644469de2f583d79a7a8b8647f142963f4af482cec04575d54f1d9b9b2b467",
+      "bytes": 1840
+    },
+    {
+      "file": "packages/realtime-gateway/src/protocol.ts",
+      "gitBlob": "cfbf877c31d33f246d52dd58101f9c0b15c7708b",
+      "sha256": "bf03696ebd459a4e38cf7e1aa570200d830f938fe0f019c16a34254c7d30612c",
+      "bytes": 15742
+    },
+    {
+      "file": "packages/realtime-gateway/src/pubsub.ts",
+      "gitBlob": "17883e8213fd3a67529125e8e779726070ba5db7",
+      "sha256": "b557c9a8551b2bc78d2bea5a753d64d6383f827c9db988d7af3e1dc8e85a6865",
+      "bytes": 10043
+    },
+    {
+      "file": "packages/realtime-gateway/src/room.ts",
+      "gitBlob": "b17047b7131b0e2ec54d20550ba4a58e52eb2703",
+      "sha256": "01703efec22f464d8ddcc253cd7d4fadeadb6d6a7f18f63b2594db2f09bcb24e",
+      "bytes": 2138
+    },
+    {
+      "file": "packages/realtime-gateway/src/transport.ts",
+      "gitBlob": "730aef3de538d6f3d34fd44cbc361c6fdbc841c3",
+      "sha256": "ab71a0adbfa9daef149c8deaa484574adb376c94fe5b4cb1d4e9772520668d12",
+      "bytes": 4165
+    },
+    {
+      "file": "packages/web/src/api/models.ts",
+      "gitBlob": "88b3c5cf60c694c2679d61b8cce90555e11e334e",
+      "sha256": "b3d357bbfba00e28147f18a3afa8025d4b042d15258268902f8033d9ee99fa39",
+      "bytes": 46276
+    },
+    {
+      "file": "packages/web/src/net/authoritative-oracle.ts",
+      "gitBlob": "6e674bce15e716b5e49906c84bf68afa4441b16f",
+      "sha256": "9320438e0f0b6753f1fcc0cfce4b7d8282e98314f24b9e46761cb002748ea7b6",
+      "bytes": 2329
+    },
+    {
+      "file": "packages/web/src/net/errors.ts",
+      "gitBlob": "387ef519ab42588c629be4c753085a76dee34d13",
+      "sha256": "9735a2f0cd6415d5bfaba35015a43f479dd1fd9af48292788aef3734965dc15e",
+      "bytes": 7031
+    },
+    {
+      "file": "packages/web/src/net/game-sync.ts",
+      "gitBlob": "1141a0c691a68f748a6231d6a194762a5232212e",
+      "sha256": "a95d752e9701411a98ba244624ed924bb98e5dcb377eaf9f1da33dd78a75c790",
+      "bytes": 28371
+    },
+    {
+      "file": "packages/web/src/net/http-client.ts",
+      "gitBlob": "dc43431de044bbb65e06ddc175a3aba8ba9b7e47",
+      "sha256": "80b7a18bcbaf37868f265b8c8b9f0da48450dd754205499c68cbb22ebd3e3331",
+      "bytes": 9376
+    },
+    {
+      "file": "packages/web/src/net/index.ts",
+      "gitBlob": "ca37c00bcae8a9bfc40a6d0db97d937e7bec76b8",
+      "sha256": "84c545bc1760affc1a7036855bbc581d2331a04089d37868f0dbce303ad3288a",
+      "bytes": 562
+    },
+    {
+      "file": "packages/web/src/net/retry.ts",
+      "gitBlob": "716f6da54228f5f2fab9a45e178d3e5e89abb667",
+      "sha256": "02831c475244c54ac816e991b1ad41ee9994385616276cfa55f638f874c8999a",
+      "bytes": 2855
+    },
+    {
+      "file": "packages/web/src/net/session.ts",
+      "gitBlob": "53870205528bb2ec2b51d4a2f42026748c20415f",
+      "sha256": "38feadbff3681e60037ca9c711a60f70a2b340c4428c02e867e3cd5cd7e0b0ee",
+      "bytes": 42504
+    },
+    {
+      "file": "packages/web/src/net/ws-client.ts",
+      "gitBlob": "96fe776872f6d80ac8287147f3390aedc5c953b2",
+      "sha256": "7ea69d76b37d990697528b992f19341f0149d65e2e44c40d589f719e19847f5e",
+      "bytes": 12895
+    },
+    {
+      "file": "packages/web/src/net/ws-protocol.ts",
+      "gitBlob": "6e6b94b84686e6a532ea693f8749a9b77a2021e9",
+      "sha256": "70ea7e7ca815c139947954432680b39314fdf83d4955c1ea10afe27cdf6a45a6",
+      "bytes": 16178
+    },
+    {
+      "file": "packages/web/src/ports/http.ts",
+      "gitBlob": "40cfd85a2959e788623b7b0850b91a097439f1c1",
+      "sha256": "58c9609ace50af0f7366f114f48bf7ca141f6c52834ce968ae1b04d1aea33b73",
+      "bytes": 3390
+    },
+    {
+      "file": "packages/web/src/ports/move-oracle.ts",
+      "gitBlob": "21810130686733e0ef7d7918a385279f617a437d",
+      "sha256": "fcbb4998c6a1deb21fe986cfaf3614b43a5cfa35df3359c50a9e76b54cec775a",
+      "bytes": 2212
+    },
+    {
+      "file": "packages/web/src/ports/webauthn.ts",
+      "gitBlob": "3f09672de54f3a112fd7b953667eaa16103c77fe",
+      "sha256": "de430c8dd2ee53197c77a861fdafb2fd5942e983247ec570d7d88f8d682d23e4",
+      "bytes": 5051
+    },
+    {
+      "file": "packages/web/src/ports/ws.ts",
+      "gitBlob": "44ecd37e4e846175e0a8777ac851f866eb87b43a",
+      "sha256": "407de32c63c49b6bc5403ad977e2457b43a36b8b685ec2e3f25bb4624ae926f0",
+      "bytes": 2167
+    },
+    {
+      "file": "packages/web/test/support/fake-socket.ts",
+      "gitBlob": "a64fc201c46c2fed4fbae4d2eb7c5c184105acc4",
+      "sha256": "5dd31957f940d738d0a49833f99b03473b2ba69edf92242ab4bd6102f5671912",
+      "bytes": 2621
+    }
+  ]
+}

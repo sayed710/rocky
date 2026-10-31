@@ -1,0 +1,461 @@
+TAP version 13
+# Subtest: F01 CONTROL
+ok 1 - F01 CONTROL
+  ---
+  duration_ms: 16.5085
+  type: 'test'
+  ...
+# Subtest: F02 CONTROL
+ok 2 - F02 CONTROL
+  ---
+  duration_ms: 3.6775
+  type: 'test'
+  ...
+# Subtest: F03 CONTROL
+ok 3 - F03 CONTROL
+  ---
+  duration_ms: 2.5024
+  type: 'test'
+  ...
+# Subtest: F04 CONTROL
+ok 4 - F04 CONTROL
+  ---
+  duration_ms: 5.1
+  type: 'test'
+  ...
+# Subtest: S01 CANDIDATE
+not ok 5 - S01 CANDIDATE
+  ---
+  duration_ms: 4.9563
+  type: 'test'
+  location: '<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs:3844:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    0 !== 2
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 2
+  actual: 0
+  operator: 'strictEqual'
+  stack: |-
+    <ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:4004:25
+    TestContext.<anonymous> (<ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:3853:7)
+    async Test.run (node:internal/test_runner/test:1208:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:831:7)
+  ...
+# Subtest: S02 CANDIDATE
+not ok 6 - S02 CANDIDATE
+  ---
+  duration_ms: 2.3951
+  type: 'test'
+  location: '<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs:3844:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    0 !== 2
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 2
+  actual: 0
+  operator: 'strictEqual'
+  stack: |-
+    <ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:4015:25
+    TestContext.<anonymous> (<ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:3853:7)
+    async Test.run (node:internal/test_runner/test:1208:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:831:7)
+  ...
+# Subtest: S03 CANDIDATE
+not ok 7 - S03 CANDIDATE
+  ---
+  duration_ms: 4.5669
+  type: 'test'
+  location: '<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs:3844:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly deep-equal:
+    + actual - expected
+    
+    + []
+    - [
+    -   {
+    -     by: 'w',
+    -     clock: {
+    -       b: 300000,
+    -       w: 300000
+    -     },
+    -     fenHash: '952a5e992e65',
+    -     gameId: 'd1a-current',
+    -     legalMoves: {
+    -       a7: [
+    -         'a6',
+    -         'a5'
+    -       ],
+    -       b7: [
+    -         'b6',
+    -         'b5'
+    -       ],
+    -       b8: [
+    -         'a6',
+    -         'c6'
+    -       ],
+    -       c7: [
+    -         'c6',
+    -         'c5'
+    -       ],
+    -       d7: [
+    -         'd6',
+    -         'd5'
+    -       ],
+    -       e7: [
+    -         'e6',
+    -         'e5'
+    -       ],
+    -       f7: [
+    -         'f6',
+    -         'f5'
+    -       ],
+    -       g7: [
+    -         'g6',
+    -         'g5'
+    -       ],
+    -       g8: [
+    -         'f6',
+    -         'h6'
+    -       ],
+    -       h7: [
+    -         'h6',
+    -         'h5'
+    -       ]
+    -     },
+    -     ply: 1,
+    -     san: 'e4',
+    -     serverTs: 1000,
+    -     stateRevision: 1,
+    -     t: 'move',
+    -     uci: 'e2e4'
+    -   },
+    -   {
+    -     by: 'b',
+    -     clock: {
+    -       b: 300000,
+    -       w: 300000
+    -     },
+    -     fenHash: '50d1e3a19c12',
+    -     gameId: 'd1a-current',
+    -     legalMoves: {
+    -       a2: [
+    -         'a3',
+    -         'a4'
+    -       ],
+    -       b1: [
+    -         'c3',
+    -         'a3'
+    -       ],
+    -       b2: [
+    -         'b3',
+    -         'b4'
+    -       ],
+    -       c2: [
+    -         'c3',
+    -         'c4'
+    -       ],
+    -       d1: [
+    -         'e2',
+    -         'f3',
+    -         'g4',
+    -         'h5'
+    -       ],
+    -       d2: [
+    -         'd3',
+    -         'd4'
+    -       ],
+    -       e1: [
+    -         'e2'
+    -       ],
+    -       f1: [
+    -         'e2',
+    -         'd3',
+    -         'c4',
+    -         'b5',
+    -         'a6'
+    -       ],
+    -       f2: [
+    -         'f3',
+    -         'f4'
+    -       ],
+    -       g1: [
+    -         'h3',
+    -         'f3',
+    -         'e2'
+    -       ],
+    -       g2: [
+    -         'g3',
+    -         'g4'
+    -       ],
+    -       h2: [
+    -         'h3',
+    -         'h4'
+    -       ]
+    -     },
+    -     ply: 2,
+    -     san: 'e5',
+    -     serverTs: 1000,
+    -     stateRevision: 2,
+    -     t: 'move',
+    -     uci: 'e7e5'
+    -   }
+    - ]
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected:
+    0:
+      t: 'move'
+      gameId: 'd1a-current'
+      stateRevision: 1
+      ply: 1
+      uci: 'e2e4'
+      san: 'e4'
+      by: 'w'
+      fenHash: '952a5e992e65'
+      clock:
+        w: 300000
+        b: 300000
+      serverTs: 1000
+      legalMoves:
+        a7:
+          0: 'a6'
+          1: 'a5'
+        b7:
+          0: 'b6'
+          1: 'b5'
+        c7:
+          0: 'c6'
+          1: 'c5'
+        d7:
+          0: 'd6'
+          1: 'd5'
+        e7:
+          0: 'e6'
+          1: 'e5'
+        f7:
+          0: 'f6'
+          1: 'f5'
+        g7:
+          0: 'g6'
+          1: 'g5'
+        h7:
+          0: 'h6'
+          1: 'h5'
+        b8:
+          0: 'a6'
+          1: 'c6'
+        g8:
+          0: 'f6'
+          1: 'h6'
+    1:
+      t: 'move'
+      gameId: 'd1a-current'
+      stateRevision: 2
+      ply: 2
+      uci: 'e7e5'
+      san: 'e5'
+      by: 'b'
+      fenHash: '50d1e3a19c12'
+      clock:
+        w: 300000
+        b: 300000
+      serverTs: 1000
+      legalMoves:
+        b1:
+          0: 'c3'
+          1: 'a3'
+        d1:
+          0: 'e2'
+          1: 'f3'
+          2: 'g4'
+          3: 'h5'
+        e1:
+          0: 'e2'
+        f1:
+          0: 'e2'
+          1: 'd3'
+          2: 'c4'
+          3: 'b5'
+          4: 'a6'
+        g1:
+          0: 'h3'
+          1: 'f3'
+          2: 'e2'
+        a2:
+          0: 'a3'
+          1: 'a4'
+        b2:
+          0: 'b3'
+          1: 'b4'
+        c2:
+          0: 'c3'
+          1: 'c4'
+        d2:
+          0: 'd3'
+          1: 'd4'
+        f2:
+          0: 'f3'
+          1: 'f4'
+        g2:
+          0: 'g3'
+          1: 'g4'
+        h2:
+          0: 'h3'
+          1: 'h4'
+  actual:
+  operator: 'deepStrictEqual'
+  stack: |-
+    <ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:4023:33
+    TestContext.<anonymous> (<ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:3853:7)
+    async Test.run (node:internal/test_runner/test:1208:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:831:7)
+  ...
+# Subtest: S04 CANDIDATE
+not ok 8 - S04 CANDIDATE
+  ---
+  duration_ms: 4.1047
+  type: 'test'
+  location: '<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs:3844:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    null !== 'w'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'w'
+  actual: ~
+  operator: 'strictEqual'
+  stack: |-
+    <ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:4033:25
+    TestContext.<anonymous> (<ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:3853:7)
+    async Test.run (node:internal/test_runner/test:1208:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:831:7)
+  ...
+# Subtest: S05 CANDIDATE
+not ok 9 - S05 CANDIDATE
+  ---
+  duration_ms: 3.3504
+  type: 'test'
+  location: '<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs:3844:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    <ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:4045:25
+    TestContext.<anonymous> (<ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:3853:7)
+    async Test.run (node:internal/test_runner/test:1208:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:831:7)
+  ...
+# Subtest: C01 CANDIDATE
+not ok 10 - C01 CANDIDATE
+  ---
+  duration_ms: 4.1208
+  type: 'test'
+  location: '<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs:3844:29'
+  failureType: 'testCodeFailure'
+  error: 'older recovery must not lower revision'
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: '=='
+  stack: |-
+    <ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:4059:25
+    TestContext.<anonymous> (<ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:3853:7)
+    async Test.run (node:internal/test_runner/test:1208:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:831:7)
+  ...
+# Subtest: C02 CANDIDATE
+not ok 11 - C02 CANDIDATE
+  ---
+  duration_ms: 3.0701
+  type: 'test'
+  location: '<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs:3844:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    same-ply older state must not erase newer draw
+    
+    null !== 'w'
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 'w'
+  actual: ~
+  operator: 'strictEqual'
+  stack: |-
+    <ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:4074:25
+    TestContext.<anonymous> (<ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:3853:7)
+    async Test.run (node:internal/test_runner/test:1208:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:831:7)
+  ...
+# Subtest: C03 CANDIDATE
+not ok 12 - C03 CANDIDATE
+  ---
+  duration_ms: 2.144
+  type: 'test'
+  location: '<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs:3844:29'
+  failureType: 'testCodeFailure'
+  error: |-
+    older recovery must not reopen terminal game
+    
+    false !== true
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: true
+  actual: false
+  operator: 'strictEqual'
+  stack: |-
+    <ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:4088:25
+    TestContext.<anonymous> (<ARTIFACT_ROOT>\D1A_CURRENT_MAIN_REPRO_2026-10-15\harness.cjs:3853:7)
+    async Test.run (node:internal/test_runner/test:1208:7)
+    async Test.processPendingSubtests (node:internal/test_runner/test:831:7)
+  ...
+# Subtest: F05 CONTROL
+ok 13 - F05 CONTROL
+  ---
+  duration_ms: 1.9245
+  type: 'test'
+  ...
+# Subtest: F06 CHARACTERIZATION
+ok 14 - F06 CHARACTERIZATION
+  ---
+  duration_ms: 3.1475
+  type: 'test'
+  ...
+# Subtest: F07 CONTROL
+ok 15 - F07 CONTROL
+  ---
+  duration_ms: 1.8519
+  type: 'test'
+  ...
+1..15
+# tests 15
+# suites 0
+# pass 7
+# fail 8
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 211.4784

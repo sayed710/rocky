@@ -1,0 +1,657 @@
+{
+  "inputs": {
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/clock.ts": {
+      "bytes": 5186,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/events.ts": {
+      "bytes": 5262,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/bot-accounts.ts": {
+      "bytes": 830,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/types.ts": {
+      "bytes": 4194,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/board.ts": {
+      "bytes": 2529,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/castling.ts": {
+      "bytes": 7643,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/board.ts",
+          "kind": "import-statement",
+          "original": "./board"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen-error.ts": {
+      "bytes": 570,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/check-counters.ts": {
+      "bytes": 4420,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen-error.ts",
+          "kind": "import-statement",
+          "original": "./fen-error"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen.ts": {
+      "bytes": 12461,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/castling.ts",
+          "kind": "import-statement",
+          "original": "./castling"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/board.ts",
+          "kind": "import-statement",
+          "original": "./board"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen-error.ts",
+          "kind": "import-statement",
+          "original": "./fen-error"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/check-counters.ts",
+          "kind": "import-statement",
+          "original": "./check-counters"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen-error.ts",
+          "kind": "import-statement",
+          "original": "./fen-error"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/chess960.ts": {
+      "bytes": 3665,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/movegen.ts": {
+      "bytes": 21501,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/board.ts",
+          "kind": "import-statement",
+          "original": "./board"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/castling.ts",
+          "kind": "import-statement",
+          "original": "./castling"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen.ts",
+          "kind": "import-statement",
+          "original": "./fen"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/types.ts",
+          "kind": "import-statement",
+          "original": "./types"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/position.ts": {
+      "bytes": 17280,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/board.ts",
+          "kind": "import-statement",
+          "original": "./board"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen.ts",
+          "kind": "import-statement",
+          "original": "./fen"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/chess960.ts",
+          "kind": "import-statement",
+          "original": "./chess960"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/movegen.ts",
+          "kind": "import-statement",
+          "original": "./movegen"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/types.ts",
+          "kind": "import-statement",
+          "original": "./types"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/repetition.ts": {
+      "bytes": 2461,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/types.ts",
+          "kind": "import-statement",
+          "original": "./types"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/movegen.ts",
+          "kind": "import-statement",
+          "original": "./movegen"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen.ts",
+          "kind": "import-statement",
+          "original": "./fen"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/index.ts": {
+      "bytes": 1738,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/types.ts",
+          "kind": "import-statement",
+          "original": "./types"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/board.ts",
+          "kind": "import-statement",
+          "original": "./board"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen.ts",
+          "kind": "import-statement",
+          "original": "./fen"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/chess960.ts",
+          "kind": "import-statement",
+          "original": "./chess960"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/castling.ts",
+          "kind": "import-statement",
+          "original": "./castling"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/check-counters.ts",
+          "kind": "import-statement",
+          "original": "./check-counters"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/movegen.ts",
+          "kind": "import-statement",
+          "original": "./movegen"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/position.ts",
+          "kind": "import-statement",
+          "original": "./position"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/repetition.ts",
+          "kind": "import-statement",
+          "original": "./repetition"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/game.ts": {
+      "bytes": 32057,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/index.ts",
+          "kind": "import-statement",
+          "original": "@chess-platform/core"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/clock.ts",
+          "kind": "import-statement",
+          "original": "./clock"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/index.ts",
+          "kind": "import-statement",
+          "original": "@chess-platform/core"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/index.ts": {
+      "bytes": 554,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/clock.ts",
+          "kind": "import-statement",
+          "original": "./clock"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/events.ts",
+          "kind": "import-statement",
+          "original": "./events"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/bot-accounts.ts",
+          "kind": "import-statement",
+          "original": "./bot-accounts"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/game.ts",
+          "kind": "import-statement",
+          "original": "./game"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/event-log.ts": {
+      "bytes": 4513,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/pubsub.ts": {
+      "bytes": 10043,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/authority.ts": {
+      "bytes": 31035,
+      "imports": [
+        {
+          "path": "node:crypto",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/index.ts",
+          "kind": "import-statement",
+          "original": "@chess-platform/game"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/event-log.ts",
+          "kind": "import-statement",
+          "original": "./event-log"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/pubsub.ts",
+          "kind": "import-statement",
+          "original": "./pubsub"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/command-router.ts": {
+      "bytes": 1799,
+      "imports": [
+        {
+          "path": "./authority",
+          "kind": "import-statement",
+          "external": true
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/room.ts": {
+      "bytes": 2138,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/gateway.ts": {
+      "bytes": 15862,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/authority.ts",
+          "kind": "import-statement",
+          "original": "./authority"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/command-router.ts",
+          "kind": "import-statement",
+          "original": "./command-router"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/room.ts",
+          "kind": "import-statement",
+          "original": "./room"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/pubsub.ts",
+          "kind": "import-statement",
+          "original": "./pubsub"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/transport.ts": {
+      "bytes": 4165,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/protocol.ts": {
+      "bytes": 15742,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/errors.ts": {
+      "bytes": 7031,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/session.ts": {
+      "bytes": 42504,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/errors.ts",
+          "kind": "import-statement",
+          "original": "./errors.js"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/api/models.ts": {
+      "bytes": 46276,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-protocol.ts": {
+      "bytes": 16178,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/api/models.ts",
+          "kind": "import-statement",
+          "original": "../api/models.js"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/game-sync.ts": {
+      "bytes": 28371,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/session.ts",
+          "kind": "import-statement",
+          "original": "./session.js"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-protocol.ts",
+          "kind": "import-statement",
+          "original": "./ws-protocol.js"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/ports/ws.ts": {
+      "bytes": 2167,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/retry.ts": {
+      "bytes": 2855,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/latency.ts": {
+      "bytes": 1840,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-client.ts": {
+      "bytes": 12895,
+      "imports": [
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-protocol.ts",
+          "kind": "import-statement",
+          "original": "./ws-protocol.js"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/ports/ws.ts",
+          "kind": "import-statement",
+          "original": "../ports/ws.js"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/retry.ts",
+          "kind": "import-statement",
+          "original": "./retry.js"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/latency.ts",
+          "kind": "import-statement",
+          "original": "@chess-platform/realtime-gateway/latency"
+        }
+      ],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/test/support/fake-socket.ts": {
+      "bytes": 2621,
+      "imports": [],
+      "format": "esm"
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/harness.ts": {
+      "bytes": 14394,
+      "imports": [
+        {
+          "path": "node:assert/strict",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:fs",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "node:test",
+          "kind": "import-statement",
+          "external": true
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/authority.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/realtime-gateway/src/authority"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/event-log.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/realtime-gateway/src/event-log"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/pubsub.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/realtime-gateway/src/pubsub"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/gateway.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/realtime-gateway/src/gateway"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/transport.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/realtime-gateway/src/transport"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/protocol.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/realtime-gateway/src/protocol"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/game-sync.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/web/src/net/game-sync"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-client.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/web/src/net/ws-client"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-protocol.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/web/src/net/ws-protocol"
+        },
+        {
+          "path": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/test/support/fake-socket.ts",
+          "kind": "import-statement",
+          "original": "./frozen-src/packages/web/test/support/fake-socket"
+        }
+      ],
+      "format": "esm"
+    }
+  },
+  "outputs": {
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/harness.cjs.map": {
+      "imports": [],
+      "exports": [],
+      "inputs": {},
+      "bytes": 487919
+    },
+    "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/harness.cjs": {
+      "imports": [
+        {
+          "path": "node:assert/strict",
+          "kind": "require-call",
+          "external": true
+        },
+        {
+          "path": "node:fs",
+          "kind": "require-call",
+          "external": true
+        },
+        {
+          "path": "node:test",
+          "kind": "require-call",
+          "external": true
+        },
+        {
+          "path": "node:crypto",
+          "kind": "require-call",
+          "external": true
+        }
+      ],
+      "exports": [],
+      "entryPoint": "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/harness.ts",
+      "inputs": {
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/harness.ts": {
+          "bytesInOutput": 14871
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/authority.ts": {
+          "bytesInOutput": 21013
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/clock.ts": {
+          "bytesInOutput": 1612
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/index.ts": {
+          "bytesInOutput": 0
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/bot-accounts.ts": {
+          "bytesInOutput": 244
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/index.ts": {
+          "bytesInOutput": 0
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/board.ts": {
+          "bytesInOutput": 1007
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/castling.ts": {
+          "bytesInOutput": 3112
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen-error.ts": {
+          "bytesInOutput": 117
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/check-counters.ts": {
+          "bytesInOutput": 1625
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/fen.ts": {
+          "bytesInOutput": 5741
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/chess960.ts": {
+          "bytesInOutput": 1482
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/movegen.ts": {
+          "bytesInOutput": 12347
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/position.ts": {
+          "bytesInOutput": 14367
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/chess-core/src/repetition.ts": {
+          "bytesInOutput": 441
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/game/src/game.ts": {
+          "bytesInOutput": 21281
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/event-log.ts": {
+          "bytesInOutput": 1796
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/pubsub.ts": {
+          "bytesInOutput": 878
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/command-router.ts": {
+          "bytesInOutput": 188
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/room.ts": {
+          "bytesInOutput": 1479
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/gateway.ts": {
+          "bytesInOutput": 10941
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/transport.ts": {
+          "bytesInOutput": 1154
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/protocol.ts": {
+          "bytesInOutput": 55
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/errors.ts": {
+          "bytesInOutput": 404
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/session.ts": {
+          "bytesInOutput": 401
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/api/models.ts": {
+          "bytesInOutput": 138
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-protocol.ts": {
+          "bytesInOutput": 5426
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/game-sync.ts": {
+          "bytesInOutput": 20127
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/ports/ws.ts": {
+          "bytesInOutput": 739
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/retry.ts": {
+          "bytesInOutput": 270
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/realtime-gateway/src/latency.ts": {
+          "bytesInOutput": 101
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-client.ts": {
+          "bytesInOutput": 7451
+        },
+        "<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/test/support/fake-socket.ts": {
+          "bytesInOutput": 1780
+        }
+      },
+      "bytes": 158907
+    }
+  }
+}

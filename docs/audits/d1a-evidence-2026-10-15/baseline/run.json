@@ -1,0 +1,121 @@
+{
+  "baseline": "4ccf8f48869335e06ac1b1de467d2161869f8fd7",
+  "repo": "<REPOSITORY>",
+  "startedAt": "2026-10-15T11:08:01.788Z",
+  "runtime": {
+    "node": "v24.15.0",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "command": [
+    "node",
+    "<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\run.mjs"
+  ],
+  "before": {
+    "head": "dbf44d9a4207af6cf6096935693198a8a4954ff0",
+    "status": ""
+  },
+  "setup": "PASS",
+  "esbuild": "0.25.12",
+  "testCommand": [
+    "node",
+    "--test",
+    "--test-concurrency=1",
+    "--test-reporter=tap",
+    "<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\harness.cjs"
+  ],
+  "testExit": 1,
+  "testSignal": null,
+  "spawnError": null,
+  "results": [
+    {
+      "id": "F01",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "F02",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "F03",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "F04",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "S01",
+      "kind": "CANDIDATE",
+      "result": "BEHAVIORAL_RED"
+    },
+    {
+      "id": "S02",
+      "kind": "CANDIDATE",
+      "result": "BEHAVIORAL_RED"
+    },
+    {
+      "id": "S03",
+      "kind": "CANDIDATE",
+      "result": "BEHAVIORAL_RED"
+    },
+    {
+      "id": "S04",
+      "kind": "CANDIDATE",
+      "result": "BEHAVIORAL_RED"
+    },
+    {
+      "id": "S05",
+      "kind": "CANDIDATE",
+      "result": "BEHAVIORAL_RED"
+    },
+    {
+      "id": "C01",
+      "kind": "CANDIDATE",
+      "result": "BEHAVIORAL_RED"
+    },
+    {
+      "id": "C02",
+      "kind": "CANDIDATE",
+      "result": "BEHAVIORAL_RED"
+    },
+    {
+      "id": "C03",
+      "kind": "CANDIDATE",
+      "result": "BEHAVIORAL_RED"
+    },
+    {
+      "id": "F05",
+      "kind": "CONTROL",
+      "result": "PASS"
+    },
+    {
+      "id": "F06",
+      "kind": "CHARACTERIZATION",
+      "result": "PASS"
+    },
+    {
+      "id": "F07",
+      "kind": "CONTROL",
+      "result": "PASS"
+    }
+  ],
+  "counts": {
+    "PASS": 7,
+    "BEHAVIORAL_RED": 8
+  },
+  "bundleSHA256": "b16317a8b0b80883c5fc68f89b3e9e0d583676fa1086eb6a071477883005f5ce",
+  "harnessSHA256": "d06dcf767b194a89677f81ff4f9998d246616b43b8f3ec9532a7f3a31df99339",
+  "runnerSHA256": "98101bcbbd68aacdbe1de926698504996522e2db0cbe6c0a5979eb3582e66ae6",
+  "frozenSourcesUnchanged": true,
+  "finishedAt": "2026-10-15T11:08:07.332Z",
+  "after": {
+    "head": "dbf44d9a4207af6cf6096935693198a8a4954ff0",
+    "status": "",
+    "originMain": "4ccf8f48869335e06ac1b1de467d2161869f8fd7"
+  }
+}

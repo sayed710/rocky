@@ -1,0 +1,9 @@
+Gemini original source-oracle review — coordinator publication summary
+
+Baseline: 4ccf8f48869335e06ac1b1de467d2161869f8fd7.
+
+This is a concise transcription of the original visible source-review outcome, replacing the private desktop accessibility capture. It is not a new Gemini execution or candidate-code acceptance. The later complete actual-harness review is preserved alongside it in GEMINI_D1A_SERVER_HARNESS_REVIEW_2026-10-15.md.
+
+The source review identified warm-cache hasFresh short-circuits in gateway recovery, absence of durable-head verification for warm join/resume, and PubSub fanout that does not refresh the independent authority aggregate. Same-ply draw and terminal events require revision-aware full-state checks; ply alone is insufficient. EventLog exposes load, not the proposed new head API. The reviewer supported committed-prefix snapshot/history oracles and a cold authority witness, without inventing a draw-broadcast requirement.
+
+Limitations: source review only, no runtime executed by reviewer. Proposed API/demo examples were not adopted as implementation and cannot replace actual healthy-state assertions. No production Redis/PostgreSQL routing or deployment proof, client policy repair, independent candidate-code approval or CI clearance follows. S03 is derivative of warm resume staleness. Review historical policy wording against the candidate README and actual later reviews.

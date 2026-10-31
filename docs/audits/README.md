@@ -1,5 +1,6 @@
 # Rookzen audit sources
 
+- [Historical D1-A evidence archive — 2026-10-15](d1a-evidence-2026-10-15/README.md) records historical baseline reproduction across 15 cases (7 PASS, 8 intended RED) and an external unapplied server prototype with 12 selected passes, retaining qualified client, oracle, and control gaps. Archival evidence only, not production acceptance or a runtime fix.
 - [Separate R-03 forwarding timeout verification — 2026-10-11](FORWARD_TIMEOUT_R03_VERIFICATION_2026-10-11.md) records the original delayed-resignation RED, owner-approved unknown-outcome semantics, atomic admission/cancellation, independent review corrections, validation and coordinated v2 rollout limits. Historical Fable + Astra closure remains separate; published-head CI and owner merge gates are tracked in the implementation PR.
 
 - [Launch Preparation A07 — mobile, Firefox and Safari verification — 2026-10-06](LAUNCH_A07_MOBILE_CROSS_BROWSER_VERIFICATION_2026-10-06.md) records release Firefox 157.0 English/Arabic/RTL evidence, the promotion-chooser correction and retests, supporting Playwright WebKit results (not Safari), and why **A07 REMAINS OPEN**: physical mobile/orientation and real Safari evidence were unavailable. O06 remains separate and last.

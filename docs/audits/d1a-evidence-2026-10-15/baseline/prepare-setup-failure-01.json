@@ -1,0 +1,27 @@
+{
+  "baseline": "4ccf8f48869335e06ac1b1de467d2161869f8fd7",
+  "repo": "<REPOSITORY>",
+  "startedAt": "2026-10-15T11:07:09.659Z",
+  "runtime": {
+    "node": "v24.15.0",
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "command": [
+    "node",
+    "<ARTIFACT_ROOT>\\D1A_CURRENT_MAIN_REPRO_2026-10-15\\run.mjs"
+  ],
+  "before": {
+    "head": "dbf44d9a4207af6cf6096935693198a8a4954ff0",
+    "status": ""
+  },
+  "setup": "FAIL",
+  "esbuild": "0.25.12",
+  "setupError": "Error: Build failed with 2 errors:\n<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-client.ts:28:31: ERROR: Could not resolve \"@chess-platform/realtime-gateway/latency\"\n<ARTIFACT_ROOT>/D1A_CURRENT_MAIN_REPRO_2026-10-15/frozen-src/packages/web/src/net/ws-protocol.ts:19:39: ERROR: Could not resolve \"../api/models.js\"\n    at failureErrorWithLog (<WORKSTATION>)\n    at <WORKSTATION>\n    at <WORKSTATION>\n    at buildResponseToResult (<WORKSTATION>)\n    at <WORKSTATION>\n    at responseCallbacks.<computed> (<WORKSTATION>)\n    at handleIncomingPacket (<WORKSTATION>)\n    at Socket.readFromStdout (<WORKSTATION>)\n    at Socket.emit (node:events:509:28)\n    at addChunk (node:internal/streams/readable:563:12)",
+  "finishedAt": "2026-10-15T11:07:15.382Z",
+  "after": {
+    "head": "dbf44d9a4207af6cf6096935693198a8a4954ff0",
+    "status": "",
+    "originMain": "4ccf8f48869335e06ac1b1de467d2161869f8fd7"
+  }
+}
