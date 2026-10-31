@@ -70,7 +70,7 @@ export function parseRoute(pathname: string): Route {
   if (segments[0] === 'profile') {
     if (segments.length === 1) return { name: 'profile', handle: null };
     return segments.length === 2
-      ? { name: 'profile', handle: segments[1]! }
+      ? { name: 'profile', handle: decodeSegment(segments[1]!) }
       : { name: 'not-found' };
   }
   if (segments[0] === 'password-reset') {

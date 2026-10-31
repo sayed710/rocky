@@ -26,6 +26,16 @@ test('parseRoute: /profile/{handle} → profile with handle', () => {
   if (r.name === 'profile') assert.equal(r.handle, 'alice');
 });
 
+test('parseRoute: /profile/{handle} decodes handle segment exactly once with malformed fallback', () => {
+  assert.deepEqual(parseRoute('/profile/alice'), { name: 'profile', handle: 'alice' });
+  assert.deepEqual(parseRoute('/profile/%D8%B9%D9%84%D9%8A'), { name: 'profile', handle: 'علي' });
+  assert.deepEqual(parseRoute('/profile/alice%2Fchess'), { name: 'profile', handle: 'alice/chess' });
+  assert.deepEqual(parseRoute('/profile/rate%2520test'), { name: 'profile', handle: 'rate%20test' });
+  assert.deepEqual(parseRoute('/profile/100%25'), { name: 'profile', handle: '100%' });
+  assert.deepEqual(parseRoute('/profile/%E0%A4%A'), { name: 'profile', handle: '%E0%A4%A' });
+  assert.deepEqual(parseRoute('/profile/%99'), { name: 'profile', handle: '%99' });
+});
+
 test('parseRoute: unknown path → not-found', () => {
   assert.equal(parseRoute('/unknown').name, 'not-found');
   assert.equal(parseRoute('/foo/bar/baz').name, 'not-found');

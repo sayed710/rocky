@@ -183,7 +183,7 @@ export function renderStandings(
     });
     if (focusedPlayerId !== null) {
       container.tabIndex = -1;
-      container.focus();
+      container.focus({ preventScroll: true });
     }
     return;
   }
@@ -236,10 +236,10 @@ export function renderStandings(
 
   if (focusedPlayerId !== null) {
     if (anchorToFocus) {
-      anchorToFocus.focus();
+      anchorToFocus.focus({ preventScroll: true });
     } else {
       container.tabIndex = -1;
-      container.focus();
+      container.focus({ preventScroll: true });
     }
   }
 }

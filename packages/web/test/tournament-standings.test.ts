@@ -13,6 +13,17 @@ function setupDocument(): { container: FakeElement; doc: Document } {
   return { container, doc };
 }
 
+const focusOptionsMap = new WeakMap<FakeElement, FocusOptions>();
+const origFakeElementFocus = FakeElement.prototype.focus;
+FakeElement.prototype.focus = function (this: FakeElement, options?: FocusOptions): void {
+  if (options !== undefined) {
+    focusOptionsMap.set(this, options);
+  } else {
+    focusOptionsMap.delete(this);
+  }
+  origFakeElementFocus.call(this);
+};
+
 describe('renderStandings', () => {
   it('renders safe literal links, LTR ranks, unresolved short IDs without links, and statistics for Arena and Swiss', () => {
     const { container } = setupDocument();
@@ -210,6 +221,7 @@ describe('renderStandings', () => {
     const firstRowAnchor = firstRowAfter.querySelectorAll('a')[0];
     assert.ok(firstRowAnchor);
     assert.equal(firstRowAnchor, activeAfter);
+    assert.deepEqual(focusOptionsMap.get(activeAfter), { preventScroll: true });
 
     const externalBtn = doc.createElement('button') as unknown as FakeElement;
     (doc as unknown as { body: FakeElement }).body.appendChild(externalBtn);
@@ -240,27 +252,33 @@ describe('renderStandings', () => {
     assert.ok(p2Anchor);
     p2Anchor.focus();
 
+    focusOptionsMap.delete(container);
     renderStandings(container as unknown as HTMLElement, [firstStanding], names, i18n);
     assert.equal((doc as unknown as { activeElement?: FakeElement }).activeElement, container);
     assert.equal((container as unknown as { tabIndex?: number }).tabIndex, -1);
+    assert.deepEqual(focusOptionsMap.get(container), { preventScroll: true });
 
     const p1Anchor = container.querySelectorAll('a').find((a) => a.dataset.playerId === 'p1');
     assert.ok(p1Anchor);
     p1Anchor.focus();
 
     const emptyNames = new Map<string, { id: string; handle: string }>();
+    focusOptionsMap.delete(container);
     renderStandings(container as unknown as HTMLElement, [firstStanding], emptyNames, i18n);
     assert.equal((doc as unknown as { activeElement?: FakeElement }).activeElement, container);
     assert.equal((container as unknown as { tabIndex?: number }).tabIndex, -1);
+    assert.deepEqual(focusOptionsMap.get(container), { preventScroll: true });
 
     renderStandings(container as unknown as HTMLElement, standings, names, i18n);
     const p1AnchorAgain = container.querySelectorAll('a').find((a) => a.dataset.playerId === 'p1');
     assert.ok(p1AnchorAgain);
     p1AnchorAgain.focus();
 
+    focusOptionsMap.delete(container);
     renderStandings(container as unknown as HTMLElement, [], names, i18n);
     assert.equal((doc as unknown as { activeElement?: FakeElement }).activeElement, container);
     assert.equal((container as unknown as { tabIndex?: number }).tabIndex, -1);
+    assert.deepEqual(focusOptionsMap.get(container), { preventScroll: true });
     assert.ok(container.textContent.includes(i18n.t('tournaments.emptyStandingsTitle')));
     assert.ok(container.textContent.includes(i18n.t('tournaments.emptyStandingsBody')));
   });

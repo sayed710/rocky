@@ -12,9 +12,13 @@ test.describe('Tournament standings profile links and focus preservation', () =>
   let currentStandings: TournamentStanding[] = [];
   let currentPlayers: Record<string, { handle: string } | null> = {};
   let liveRequestCount = 0;
+  let userProfileRequests: string[] = [];
+  let userGamesRequests: string[] = [];
 
   test.beforeEach(async ({ page }) => {
     liveRequestCount = 0;
+    userProfileRequests = [];
+    userGamesRequests = [];
     currentParticipants = ['p1', 'p2', 'p3'];
     currentTournament = {
       id: 't1',
@@ -67,11 +71,63 @@ test.describe('Tournament standings profile links and focus preservation', () =>
       }),
     );
 
-    await page.route('**/v1/users/**', (route) =>
+    await page.route('**/v1/users/**', (route) => {
+      const url = new URL(route.request().url());
+      const pathname = url.pathname;
+      if (pathname.endsWith('/games')) {
+        userGamesRequests.push(pathname);
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: '[]',
+        });
+      }
+      if (pathname.endsWith('/ratings')) {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: '[]',
+        });
+      }
+      userProfileRequests.push(pathname);
+      const rawHandle = pathname.replace('/v1/users/', '');
+      const decodedHandle = decodeURIComponent(rawHandle);
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          user: {
+            id: 'p1',
+            handle: decodedHandle,
+            country: null,
+            createdAt: '2026-10-31T00:00:00Z',
+          },
+          ratings: [],
+        }),
+      });
+    });
+
+    await page.route('**/v1/social/players/**', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ id: 'p1', handle: 'alice' }),
+        body: JSON.stringify({ total: 0, items: [] }),
+      }),
+    );
+
+    await page.route('**/v1/players/*/achievements', (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Achievements unavailable' }),
+      }),
+    );
+
+    await page.route('**/achievements/summary**', (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Achievements unavailable' }),
       }),
     );
 
@@ -206,6 +262,24 @@ test.describe('Tournament standings profile links and focus preservation', () =>
     await aliceAnchor.focus();
     await expect(aliceAnchor).toBeFocused();
 
+    await page.evaluate(() => {
+      document.documentElement.style.overflowAnchor = 'none';
+      document.body.style.overflowAnchor = 'none';
+      const spacer = document.createElement('div');
+      spacer.id = 'scroll-spacer';
+      spacer.style.height = '3000px';
+      document.body.appendChild(spacer);
+    });
+    const targetScrollY = await aliceAnchor.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      return Math.ceil(window.scrollY + rect.bottom + window.innerHeight + 100);
+    });
+    await page.evaluate((y) => window.scrollTo(0, y), targetScrollY);
+    const scrollYBefore = await page.evaluate(() => window.scrollY);
+    expect(scrollYBefore).toBeGreaterThan(0);
+    expect(await aliceAnchor.evaluate((el) => el.getBoundingClientRect().bottom < 0)).toBe(true);
+    expect(await aliceAnchor.evaluate((el) => document.activeElement === el)).toBe(true);
+
     currentPlayers = {
       p1: { handle: 'alice_gm' },
       p2: { handle: 'bob' },
@@ -223,6 +297,7 @@ test.describe('Tournament standings profile links and focus preservation', () =>
     const updatedAliceAnchor = container.locator('a[data-route="profile"][data-player-id="p1"]');
     await expect(updatedAliceAnchor).toHaveText('alice_gm');
     await expect(updatedAliceAnchor).toBeFocused();
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollYBefore);
 
     currentStandings = [
       { rank: 1, playerId: 'p2', points: 14, wins: 7, draws: 0, losses: 1, gamesPlayed: 8, onFire: true },
@@ -235,6 +310,7 @@ test.describe('Tournament standings profile links and focus preservation', () =>
     await expect(container.locator('a[data-player-id="p1"]')).toHaveCount(0);
     await expect(container).toBeFocused();
     await expect(container).toHaveAttribute('tabindex', '-1');
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollYBefore);
 
     const externalControl = page.locator('#locale-select');
     await externalControl.focus();
@@ -254,6 +330,9 @@ test.describe('Tournament standings profile links and focus preservation', () =>
     const bobAnchor = container.locator('a[data-player-id="p2"]');
     await bobAnchor.focus();
     await expect(bobAnchor).toBeFocused();
+    await page.evaluate((y) => window.scrollTo(0, y), scrollYBefore);
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollYBefore);
+    expect(await bobAnchor.evaluate((el) => document.activeElement === el)).toBe(true);
 
     currentStandings = [];
 
@@ -263,11 +342,13 @@ test.describe('Tournament standings profile links and focus preservation', () =>
     await expect(container.locator('a[data-route="profile"]')).toHaveCount(0);
     await expect(container).toBeFocused();
     await expect(container).toHaveAttribute('tabindex', '-1');
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollYBefore);
   });
 
   test('navigates to profile on Enter and preserves native anchor attributes for modified clicks', async ({ page }) => {
+    const unicodeHandle = 'لاعب_شطرنج';
     currentParticipants = ['p1'];
-    currentPlayers = { p1: { handle: 'alice' } };
+    currentPlayers = { p1: { handle: unicodeHandle } };
     currentStandings = [
       { rank: 1, playerId: 'p1', points: 4, wins: 2, draws: 0, losses: 0, gamesPlayed: 2, onFire: false },
     ];
@@ -275,34 +356,50 @@ test.describe('Tournament standings profile links and focus preservation', () =>
     await page.goto('/tournaments/t1');
 
     const container = page.locator('#tournament-standings');
-    const aliceAnchor = container.locator('a[data-route="profile"][data-player-id="p1"]');
-    await expect(aliceAnchor).toBeVisible();
-    await expect(aliceAnchor).toHaveAttribute('href', '/profile/alice');
-    await expect(aliceAnchor).toHaveAttribute('data-route', 'profile');
-    await expect(aliceAnchor).toHaveAttribute('data-player-id', 'p1');
-    expect(await aliceAnchor.getAttribute('download')).toBeNull();
+    const profileAnchor = container.locator('a[data-route="profile"][data-player-id="p1"]');
+    await expect(profileAnchor).toBeVisible();
+    await expect(profileAnchor).toHaveAttribute('href', `/profile/${encodeURIComponent(unicodeHandle)}`);
+    await expect(profileAnchor).toHaveAttribute('data-route', 'profile');
+    await expect(profileAnchor).toHaveAttribute('data-player-id', 'p1');
+    expect(await profileAnchor.getAttribute('download')).toBeNull();
 
-    const target = await aliceAnchor.getAttribute('target');
+    const target = await profileAnchor.getAttribute('target');
     expect(target === null || target === '_self').toBe(true);
 
-    const ctrlPrevented = await aliceAnchor.evaluate((el) => {
+    const ctrlPrevented = await profileAnchor.evaluate((el) => {
       const evt = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ctrlKey: true });
       el.dispatchEvent(evt);
       return evt.defaultPrevented;
     });
     expect(ctrlPrevented).toBe(false);
 
-    const middlePrevented = await aliceAnchor.evaluate((el) => {
+    const middlePrevented = await profileAnchor.evaluate((el) => {
       const evt = new MouseEvent('click', { bubbles: true, cancelable: true, button: 1 });
       el.dispatchEvent(evt);
       return evt.defaultPrevented;
     });
     expect(middlePrevented).toBe(false);
 
-    await aliceAnchor.focus();
-    await expect(aliceAnchor).toBeFocused();
+    await profileAnchor.focus();
+    await expect(profileAnchor).toBeFocused();
     await page.keyboard.press('Enter');
-    await expect(page).toHaveURL(/\/profile\/alice$/);
+    await expect(page).toHaveURL(new RegExp(`/profile/${encodeURIComponent(unicodeHandle)}$`));
+
+    const expectedProfilePath = `/v1/users/${encodeURIComponent(unicodeHandle)}`;
+    const expectedGamesPath = `/v1/users/${encodeURIComponent(unicodeHandle)}/games`;
+
+    await expect.poll(() => userProfileRequests.length).toBe(1);
+    expect(userProfileRequests[0]).toBe(expectedProfilePath);
+    expect(userProfileRequests[0]).not.toContain('%25');
+
+    await expect.poll(() => userGamesRequests.length).toBe(1);
+    expect(userGamesRequests[0]).toBe(expectedGamesPath);
+    expect(userGamesRequests[0]).not.toContain('%25');
+
+    await expect(page.locator('#profile-handle')).toHaveText(unicodeHandle);
+    await expect(page.locator('#profile-error')).toBeEmpty();
+    await expect(page.locator('#profile-ratings')).toContainText('No ratings yet');
+    await expect(page.locator('#profile-games')).toContainText('No games yet');
   });
 
   test('renders swiss tournament standings with tiebreak buchholz and withdrawn stats in EN and AR', async ({ page }) => {
