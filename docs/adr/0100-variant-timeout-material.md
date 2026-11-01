@@ -42,8 +42,23 @@ The signature becomes `canMate(fen, color, variant = 'standard')`, and `endByTim
 
 The rule per variant, and why:
 
-- **`standard` / `chess960`** — checkmate is the win condition, so the classical test stands: a lone
-  king, K+N and K+B cannot force mate; two minors can.
+- **`standard` / `chess960`** — checkmate reachability under FIDE Article 6.9 applies:
+  a timeout is adjudicated as a draw ('insufficient_material') if and only if it is proven
+  impossible for the prospective winner to deliver checkmate by any possible series of legal
+  moves from the actual position. Enemy pieces can serve as enabling blockers (e.g., in KN vs KR,
+  KN vs KN, or KB vs KN corner mates). Adjudication evaluates cooperative reachability via a
+  bounded proof (depth 4, capacity 512 tokens). In accordance with the uncertainty bias below,
+  if the search budget is exhausted or an unclosed cycle is encountered, the outcome defaults to
+  possible ('timeout' win).
+  **Bounded Engineering Limitation & Risk Profile**: The actual operational risk of the bounded
+  proof is not deep forced mates (which uncertainty bias already resolves as a win), but rather
+  deeply forced loss of the prospective winner's only mating material or dead positions requiring
+  proof beyond depth 4 / capacity 512 tokens. In such positions, the solver returns unknown,
+  which defaults to possible ('timeout' win), potentially awarding a win in positions that are
+  actually dead under FIDE Article 6.9 / Article 5.2.2. The solver is a bounded engineering heuristic,
+  not a full FIDE dead-position oracle. Shallow forced controls (e.g. single-ply Control 1 branch
+  closure) are resolved, and the uncertainty bias guarantees that a player is never erroneously
+  handed an unproven draw.
 - **`kingofthehill`, `racingkings`** — both are won by walking a king somewhere. A player reduced to
   a bare king still holds the only piece the win condition needs, so material can never rule it out.
 - **`crazyhouse`** — pieces in hand can be dropped and the board does not show them. The deciding
@@ -83,8 +98,14 @@ way", the rule has to say so too, or the guard quietly reintroduces the bug it w
 
 - A timeout in an offered variant is now resolved by that variant's rules. The most visible change:
   in King of the Hill a bare king wins on time instead of drawing.
-- Standard and Chess960 behaviour is unchanged, and the default argument keeps existing callers
-  correct.
+- **Standard and Chess960 behaviour**: Originally preserved unchanged under the initial variant
+  milestone (maintaining the legacy two-minor material heuristic). Under Issue #123, Standard and
+  Chess960 timeout adjudication is updated to bounded cooperative reachability (fixed depth 4,
+  capacity 512 tokens), evaluating whether checkmate can be delivered by any legal series of moves
+  under FIDE Article 6.9 (resolving lone-minor corner mates with opponent assistance and same-color
+  bishop draws). This is an engineering heuristic rather than a full FIDE dead-position oracle;
+  the declared depth and token budget retains a residual false-WIN risk on deeply dead positions.
+  The default argument `variant = 'standard'` continues to keep existing callers correct.
 - Mutation-verified: dropping the `variant` argument at the call site fails the King of the Hill
   test.
 
