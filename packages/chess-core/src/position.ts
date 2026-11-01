@@ -7,6 +7,7 @@
 import { fileOf, opposite, rankOf, squareFromName, squareName, typeOf } from './board';
 import { START_FEN, cloneState, parseFen, toFen } from './fen';
 import { CHESS960_STANDARD_ID, chess960Fen } from './chess960';
+import { isFrozenDeadPosition } from './dead-position';
 import {
   applyMove,
   findKing,
@@ -294,6 +295,9 @@ export class Position {
       return { over: true, reason: 'stalemate' };
     }
 
+    if (isFrozenDeadPosition(this.state)) {
+      return { over: true, reason: 'dead_position' };
+    }
     if (this.state.halfmoves >= 100 && this.state.variant !== 'threecheck') {
       return { over: true, reason: 'fifty_move' };
     }

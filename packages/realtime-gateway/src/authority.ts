@@ -442,14 +442,23 @@ export class GameAuthority {
         // uniqueness across restarts.
         const appendP = invokeSafely(() => this.store.append(params.gameId, -1, events, controller.signal));
         let persistedSeq: number;
+        const pendingBroadcasts: BroadcastLogEntry[] = [];
         try {
           persistedSeq = await appendP;
           this.validateAppendHead(persistedSeq, nextEventHead(-1, events.length));
+          let bSeq = 0;
+          if (events.length > 1 && events[1]!.type === 'GameEnded') {
+            const endedEv = events[1]!;
+            const msg = this.toBroadcast(params.gameId, endedEv, game, 1);
+            if (msg) {
+              pendingBroadcasts.push({ seq: ++bSeq, ply: null, msg });
+            }
+          }
           slot.record = {
             game,
             events: [...events],
-            broadcasts: [],
-            broadcastSeq: 0,
+            broadcasts: pendingBroadcasts,
+            broadcastSeq: bSeq,
             persistedSeq,
             stale: false,
           };
@@ -459,7 +468,6 @@ export class GameAuthority {
             slot.stalled = undefined;
             this.notifyWriteSettled(params.gameId, 'create', 'committed');
           }
-          return this.viewOf(game, persistedSeq);
         } catch (err) {
           if (timedOut) {
             slot.stalled = undefined;
@@ -473,6 +481,25 @@ export class GameAuthority {
         } finally {
           cancelTimer();
         }
+
+        // Post-commit publication: durable append and cache installation are already committed.
+        // Attempt channels independently so subscriber exceptions on one channel do not abort the other
+        // or falsely reclassify a committed creation as an uncommitted durable write failure.
+        for (const entry of pendingBroadcasts) {
+          try {
+            this.pubsub.publish(gameChannel(params.gameId), entry.msg);
+          } catch {
+            // Contained best-effort notification delivery failure; durable write succeeded
+          }
+          if (entry.msg.t === 'ended') {
+            try {
+              this.pubsub.publish(gamesEndedChannel(), entry.msg);
+            } catch {
+              // Contained best-effort notification delivery failure; durable write succeeded
+            }
+          }
+        }
+        return this.viewOf(game, persistedSeq);
       } finally {
         slot.waiters.delete(waiter);
       }

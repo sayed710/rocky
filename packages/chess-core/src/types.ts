@@ -121,4 +121,5 @@ export type GameStatus =
   | { over: true; reason: 'fifty_move' }
   | { over: true; reason: 'threefold' }
   | { over: true; reason: 'variant_win'; winner: Color }
-  | { over: true; reason: 'variant_draw' };
+  | { over: true; reason: 'variant_draw' }
+  | { over: true; reason: 'dead_position' };
