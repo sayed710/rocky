@@ -4,6 +4,7 @@ import type {
   Collaborator,
   Page,
   PageOptions,
+  InitialPositionPort,
   PositionReader,
   StudiesRepository,
   Study,
@@ -16,7 +17,6 @@ import type {
 } from '@chess-platform/studies';
 import {
   StudyRuleError,
-  DEFAULT_STARTING_FEN,
   DEFAULT_STUDY_VARIANT,
   MAX_GAMES_PER_IMPORT,
   MAX_PGN_BYTES,
@@ -162,7 +162,10 @@ async function rollback(client: PoolClient): Promise<void> {
 }
 
 export class PgStudiesRepository implements StudiesRepository {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly positionReader: InitialPositionPort
+  ) {}
 
   private handleSqlError(err: unknown, entityLabel = 'Resource'): never {
     if (err instanceof StudyRuleError) {
@@ -671,7 +674,7 @@ export class PgStudiesRepository implements StudiesRepository {
     studyId: string,
     actorId: string,
     name: string,
-    startingFen = DEFAULT_STARTING_FEN,
+    startingFen?: string,
     at = new Date()
   ): Promise<Chapter> {
     const validName = normalizeChapterName(name);
@@ -680,13 +683,17 @@ export class PgStudiesRepository implements StudiesRepository {
       await client.query('BEGIN');
       await lockStudy(client, studyId);
 
-      await this.findVisibleStudyInternal(client, studyId, actorId, false, true);
+      const study = await this.findVisibleStudyInternal(client, studyId, actorId, false, true);
       await this.assertAuthorityInternal(client, studyId, actorId, 'contributor', true);
 
       const existing = await client.query(`SELECT id FROM study_chapters WHERE id = $1`, [id]);
       if (existing.rows.length > 0) {
         throw new StudyRuleError('invalid_input', `Chapter '${id}' already exists`);
       }
+
+      const resolvedStartingFen = startingFen !== undefined
+        ? startingFen
+        : this.positionReader.initialFen(study.variant);
 
       const activeCountRes = await client.query<{ count: string }>(
         `SELECT COUNT(*) AS count FROM study_chapters WHERE study_id = $1 AND deleted_at IS NULL`,
@@ -698,7 +705,7 @@ export class PgStudiesRepository implements StudiesRepository {
         `INSERT INTO study_chapters (id, study_id, name, order_index, starting_fen)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id, study_id, name, order_index, starting_fen, deleted_at`,
-        [id, studyId, validName, orderIndex, startingFen]
+        [id, studyId, validName, orderIndex, resolvedStartingFen]
       );
 
       await client.query(`UPDATE studies SET updated_at = $2 WHERE id = $1`, [studyId, at]);
@@ -1153,7 +1160,7 @@ export class PgStudiesRepository implements StudiesRepository {
       const game = games[i];
       const name = chapterNameFor(game, i);
 
-      const startingFen = tagValue(game, 'FEN') || DEFAULT_STARTING_FEN;
+      const startingFen = tagValue(game, 'FEN') || this.positionReader.initialFen(study.variant);
       reader.legalSans(startingFen, study.variant);
       this.validatePlayableMovetext(game.moves, startingFen, reader, study.variant);
       validatedGames.push({ name, startingFen, moves: game.moves });
@@ -1307,6 +1314,7 @@ export class PgStudiesRepository implements StudiesRepository {
       }
 
       const pgnGames: PgnGame[] = [];
+      const canonicalStartingFen = this.positionReader.initialFen(study.variant);
       for (const chapter of targetChapters) {
         const nodesRes = await this.pool.query<TreeNodeRow>(
           `SELECT id, chapter_id, parent_id, san, fen_after, comment, nags, order_index
@@ -1323,7 +1331,7 @@ export class PgStudiesRepository implements StudiesRepository {
         const tags = [
           { key: 'Event', value: chapter.name },
           ...(study.variant !== DEFAULT_STUDY_VARIANT ? [{ key: 'Variant', value: study.variant }] : []),
-          ...(chapter.startingFen !== DEFAULT_STARTING_FEN ? [{ key: 'FEN', value: chapter.startingFen }] : []),
+          ...(chapter.startingFen !== canonicalStartingFen ? [{ key: 'FEN', value: chapter.startingFen }] : []),
         ];
 
         pgnGames.push({

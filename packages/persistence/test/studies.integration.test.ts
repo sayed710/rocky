@@ -28,6 +28,9 @@ class CorePositionReader implements PositionReader {
     }
     return pos.play(move).fen();
   }
+  initialFen(variant: StudyVariant = 'standard'): string {
+    return Position.initial(variant).fen();
+  }
 }
 
 interface PgErrorShape {
@@ -48,8 +51,8 @@ test('pg studies repository integration tests', { skip }, async () => {
   const pool = createPool();
   await migrate(pool, join(process.cwd(), 'migrations'));
 
-  const repo = new PgStudiesRepository(pool);
   const reader = new CorePositionReader();
+  const repo = new PgStudiesRepository(pool, reader);
 
   const createdUserIds: string[] = [];
   /** Inserts and tracks a disposable integration-test user. */
@@ -131,6 +134,21 @@ test('pg studies repository integration tests', { skip }, async () => {
     const chId1 = uuidv7();
     const ch1 = await repo.createChapter(chId1, studyId1, bob, 'Mainline e4', undefined, t0);
     assert.equal(ch1.orderIndex, 0);
+
+    // Direct repository variant-derived default regression (Qodo c8aa2377):
+    const hordeStudyId = uuidv7();
+    await repo.createStudy(hordeStudyId, bob, 'Horde Study', '', 'public', t0, { variant: 'horde' });
+    const hordeCh1 = await repo.createChapter(uuidv7(), hordeStudyId, bob, 'Horde Default', undefined, t0);
+    assert.equal(hordeCh1.startingFen, Position.initial('horde').fen(), 'omitted FEN on Horde study must derive Horde initial position');
+
+    const explicitFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const hordeCh2 = await repo.createChapter(uuidv7(), hordeStudyId, bob, 'Horde Explicit', explicitFen, t1);
+    assert.equal(hordeCh2.startingFen, explicitFen, 'explicit FEN override must be preserved');
+
+    const rkStudyId = uuidv7();
+    await repo.createStudy(rkStudyId, bob, 'RK Study', '', 'public', t0, { variant: 'racingkings' });
+    const rkCh = await repo.createChapter(uuidv7(), rkStudyId, bob, 'RK Default', undefined, t0);
+    assert.equal(rkCh.startingFen, Position.initial('racingkings').fen(), 'omitted FEN on Racing Kings study must derive RK initial position');
 
     const chId2 = uuidv7();
     const ch2 = await repo.createChapter(chId2, studyId1, bob, 'Sideline d4', undefined, t1);
@@ -391,6 +409,33 @@ test('pg studies repository integration tests', { skip }, async () => {
       const fetched = await repo.getStudy(vStudyId, alice);
       assert.equal(fetched.variant, v);
     }
+
+    // 10.5 Variant starting FEN export/import round-trip compatibility (Qodo fef0004f)
+    // Legacy Racing Kings chapter stored with Standard start FEN must include [FEN] on export and round-trip faithfully
+    const rkLegacyStudyId = uuidv7();
+    await repo.createStudy(rkLegacyStudyId, alice, 'Legacy RK', '', 'public', t0, { variant: 'racingkings' });
+    const rkLegacyChapterId = uuidv7();
+    const standardStartFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    await repo.createChapter(rkLegacyChapterId, rkLegacyStudyId, alice, 'Legacy Standard Start', standardStartFen, t0);
+    const rkExportedPgn = await repo.exportPgn(rkLegacyStudyId, alice, rkLegacyChapterId);
+    assert.ok(rkExportedPgn.includes(`[FEN "${standardStartFen}"]`), 'export of legacy start must include FEN tag');
+
+    const rkReimportStudyId = uuidv7();
+    await repo.createStudy(rkReimportStudyId, alice, 'Reimport RK', '', 'public', t0, { variant: 'racingkings' });
+    const [reimportedRkChapter] = await repo.importPgn(rkReimportStudyId, alice, rkExportedPgn, reader, t0);
+    assert.equal(reimportedRkChapter.startingFen, standardStartFen, 'reimported chapter must retain legacy starting FEN');
+
+    // Canonical variant start omits FEN on export and reproduces canonical start on import
+    const rkCanonicalStudyId = uuidv7();
+    await repo.createStudy(rkCanonicalStudyId, alice, 'Canonical RK', '', 'public', t0, { variant: 'racingkings' });
+    const rkCanonicalChapterId = uuidv7();
+    await repo.createChapter(rkCanonicalChapterId, rkCanonicalStudyId, alice, 'Canonical Start', undefined, t0);
+    const rkCanonicalExport = await repo.exportPgn(rkCanonicalStudyId, alice, rkCanonicalChapterId);
+    assert.ok(!rkCanonicalExport.includes('[FEN '), 'export of canonical variant start must omit FEN tag');
+    const rkCanonicalReimportId = uuidv7();
+    await repo.createStudy(rkCanonicalReimportId, alice, 'Reimport Canonical RK', '', 'public', t0, { variant: 'racingkings' });
+    const [reimportedCanonicalRk] = await repo.importPgn(rkCanonicalReimportId, alice, rkCanonicalExport, reader, t0);
+    assert.equal(reimportedCanonicalRk.startingFen, '8/8/8/8/8/8/krbnNBRK/qrbnNBRQ w - - 0 1');
 
   } finally {
     if (createdUserIds.length > 0) {
