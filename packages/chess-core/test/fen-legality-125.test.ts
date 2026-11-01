@@ -247,10 +247,18 @@ test('F125-03: both colors king captures and promotions omitted from legalMoves 
   assert.throws(() => pRookCapture.play(moveObjRook), IllegalMoveError);
 
   // 4. Black rook capturing White king
-  const pBlackRookCapture = Position.fromFen('4k1r1/8/8/8/8/8/8/4K3 b - - 0 1', 'standard');
+  const pBlackRookCapture = Position.fromFen('4r1k1/8/8/8/8/8/8/4K3 b - - 0 1', 'standard');
   const ucisBlackRook = pBlackRookCapture.legalMoves().map((m) => pBlackRookCapture.toUci(m));
-  assert.ok(!ucisBlackRook.includes('g8e1'), 'legalMoves must omit g8e1 king capture');
-  assert.throws(() => pBlackRookCapture.play('g8e1'), IllegalMoveError);
+  assert.ok(!ucisBlackRook.includes('e8e1'), 'legalMoves must omit e8e1 king capture');
+  assert.throws(() => pBlackRookCapture.play('e8e1'), IllegalMoveError);
+  const moveObjBlackRook: Move = {
+    from: squareFromName('e8'),
+    to: squareFromName('e1'),
+    piece: 'r',
+    captured: 'K',
+    flags: MoveFlag.Capture,
+  };
+  assert.throws(() => pBlackRookCapture.play(moveObjBlackRook), IllegalMoveError);
 
   // 5. Pawn promotion capturing opposing king
   const pPromoCapture = Position.fromFen('4k3/3P4/8/8/8/8/8/4K3 w - - 0 1', 'standard');
