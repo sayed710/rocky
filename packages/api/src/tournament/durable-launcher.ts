@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { CHESS960_POSITIONS, type Variant } from '@chess-platform/core';
-import { Game, type GameEvent, type TimeControl } from '@chess-platform/game';
+import { Game, type GameEndedEvent, type GameEvent, type TimeControl } from '@chess-platform/game';
 import type { EventStore } from '@chess-platform/persistence';
-import { ConcurrencyError } from '@chess-platform/persistence';
+import { ConcurrencyError, projectGameStream } from '@chess-platform/persistence';
 import type { Clock } from '../ports/clock';
 import { DEFAULT_NO_SHOW_DEADLINES } from '../config';
 import type { GameLauncher, LaunchInput, LaunchResult } from './launcher';
@@ -159,7 +159,9 @@ export class DurableGameLauncher implements GameLauncher {
    */
   private async existing(gameId: string, input: LaunchInput, signal?: AbortSignal): Promise<LaunchResult | null> {
     const stored = await this.events.load(gameId, signal);
-    const ending = stored.find(({ event }) => event.type === 'GameEnded')?.event;
+    if (stored.length === 0) return null;
+    const projection = projectGameStream(gameId, stored);
+    const ending = projection.result !== null ? (stored[stored.length - 1]!.event as GameEndedEvent) : null;
     if (!input.committedArenaPairing && !input.committedRoundPairing && ending) return null;
     const created = stored[0]?.event;
     const same = created?.type === 'GameCreated'

@@ -82,11 +82,11 @@ To fix Horde study chapter creation and PGN import without hardcoding engine log
 - **Verification Evidence**:
   - Initial baseline probe on HEAD `e1797525b7f736e15dd69cafb80327fb691c5622` confirmed 5/5 behavioral RED failures (king capture generated, pocket king dropped, adjacent kings accepted, side-not-to-move in check accepted, pocket king accepted); unchanged candidate probe passed 5/5 GREEN.
   - Coordinator independently reran 27 focused tests across core (14), API ingress (5), and game stored-history (8): 27 passed, 0 failed, 0 skipped.
-  - Follow-up fixture correction: Black rook capture fixture corrected to `4r1k1/8/8/8/8/8/8/4K3 b - - 0 1` (asserting `e8e1` capture omitted and rejected); expanded six-case probe verified baseline fails 6/6 (exit 1) and candidate passes 6/6 (exit 0); author executed core package tests (`npm test -w @chess-platform/core`) passing 182/182 tests and compiled `fen-legality-125.test.js` passing 14/14 tests; root independent full-core verification is currently running and root count remains pending.
+  - Follow-up fixture correction: Black rook capture fixture corrected to `4r1k1/8/8/8/8/8/8/4K3 b - - 0 1` (asserting `e8e1` capture omitted and rejected); expanded six-case probe verified baseline fails 6/6 (exit 1) and candidate passes 6/6 (exit 0); author executed core package tests (`npm test -w @chess-platform/core`) passing 182/182 tests and compiled `fen-legality-125.test.js` passing 14/14 tests. Subsequent root independent rerun verified baseline 6 FAIL exit 1 (`outputs/issue125-root-six-red.log`), candidate 6 PASS exit 0 (`outputs/issue125-root-six-green.log`), and full core npm test 182 PASS, 0 FAIL, 0 SKIP exit 0 (`outputs/issue125-root-corrected-core.log`).
   - Zero OpenAPI specification drift on `packages/api/openapi.json`.
   - Zero lint errors across `@chess-platform/core`, `@chess-platform/api`, and `@chess-platform/studies`.
   - Zero `as any` introduced.
 - **Remaining Limitations**:
-  - Current-head coordinator review and remote CI remain pending.
+  - Current-head integration verification, renewed new-head review, and remote CI remain pending.
   - Live PostgreSQL integration tests and real binary engine smoke tests remain root-owned.
   - Full repository CI and gateway clean-install verification remain root-owned.
