@@ -10,7 +10,7 @@
  * - Concrete predecessor and live timeout routes (Standard and Chess960 legacy).
  * - Ongoing affected-class WIN fixtures for Routes 1 and 2.
  * - Escaping branch with concrete child assertions & single-ply proof vs depth cutoff.
- * - Solver traversal of special moves (legal EP, pinned illegal EP with two valid kings, 4 promotions, 960 castling).
+ * - Move generation, child state validity, and uncurtailed search for special moves (legal EP, pinned illegal EP with two valid kings, 4 promotions, 960 castling); no per-edge solver expansion certificate is claimed.
  * - Historical replay invariance (including stored outcome contradicting new solver).
  * - Variant invariance across all 6 non-standard variants.
  * - Negative FEN controls across all 8 variants.
@@ -51,7 +51,7 @@ const T0 = 1_000_000;
 // The 5 mandatory positional controls from the design brief:
 const MANDATORY_5_FENS: ReadonlyArray<{ name: string; fen: string }> = [
   { name: 'Control 1: White Kf7+Bf6 vs Black Kh8+Nh7 (h7f6 forced)', fen: '7k/5K1n/5B2/8/8/8/8/8 b - - 0 1' },
-  { name: 'Control 2: White Kg1+Nf2 vs Black Kh1+Bg1 (g1f2 forced)', fen: '8/8/8/8/8/6K1/5N2/6bk b - - 0 1' },
+  { name: 'Control 2: White Kg3+Nf2 vs Black Kh1+Bg1 (g1f2 forced)', fen: '8/8/8/8/8/6K1/5N2/6bk b - - 0 1' },
   { name: 'Control 3: White Kc3+Nb1 vs Black Ka2+Ra1 (Rxb1/Kxb1 forced)', fen: '8/8/8/8/8/2K5/k7/rN6 b - - 0 1' },
   { name: 'Control 4: White Ke8+Bg1 vs Black Kh1+Pg2 (Kxg1 forced)', fen: '4K3/8/8/8/8/8/6p1/6Bk b - - 0 1' },
   { name: 'Control 5: White Kc1+Na1 vs Black Ka2+Pa3 (Kxa1 forced)', fen: '8/8/8/8/8/p7/k7/N1K5 b - - 0 1' },
@@ -153,7 +153,7 @@ test('Impossible material classes: bare King, KN vs K, KB vs K, same-color KB', 
     { name: 'Bare Kings (K vs K)', fen: '4k3/8/8/8/8/8/8/4K3 w - - 0 1' },
     { name: 'White lone knight vs bare King', fen: '4k3/8/8/8/8/8/8/1N2K3 w - - 0 1' },
     { name: 'White lone bishop vs bare King', fen: '4k3/8/8/8/8/8/8/2B1K3 w - - 0 1' },
-    { name: 'Both players have same-color light bishops', fen: '4kb2/8/8/8/8/8/8/2B1K3 w - - 0 1' },
+    { name: 'Both players have same-color dark bishops (c1, f8)', fen: '4kb2/8/8/8/8/8/8/2B1K3 w - - 0 1' },
   ];
 
   for (const { name, fen } of impossibleCases) {
@@ -585,7 +585,7 @@ test('Control 1 single-ply branch closure: cuts off at depth 0 (unknown), comple
 // earlier sibling already resolved the branch; this remains an explicit evidence gap.
 // ============================================================================
 
-test('En Passant: legal EP admitted by solver; pinned EP with two valid kings rejected', () => {
+test('En Passant: legal EP generation and child state verified; pinned EP excluded; uncurtailed bounded search', () => {
   // 1. Legal En Passant:
   const legalEpPos = Position.fromFen('8/8/8/3pP3/8/8/8/4K2k w - d6 0 1');
   const legalMoves = legalEpPos.legalMoves().map((m) => legalEpPos.toUci(m));
@@ -612,7 +612,7 @@ test('En Passant: legal EP admitted by solver; pinned EP with two valid kings re
   assert.equal(pinnedMoves.includes('e5d6'), false, 'Solver traversal never admits illegal pinned EP');
 });
 
-test('Pawn promotions: solver explores all 4 promotion types (q, r, b, n) in natural order', () => {
+test('Pawn promotions: all 4 promotion types (q, r, b, n) generated; uncurtailed bounded search', () => {
   const promoPos = Position.fromFen('8/4P3/8/8/8/8/8/4K2k w - - 0 1');
   const promoMoves = promoPos.legalMoves().map((m) => promoPos.toUci(m));
 
@@ -627,7 +627,7 @@ test('Pawn promotions: solver explores all 4 promotion types (q, r, b, n) in nat
   assert.equal(c.capacityCutoffs, 0, 'All promotion branches explored');
 });
 
-test('Chess960 castling rights: solver admits castling and preserves Chess960 child state', () => {
+test('Chess960 castling rights: castling move generated and child state preserved; uncurtailed canMate evaluation', () => {
   const pos960 = Position.chess960(518);
   const moved = pos960.play('e2e4').play('e7e5').play('g1f3').play('b8c6').play('f1c4').play('f8c5');
 

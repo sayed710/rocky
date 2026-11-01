@@ -98,8 +98,14 @@ way", the rule has to say so too, or the guard quietly reintroduces the bug it w
 
 - A timeout in an offered variant is now resolved by that variant's rules. The most visible change:
   in King of the Hill a bare king wins on time instead of drawing.
-- Standard and Chess960 behaviour is unchanged, and the default argument keeps existing callers
-  correct.
+- **Standard and Chess960 behaviour**: Originally preserved unchanged under the initial variant
+  milestone (maintaining the legacy two-minor material heuristic). Under Issue #123, Standard and
+  Chess960 timeout adjudication is updated to bounded cooperative reachability (fixed depth 4,
+  capacity 512 tokens), evaluating whether checkmate can be delivered by any legal series of moves
+  under FIDE Article 6.9 (resolving lone-minor corner mates with opponent assistance and same-color
+  bishop draws). This is an engineering heuristic rather than a full FIDE dead-position oracle;
+  the declared depth and token budget retains a residual false-WIN risk on deeply dead positions.
+  The default argument `variant = 'standard'` continues to keep existing callers correct.
 - Mutation-verified: dropping the `variant` argument at the call site fails the King of the Hill
   test.
 
