@@ -127,7 +127,7 @@ export function inCheck(state: PositionState, color: Color): boolean {
 }
 
 /** True if 0x88 squares `a` and `b` (either may be -1) are a king step apart. */
-function isAdjacent(a: number, b: number): boolean {
+export function isAdjacent(a: number, b: number): boolean {
   return a !== -1 && b !== -1 && KING_OFFSETS.includes(b - a);
 }
 
@@ -403,6 +403,7 @@ function generateDrops(state: PositionState, moves: Move[]): void {
   for (const type of pocket) {
     if (seen.has(type)) continue;
     seen.add(type);
+    if (type === 'k') continue;
     for (let to = 0; to < 128; to++) {
       if ((to & 0x88) !== 0) continue;
       if (state.board[to] !== null) continue;
@@ -470,7 +471,7 @@ export function applyMove(state: PositionState, move: Move): PositionState {
       board[capturedSq] = null;
       if (next.variant === 'crazyhouse' && capd) next.pockets[us].push('p');
     } else if (move.captured) {
-      if (next.variant === 'crazyhouse') {
+      if (next.variant === 'crazyhouse' && typeOf(move.captured) !== 'k') {
         // Demoted pieces return as pawns per Crazyhouse rules.
         next.pockets[us].push(typeOf(move.captured));
       }
@@ -552,6 +553,9 @@ export function generateLegalMoves(state: PositionState): Move[] {
   const legal: Move[] = [];
 
   for (const move of pseudo) {
+    if (state.variant !== 'atomic' && move.captured && typeOf(move.captured) === 'k') {
+      continue;
+    }
     const next = applyMove(state, move);
     if (isLegalAfter(state, next, us)) legal.push(move);
   }
@@ -568,6 +572,7 @@ function isLegalAfter(before: PositionState, after: PositionState, us: Color): b
     if (findKing(after, them) === -1) return true; // you exploded their king → legal & winning
     return !inCheck(after, us); // connected kings are never in check
   }
+
 
   if (before.variant === 'racingkings') {
     // No move may leave *either* king in check (racing kings forbids checks).

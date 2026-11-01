@@ -772,7 +772,7 @@ export class InMemoryStudiesRepository implements StudiesRepository {
       const game = games[i];
       const name = chapterNameFor(game, i);
 
-      const startingFen = tagValue(game, 'FEN') || DEFAULT_STARTING_FEN;
+      const startingFen = tagValue(game, 'FEN') || reader.initialFen(study.variant);
 
       // The starting position itself, before the movetext. A game with moves already reaches the
       // reader on its first SAN, so this is load-bearing only for a game with none — and that is

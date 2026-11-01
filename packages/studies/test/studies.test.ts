@@ -28,6 +28,11 @@ const mockReader: PositionReader = {
     }
     return `${fen}+${san}`;
   },
+  initialFen(variant) {
+    return variant === 'horde'
+      ? 'rnbqkbnr/pppppppp/8/8/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP w - - 0 1'
+      : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  },
 };
 
 describe('Domain Rule 1: Ownership and transfer', () => {
@@ -252,6 +257,9 @@ describe('Domain Rule 7: Import PGN validation and atomicity', () => {
         if (variant !== 'threecheck') throw new Error('wrong rule set');
         return fen.replace(' 3+3 ', ' 2+3 ');
       },
+      initialFen() {
+        return '4k3/8/8/8/8/8/8/3R3K w - - 3+3 0 1';
+      },
     };
     const pgn = [
       '[Event "Counter preservation"]',
@@ -291,6 +299,9 @@ describe('Domain Rule 7: Import PGN validation and atomicity', () => {
       play: (fen, san, variant) => {
         if (variant !== 'threecheck') throw new Error(`played ${san} under ${String(variant)}`);
         return fen.replace(/ (\d)\+(\d) /, (_m, w: string) => ` ${Number(w) - 1}+3 `) + `|${san}`;
+      },
+      initialFen() {
+        return '4k3/8/8/8/8/8/8/3R3K w - - 3+3 0 1';
       },
     };
 

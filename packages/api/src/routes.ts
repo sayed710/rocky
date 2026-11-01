@@ -6,7 +6,7 @@
  * present the result. All collaborators arrive via {@link RouteDeps} — no globals.
  */
 
-import { FenError } from '@chess-platform/core';
+import { FenError, Position } from '@chess-platform/core';
 import { coreFenValidator } from './analysis/fen-validator.js';
 import type { TiebreakKey } from '@chess-platform/tournament';
 import {
@@ -5055,8 +5055,11 @@ export function buildRouter(deps: RouteDeps): Router {
       // validator adds the structural allowlist and the king-count check, and is the same one the
       // analysis boundary uses, so studies do not grow a second opinion about what a position is.
       // Raised in the Qodo review of PR #140.
+      const study = await repo.getStudy(studyId, actorId).catch((err: unknown) => mapStudyError(err));
+      const resolvedStartingFen = startingFen !== undefined
+        ? startingFen
+        : Position.initial(study.variant).fen();
       if (startingFen !== undefined) {
-        const study = await repo.getStudy(studyId, actorId).catch((err: unknown) => mapStudyError(err));
         try {
           coreFenValidator.validate(startingFen, study.variant);
         } catch (err: unknown) {
@@ -5068,7 +5071,7 @@ export function buildRouter(deps: RouteDeps): Router {
       }
 
       try {
-        const chapter = await repo.createChapter(chapterId, studyId, actorId, name, startingFen);
+        const chapter = await repo.createChapter(chapterId, studyId, actorId, name, resolvedStartingFen);
         return json(201, chapterView(chapter));
       } catch (err) {
         mapStudyError(err);

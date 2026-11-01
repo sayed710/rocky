@@ -1153,7 +1153,7 @@ export class PgStudiesRepository implements StudiesRepository {
       const game = games[i];
       const name = chapterNameFor(game, i);
 
-      const startingFen = tagValue(game, 'FEN') || DEFAULT_STARTING_FEN;
+      const startingFen = tagValue(game, 'FEN') || reader.initialFen(study.variant);
       reader.legalSans(startingFen, study.variant);
       this.validatePlayableMovetext(game.moves, startingFen, reader, study.variant);
       validatedGames.push({ name, startingFen, moves: game.moves });

@@ -38,3 +38,4 @@ export {
 } from './movegen';
 export { Position, IllegalMoveError, HORDE_FEN, RACING_KINGS_FEN } from './position';
 export { repetitionKey } from './repetition';
+export { validatePositionSemantics, validateFen } from './position-validator';

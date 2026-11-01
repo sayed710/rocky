@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { IllegalMoveError, Position, type Variant } from '@chess-platform/core';
+import { FenError, IllegalMoveError, Position, type Variant } from '@chess-platform/core';
+import { InvalidFenError } from '@chess-platform/engine';
 import type {
   StudyPartnerRepository,
   StudyPartnerSessionDetail,
@@ -201,7 +202,16 @@ export class StudyPartnerService {
     try {
       const detail = await this.options.repository.findOwnedSession(input.sessionId, input.ownerId);
       if (!detail) throw HttpError.notFound('study partner session not found');
-      coreFenValidator.validate(detail.session.currentFen, detail.session.variant);
+      try {
+        coreFenValidator.validate(detail.session.currentFen, detail.session.variant);
+      } catch (error: unknown) {
+        if (error instanceof InvalidFenError || error instanceof FenError) {
+          throw HttpError.validation('invalid FEN in study partner session', {
+            currentFen: 'invalid FEN for variant',
+          });
+        }
+        throw error;
+      }
       const before = Position.fromFen(detail.session.currentFen, detail.session.variant);
       let after: Position;
       try {

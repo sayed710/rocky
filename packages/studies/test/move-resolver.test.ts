@@ -28,6 +28,9 @@ const engine: PositionReader = {
     }
     throw new Error(`illegal move ${san}`);
   },
+  initialFen(variant) {
+    return Position.initial(variant).fen();
+  },
 };
 
 /** Position after 1. e4 e5 2. Bc4 Nc6 3. Qh5 Nf6, where 4. Qxf7 is mate. */
@@ -70,6 +73,7 @@ describe('resolveSan', () => {
   const perVariant: PositionReader = {
     legalSans: (_fen, variant) => (variant === 'threecheck' ? ['Re1+'] : ['Rd2']),
     play: (fen) => fen,
+    initialFen: (variant) => Position.initial(variant).fen(),
   };
   const THREE_CHECK_FEN = '4k3/8/8/8/8/8/8/3R3K w - - 3+3 0 1';
 

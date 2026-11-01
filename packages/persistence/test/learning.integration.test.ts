@@ -6,7 +6,7 @@ import { migrate } from '../src/pg/migrate';
 import { PgLearningRepository } from '../src/pg/learning';
 import { uuidv7 } from '../src/ids';
 import { LearningRuleError } from '@chess-platform/learning';
-import type { PositionReader } from '@chess-platform/studies';
+import type { PositionReader, StudyVariant } from '@chess-platform/studies';
 import { Position } from '@chess-platform/core';
 
 const DATABASE_URL = process.env['DATABASE_URL'];
@@ -25,6 +25,9 @@ class CorePositionReader implements PositionReader {
       throw new Error(`Illegal move ${san}`);
     }
     return pos.play(move).fen();
+  }
+  initialFen(variant?: StudyVariant): string {
+    return Position.initial(variant ?? 'standard').fen();
   }
 }
 

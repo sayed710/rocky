@@ -14,6 +14,8 @@ export interface PositionReader {
   legalSans(fen: string, variant?: StudyVariant): readonly string[];
   /** The position after playing a SAN move. Throws if the move is not legal. */
   play(fen: string, san: string, variant?: StudyVariant): string;
+  /** The canonical starting position for a variant. */
+  initialFen(variant?: StudyVariant): string;
 }
 
 /**

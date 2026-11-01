@@ -28,6 +28,9 @@ class CorePositionReader implements PositionReader {
     }
     return pos.play(move).fen();
   }
+  initialFen(variant: StudyVariant = 'standard'): string {
+    return Position.initial(variant).fen();
+  }
 }
 
 interface PgErrorShape {
