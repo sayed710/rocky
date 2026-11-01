@@ -216,6 +216,7 @@ const EXPECTED_RESULTS: Record<Termination, readonly ResultString[]> = {
   insufficient_material: ['1/2-1/2'],
   fifty_move: ['1/2-1/2'],
   threefold: ['1/2-1/2'],
+  dead_position: ['1/2-1/2'],
   variant: ['1-0', '0-1', '1/2-1/2'],
   aborted: ['*'],
   no_show: ['*', '1-0', '0-1'],
@@ -248,7 +249,7 @@ test('every termination x result x winner combination is accepted exactly when t
       }
     }
   }
-  assert.equal(accepted, 18, 'the 18 combinations the authority can write');
+  assert.equal(accepted, 19, 'the 19 combinations the authority can write');
   assert.equal(accepts({ result: '1-0', winner: 'w', termination: 'forfeit' }), false, 'an unknown termination is refused');
 });
 
@@ -267,6 +268,11 @@ test('the contradictions found in review are refused, and every legitimate endin
     { result: '1/2-1/2', winner: 'w', termination: 'agreement' },
     { result: '*', winner: 'b', termination: 'aborted' },
     { result: '1-0', winner: 'w', termination: 'aborted' },
+    { result: '1-0', winner: 'w', termination: 'dead_position' },
+    { result: '0-1', winner: 'b', termination: 'dead_position' },
+    { result: '*', winner: null, termination: 'dead_position' },
+    { result: '1/2-1/2', winner: 'w', termination: 'dead_position' },
+    { result: '1/2-1/2', winner: 'b', termination: 'dead_position' },
   ]) {
     assert.equal(accepts(patch), false, JSON.stringify(patch));
   }
@@ -277,6 +283,7 @@ test('the contradictions found in review are refused, and every legitimate endin
     { result: '1/2-1/2', winner: null, termination: 'stalemate' },
     { result: '1/2-1/2', winner: null, termination: 'agreement' },
     { result: '1/2-1/2', winner: null, termination: 'insufficient_material' },
+    { result: '1/2-1/2', winner: null, termination: 'dead_position' },
     { result: '1/2-1/2', winner: null, termination: 'fifty_move' },
     { result: '1/2-1/2', winner: null, termination: 'threefold' },
     { result: '0-1', winner: 'b', termination: 'variant' },

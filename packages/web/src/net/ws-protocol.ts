@@ -66,7 +66,9 @@ export type Termination =
   | 'variant'
   | 'aborted'
   /** Pregame no-show (ADR-0148): no first move before the deadline. Never a chess timeout. */
-  | 'no_show';
+  | 'no_show'
+  /** Dead position (FIDE 5.2.2, ADR-0166): prepared compatibility consumer. */
+  | 'dead_position';
 
 export type GameStatus =
   | { readonly over: false }
@@ -350,6 +352,7 @@ function validRevisionFrame(parsed: Record<string, unknown>, mode: 'legacy' | 'r
   if (!snapshot && !event) return true;
   const payload = snapshot ? parsed.state : parsed;
   if (!record(payload)) return false;
+  if (isInvalidDeadPositionEnding(payload)) return false;
   const revisioned = Object.hasOwn(payload, 'stateRevision');
   if (!revisioned && mode === 'revision') return false;
   if (revisioned && !(snapshot ? validState(payload) : validEvent(parsed))) return false;
@@ -359,6 +362,7 @@ function validRevisionFrame(parsed: Record<string, unknown>, mode: 'legacy' | 'r
     if (!Array.isArray(parsed.missed)) return false;
     for (const missed of parsed.missed) {
       if (!record(missed) || typeof missed.t !== 'string' || !['move', 'ready', 'ended'].includes(missed.t) ||
+          isInvalidDeadPositionEnding(missed) ||
           Object.hasOwn(missed, 'stateRevision') !== revisioned ||
           (revisioned && (!validEvent(missed) || missed.gameId !== parsed.gameId))) return false;
     }
@@ -376,6 +380,17 @@ export function isRevisionedState(state: StateView): state is RevisionedStateVie
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isInvalidDeadPositionEnding(val: unknown): boolean {
+  if (!record(val)) return false;
+  if (val.termination === 'dead_position') {
+    return val.result !== '1/2-1/2' || val.winner !== null;
+  }
+  if (record(val.status) && val.status.over === true && val.status.termination === 'dead_position') {
+    return val.status.result !== '1/2-1/2' || val.status.winner !== null;
+  }
+  return false;
 }
 
 function validRevision(value: unknown): value is number {
@@ -396,9 +411,12 @@ function legalMoves(value: unknown): boolean {
 
 const TERMINATIONS: readonly Termination[] = [
   'checkmate', 'resignation', 'timeout', 'stalemate', 'agreement', 'insufficient_material',
-  'fifty_move', 'threefold', 'variant', 'aborted', 'no_show',
+  'fifty_move', 'threefold', 'variant', 'aborted', 'no_show', 'dead_position',
 ];
 function ending(value: Record<string, unknown>): boolean {
+  if (value.termination === 'dead_position') {
+    return value.result === '1/2-1/2' && value.winner === null;
+  }
   return typeof value.result === 'string' && ['1-0', '0-1', '1/2-1/2', '*'].includes(value.result) &&
     TERMINATIONS.some(t => t === value.termination) && (value.winner === null || color(value.winner));
 }

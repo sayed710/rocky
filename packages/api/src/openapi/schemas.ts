@@ -32,6 +32,7 @@ const TERMINAL_REASONS = [
   'threefold',
   'variant_win',
   'variant_draw',
+  'dead_position',
 ] as const;
 const RESULT_STRINGS = ['1-0', '0-1', '1/2-1/2'] as const;
 

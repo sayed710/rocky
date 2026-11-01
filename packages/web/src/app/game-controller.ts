@@ -590,6 +590,9 @@ export class GameController {
     if (termination === 'insufficient_material') {
       return t('game.status.insufficientMaterialResult', { result });
     }
+    if (termination === 'dead_position') {
+      return t('game.status.deadPositionResult', { result });
+    }
     if (termination === 'fifty_move') {
       return t('game.status.fiftyMoveResult', { result });
     }

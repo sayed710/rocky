@@ -20,7 +20,9 @@ import { Position } from '@chess-platform/core';
 /**
  * Why a position is terminal, in the vocabulary the platform already uses.
  *
- * Exactly `GameStatus['reason']`. `threefold` is included even though `Position.status()` cannot
+ * Prepared for compatibility consumers to accept `dead_position` (AUD-03a, FIDE 5.2.2), while
+ * core `GameStatus['reason']` remains unchanged until detector implementation (AUD-03b).
+ * `threefold` is included even though `Position.status()` cannot
  * return it from a single FEN — repetition needs the move history, which no analysis request
  * carries — because this module is exported, and mapping it onto a *neighbouring* reason would
  * report a wrong result rather than no result. Raised in the Qodo review of PR #135.
@@ -32,7 +34,8 @@ export type TerminalReason =
   | 'fifty_move'
   | 'threefold'
   | 'variant_win'
-  | 'variant_draw';
+  | 'variant_draw'
+  | 'dead_position';
 
 /**
  * A terminal position's outcome.
@@ -120,5 +123,7 @@ export function describeTerminal(outcome: TerminalOutcome): string {
       return 'threefold repetition — drawn';
     case 'variant_draw':
       return 'variant draw — drawn';
+    case 'dead_position':
+      return 'dead position — drawn';
   }
 }

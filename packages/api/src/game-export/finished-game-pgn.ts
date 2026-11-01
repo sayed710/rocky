@@ -111,6 +111,7 @@ const RESULTS_BY_TERMINATION: Readonly<Record<Termination, readonly ResultString
   insufficient_material: DRAW,
   fifty_move: DRAW,
   threefold: DRAW,
+  dead_position: DRAW,
   variant: [...DECISIVE, ...DRAW],
   aborted: ['*'],
   no_show: ['*', ...DECISIVE],

@@ -32,6 +32,7 @@ const PLAYED: ReadonlyArray<[ResultString, Termination]> = [
   ['1-0', 'checkmate'], ['0-1', 'checkmate'], ['1-0', 'resignation'], ['0-1', 'resignation'],
   ['1-0', 'timeout'], ['0-1', 'timeout'], ['1/2-1/2', 'stalemate'], ['1/2-1/2', 'agreement'],
   ['1/2-1/2', 'insufficient_material'], ['1/2-1/2', 'fifty_move'], ['1/2-1/2', 'threefold'],
+  ['1/2-1/2', 'dead_position'],
   ['1-0', 'variant'], ['0-1', 'variant'], ['1/2-1/2', 'variant'],
 ];
 
@@ -81,6 +82,10 @@ test('an ending no authority could write fails closed instead of being rated or 
     ['unknown result', ['2-0', 'checkmate']],
     ['decisive stalemate', ['1-0', 'stalemate']],
     ['decisive agreement', ['0-1', 'agreement']],
+    ['decisive dead_position (1-0)', ['1-0', 'dead_position']],
+    ['decisive dead_position (0-1)', ['0-1', 'dead_position']],
+    ['scoreless dead_position', ['*', 'dead_position']],
+    ['winner on dead_position', ['1/2-1/2', 'dead_position', {}, { winner: 'w' }]],
     ['drawn checkmate', ['1/2-1/2', 'checkmate']],
     ['drawn resignation', ['1/2-1/2', 'resignation']],
     ['scoreless resignation', ['*', 'resignation']],

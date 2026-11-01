@@ -25,7 +25,13 @@ export type Termination =
    * timeout. `'*'` with no winner is a seek abort or a tournament double forfeit; a tournament game
    * with exactly one ready player is won by that player.
    */
-  | 'no_show';
+  | 'no_show'
+  /**
+   * A structural dead position (FIDE Article 5.2.2, ADR-0166): neither player can mate by any
+   * possible series of legal moves. Prepared as a draw termination for backward-compatible readers;
+   * emission is on HOLD until database and client rollout prerequisites are complete (AUD-03b).
+   */
+  | 'dead_position';
 
 /**
  * Where a game came from, recorded only when that decides its pregame lifecycle (ADR-0148).

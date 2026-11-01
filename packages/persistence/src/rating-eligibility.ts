@@ -45,6 +45,7 @@ const DRAW: readonly ResultString[] = ['1/2-1/2'];
 const RESULTS_BY_TERMINATION: ReadonlyMap<Termination, readonly ResultString[]> = new Map<Termination, readonly ResultString[]>([
   ['checkmate', DECISIVE], ['resignation', DECISIVE], ['timeout', DECISIVE],
   ['stalemate', DRAW], ['agreement', DRAW], ['insufficient_material', DRAW], ['fifty_move', DRAW], ['threefold', DRAW],
+  ['dead_position', DRAW],
   ['variant', [...DECISIVE, ...DRAW]],
   ['aborted', ['*']],
   ['no_show', ['*', ...DECISIVE]],
