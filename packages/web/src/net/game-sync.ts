@@ -33,7 +33,13 @@ import type {
   StateView,
   WsColor,
 } from './ws-protocol.js';
-import { colorForRole, opposite } from './ws-protocol.js';
+import {
+  colorForRole,
+  opposite,
+  isInvalidDeadPositionEvent,
+  isInvalidDeadPositionStatus,
+  isValidDeadPositionOutcome,
+} from './ws-protocol.js';
 import { VARIANTS } from '../api/models.js';
 
 /** PostgreSQL INTEGER limit (0..2147483647), matching ADR-0161 durable stateRevision. */
@@ -610,7 +616,27 @@ export class GameSync {
     return 'newer';
   }
 
+  private hasInvalidDeadPosition(msg: ServerMessage): boolean {
+    if (msg.t === 'ended') {
+      return isInvalidDeadPositionEvent(msg);
+    }
+    if (msg.t === 'joined' || msg.t === 'state' || msg.t === 'resumed') {
+      if (isInvalidDeadPositionStatus(msg.state?.status)) {
+        return true;
+      }
+      if (msg.t === 'resumed' && Array.isArray(msg.missed)) {
+        for (const missed of msg.missed) {
+          if (missed && typeof missed === 'object' && missed.t === 'ended' && isInvalidDeadPositionEvent(missed)) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
   private handleMessage(msg: ServerMessage): void {
+    if (this.hasInvalidDeadPosition(msg)) return;
     if ('gameId' in msg && msg.gameId !== this.gameId) return;
     if (msg.t !== 'joined' && msg.t !== 'reject' && !this.state.connected) return;
     switch (msg.t) {
@@ -1231,16 +1257,20 @@ export class GameSync {
 
   private isValidStatus(status: unknown): boolean {
     if (typeof status !== 'object' || status === null || Array.isArray(status)) return false;
+    if (isInvalidDeadPositionStatus(status)) return false;
     const s = status as Record<string, unknown>;
     if (typeof s.over !== 'boolean') return false;
     if (!s.over) return true;
     const validResults: readonly string[] = ['1-0', '0-1', '1/2-1/2', '*'];
     const validTerminations: readonly string[] = [
       'checkmate', 'resignation', 'timeout', 'stalemate', 'agreement',
-      'insufficient_material', 'fifty_move', 'threefold', 'variant', 'aborted', 'no_show',
+      'insufficient_material', 'fifty_move', 'threefold', 'variant', 'aborted', 'no_show', 'dead_position',
     ];
     if (typeof s.result !== 'string' || !validResults.includes(s.result)) return false;
     if (typeof s.termination !== 'string' || !validTerminations.includes(s.termination)) return false;
+    if (s.termination === 'dead_position') {
+      return isValidDeadPositionOutcome(s);
+    }
     return s.winner === null || s.winner === 'w' || s.winner === 'b';
   }
 

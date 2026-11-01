@@ -148,7 +148,7 @@ export class PgTerminalEventInbox implements TerminalEventInbox {
 const TERMINATIONS: Readonly<Record<Termination, readonly ResultString[]>> = {
   checkmate: ['1-0', '0-1'], resignation: ['1-0', '0-1'], timeout: ['1-0', '0-1'],
   stalemate: ['1/2-1/2'], agreement: ['1/2-1/2'], insufficient_material: ['1/2-1/2'],
-  fifty_move: ['1/2-1/2'], threefold: ['1/2-1/2'], variant: ['1-0', '0-1', '1/2-1/2'],
+  fifty_move: ['1/2-1/2'], threefold: ['1/2-1/2'], dead_position: ['1/2-1/2'], variant: ['1-0', '0-1', '1/2-1/2'],
   aborted: ['*'], no_show: ['1-0', '0-1', '*'],
 };
 const WINNERS: Readonly<Record<ResultString, 'w' | 'b' | null>> = { '1-0': 'w', '0-1': 'b', '1/2-1/2': null, '*': null };

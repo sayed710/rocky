@@ -56,6 +56,8 @@ export function describeOutcome(
       return winner ? i18n.t('ai.explain.outcome.variantWinWinner', { winner }) : i18n.t('ai.explain.outcome.variantWin');
     case 'variant_draw':
       return i18n.t('ai.explain.outcome.variantDraw');
+    case 'dead_position':
+      return i18n.t('ai.explain.outcome.deadPosition');
     default:
       // A reason this client does not know yet still has an authoritative result, so show that
       // rather than nothing. Falling back to an evaluation would be the original defect again.

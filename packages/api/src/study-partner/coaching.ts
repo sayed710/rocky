@@ -142,8 +142,11 @@ function isTerminalMoveOutcome(value: Record<string, unknown>): boolean {
       'threefold',
       'variant_win',
       'variant_draw',
+      'dead_position',
     ] as const)
-    && isOneOf(value['result'], ['1-0', '0-1', '1/2-1/2'] as const);
+    && (value['reason'] === 'dead_position'
+      ? value['result'] === '1/2-1/2'
+      : isOneOf(value['result'], ['1-0', '0-1', '1/2-1/2'] as const));
 }
 
 function isCitationMoveOutcome(value: unknown): value is MoveOutcomeView {
