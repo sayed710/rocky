@@ -648,6 +648,9 @@ export class Game {
   ): Game {
     let state: GameState | null = null;
     for (const [index, event] of events.entries()) {
+      if (state !== null && state.status.over) {
+        throw new GameError(`${event.type} after GameEnded`);
+      }
       if (event.type !== 'MovePlayed' || state === null) {
         state = Game.reduce(state, event);
         continue;
@@ -671,8 +674,12 @@ export class Game {
 
   /** The pure reducer: `(state, event) -> state`. */
   private static reduce(state: GameState | null, event: GameEvent): GameState {
+    if (state !== null && state.status.over) {
+      throw new GameError(`${event.type} after GameEnded`);
+    }
     switch (event.type) {
       case 'GameCreated': {
+        if (state !== null) throw new GameError('GameCreated after GameCreated');
         const startId = Game.startIdOf(event);
         const pregame = pregameOf(event.source, event.noShowAfterMs, event.at);
         const source = pregame?.source ?? null;
@@ -730,6 +737,8 @@ export class Game {
           drawOffer: null,
         };
       }
+      default:
+        throw new GameError(`Unknown event type ${JSON.stringify((event as { type: unknown }).type)}`);
     }
   }
 }

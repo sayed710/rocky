@@ -2,7 +2,7 @@ import type { GameResult } from '@chess-platform/tournament';
 import type { GameEndedEvent } from '@chess-platform/game';
 import { type PubSub, gameChannel } from '@chess-platform/realtime-gateway';
 import type { EventStore, TournamentsRepository } from '@chess-platform/persistence';
-import { isArenaSnapshot } from '@chess-platform/persistence';
+import { isArenaSnapshot, projectGameStream } from '@chess-platform/persistence';
 import type { TournamentService } from './service';
 import type { ArenaService } from './arena.service';
 
@@ -164,7 +164,11 @@ export class TournamentResultReporter {
       this.forget(gameId);
       return;
     }
-    const ending = (await this.events.load(gameId)).find(({ event }) => event.type === 'GameEnded')?.event;
+    const stream = await this.events.load(gameId);
+    if (stream.length === 0) return;
+    const projection = projectGameStream(gameId, stream);
+    if (projection.result === null) return;
+    const ending = stream[stream.length - 1]!.event as GameEndedEvent;
     if (ending?.type !== 'GameEnded') return;
     const isArena = isArenaSnapshot(stored.snapshot);
     const mapped = tournamentOutcome(ending);
