@@ -37,5 +37,6 @@ export {
   applyMove,
 } from './movegen';
 export { Position, IllegalMoveError, HORDE_FEN, RACING_KINGS_FEN } from './position';
+export { isFrozenDeadPosition } from './dead-position';
 export { repetitionKey } from './repetition';
 export { validatePositionSemantics, validateFen } from './position-validator';

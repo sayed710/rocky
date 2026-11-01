@@ -34,6 +34,10 @@ const CHECKMATE_FEN = 'r1bqkb1r/pppp1Qpp/2n5/4p3/2B1n3/8/PPPP1PPP/RNB1K1NR b KQk
 const STALEMATE_FEN = '7k/5Q2/6K1/8/8/8/8/8 b - - 0 1';
 /** Bare kings. */
 const INSUFFICIENT_FEN = '8/8/8/4k3/8/4K3/8/8 w - - 0 1';
+/** Frozen King and Pawn dead position (motivating Issue #124 position). */
+const DEAD_POSITION_FEN = '8/1pk2p1p/pPp1pPpP/P1P1P1P1/5K2/8/8/8 b - - 0 1';
+/** Predecessor position where White's move b5b6 transitions into DEAD_POSITION_FEN. */
+const BEFORE_DEAD_POSITION_FEN = '8/1pk2p1p/p1p1pPpP/PPP1P1P1/5K2/8/8/8 w - - 0 1';
 /**
  * King of the Hill: White's king stands on d5, which wins on the spot.
  *
@@ -132,6 +136,10 @@ test('terminalOutcome names each decided position in the platform result vocabul
     reason: 'insufficient_material',
     result: '1/2-1/2',
   });
+  assert.deepEqual(terminalOutcome(DEAD_POSITION_FEN, 'standard'), {
+    reason: 'dead_position',
+    result: '1/2-1/2',
+  });
   assert.equal(terminalOutcome(START_FEN, 'standard'), undefined, 'an ongoing game has no result');
 });
 
@@ -209,6 +217,26 @@ test('POST /v1/analysis reports a variant win using the variant rules', async ()
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.terminal, { reason: 'variant_win', result: '1-0' });
     assert.equal(engine.callCount, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test('POST /v1/analysis reports dead_position as a draw rather than an evaluation and incurs no engine work', async () => {
+  const engine = new CountingAnalysisProvider();
+  const h = await startHarness({}, { analysis: new AnalysisService({ provider: engine }) });
+  try {
+    const user = await h.makeUser('alice');
+    const res = await h.json('POST', '/v1/analysis', {
+      token: user.token,
+      body: { fen: DEAD_POSITION_FEN, variant: 'standard' },
+    });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.terminal, { reason: 'dead_position', result: '1/2-1/2' });
+    assert.deepEqual(res.body.lines, [], 'a dead position has no lines to report');
+    assert.equal(engine.callCount, 0, 'no engine search performed');
+    assert.equal(JSON.stringify(res.body).includes('"value":0'), false, 'no fabricated +0.00 evaluation');
   } finally {
     await h.close();
   }
@@ -397,7 +425,76 @@ test('a move played from an already-decided position is rejected, and costs noth
   assert.equal(provider.calls.length, 0);
 });
 
+test('a move into a dead position costs one engine search and is cited as dead_position, skipping post-move evaluation', async () => {
+  const engine = new CountingAnalysisProvider();
+  engine.responder = (fen) =>
+    fen === BEFORE_DEAD_POSITION_FEN
+      ? [
+          {
+            multipv: 1,
+            evaluation: { type: 'cp', value: 0 },
+            principalVariation: ['b5b6'],
+            depth: 12,
+            selDepth: 14,
+            nodes: 500,
+            nps: 5000,
+            timeMs: 50,
+          },
+        ]
+      : [];
+  const provider = new FakeProvider({ id: 'p1', model: 'p1-model', content: 'A dead position transition.' });
+  const service = buildExplanation(engine, provider);
+
+  const outcome = await service.explain({
+    fen: BEFORE_DEAD_POSITION_FEN,
+    variant: 'standard',
+    move: 'b5b6',
+  });
+
+  assert.equal(engine.callCount, 1, 'the post-move search is skipped');
+  assert.deepEqual(engine.fens, [BEFORE_DEAD_POSITION_FEN], 'only pre-move position ran');
+  assert.deepEqual(outcome.citation.moveOutcome, {
+    kind: 'terminal',
+    reason: 'dead_position',
+    result: '1/2-1/2',
+  });
+});
+
+test('explaining a move from an already dead position fails with 422 and charges nothing', async () => {
+  const engine = new CountingAnalysisProvider();
+  const provider = new FakeProvider({ id: 'p1', model: 'p1-model', content: '' });
+  const service = buildExplanation(engine, provider);
+
+  let charged = 0;
+  await assert.rejects(
+    () =>
+      service.explain(
+        { fen: DEAD_POSITION_FEN, variant: 'standard', move: 'c7d7' },
+        async () => {
+          charged += 1;
+        },
+      ),
+    (err: unknown) => {
+      const httpError = err as { status?: number; message?: string };
+      assert.equal(httpError.status, 422, 'permanent, not a retryable 503');
+      assert.equal(httpError.message, 'the game is already over in this position');
+      return true;
+    },
+  );
+
+  assert.equal(charged, 0, 'caller keeps their quota');
+  assert.equal(engine.callCount, 0, 'engine never called');
+  assert.equal(provider.calls.length, 0, 'ai model never called');
+});
+
 /** Threefold is reported as itself, not folded into a neighbouring draw. */
+test('a dead_position status is reported as dead_position draw', () => {
+  assert.deepEqual(fromStatus({ over: true, reason: 'dead_position' }), {
+    reason: 'dead_position',
+    result: '1/2-1/2',
+  });
+});
+
 test('a threefold status is reported as threefold', () => {
   assert.deepEqual(fromStatus({ over: true, reason: 'threefold' }), {
     reason: 'threefold',
