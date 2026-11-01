@@ -496,4 +496,109 @@ describe('Repository Variant-Derived Default FEN (Qodo c8aa2377)', () => {
     assert.equal(imported.length, 1);
     assert.equal(imported[0].startingFen, customFen, 'Explicit PGN [FEN] tag must be preserved');
   });
+
+  it('exportPgn omits FEN tag for canonical starts across all 8 variants and roundtrips faithfully (Qodo fef0004f)', async () => {
+    const variants: readonly StudyVariant[] = [
+      'standard',
+      'chess960',
+      'threecheck',
+      'crazyhouse',
+      'kingofthehill',
+      'atomic',
+      'horde',
+      'racingkings',
+    ];
+
+    const repo = new InMemoryStudiesRepository(mockReader);
+    for (const v of variants) {
+      const studyId = `s-export-${v}`;
+      await repo.createStudy(studyId, 'p-owner', `${v} Export Study`, 'Desc', 'public', new Date(), { variant: v });
+      const ch = await repo.createChapter(`ch-exp-${v}`, studyId, 'p-owner', `${v} Chapter`);
+      assert.equal(ch.startingFen, canonicalStarts[v]);
+
+      const exportedPgn = await repo.exportPgn(studyId, 'p-owner', ch.id);
+      assert.equal(
+        exportedPgn.includes('[FEN '),
+        false,
+        `Variant ${v} canonical start must omit FEN tag on export`
+      );
+
+      const reimportStudyId = `s-reimport-${v}`;
+      await repo.createStudy(reimportStudyId, 'p-owner', `${v} Reimport Study`, 'Desc', 'public', new Date(), { variant: v });
+      const [reimported] = await repo.importPgn(reimportStudyId, 'p-owner', exportedPgn, mockReader);
+      assert.equal(
+        reimported.startingFen,
+        canonicalStarts[v],
+        `Variant ${v} reimport without FEN tag must derive canonical initial FEN`
+      );
+    }
+  });
+
+  it('exportPgn preserves FEN tag for stored legacy Racing Kings Standard-start and roundtrips faithfully (Qodo fef0004f)', async () => {
+    const repo = new InMemoryStudiesRepository(mockReader);
+    const standardStart = canonicalStarts.standard;
+
+    // Study has variant racingkings, but chapter stores legacy Standard start FEN
+    await repo.createStudy('s-rk-legacy', 'p-owner', 'Legacy RK', 'Desc', 'public', new Date(), { variant: 'racingkings' });
+    const ch = await repo.createChapter('ch-rk-legacy', 's-rk-legacy', 'p-owner', 'Legacy Chapter', standardStart);
+    assert.equal(ch.startingFen, standardStart);
+
+    const exportedPgn = await repo.exportPgn('s-rk-legacy', 'p-owner', ch.id);
+    assert.ok(
+      exportedPgn.includes(`[FEN "${standardStart}"]`),
+      'export of legacy Standard start in Racing Kings study must retain explicit FEN tag'
+    );
+
+    await repo.createStudy('s-rk-reimport', 'p-owner', 'Reimport RK', 'Desc', 'public', new Date(), { variant: 'racingkings' });
+    const [reimported] = await repo.importPgn('s-rk-reimport', 'p-owner', exportedPgn, mockReader);
+    assert.equal(
+      reimported.startingFen,
+      standardStart,
+      'reimport must preserve the exact stored legacy Standard starting FEN rather than silently selecting RK default'
+    );
+  });
+
+  it('handles Threecheck and Crazyhouse serialized-default differences properly (Qodo fef0004f)', async () => {
+    const repo = new InMemoryStudiesRepository(mockReader);
+
+    // 1. Threecheck canonical has '3+3 0 1' -> omits FEN tag on export
+    await repo.createStudy('s-tc-canon', 'p-owner', 'TC Canon', 'Desc', 'public', new Date(), { variant: 'threecheck' });
+    const tcCanonCh = await repo.createChapter('ch-tc-canon', 's-tc-canon', 'p-owner', 'TC Canon');
+    assert.equal(tcCanonCh.startingFen, canonicalStarts.threecheck);
+    const tcCanonPgn = await repo.exportPgn('s-tc-canon', 'p-owner', tcCanonCh.id);
+    assert.equal(tcCanonPgn.includes('[FEN '), false, 'canonical Threecheck must omit FEN tag');
+
+    // 2. Threecheck with standard FEN (missing '3+3') -> emits explicit FEN tag
+    await repo.createStudy('s-tc-legacy', 'p-owner', 'TC Legacy', 'Desc', 'public', new Date(), { variant: 'threecheck' });
+    const tcLegacyCh = await repo.createChapter('ch-tc-legacy', 's-tc-legacy', 'p-owner', 'TC Legacy', canonicalStarts.standard);
+    const tcLegacyPgn = await repo.exportPgn('s-tc-legacy', 'p-owner', tcLegacyCh.id);
+    assert.ok(tcLegacyPgn.includes(`[FEN "${canonicalStarts.standard}"]`), 'Threecheck with standard FEN must retain FEN tag');
+
+    // 3. Crazyhouse canonical has '[]' -> omits FEN tag on export
+    await repo.createStudy('s-zh-canon', 'p-owner', 'ZH Canon', 'Desc', 'public', new Date(), { variant: 'crazyhouse' });
+    const zhCanonCh = await repo.createChapter('ch-zh-canon', 's-zh-canon', 'p-owner', 'ZH Canon');
+    assert.equal(zhCanonCh.startingFen, canonicalStarts.crazyhouse);
+    const zhCanonPgn = await repo.exportPgn('s-zh-canon', 'p-owner', zhCanonCh.id);
+    assert.equal(zhCanonPgn.includes('[FEN '), false, 'canonical Crazyhouse must omit FEN tag');
+
+    // 4. Crazyhouse with standard FEN (missing '[]') -> emits explicit FEN tag
+    await repo.createStudy('s-zh-legacy', 'p-owner', 'ZH Legacy', 'Desc', 'public', new Date(), { variant: 'crazyhouse' });
+    const zhLegacyCh = await repo.createChapter('ch-zh-legacy', 's-zh-legacy', 'p-owner', 'ZH Legacy', canonicalStarts.standard);
+    const zhLegacyPgn = await repo.exportPgn('s-zh-legacy', 'p-owner', zhLegacyCh.id);
+    assert.ok(zhLegacyPgn.includes(`[FEN "${canonicalStarts.standard}"]`), 'Crazyhouse with standard FEN must retain FEN tag');
+  });
+
+  it('preserves legacy Horde with standard start as explicit FEN on export without silent rewrite (Qodo fef0004f)', async () => {
+    const repo = new InMemoryStudiesRepository(mockReader);
+    const standardStart = canonicalStarts.standard;
+
+    await repo.createStudy('s-horde-legacy', 'p-owner', 'Legacy Horde', 'Desc', 'public', new Date(), { variant: 'horde' });
+    const ch = await repo.createChapter('ch-horde-legacy', 's-horde-legacy', 'p-owner', 'Legacy Horde Chapter', standardStart);
+
+    const exportedPgn = await repo.exportPgn('s-horde-legacy', 'p-owner', ch.id);
+    assert.ok(
+      exportedPgn.includes(`[FEN "${standardStart}"]`),
+      'export of legacy Horde holding standard start must preserve exact stored FEN, not silently omit or mutate'
+    );
+  });
 });

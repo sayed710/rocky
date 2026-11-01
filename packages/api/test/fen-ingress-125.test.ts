@@ -655,3 +655,96 @@ test('Atomic four-move sequence reachable FEN accepted across caller ingress wit
   });
   assert.equal(contRes.status, 422, 'continuation past terminal blast leaf must return 422');
 });
+
+test('F125-06: PGN export/import round-trip preserves exact start across variants and legacy setups (Qodo fef0004f)', async (t) => {
+  const provider = new CountingAnalysisProvider();
+  const analysis = new AnalysisService({ provider });
+  const h = await startHarness({}, { analysis });
+  t.after(() => h.close());
+  const user = await h.makeUser('export-roundtrip-tester', ['admin']);
+
+  const reader = new CorePositionReader();
+
+  // 1. Stored legacy Racing Kings with Standard start export includes FEN tag and roundtrips faithfully
+  const legacyStudyRes = await h.json('POST', '/v1/studies', {
+    token: user.token,
+    body: { name: 'Legacy RK Study', visibility: 'public', variant: 'racingkings' },
+  });
+  assert.equal(legacyStudyRes.status, 201);
+  const legacyStudyId = legacyStudyRes.body.id as string;
+
+  const standardStartFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  const legacyChapterRes = await h.json('POST', `/v1/studies/${legacyStudyId}/chapters`, {
+    token: user.token,
+    body: { name: 'Legacy Standard Start Chapter', startingFen: standardStartFen },
+  });
+  assert.equal(legacyChapterRes.status, 201);
+  const legacyChapterId = legacyChapterRes.body.id as string;
+
+  const legacyExportRes = await fetch(`${h.baseUrl}/v1/studies/${legacyStudyId}/export.pgn?chapterId=${legacyChapterId}`, {
+    headers: { authorization: `Bearer ${user.token}` },
+  });
+  assert.equal(legacyExportRes.status, 200);
+  const legacyPgn = await legacyExportRes.text();
+  assert.ok(legacyPgn.includes(`[FEN "${standardStartFen}"]`), 'export of legacy standard start under RK must include FEN tag');
+
+  // Reimporting this PGN must preserve the exact legacy standard start FEN
+  const reimportStudyRes = await h.json('POST', '/v1/studies', {
+    token: user.token,
+    body: { name: 'Reimported Legacy RK', visibility: 'public', variant: 'racingkings' },
+  });
+  assert.equal(reimportStudyRes.status, 201);
+  const reimportStudyId = reimportStudyRes.body.id as string;
+
+  const reimportRes = await h.json('POST', `/v1/studies/${reimportStudyId}/import`, {
+    token: user.token,
+    body: { pgn: legacyPgn },
+  });
+  assert.equal(reimportRes.status, 200);
+  assert.equal(reimportRes.body.items.length, 1);
+  assert.equal(reimportRes.body.items[0].startingFen, standardStartFen, 'reimported chapter must retain exact legacy start');
+
+  // 2. Canonical Racing Kings omitted start exports WITHOUT FEN tag and roundtrips to canonical RK start
+  const canonicalRkStudyRes = await h.json('POST', '/v1/studies', {
+    token: user.token,
+    body: { name: 'Canonical RK Study', visibility: 'public', variant: 'racingkings' },
+  });
+  const canonicalRkStudyId = canonicalRkStudyRes.body.id as string;
+  const canonicalRkChapterRes = await h.json('POST', `/v1/studies/${canonicalRkStudyId}/chapters`, {
+    token: user.token,
+    body: { name: 'Default Start Chapter' },
+  });
+  const canonicalRkChapterId = canonicalRkChapterRes.body.id as string;
+  const canonicalExportRes = await fetch(`${h.baseUrl}/v1/studies/${canonicalRkStudyId}/export.pgn?chapterId=${canonicalRkChapterId}`, {
+    headers: { authorization: `Bearer ${user.token}` },
+  });
+  const canonicalPgn = await canonicalExportRes.text();
+  assert.ok(!canonicalPgn.includes('[FEN '), 'export of canonical RK start must omit FEN tag');
+
+  const canonicalReimportStudyRes = await h.json('POST', '/v1/studies', {
+    token: user.token,
+    body: { name: 'Canonical Reimport', visibility: 'public', variant: 'racingkings' },
+  });
+  const canonicalReimportId = canonicalReimportStudyRes.body.id as string;
+  const canonicalReimportRes = await h.json('POST', `/v1/studies/${canonicalReimportId}/import`, {
+    token: user.token,
+    body: { pgn: canonicalPgn },
+  });
+  assert.equal(canonicalReimportRes.status, 200);
+  assert.equal(
+    canonicalReimportRes.body.items[0].startingFen,
+    '8/8/8/8/8/8/krbnNBRK/qrbnNBRQ w - - 0 1',
+    'reimport of canonical RK export must derive canonical RK start',
+  );
+
+  // 3. Direct InMemoryStudiesRepository verification with CorePositionReader (matching root probe)
+  const { InMemoryStudiesRepository } = await import('@chess-platform/studies');
+  const repo = new InMemoryStudiesRepository(reader);
+  await repo.createStudy('s-direct', 'owner', 'Direct RK', '', 'private', undefined, { variant: 'racingkings' });
+  await repo.createChapter('ch-direct', 's-direct', 'owner', 'Stored legacy start', standardStartFen);
+  const directPgn = await repo.exportPgn('s-direct', 'owner', 'ch-direct');
+  assert.ok(directPgn.includes(`[FEN "${standardStartFen}"]`), 'direct repo export of legacy RK start must include FEN tag');
+  await repo.createStudy('s-direct-reimport', 'owner', 'Direct Reimport', '', 'private', undefined, { variant: 'racingkings' });
+  const [directReimported] = await repo.importPgn('s-direct-reimport', 'owner', directPgn, reader);
+  assert.equal(directReimported.startingFen, standardStartFen, 'direct repo reimport must preserve legacy start');
+});

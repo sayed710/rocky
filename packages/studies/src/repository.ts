@@ -11,7 +11,6 @@ import type {
 import {
   normalizeChapterName,
   normalizeStudyName,
-  DEFAULT_STARTING_FEN,
   DEFAULT_STUDY_VARIANT,
   roleRank,
 } from './model';
@@ -878,6 +877,7 @@ export class InMemoryStudiesRepository implements StudiesRepository {
     }
 
     const pgnGames: PgnGame[] = [];
+    const canonicalStartingFen = this.positionReader.initialFen(study.variant);
 
     for (const chapter of targetChapters) {
       const nodes = Array.from(this.treeNodes.values())
@@ -888,7 +888,7 @@ export class InMemoryStudiesRepository implements StudiesRepository {
       const tags = [
         { key: 'Event', value: chapter.name },
         ...(study.variant !== DEFAULT_STUDY_VARIANT ? [{ key: 'Variant', value: study.variant }] : []),
-        ...(chapter.startingFen !== DEFAULT_STARTING_FEN ? [{ key: 'FEN', value: chapter.startingFen }] : []),
+        ...(chapter.startingFen !== canonicalStartingFen ? [{ key: 'FEN', value: chapter.startingFen }] : []),
       ];
 
       pgnGames.push({

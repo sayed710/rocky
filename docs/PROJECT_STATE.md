@@ -6,7 +6,8 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-11-01 — Variant-aware untrusted FEN validation: supported repository initial-position port correction and Atomic blast evidence clarification verified; root gates, DB CI and review provider disposition pending._
+_Last updated: 2026-11-01 — Variant-aware untrusted FEN validation: PGN export canonical initial-position omission policy and round-trip fidelity verified; Qodo fef0004f addressed; root gates and CI pending._
+Prior: _Last updated: 2026-11-01 — Variant-aware untrusted FEN validation: supported repository initial-position port correction and Atomic blast evidence clarification verified; root gates, DB CI and review provider disposition pending._
 Prior: _Last updated: 2026-11-01 — Integration of Issue #125 (variant-aware untrusted FEN validation and core royal safety) onto verified Issue #128 main (0cd3af0); integration checks, new-head review and remote CI pending._
 Prior: _Last updated: 2026-11-01 — Variant-aware untrusted FEN validation and core royal safety (Issue #125); Black rook capture fixture test-only correction verified; new-head review and full CI pending._
 Prior: _Last updated: 2026-11-01 — Variant-aware untrusted FEN validation and core royal safety (Issue #125); 27 focused tests and 5/5 RED-to-GREEN probe verified; full repository gates pending._
@@ -6022,4 +6023,17 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - `@chess-platform/api`: Author ingress regressions pass **6 PASS, 0 FAIL, 0 SKIP, exit 0** (`npx ts-node packages/api/test/fen-ingress-125.test.ts`). Build succeeds exit 0. Zero drift in `packages/api/openapi.json`.
   - Zero `as any` introduced across all touched packages.
   - No Qodo findings dismissed or marked resolved at provider level: findings `c8aa2377-bed4-4dbf-9a10-710c4d4e6716` and `28f1a7ad-c140-45ca-812b-ebcfa614211f` remain pending provider disposition by root.
+  - Independent root integrated CORE13 rerun, live PostgreSQL integration, binary engine smoke tests, remote CI, and review provider disposition remain pending root owner actions; repository owner alone merges.
+
+## Milestone: PGN Export Canonical Initial-Position Omission & Round-Trip Fidelity (Qodo fef0004f) (2026-11-01)
+
+- **PGN Export Canonical Initial-Position Omission Policy (Qodo Finding fef0004f-9b60-47dd-9414-3e299656aebf, Supported)**:
+  Addressed Qodo review finding on PR #142 (HEAD `8e8d2bc11331df14f5c8a2fe7858d7d0a7818e52`) where PGN export previously omitted the `[FEN]` tag by comparing against `DEFAULT_STARTING_FEN` (standard chess), causing stored non-standard chapters (such as legacy Racing Kings holding standard start) to export without `[FEN]` and silently mutate to the variant's canonical start on reimport. Updated `exportPgn` in both `InMemoryStudiesRepository` and `PgStudiesRepository` to omit the `[FEN]` tag if and only if `chapter.startingFen === this.positionReader.initialFen(study.variant)`. When `chapter.startingFen` differs from the variant's canonical initial position (including stored legacy Standard starts in variant studies, Three-check or Crazyhouse setups without canonical counter/bracket syntax, or custom setups), the explicit `[FEN]` tag is emitted, guaranteeing that reimport preserves the exact stored start. Canonical omitted defaults across all 8 variants omit `[FEN]` on export and cleanly round-trip. Legacy invalid Horde positions holding standard start retain explicit `[FEN]` on export and fail closed on strict reimport rather than silently canonicalizing to a different position. Removed unused `DEFAULT_STARTING_FEN` imports from repository implementations.
+- **Verification Evidence & Pass Counts (Author Unit Evidence vs. Root Gates)**:
+  - `@chess-platform/studies`: Author unit tests pass **63 PASS, 0 FAIL, 0 SKIP, exit 0** (`npm test -w @chess-platform/studies`). Build succeeds exit 0.
+  - `@chess-platform/persistence`: Author unit tests pass **113 PASS, 0 FAIL, 0 SKIP, exit 0** (`npm test -w @chess-platform/persistence`); note that PostgreSQL unit tests are not live integration PASS — source-added direct `PgStudiesRepository` export/import round-trip integration test coverage in `studies.integration.test.ts` awaits database CI. Build succeeds exit 0.
+  - `@chess-platform/core`: Unit tests pass **183 PASS, 0 FAIL, 0 SKIP, exit 0** (`npm test -w @chess-platform/core`).
+  - `@chess-platform/api`: Author ingress and round-trip regressions pass **7 PASS, 0 FAIL, 0 SKIP, exit 0** (`node packages/api/dist-test/test/fen-ingress-125.test.js`), including HTTP export/import roundtrip for legacy Racing Kings Standard start, canonical RK omission, and direct repository verification matching root external probe. Zero drift in `packages/api/openapi.json`.
+  - Zero `as any` introduced across all touched packages.
+  - Provider disposition for Qodo findings `c8aa2377-bed4-4dbf-9a10-710c4d4e6716`, `28f1a7ad-c140-45ca-812b-ebcfa614211f`, and `fef0004f-9b60-47dd-9414-3e299656aebf` remains pending root owner actions; no clean/disposition or remote CI pass is claimed.
   - Independent root integrated CORE13 rerun, live PostgreSQL integration, binary engine smoke tests, remote CI, and review provider disposition remain pending root owner actions; repository owner alone merges.

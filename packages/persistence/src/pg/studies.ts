@@ -17,7 +17,6 @@ import type {
 } from '@chess-platform/studies';
 import {
   StudyRuleError,
-  DEFAULT_STARTING_FEN,
   DEFAULT_STUDY_VARIANT,
   MAX_GAMES_PER_IMPORT,
   MAX_PGN_BYTES,
@@ -1315,6 +1314,7 @@ export class PgStudiesRepository implements StudiesRepository {
       }
 
       const pgnGames: PgnGame[] = [];
+      const canonicalStartingFen = this.positionReader.initialFen(study.variant);
       for (const chapter of targetChapters) {
         const nodesRes = await this.pool.query<TreeNodeRow>(
           `SELECT id, chapter_id, parent_id, san, fen_after, comment, nags, order_index
@@ -1331,7 +1331,7 @@ export class PgStudiesRepository implements StudiesRepository {
         const tags = [
           { key: 'Event', value: chapter.name },
           ...(study.variant !== DEFAULT_STUDY_VARIANT ? [{ key: 'Variant', value: study.variant }] : []),
-          ...(chapter.startingFen !== DEFAULT_STARTING_FEN ? [{ key: 'FEN', value: chapter.startingFen }] : []),
+          ...(chapter.startingFen !== canonicalStartingFen ? [{ key: 'FEN', value: chapter.startingFen }] : []),
         ];
 
         pgnGames.push({
