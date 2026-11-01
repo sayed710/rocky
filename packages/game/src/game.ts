@@ -29,6 +29,7 @@ import {
   type ClockState,
   type TimeControl,
 } from './clock';
+import { adjudicateTimeoutPossibility } from './timeout-adjudication';
 import type {
   GameCreatedEvent,
   GameEndedEvent,
@@ -759,62 +760,34 @@ export class Game {
  * mode worth avoiding; the guard exists only to spare someone a loss they could never have converted.
  */
 export function canMate(fen: string, color: Color, variant: Variant = 'standard'): boolean {
-  const st = parseFen(fen, variant);
-
-  let bishops = 0;
-  let knights = 0;
-  let majorOrPawn = false;
-  let anyPiece = false;
-  for (let sq = 0; sq < 128; sq++) {
-    if ((sq & 0x88) !== 0) continue;
-    const p = st.board[sq];
-    if (p === null) continue;
-    const isWhite = p === p.toUpperCase();
-    if ((isWhite && color !== 'w') || (!isWhite && color !== 'b')) continue;
-    const t = typeOf(p);
-    if (t === 'k') continue;
-    anyPiece = true;
-    if (t === 'p' || t === 'r' || t === 'q') majorOrPawn = true;
-    else if (t === 'b') bishops++;
-    else if (t === 'n') knights++;
-  }
-
   switch (variant) {
     case 'kingofthehill':
     case 'racingkings':
-      // Both are won by walking a king somewhere. A player reduced to a bare king still has the only
-      // piece the win condition needs, so material can never rule the win out.
-      return true;
-
     case 'crazyhouse':
-      // Anything in hand can be dropped, and the board alone never shows it — but the deciding point
-      // is that a king captures like any other piece, so even a bare king with an empty pocket can
-      // take something and drop it back. There is no material configuration from which winning is
-      // impossible, which makes the guard inapplicable rather than merely generous.
+    case 'horde':
+      // Validates FEN syntax preserving non-standard error behavior.
+      parseFen(fen, variant);
       return true;
 
     case 'threecheck':
-      // Won by giving three checks rather than by mating, so the two-minor threshold does not apply:
-      // a lone knight can check. Only a bare king can never give check.
-      return anyPiece;
-
-    case 'atomic':
-      // Won by exploding the enemy king. A king may not capture — it would explode itself — so a bare
-      // king cannot win, but any other piece can deliver the capture that ends it.
-      return anyPiece;
-
-    case 'horde':
-      // White is an army of pawns with no king and wins by mating Black; Black wins by capturing
-      // every white piece, and a king captures perfectly well on its own. Neither side reaches a
-      // material state that rules the win out, so as in Crazyhouse the guard does not apply.
-      return true;
+    case 'atomic': {
+      const st = parseFen(fen, variant);
+      for (let sq = 0; sq < 128; sq++) {
+        if ((sq & 0x88) !== 0) continue;
+        const p = st.board[sq];
+        if (p === null) continue;
+        const isWhite = p === p.toUpperCase();
+        if ((isWhite && color !== 'w') || (!isWhite && color !== 'b')) continue;
+        if (typeOf(p) !== 'k') return true;
+      }
+      return false;
+    }
 
     case 'standard':
     case 'chess960':
-    default:
-      // Checkmate is the win condition, so the classical material test applies: a lone king, K+N and
-      // K+B cannot force mate; two minors can.
-      if (majorOrPawn) return true;
-      return bishops + knights >= 2;
+    default: {
+      const pos = Position.fromFen(fen, variant);
+      return adjudicateTimeoutPossibility(pos, color);
+    }
   }
 }

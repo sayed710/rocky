@@ -118,7 +118,7 @@ test('timeout on insufficient mating material is a draw, exactly as claimFlag re
   // White (to move after Black's reply) flags; Black has only a king or a single knight.
   const cases: Array<{ variant: Variant; fen: string; move: string; result: string }> = [
     { variant: 'standard', fen: '4k3/8/8/8/8/8/8/R3K3 w - - 0 1', move: 'a1a2', result: '1/2-1/2' },
-    { variant: 'standard', fen: '4k3/8/8/8/8/8/1n6/R3K3 w - - 0 1', move: 'a1a3', result: '1/2-1/2' },
+    { variant: 'standard', fen: '4k3/8/8/8/8/8/1n6/R3K3 w - - 0 1', move: 'a1a3', result: '0-1' },
     { variant: 'standard', fen: '4k3/8/8/8/8/8/1q6/R3K3 w - - 0 1', move: 'a1a3', result: '0-1' },
     { variant: 'chess960', fen: '', move: '', result: '0-1' },
     { variant: 'kingofthehill', fen: '4k3/8/8/8/8/8/8/R3K3 w - - 0 1', move: 'a1a2', result: '0-1' },
