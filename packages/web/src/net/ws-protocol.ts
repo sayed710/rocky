@@ -382,14 +382,44 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isInvalidDeadPositionEnding(val: unknown): boolean {
+/** A dead_position termination outcome must strictly be a draw with no winner. */
+export function isValidDeadPositionOutcome(val: { readonly result?: unknown; readonly winner?: unknown } | Record<string, unknown>): boolean {
+  return val.result === '1/2-1/2' && val.winner === null;
+}
+
+/**
+ * Any status bearing the dead_position termination must be an actual terminal draw
+ * with literal boolean over: true, result: '1/2-1/2', and winner: null.
+ * Malformed, false, missing, or non-boolean over must not bypass validation.
+ */
+export function isInvalidDeadPositionStatus(status: unknown): boolean {
+  if (!record(status)) return false;
+  if (status.termination === 'dead_position') {
+    return status.over !== true || !isValidDeadPositionOutcome(status);
+  }
+  return false;
+}
+
+/**
+ * An ended event bearing the dead_position termination must have result '1/2-1/2' and winner null.
+ * Bare ended broadcasts lack an `over` property on the wire.
+ */
+export function isInvalidDeadPositionEvent(val: unknown): boolean {
   if (!record(val)) return false;
   if (val.termination === 'dead_position') {
-    return val.result !== '1/2-1/2' || val.winner !== null;
+    return !isValidDeadPositionOutcome(val);
   }
-  if (record(val.status) && val.status.over === true && val.status.termination === 'dead_position') {
-    return val.status.result !== '1/2-1/2' || val.status.winner !== null;
-  }
+  return false;
+}
+
+/**
+ * Evaluates whether an incoming frame payload or event carries an invalid dead_position termination.
+ * Rejects invalid status objects in snapshots (joined/state/resumed) and invalid bare/missed ended events.
+ */
+function isInvalidDeadPositionEnding(val: unknown): boolean {
+  if (!record(val)) return false;
+  if (isInvalidDeadPositionEvent(val)) return true;
+  if (isInvalidDeadPositionStatus(val.status)) return true;
   return false;
 }
 
@@ -415,7 +445,7 @@ const TERMINATIONS: readonly Termination[] = [
 ];
 function ending(value: Record<string, unknown>): boolean {
   if (value.termination === 'dead_position') {
-    return value.result === '1/2-1/2' && value.winner === null;
+    return isValidDeadPositionOutcome(value);
   }
   return typeof value.result === 'string' && ['1-0', '0-1', '1/2-1/2', '*'].includes(value.result) &&
     TERMINATIONS.some(t => t === value.termination) && (value.winner === null || color(value.winner));

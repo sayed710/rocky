@@ -33,7 +33,13 @@ import type {
   StateView,
   WsColor,
 } from './ws-protocol.js';
-import { colorForRole, opposite } from './ws-protocol.js';
+import {
+  colorForRole,
+  opposite,
+  isInvalidDeadPositionEvent,
+  isInvalidDeadPositionStatus,
+  isValidDeadPositionOutcome,
+} from './ws-protocol.js';
 import { VARIANTS } from '../api/models.js';
 
 /** PostgreSQL INTEGER limit (0..2147483647), matching ADR-0161 durable stateRevision. */
@@ -612,21 +618,16 @@ export class GameSync {
 
   private hasInvalidDeadPosition(msg: ServerMessage): boolean {
     if (msg.t === 'ended') {
-      return msg.termination === 'dead_position' && (msg.result !== '1/2-1/2' || msg.winner !== null);
+      return isInvalidDeadPositionEvent(msg);
     }
     if (msg.t === 'joined' || msg.t === 'state' || msg.t === 'resumed') {
-      const status = msg.state?.status;
-      if (status && typeof status === 'object' && 'over' in status && status.over === true) {
-        if (status.termination === 'dead_position' && (status.result !== '1/2-1/2' || status.winner !== null)) {
-          return true;
-        }
+      if (isInvalidDeadPositionStatus(msg.state?.status)) {
+        return true;
       }
       if (msg.t === 'resumed' && Array.isArray(msg.missed)) {
         for (const missed of msg.missed) {
-          if (missed && typeof missed === 'object' && missed.t === 'ended') {
-            if (missed.termination === 'dead_position' && (missed.result !== '1/2-1/2' || missed.winner !== null)) {
-              return true;
-            }
+          if (missed && typeof missed === 'object' && missed.t === 'ended' && isInvalidDeadPositionEvent(missed)) {
+            return true;
           }
         }
       }
@@ -994,9 +995,6 @@ export class GameSync {
   }
 
   private applyEnded(msg: EndedBroadcast): void {
-    if (msg.termination === 'dead_position' && (msg.result !== '1/2-1/2' || msg.winner !== null)) {
-      return;
-    }
     let hasRevisionGap = false;
     if (isStateRevision(msg.stateRevision)) {
       if (this.stateRevisionFloor !== null && msg.stateRevision <= this.stateRevisionFloor) {
@@ -1259,6 +1257,7 @@ export class GameSync {
 
   private isValidStatus(status: unknown): boolean {
     if (typeof status !== 'object' || status === null || Array.isArray(status)) return false;
+    if (isInvalidDeadPositionStatus(status)) return false;
     const s = status as Record<string, unknown>;
     if (typeof s.over !== 'boolean') return false;
     if (!s.over) return true;
@@ -1270,7 +1269,7 @@ export class GameSync {
     if (typeof s.result !== 'string' || !validResults.includes(s.result)) return false;
     if (typeof s.termination !== 'string' || !validTerminations.includes(s.termination)) return false;
     if (s.termination === 'dead_position') {
-      return s.result === '1/2-1/2' && s.winner === null;
+      return isValidDeadPositionOutcome(s);
     }
     return s.winner === null || s.winner === 'w' || s.winner === 'b';
   }

@@ -173,7 +173,61 @@ test('ws-protocol: decodeServer rejects invalid dead_position combinations acros
   const decodedValidMissed = decodeServer(JSON.stringify(validMissedFrame));
   assert.equal(decodedValidMissed?.t, 'resumed', 'matched envelope with valid dead_position in missed must pass decodeServer');
 
-  // 7. Historical terminations preserved
+  // 7. Malformed status boolean variants bearing dead_position (truthy string, false, null, number, missing)
+  // across matched joined, state, and resumed snapshots in both legacy (unrevisioned) and revisioned modes
+  const malformedOverVariants: readonly unknown[] = ['true', false, null, 1, undefined];
+  for (const badOver of malformedOverVariants) {
+    const malformedStatus: Record<string, unknown> = badOver === undefined
+      ? { termination: 'dead_position', result: '1/2-1/2', winner: null }
+      : { over: badOver, termination: 'dead_position', result: '1/2-1/2', winner: null };
+
+    // Legacy unrevisioned snapshot
+    const legacySnapshotState = { ...makeStateView(false), status: malformedStatus };
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'state', gameId: 'g1', state: legacySnapshotState })),
+      null,
+      `legacy unrevisioned state with malformed over (${String(badOver)}) must be rejected by decodeServer`,
+    );
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'joined', gameId: 'g1', role: 'spectator', state: legacySnapshotState })),
+      null,
+      `legacy unrevisioned joined with malformed over (${String(badOver)}) must be rejected by decodeServer`,
+    );
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'resumed', gameId: 'g1', state: legacySnapshotState, missed: [] })),
+      null,
+      `legacy unrevisioned resumed with malformed over (${String(badOver)}) must be rejected by decodeServer`,
+    );
+
+    // Revisioned snapshot
+    const revisionedSnapshotState = { ...makeStateView(false, 3), status: malformedStatus };
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'state', gameId: 'g1', state: revisionedSnapshotState })),
+      null,
+      `revisioned state with malformed over (${String(badOver)}) must be rejected by decodeServer`,
+    );
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'joined', gameId: 'g1', role: 'spectator', state: revisionedSnapshotState })),
+      null,
+      `revisioned joined with malformed over (${String(badOver)}) must be rejected by decodeServer`,
+    );
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'resumed', gameId: 'g1', stateRevision: 3, state: revisionedSnapshotState, missed: [] })),
+      null,
+      `revisioned resumed with malformed over (${String(badOver)}) must be rejected by decodeServer`,
+    );
+  }
+
+  // Valid draw controls across joined, state, and resumed pass decodeServer
+  const validSnapshotState = {
+    ...makeStateView(false, 3),
+    status: { over: true, termination: 'dead_position', result: '1/2-1/2', winner: null },
+  };
+  assert.equal(decodeServer(JSON.stringify({ t: 'state', gameId: 'g1', state: validSnapshotState }))?.t, 'state');
+  assert.equal(decodeServer(JSON.stringify({ t: 'joined', gameId: 'g1', role: 'spectator', state: validSnapshotState }))?.t, 'joined');
+  assert.equal(decodeServer(JSON.stringify({ t: 'resumed', gameId: 'g1', stateRevision: 3, state: validSnapshotState, missed: [] }))?.t, 'resumed');
+
+  // 8. Historical terminations preserved
   assert.ok(decodeServer(JSON.stringify({ t: 'ended', gameId: 'g1', result: '1-0', termination: 'checkmate', winner: 'w', serverTs: 1000, stateRevision: 1 })));
   assert.ok(decodeServer(JSON.stringify({ t: 'ended', gameId: 'g1', result: '1/2-1/2', termination: 'stalemate', winner: null, serverTs: 1000, stateRevision: 1 })));
   assert.ok(decodeServer(JSON.stringify({ t: 'ended', gameId: 'g1', result: '1/2-1/2', termination: 'insufficient_material', winner: null, serverTs: 1000, stateRevision: 1 })));
@@ -398,6 +452,180 @@ test('GameSync: preserves pending move, pending action, uncertainty notice, and 
   client3.close();
 });
 
+test('GameSync: legacy unrevisioned session rejects malformed status over and preserves pending action, move, and uncertainty', () => {
+  function createLegacySync(gameId: string) {
+    const factory = new FakeSocketFactory();
+    const scheduler = new ManualScheduler();
+    const client = new WsClient({
+      url: 'wss://example.test/ws',
+      factory: factory.factory,
+      scheduler,
+      heartbeatMs: 0,
+      reconnect: { baseDelayMs: 10, maxDelayMs: 10, jitter: 'none' },
+    });
+    const sync = new GameSync(client, { gameId, scheduler });
+    sync.start();
+    factory.last.open();
+    // Genuine unrevisioned (legacy) joined snapshot without stateRevision
+    factory.last.emit({
+      t: 'joined',
+      gameId,
+      role: 'white',
+      state: makeStateView(false, undefined, 'w', 0, gameId),
+    });
+    return {
+      factory,
+      sync,
+      close: () => {
+        sync.stop();
+        client.close();
+      },
+    };
+  }
+
+  // Case A: Pending action preservation in legacy unrevisioned session
+  const h1 = createLegacySync('g-leg-act');
+  assert.equal(h1.sync.getState().status?.over, false);
+  assert.equal(h1.sync.offerDraw(), true);
+  assert.equal(h1.sync.getState().pendingAction, 'offerDraw');
+
+  // Inject unrevisioned snapshot with malformed over: 'true' but otherwise valid draw outcome
+  h1.factory.last.emit({
+    t: 'state',
+    gameId: 'g-leg-act',
+    state: {
+      ...makeStateView(false, undefined, 'w', 0, 'g-leg-act'),
+      status: { over: 'true', termination: 'dead_position', result: '1/2-1/2', winner: null },
+    },
+  });
+  // Pending action and status must remain completely intact
+  assert.equal(h1.sync.getState().status?.over, false, 'game must remain ongoing after malformed legacy snapshot');
+  assert.equal(h1.sync.getState().pendingAction, 'offerDraw', 'pendingAction must be preserved when malformed snapshot is dropped');
+  assert.equal(h1.sync.getState().lastReject, null);
+
+  // Additional malformed status boolean variants: false, 1, null, missing over, and decisive result
+  const badVariants: readonly unknown[] = ['true', false, null, 1];
+  for (const badOver of badVariants) {
+    h1.factory.last.emit({
+      t: 'state',
+      gameId: 'g-leg-act',
+      state: {
+        ...makeStateView(false, undefined, 'w', 0, 'g-leg-act'),
+        status: { over: badOver, termination: 'dead_position', result: '1-0', winner: 'w' },
+      },
+    });
+    assert.equal(h1.sync.getState().pendingAction, 'offerDraw', `pendingAction preserved when bad variant (${String(badOver)}) is dropped`);
+    assert.equal(h1.sync.getState().status?.over, false);
+  }
+
+  // Positive valid draw control with SAME unrevisioned format applies cleanly and clears pendingAction
+  h1.factory.last.emit({
+    t: 'state',
+    gameId: 'g-leg-act',
+    state: makeStateView(true, undefined, 'b', 0, 'g-leg-act'),
+  });
+  const state1 = h1.sync.getState();
+  assert.equal(state1.status?.over, true);
+  if (state1.status?.over) {
+    assert.equal(state1.status.termination, 'dead_position');
+    assert.equal(state1.status.result, '1/2-1/2');
+    assert.equal(state1.status.winner, null);
+  }
+  assert.equal(state1.pendingAction, null);
+  h1.close();
+
+  // Case B: Pending optimistic move preservation in legacy unrevisioned session
+  const h2 = createLegacySync('g-leg-mov');
+  const pendingMove = h2.sync.submitMove('e2e4');
+  assert.ok(pendingMove, 'optimistic move must be submitted');
+  assert.equal(h2.sync.getState().pending?.uci, 'e2e4');
+
+  // Inject unrevisioned snapshot with malformed over: 'true' but otherwise valid draw outcome
+  h2.factory.last.emit({
+    t: 'state',
+    gameId: 'g-leg-mov',
+    state: {
+      ...makeStateView(false, undefined, 'w', 0, 'g-leg-mov'),
+      status: { over: 'true', termination: 'dead_position', result: '1/2-1/2', winner: null },
+    },
+  });
+  assert.equal(h2.sync.getState().pending?.uci, 'e2e4', 'pending move must be preserved when malformed legacy snapshot is dropped');
+  assert.equal(h2.sync.getState().status?.over, false);
+  assert.equal(h2.sync.getState().lastReject, null);
+
+  // Additional malformed variants: false, null, 1
+  for (const badOver of [false, null, 1]) {
+    h2.factory.last.emit({
+      t: 'state',
+      gameId: 'g-leg-mov',
+      state: {
+        ...makeStateView(false, undefined, 'w', 0, 'g-leg-mov'),
+        status: { over: badOver, termination: 'dead_position', result: '1/2-1/2', winner: null },
+      },
+    });
+    assert.equal(h2.sync.getState().pending?.uci, 'e2e4', `pending move preserved when bad over (${String(badOver)}) is dropped`);
+    assert.equal(h2.sync.getState().status?.over, false);
+  }
+
+  // Positive valid draw control with SAME unrevisioned format applies cleanly and clears pending move
+  h2.factory.last.emit({
+    t: 'state',
+    gameId: 'g-leg-mov',
+    state: makeStateView(true, undefined, 'b', 0, 'g-leg-mov'),
+  });
+  assert.equal(h2.sync.getState().status?.over, true);
+  assert.equal(h2.sync.getState().pending, null, 'pending move cleared by accepted valid draw snapshot');
+  h2.close();
+
+  // Case C: Command uncertainty (outcomeUnknown) preservation in legacy unrevisioned session
+  const h3 = createLegacySync('g-leg-unc');
+  const pendingUnc = h3.sync.submitMove('e2e4');
+  assert.ok(pendingUnc, 'move must be submitted to establish clientSeq');
+
+  // Transport emits outcomeUnknown receipt for this move request
+  h3.factory.last.emit({
+    t: 'outcomeUnknown',
+    code: 'outcome_unknown',
+    gameId: 'g-leg-unc',
+    ref: pendingUnc.clientSeq,
+    requestId: 'req-legacy-unc-1',
+    message: 'Command outcome unknown.',
+  });
+
+  const state3Uncertain = h3.sync.getState();
+  assert.equal(state3Uncertain.lastReject?.t, 'outcomeUnknown');
+  assert.equal(state3Uncertain.lastReject?.code, 'outcome_unknown');
+  assert.equal(state3Uncertain.lastReject?.message, 'Command outcome unknown.');
+  assert.equal(state3Uncertain.pending?.uci, 'e2e4');
+
+  // Inject unrevisioned snapshot with malformed over: 'true' but otherwise valid draw outcome
+  h3.factory.last.emit({
+    t: 'state',
+    gameId: 'g-leg-unc',
+    state: {
+      ...makeStateView(false, undefined, 'w', 0, 'g-leg-unc'),
+      status: { over: 'true', termination: 'dead_position', result: '1/2-1/2', winner: null },
+    },
+  });
+
+  const state3AfterMalformed = h3.sync.getState();
+  assert.equal(state3AfterMalformed.status?.over, false, 'game must remain ongoing after malformed snapshot');
+  assert.equal(state3AfterMalformed.lastReject?.t, 'outcomeUnknown', 'outcomeUnknown notice must remain intact when malformed snapshot is dropped');
+  assert.equal(state3AfterMalformed.lastReject?.code, 'outcome_unknown');
+  assert.equal(state3AfterMalformed.lastReject?.message, 'Command outcome unknown.');
+  assert.equal(state3AfterMalformed.pending?.uci, 'e2e4', 'pending move must be preserved during uncertainty');
+
+  // Positive valid draw control with SAME unrevisioned format applies cleanly and settles uncertainty
+  h3.factory.last.emit({
+    t: 'state',
+    gameId: 'g-leg-unc',
+    state: makeStateView(true, undefined, 'b', 0, 'g-leg-unc'),
+  });
+  assert.equal(h3.sync.getState().status?.over, true);
+  assert.equal(h3.sync.getState().pending, null, 'pending move settled by accepted valid draw snapshot');
+  h3.close();
+});
+
 test('GameSync: gap recovery and equal-revision behavior with dead_position', () => {
   const factory = new FakeSocketFactory();
   const scheduler = new ManualScheduler();
@@ -454,6 +682,19 @@ test('GameSync: gap recovery and equal-revision behavior with dead_position', ()
   };
   factory.last.emit(invalidRecoverySnapshot);
   assert.equal(sync.getState().recovering, true, 'invalid snapshot must be dropped and not complete recovery');
+  assert.equal(sync.getState().status?.over, false);
+
+  // Malformed recovery snapshot with string 'true' over is also dropped
+  const malformedRecoverySnapshot = {
+    t: 'state',
+    gameId: 'g1',
+    state: {
+      ...makeStateView(false, 4),
+      status: { over: 'true', termination: 'dead_position', result: '1/2-1/2', winner: null },
+    },
+  };
+  factory.last.emit(malformedRecoverySnapshot);
+  assert.equal(sync.getState().recovering, true, 'malformed over recovery snapshot must be dropped');
   assert.equal(sync.getState().status?.over, false);
 
   // 4. Valid recovery snapshot completes recovery cleanly
