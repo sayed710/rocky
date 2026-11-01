@@ -75,7 +75,16 @@ In `packages/api/src/analysis/terminal.ts`:
 ### 4. Game Lifecycle & Command Arbitration (`packages/game/src/game.ts`)
 
 1. **Custom FEN Creation**: When `Game.create` receives a custom `initialFen` that is certified dead, it returns `[GameCreated, GameEnded]` with `termination: 'dead_position'` and `result: '1/2-1/2'`, providing durable event persistence from creation.
-2. **Command Arbitration**: In `playMove`, `resign`, `offerDraw`, `acceptDraw`, `declineDraw`, `claimFlag`, `abort`, and `expireNoShow`, if the current position is dead, the command is intercepted and returns `GameEnded` (`termination: 'dead_position'`). This prevents spurious timeouts, resignations, or illegal continuation moves on ongoing dead prefixes.
+2. **Command Arbitration & Admission Preconditions**: Commands strictly validate domain admission prerequisites before checking or settling dead positions:
+   - `expireNoShow`: requires `noShowVerdict(at).kind === 'expire'` before dead check; premature (`not_due`), `not_applicable`, or `both_ready` expirations reject unchanged without mutation.
+   - `claimFlag`: requires `hasFlagged(s.clock, sideToMove, at, s.timeControl)` before dead check; premature flag claims reject.
+   - `abort`: enforces `ply < 2` before dead check; aborts after 2 plies reject.
+   - `acceptDraw`: requires an active opponent offer (`drawOffer !== null && drawOffer !== color`) before dead check.
+   - `declineDraw`: preserves non-null offer check (`drawOffer !== null`) before dead check.
+   - `offerDraw`: rejects duplicate same-side offers (`drawOffer === color`) before dead check.
+   - `playMove`: preserves due no-show and flag arbitration, readiness rejection, and legal move syntax/matching (`resolveMove`) before checking dead position; an admitted legal move on an already-dead position returns `GameEnded` (`termination: 'dead_position'`) before applying the move or emitting `MovePlayed`, without charging extra clock time or storing an extra move; unready or illegal moves reject without mutation.
+   - `resign`: preserves ongoing check before dead check.
+   - When an admitted legal command proves due no-show, due flag, or valid abort on a dead position, settlement precedence yields `GameEnded` (`termination: 'dead_position'`, `result: '1/2-1/2'`) rather than forfeit, timeout, or abort.
 3. **Timeout Evaluation (`canMate`)**: `canMate` evaluates a cheap certificate check and returns `false` if the position status is `dead_position`, correctly classifying any pending flag claim as a draw.
 4. **Historical Replay Invariance**: `Game.reduce` and `Game.fromEvents` do not check `Position.status()` to fabricate endings. Historical games stored without a terminal event replay faithfully as ongoing games without synthetic revision drift.
 5. **Frozen Solver Invariant**: `packages/game/src/timeout-adjudication.ts` (Issue #123 solver) remains strictly frozen and unmodified.
@@ -84,7 +93,7 @@ In `packages/api/src/analysis/terminal.ts`:
 
 In `GameAuthority`:
 - `createGame` inspects the events returned by `Game.create`. When a custom dead FEN emits `[GameCreated, GameEnded]`, the authority sets `persistedSeq: 1`, publishes the terminal `ended` broadcast to `gameChannel` and `gamesEndedChannel()`, and clears `legalMoves` to `{}`.
-- **Durable Commit vs. Best-Effort Broadcast**: Event log appending (`store.append`) is durable and establishes canonical sequence ordering. Post-commit PubSub publications are best-effort client notifications wrapped in independent try/catch blocks; subscriber exceptions do not fail the commit or prevent remaining channel notifications. Asynchronous consumers (rating processing, bot analysis, anti-cheat) recover durably via the transactional PostgreSQL terminal-event inbox (`PgTerminalEventInbox`), distinguishing durable event/inbox persistence from best-effort pubsub broadcasts without implying an outbox delivery redesign or full D2 fix.
+- **Durable Commit vs. Best-Effort Broadcast**: Event log appending (`store.append`) is durable and establishes canonical sequence ordering. Post-commit PubSub publications in `createGame` are best-effort client notifications wrapped in independent try/catch blocks; synchronous subscriber exceptions do not fail the commit, reclassify the write, or prevent remaining channel notifications. The two catch blocks log controlled operation/channel class and `gameId` via `console.error` while omitting raw exception objects and event payloads, preventing subscriber exception text (such as controlled synthetic sentinels or FEN strings) from being propagated to log arguments. This bounded diagnostic logging does not assert a universal platform redaction framework or global confidentiality guarantee. Asynchronous consumers (rating processing, bot analysis, anti-cheat) recover durably via the transactional PostgreSQL terminal-event inbox (`PgTerminalEventInbox`), distinguishing durable event/inbox persistence from best-effort pubsub broadcasts without implying an outbox delivery redesign or full D2 fix.
 - Incoming commands on ongoing dead prefixes arbitrate directly to `dead_position` endings, preserving durable event persistence, inbox recovery, and best-effort client notifications.
 
 ## Validation & Evidence

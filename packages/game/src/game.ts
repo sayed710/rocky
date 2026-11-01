@@ -342,8 +342,6 @@ export class Game {
     this.assertOngoing();
     // Like a move after a flag fall: once the no-show deadline has passed without a first move, the
     // move does not count and the no-show ending is what gets recorded, however late the worker is.
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
     if (this.noShowVerdict(at).kind === 'expire') return this.expireNoShow(at);
     if (this.awaitingReadiness) throw new GameError(NOT_READY_MESSAGE);
     const s = this.state;
@@ -355,11 +353,20 @@ export class Game {
       return this.endByTimeout(mover, at);
     }
 
-    let nextPos: Position;
+    let move: ReturnType<Position['legalMoves']>[number];
     let san: string;
     try {
-      const move = this.resolveMove(uci);
+      move = this.resolveMove(uci);
       san = s.position.toSan(move);
+    } catch (err) {
+      throw new GameError(`Illegal move "${uci}": ${(err as Error).message}`);
+    }
+
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+
+    let nextPos: Position;
+    try {
       nextPos = s.position.play(move);
     } catch (err) {
       throw new GameError(`Illegal move "${uci}": ${(err as Error).message}`);
@@ -416,11 +423,11 @@ export class Game {
   /** Offer a draw as `color`. */
   offerDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
     if (this.state.drawOffer === color) {
       throw new GameError('Draw already offered by this side');
     }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [{ type: 'DrawOffered', by: color, at }];
     return { game: Game.applyAll(this, events), events };
   }
@@ -428,12 +435,12 @@ export class Game {
   /** Accept an outstanding draw offer made by the opponent of `color`. */
   acceptDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
     const offer = this.state.drawOffer;
     if (offer === null || offer === color) {
       throw new GameError('No draw offer from the opponent to accept');
     }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [{
       type: 'GameEnded',
       result: '1/2-1/2',
@@ -447,9 +454,9 @@ export class Game {
   /** Decline the outstanding draw offer as `color`. */
   declineDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
+    if (this.state.drawOffer === null) throw new GameError('No draw offer to decline');
     const dead = this.deadPositionEnding(at);
     if (dead) return dead;
-    if (this.state.drawOffer === null) throw new GameError('No draw offer to decline');
     const events: GameEvent[] = [{ type: 'DrawDeclined', by: color, at }];
     return { game: Game.applyAll(this, events), events };
   }
@@ -457,22 +464,22 @@ export class Game {
   /** Claim the side-to-move has flagged (opponent's clock claim). */
   claimFlag(at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
     const s = this.state;
     const sideToMove = s.position.turn;
     if (!hasFlagged(s.clock, sideToMove, at, s.timeControl)) {
       throw new GameError('Opponent has not flagged');
     }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     return this.endByTimeout(sideToMove, at);
   }
 
   /** Abort the game (allowed only before both players have moved). */
   abort(at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
+    if (this.state.ply >= 2) throw new GameError('Game can no longer be aborted');
     const dead = this.deadPositionEnding(at);
     if (dead) return dead;
-    if (this.state.ply >= 2) throw new GameError('Game can no longer be aborted');
     const events: GameEvent[] = [{
       type: 'GameEnded',
       result: '*',
@@ -523,10 +530,10 @@ export class Game {
   /** End the game by the pregame no-show rule. Throws unless {@link noShowVerdict} says `expire`. */
   expireNoShow(at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
     const verdict = this.noShowVerdict(at);
     if (verdict.kind !== 'expire') throw new GameError(`No-show expiry refused: ${verdict.kind}`);
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [verdict.ending];
     return { game: Game.applyAll(this, events), events };
   }

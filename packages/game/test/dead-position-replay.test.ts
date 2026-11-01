@@ -292,6 +292,212 @@ test('ongoing dead prefix command arbitration: adjudicates dead_position before 
   }
 });
 
+test('data-driven command admission refusal partitions: invalid commands throw GameError without mutating state or settling dead position', () => {
+  const blockedFen = '8/1pk2p1p/pPp1pPpP/P1P1P1P1/5K2/8/8/8 b - - 0 1';
+
+  const baseEvent: GameCreatedEvent = {
+    type: 'GameCreated',
+    gameId: 'dead-admission-base',
+    variant: 'standard',
+    initialFen: blockedFen,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: { initialMs: 10_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+    rated: false,
+    at: 0,
+  };
+
+  const sourcedEvent: GameCreatedEvent = {
+    ...baseEvent,
+    source: 'seek',
+    noShowAfterMs: 1000,
+  };
+
+  // Two ply event prefix for abort refusal
+  const move1: MovePlayedEvent = {
+    type: 'MovePlayed',
+    ply: 1,
+    uci: 'c7d7',
+    san: 'Kd7',
+    by: 'b',
+    moveTimeMs: 100,
+    remaining: { w: 10_000, b: 9_900 },
+    at: 100,
+  };
+  const move2: MovePlayedEvent = {
+    type: 'MovePlayed',
+    ply: 2,
+    uci: 'f4e3',
+    san: 'Ke3',
+    by: 'w',
+    moveTimeMs: 100,
+    remaining: { w: 9_900, b: 9_900 },
+    at: 200,
+  };
+
+  const drawOfferEvent: GameEvent = {
+    type: 'DrawOffered',
+    by: 'b',
+    at: 100,
+  };
+
+  type RefusalCase = {
+    name: string;
+    events: GameEvent[];
+    action: (g: Game) => void;
+    expectedPattern: RegExp;
+  };
+
+  const refusalCases: RefusalCase[] = [
+    {
+      name: 'early no-show',
+      events: [sourcedEvent],
+      action: (g) => g.expireNoShow(500),
+      expectedPattern: /No-show expiry refused: not_due/,
+    },
+    {
+      name: 'non-applicable no-show',
+      events: [baseEvent],
+      action: (g) => g.expireNoShow(500),
+      expectedPattern: /No-show expiry refused: not_applicable/,
+    },
+    {
+      name: 'early flag claim',
+      events: [baseEvent],
+      action: (g) => g.claimFlag(100),
+      expectedPattern: /Opponent has not flagged/,
+    },
+    {
+      name: 'abort after 2 plies',
+      events: [baseEvent, move1, move2],
+      action: (g) => g.abort(300),
+      expectedPattern: /Game can no longer be aborted/,
+    },
+    {
+      name: 'missing draw offer decline',
+      events: [baseEvent],
+      action: (g) => g.declineDraw('w', 100),
+      expectedPattern: /No draw offer to decline/,
+    },
+    {
+      name: 'missing draw offer accept',
+      events: [baseEvent],
+      action: (g) => g.acceptDraw('w', 100),
+      expectedPattern: /No draw offer from the opponent to accept/,
+    },
+    {
+      name: 'duplicate own draw offer',
+      events: [baseEvent, drawOfferEvent],
+      action: (g) => g.offerDraw('b', 200),
+      expectedPattern: /Draw already offered by this side/,
+    },
+    {
+      name: 'unready move',
+      events: [sourcedEvent],
+      action: (g) => g.playMove('c7d7', 500),
+      expectedPattern: /Both players must be ready before the first move/,
+    },
+    {
+      name: 'illegal move',
+      events: [baseEvent],
+      action: (g) => g.playMove('e2e4', 100),
+      expectedPattern: /No legal move matches "e2e4"/,
+    },
+  ];
+
+  for (const { name, events, action, expectedPattern } of refusalCases) {
+    const game = Game.fromEvents(events);
+    const beforeFen = game.fen;
+    assert.equal(game.status.over, false, `${name}: game must be ongoing before command`);
+    assert.throws(
+      () => action(game),
+      expectedPattern,
+      `${name}: must throw expected error`,
+    );
+    assert.equal(game.fen, beforeFen, `${name}: FEN must remain unchanged after refusal`);
+    assert.equal(game.status.over, false, `${name}: game must remain ongoing without dead settlement`);
+  }
+});
+
+test('data-driven due admitted actions on dead position: admitted commands adjudicate dead_position draw', () => {
+  const blockedFen = '8/1pk2p1p/pPp1pPpP/P1P1P1P1/5K2/8/8/8 b - - 0 1';
+
+  const baseEvent: GameCreatedEvent = {
+    type: 'GameCreated',
+    gameId: 'dead-admitted-base',
+    variant: 'standard',
+    initialFen: blockedFen,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: { initialMs: 1000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+    rated: false,
+    at: 0,
+  };
+
+  const sourcedEvent: GameCreatedEvent = {
+    ...baseEvent,
+    source: 'seek',
+    noShowAfterMs: 1000,
+  };
+
+  const drawOfferedByWhite: GameEvent = {
+    type: 'DrawOffered',
+    by: 'w',
+    at: 100,
+  };
+
+  type AdmittedCase = {
+    name: string;
+    events: GameEvent[];
+    action: (g: Game) => { game: Game; events: GameEvent[] };
+  };
+
+  const admittedCases: AdmittedCase[] = [
+    {
+      name: 'due no-show on dead position yields dead_position draw',
+      events: [sourcedEvent],
+      action: (g) => g.expireNoShow(1500),
+    },
+    {
+      name: 'due flag on dead position yields dead_position draw',
+      events: [baseEvent],
+      action: (g) => g.claimFlag(2000),
+    },
+    {
+      name: 'valid abort on dead position yields dead_position draw',
+      events: [baseEvent],
+      action: (g) => g.abort(500),
+    },
+    {
+      name: 'admitted legal move on dead position yields dead_position draw without MovePlayed',
+      events: [baseEvent],
+      action: (g) => g.playMove('c7d7', 100),
+    },
+    {
+      name: 'valid accepted draw on dead position yields dead_position draw',
+      events: [baseEvent, drawOfferedByWhite],
+      action: (g) => g.acceptDraw('b', 200),
+    },
+  ];
+
+  for (const { name, events, action } of admittedCases) {
+    const game = Game.fromEvents(events);
+    assert.equal(game.status.over, false, `${name}: game must be ongoing before command`);
+    const { game: afterGame, events: emitted } = action(game);
+    assert.equal(emitted.length, 1, `${name}: must emit exactly 1 event`);
+    assert.equal(emitted[0]!.type, 'GameEnded', `${name}: emitted event must be GameEnded`);
+    if (emitted[0]!.type === 'GameEnded') {
+      assert.equal(emitted[0]!.termination, 'dead_position', `${name}: termination must be dead_position`);
+      assert.equal(emitted[0]!.result, '1/2-1/2', `${name}: result must be 1/2-1/2`);
+      assert.equal(emitted[0]!.winner, null, `${name}: winner must be null`);
+    }
+    assert.equal(afterGame.status.over, true, `${name}: resulting game status must be over`);
+    if (afterGame.status.over) {
+      assert.equal(afterGame.status.termination, 'dead_position');
+      assert.equal(afterGame.status.result, '1/2-1/2');
+      assert.equal(afterGame.status.winner, null);
+    }
+  }
+});
+
 test('narrow literal check: frozen timeout-adjudication solver and unrelated core files remain untouched', () => {
   let rootDir = __dirname;
   while (rootDir !== path.dirname(rootDir)) {

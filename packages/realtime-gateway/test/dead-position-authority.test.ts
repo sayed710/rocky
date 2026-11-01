@@ -7,6 +7,7 @@ import {
   type Broadcast,
   gameChannel,
   gamesEndedChannel,
+  NO_SHOW_ACTOR,
 } from '../src';
 
 const BLOCKED_DEAD_FEN = '8/1pk2p1p/pPp1pPpP/P1P1P1P1/5K2/8/8/8 b - - 0 1';
@@ -290,5 +291,270 @@ test('ongoing dead prefix command arbitration: flag claim adjudicates dead_posit
     assert.equal(result.events[0]!.termination, 'dead_position');
     assert.equal(result.events[0]!.result, '1/2-1/2');
     assert.equal(result.events[0]!.winner, null);
+  }
+});
+
+test('data-driven authority command admission refusals: invalid commands reject without durable mutation or dead settlement', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+
+  const id = 'authority-refusal-partitions';
+  const baseEvent = {
+    type: 'GameCreated' as const,
+    gameId: id,
+    variant: 'standard' as const,
+    initialFen: BLOCKED_DEAD_FEN,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: { initialMs: 10_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' as const },
+    rated: false,
+    at: 0,
+  };
+
+  const sourcedId = 'authority-sourced-refusals';
+  const sourcedEvent = {
+    ...baseEvent,
+    gameId: sourcedId,
+    source: 'seek' as const,
+    noShowAfterMs: 1000,
+  };
+
+  await store.append(id, -1, [baseEvent]);
+  await store.append(sourcedId, -1, [sourcedEvent]);
+
+  // Two-ply game for abort refusal
+  const twoPlyId = 'authority-two-ply-abort';
+  await store.append(twoPlyId, -1, [
+    { ...baseEvent, gameId: twoPlyId },
+    {
+      type: 'MovePlayed',
+      ply: 1,
+      uci: 'c7d7',
+      san: 'Kd7',
+      by: 'b',
+      moveTimeMs: 100,
+      remaining: { w: 10_000, b: 9_900 },
+      at: 100,
+    },
+    {
+      type: 'MovePlayed',
+      ply: 2,
+      uci: 'f4e3',
+      san: 'Ke3',
+      by: 'w',
+      moveTimeMs: 100,
+      remaining: { w: 9_900, b: 9_900 },
+      at: 200,
+    },
+  ]);
+
+  // Duplicate draw offer game
+  const duplicateOfferId = 'authority-duplicate-offer';
+  await store.append(duplicateOfferId, -1, [
+    { ...baseEvent, gameId: duplicateOfferId },
+    {
+      type: 'DrawOffered',
+      by: 'b',
+      at: 100,
+    },
+  ]);
+
+  const authority = new GameAuthority(pubsub, () => 500, store);
+  await authority.ensureLoaded(id);
+  await authority.ensureLoaded(sourcedId);
+  await authority.ensureLoaded(twoPlyId);
+  await authority.ensureLoaded(duplicateOfferId);
+
+  // 1. Server premature no-show
+  await assert.rejects(
+    async () => authority.apply(sourcedId, NO_SHOW_ACTOR, { kind: 'expireNoShow' }),
+    { message: /No-show expiry refused: not_due/ },
+  );
+  assert.equal(await store.head(sourcedId), 0, 'Premature no-show must not mutate durable store');
+
+  // 2. Player unready move
+  await assert.rejects(
+    async () => authority.apply(sourcedId, 'bob', { kind: 'move', uci: 'c7d7' }),
+    { message: /both players must be ready before the first move/ },
+  );
+  assert.equal(await store.head(sourcedId), 0, 'Unready move must not mutate durable store');
+
+  // 3. Player premature flag claim
+  await assert.rejects(
+    async () => authority.apply(id, 'alice', { kind: 'claimFlag' }),
+    { message: /Opponent has not flagged/ },
+  );
+  assert.equal(await store.head(id), 0, 'Premature flag claim must not mutate durable store');
+
+  // 4. Player abort after 2 plies
+  await assert.rejects(
+    async () => authority.apply(twoPlyId, 'bob', { kind: 'abort' }),
+    { message: /Game can no longer be aborted/ },
+  );
+  assert.equal(await store.head(twoPlyId), 2, 'Late abort must not mutate durable store');
+
+  // 5. Missing draw offer accept
+  await assert.rejects(
+    async () => authority.apply(id, 'alice', { kind: 'acceptDraw' }),
+    { message: /No draw offer from the opponent to accept/ },
+  );
+  assert.equal(await store.head(id), 0, 'Missing draw accept must not mutate durable store');
+
+  // 6. Missing draw offer decline
+  await assert.rejects(
+    async () => authority.apply(id, 'alice', { kind: 'declineDraw' }),
+    { message: /No draw offer to decline/ },
+  );
+  assert.equal(await store.head(id), 0, 'Missing draw decline must not mutate durable store');
+
+  // 7. Duplicate draw offer
+  await assert.rejects(
+    async () => authority.apply(duplicateOfferId, 'bob', { kind: 'offerDraw' }),
+    { message: /Draw already offered by this side/ },
+  );
+  assert.equal(await store.head(duplicateOfferId), 1, 'Duplicate offerDraw must not mutate durable store');
+
+  // 8. Illegal move on ongoing dead prefix
+  await assert.rejects(
+    async () => authority.apply(id, 'bob', { kind: 'move', uci: 'e2e4' }),
+    { message: /No legal move matches "e2e4"/ },
+  );
+  assert.equal(await store.head(id), 0, 'Illegal move must not mutate durable store');
+});
+
+test('data-driven authority due admitted dead actions: due actions settle dead draw and persist GameEnded', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+
+  // 1. Due no-show on dead position
+  const noShowId = 'authority-due-noshow';
+  await store.append(noShowId, -1, [{
+    type: 'GameCreated' as const,
+    gameId: noShowId,
+    variant: 'standard' as const,
+    initialFen: BLOCKED_DEAD_FEN,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: { initialMs: 10_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' as const },
+    rated: false,
+    source: 'seek' as const,
+    noShowAfterMs: 1000,
+    at: 0,
+  }]);
+
+  // Authority clock at 1500 (deadline passed)
+  const authority1 = new GameAuthority(pubsub, () => 1500, store);
+  await authority1.ensureLoaded(noShowId);
+  const noShowResult = await authority1.apply(noShowId, NO_SHOW_ACTOR, { kind: 'expireNoShow' });
+  assert.equal(noShowResult.events.length, 1);
+  assert.equal(noShowResult.events[0]!.type, 'GameEnded');
+  if (noShowResult.events[0]!.type === 'GameEnded') {
+    assert.equal(noShowResult.events[0]!.termination, 'dead_position');
+    assert.equal(noShowResult.events[0]!.result, '1/2-1/2');
+    assert.equal(noShowResult.events[0]!.winner, null);
+  }
+  assert.equal(await store.head(noShowId), 1);
+
+  // 2. Valid abort on dead position
+  const abortId = 'authority-valid-abort';
+  await store.append(abortId, -1, [{
+    type: 'GameCreated' as const,
+    gameId: abortId,
+    variant: 'standard' as const,
+    initialFen: BLOCKED_DEAD_FEN,
+    players: { white: 'alice', black: 'bob' },
+    timeControl: { initialMs: 10_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' as const },
+    rated: false,
+    at: 0,
+  }]);
+  const authority2 = new GameAuthority(pubsub, () => 500, store);
+  await authority2.ensureLoaded(abortId);
+  const abortResult = await authority2.apply(abortId, 'alice', { kind: 'abort' });
+  assert.equal(abortResult.events.length, 1);
+  assert.equal(abortResult.events[0]!.type, 'GameEnded');
+  if (abortResult.events[0]!.type === 'GameEnded') {
+    assert.equal(abortResult.events[0]!.termination, 'dead_position');
+    assert.equal(abortResult.events[0]!.result, '1/2-1/2');
+    assert.equal(abortResult.events[0]!.winner, null);
+  }
+  assert.equal(await store.head(abortId), 1);
+
+  // 3. Accepted draw on dead position
+  const acceptId = 'authority-accept-draw';
+  await store.append(acceptId, -1, [
+    {
+      type: 'GameCreated' as const,
+      gameId: acceptId,
+      variant: 'standard' as const,
+      initialFen: BLOCKED_DEAD_FEN,
+      players: { white: 'alice', black: 'bob' },
+      timeControl: { initialMs: 10_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' as const },
+      rated: false,
+      at: 0,
+    },
+    {
+      type: 'DrawOffered' as const,
+      by: 'w' as const,
+      at: 100,
+    },
+  ]);
+  const authority3 = new GameAuthority(pubsub, () => 500, store);
+  await authority3.ensureLoaded(acceptId);
+  const acceptResult = await authority3.apply(acceptId, 'bob', { kind: 'acceptDraw' });
+  assert.equal(acceptResult.events.length, 1);
+  assert.equal(acceptResult.events[0]!.type, 'GameEnded');
+  if (acceptResult.events[0]!.type === 'GameEnded') {
+    assert.equal(acceptResult.events[0]!.termination, 'dead_position');
+    assert.equal(acceptResult.events[0]!.result, '1/2-1/2');
+    assert.equal(acceptResult.events[0]!.winner, null);
+  }
+  assert.equal(await store.head(acceptId), 2);
+});
+
+test('createGame with throwing subscriber: logs contextual console.error with channel and gameId without leaking synthetic payload sentinel across all arguments', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const id = 'throwing-sub-contextual-log';
+  const syntheticSentinel = 'SYNTHETIC_PAYLOAD_SENTINEL ' + BLOCKED_DEAD_FEN;
+
+  let globalAttempts = 0;
+  pubsub.subscribe(gameChannel(id), () => {
+    throw new Error(syntheticSentinel);
+  });
+  pubsub.subscribe(gamesEndedChannel(), () => {
+    globalAttempts++;
+  });
+
+  const loggedErrors: unknown[][] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => {
+    loggedErrors.push(args);
+  };
+
+  try {
+    const authority = new GameAuthority(pubsub, () => 1000, store);
+    const view = await authority.createGame({
+      gameId: id,
+      variant: 'standard',
+      initialFen: BLOCKED_DEAD_FEN,
+      players: { white: 'alice', black: 'bob' },
+      timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' },
+      at: 1000,
+    });
+
+    assert.equal(view.status.over, true);
+    assert.equal(await store.head(id), 1);
+    assert.equal(globalAttempts, 1, 'gamesEndedChannel still received delivery');
+    assert.ok(loggedErrors.length >= 1, 'console.error must be called on synchronous publish failure');
+
+    // Inspect ALL arguments across all logged calls
+    const allArgs = loggedErrors.flat().map((arg) => String(arg));
+    assert.ok(allArgs.some((arg) => arg.includes('[GameAuthority]')), 'Must contain [GameAuthority] tag');
+    assert.ok(allArgs.some((arg) => arg.includes('game channel')), 'Must identify channel');
+    assert.ok(allArgs.some((arg) => arg.includes(id)), 'Must include gameId');
+    assert.ok(
+      allArgs.every((arg) => !arg.includes(syntheticSentinel) && !arg.includes(BLOCKED_DEAD_FEN)),
+      'Must NOT include synthetic error payload or FEN in any logged argument',
+    );
+  } finally {
+    console.error = origError;
   }
 });

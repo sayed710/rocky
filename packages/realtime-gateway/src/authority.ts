@@ -489,13 +489,13 @@ export class GameAuthority {
           try {
             this.pubsub.publish(gameChannel(params.gameId), entry.msg);
           } catch {
-            // Contained best-effort notification delivery failure; durable write succeeded
+            console.error(`[GameAuthority] Failed to publish message to game channel: ${params.gameId}`);
           }
           if (entry.msg.t === 'ended') {
             try {
               this.pubsub.publish(gamesEndedChannel(), entry.msg);
             } catch {
-              // Contained best-effort notification delivery failure; durable write succeeded
+              console.error(`[GameAuthority] Failed to publish message to games-ended channel: ${params.gameId}`);
             }
           }
         }
