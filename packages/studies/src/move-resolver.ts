@@ -2,6 +2,15 @@ import { StudyRuleError } from './errors';
 import { DEFAULT_STUDY_VARIANT, type StudyVariant } from './model';
 
 /**
+ * Engine-neutral port for resolving the canonical starting position of a variant.
+ * Shared consistently across chapter creation defaults and PGN import.
+ */
+export interface InitialPositionPort {
+  /** The canonical starting position for a variant. */
+  initialFen(variant?: StudyVariant): string;
+}
+
+/**
  * The single thing this package needs from a chess engine: given a position, which moves are legal
  * and what is each one called.
  *
@@ -9,13 +18,11 @@ import { DEFAULT_STUDY_VARIANT, type StudyVariant } from './model';
  * the shape it needs is genuinely small — `@chess-platform/core` can write SAN (`Position.toSan`)
  * but cannot read it, so no existing function answers "which move is `Nbd7` here?".
  */
-export interface PositionReader {
+export interface PositionReader extends InitialPositionPort {
   /** SAN for every legal move from this position, in any order. */
   legalSans(fen: string, variant?: StudyVariant): readonly string[];
   /** The position after playing a SAN move. Throws if the move is not legal. */
   play(fen: string, san: string, variant?: StudyVariant): string;
-  /** The canonical starting position for a variant. */
-  initialFen(variant?: StudyVariant): string;
 }
 
 /**

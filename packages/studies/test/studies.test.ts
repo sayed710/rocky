@@ -4,7 +4,19 @@ import {
   InMemoryStudiesRepository,
   StudyRuleError,
   type PositionReader,
+  type StudyVariant,
 } from '../src';
+
+const canonicalStarts: Record<StudyVariant, string> = {
+  standard: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+  chess960: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+  threecheck: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 3+3 0 1',
+  crazyhouse: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR[] w KQkq - 0 1',
+  kingofthehill: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+  atomic: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+  horde: 'rnbqkbnr/pppppppp/8/1PP2PP1/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP w kq - 0 1',
+  racingkings: '8/8/8/8/8/8/krbnNBRK/qrbnNBRQ w - - 0 1',
+};
 
 // Simple mock PositionReader for testing move resolution in domain rules
 const mockReader: PositionReader = {
@@ -28,16 +40,14 @@ const mockReader: PositionReader = {
     }
     return `${fen}+${san}`;
   },
-  initialFen(variant) {
-    return variant === 'horde'
-      ? 'rnbqkbnr/pppppppp/8/8/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP w - - 0 1'
-      : 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  initialFen(variant: StudyVariant = 'standard') {
+    return canonicalStarts[variant] ?? canonicalStarts.standard;
   },
 };
 
 describe('Domain Rule 1: Ownership and transfer', () => {
   it('creates study with exactly one owner and demotes old owner on transfer', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     const study = await repo.createStudy('s1', 'p-owner', 'Study 1', 'Desc', 'public');
 
     assert.equal(study.ownerId, 'p-owner');
@@ -62,7 +72,7 @@ describe('Domain Rule 1: Ownership and transfer', () => {
     // to a mistyped id would succeed, demote the real owner to contributor, and leave the study
     // owned by an account nobody can sign in as. Taking it back is itself an owner-only action, so
     // there is no path back.
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s-lock', 'p-owner', 'Study', '', 'private');
 
     await assert.rejects(
@@ -78,7 +88,7 @@ describe('Domain Rule 1: Ownership and transfer', () => {
   });
 
   it('fails if non-owner attempts to transfer ownership', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s1', 'p-owner', 'Study 1', 'Desc', 'public');
     await repo.addCollaborator('s1', 'p-owner', 'p-contrib', 'contributor');
 
@@ -91,7 +101,7 @@ describe('Domain Rule 1: Ownership and transfer', () => {
 
 describe('Domain Rule 2: Authority hierarchy (owner > contributor > viewer)', () => {
   it('allows contributor+ to edit chapters/tree, but only owner to change visibility or delete study', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s1', 'p-owner', 'Study 1', 'Desc', 'public');
     await repo.addCollaborator('s1', 'p-owner', 'p-contrib', 'contributor');
     await repo.addCollaborator('s1', 'p-owner', 'p-viewer', 'viewer');
@@ -130,7 +140,7 @@ describe('Domain Rule 2: Authority hierarchy (owner > contributor > viewer)', ()
 
 describe('Domain Rule 3: Visibility and not_found vs not_authorized', () => {
   it('hides private studies from non-collaborators as not_found, excludes unlisted from list, and uses not_authorized only for visible actions', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s-pub', 'p-owner', 'Public Study', 'Desc', 'public');
     await repo.createStudy('s-priv', 'p-owner', 'Private Study', 'Desc', 'private');
     await repo.createStudy('s-unlisted', 'p-owner', 'Unlisted Study', 'Desc', 'unlisted');
@@ -161,7 +171,7 @@ describe('Domain Rule 3: Visibility and not_found vs not_authorized', () => {
 
 describe('Domain Rule 4: Appending move resolution & deduplication', () => {
   it('resolves move via PositionReader and returns existing child instead of duplicating', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s1', 'p-owner', 'Study 1', 'Desc', 'public');
     await repo.createChapter('c1', 's1', 'p-owner', 'Chapter 1');
 
@@ -187,7 +197,7 @@ describe('Domain Rule 4: Appending move resolution & deduplication', () => {
 
 describe('Domain Rule 5: Dense and stable orderIndex', () => {
   it('maintains contiguous orderIndex for chapters and reordering yields dense 0..N-1 sequence', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s1', 'p-owner', 'Study 1', 'Desc', 'public');
     const c0 = await repo.createChapter('ch0', 's1', 'p-owner', 'Ch 0');
     const c1 = await repo.createChapter('ch1', 's1', 'p-owner', 'Ch 1');
@@ -210,7 +220,7 @@ describe('Domain Rule 5: Dense and stable orderIndex', () => {
 
 describe('Domain Rule 6: Tombstones and transition locks', () => {
   it('marks deleted entity with tombstone and rejects secondary edit/delete with invalid_transition', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s1', 'p-owner', 'Study 1', 'Desc', 'public');
     await repo.createChapter('c1', 's1', 'p-owner', 'Chapter 1');
 
@@ -238,7 +248,7 @@ describe('Domain Rule 6: Tombstones and transition locks', () => {
 
 describe('Domain Rule 7: Import PGN validation and atomicity', () => {
   it('passes the persisted study variant through PGN import and export', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy(
       's-threecheck',
       'p-owner',
@@ -286,7 +296,7 @@ describe('Domain Rule 7: Import PGN validation and atomicity', () => {
     //
     // This is the property M15 Increment 13 pinned when it deleted `importGame`, the one movetext
     // walker in this package that never threaded a variant at all.
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s-var', 'p-owner', 'Three-Check Study', '', 'public', undefined, {
       variant: 'threecheck',
     });
@@ -325,7 +335,7 @@ describe('Domain Rule 7: Import PGN validation and atomicity', () => {
   });
 
   it('creates one chapter per game and rejects invalid moves with invalid_move without partial import', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s1', 'p-owner', 'Study 1', 'Desc', 'public');
 
     const validPgn = [
@@ -365,7 +375,7 @@ describe('Domain Rule 7: Import PGN validation and atomicity', () => {
   });
 
   it('preserves move and variation ordering (mainline orderIndex 0, variations orderIndex >= 1) on import and round-trip', async () => {
-    const repo = new InMemoryStudiesRepository();
+    const repo = new InMemoryStudiesRepository(mockReader);
     await repo.createStudy('s1', 'p-owner', 'Study 1', 'Desc', 'public');
 
     const pgnWithVar = '[Event "Petroff Line"]\n[White "W"]\n[Black "B"]\n\n1. e4 e5 2. Nf3 Nc6 (2... Nf6 3. Nxe5 d6) 3. Bb5 *';
@@ -391,5 +401,99 @@ describe('Domain Rule 7: Import PGN validation and atomicity', () => {
     // Export PGN and confirm round-trip mainline & variation structure is preserved
     const exported = await repo.exportPgn('s1', 'p-owner', chapterId);
     assert.match(exported, /2\. Nf3 Nc6 \(2\.\.\. Nf6 3\. Nxe5 d6\) 3\. Bb5/);
+  });
+});
+
+describe('Repository Variant-Derived Default FEN (Qodo c8aa2377)', () => {
+  it('derives variant starting FEN for Horde and Racing Kings when startingFen is omitted', async () => {
+    const repo = new InMemoryStudiesRepository(mockReader);
+    await repo.createStudy('s-horde', 'p-owner', 'Horde Study', 'Desc', 'public', new Date(), { variant: 'horde' });
+    const hordeCh = await repo.createChapter('ch-horde', 's-horde', 'p-owner', 'Horde Ch');
+    assert.equal(hordeCh.startingFen, canonicalStarts.horde, 'Horde chapter without FEN must derive Horde initial position');
+
+    await repo.createStudy('s-rk', 'p-owner', 'RK Study', 'Desc', 'public', new Date(), { variant: 'racingkings' });
+    const rkCh = await repo.createChapter('ch-rk', 's-rk', 'p-owner', 'RK Ch');
+    assert.equal(rkCh.startingFen, canonicalStarts.racingkings, 'Racing Kings chapter without FEN must derive RK initial position');
+  });
+
+  it('derives canonical starting FEN across all 8 variants when startingFen is omitted', async () => {
+    const variants: readonly StudyVariant[] = [
+      'standard',
+      'chess960',
+      'threecheck',
+      'crazyhouse',
+      'kingofthehill',
+      'atomic',
+      'horde',
+      'racingkings',
+    ];
+
+    const repo = new InMemoryStudiesRepository(mockReader);
+    for (const v of variants) {
+      const studyId = `s-${v}`;
+      await repo.createStudy(studyId, 'p-owner', `${v} Study`, 'Desc', 'public', new Date(), { variant: v });
+      const ch = await repo.createChapter(`ch-${v}`, studyId, 'p-owner', `${v} Chapter`);
+      assert.equal(ch.startingFen, canonicalStarts[v], `Variant ${v} must derive canonical starting FEN`);
+    }
+  });
+
+  it('preserves explicit startingFen override regardless of study variant', async () => {
+    const repo = new InMemoryStudiesRepository(mockReader);
+    await repo.createStudy('s-horde-custom', 'p-owner', 'Custom Horde', 'Desc', 'public', new Date(), { variant: 'horde' });
+    const customFen = '4k3/8/8/8/8/8/PPPPPPPP/PPPPPPPP w - - 0 1';
+    const ch = await repo.createChapter('ch-custom', 's-horde-custom', 'p-owner', 'Custom Ch', customFen);
+    assert.equal(ch.startingFen, customFen, 'Explicit FEN must be preserved');
+  });
+
+  it('uses repository injected InitialPositionPort for omitted PGN start even if operation reader advertises different initialFen', async () => {
+    const repo = new InMemoryStudiesRepository(mockReader);
+    await repo.createStudy('s-horde-import', 'p-owner', 'Horde Import', 'Desc', 'public', new Date(), { variant: 'horde' });
+
+    let operationReaderInitialFenCalled = false;
+    let operationReaderPlayCalled = false;
+
+    const operationReader: PositionReader = {
+      legalSans(): readonly string[] {
+        return ['c4', 'd4'];
+      },
+      play(fen: string, san: string): string {
+        operationReaderPlayCalled = true;
+        return `${fen}+${san}`;
+      },
+      initialFen(): string {
+        operationReaderInitialFenCalled = true;
+        return 'decoy/divergent/fen/from/operation/reader w - - 0 1';
+      },
+    };
+
+    const pgn = `[Event "Horde Test"]
+[Site "Local"]
+
+1. c4 *`;
+
+    const imported = await repo.importPgn('s-horde-import', 'p-owner', pgn, operationReader);
+    assert.equal(imported.length, 1);
+    assert.equal(
+      imported[0].startingFen,
+      canonicalStarts.horde,
+      'Imported chapter must derive initial FEN from repository injected provider, not operation reader'
+    );
+    assert.equal(operationReaderInitialFenCalled, false, 'Operation reader initialFen must not be queried for default start');
+    assert.equal(operationReaderPlayCalled, true, 'Operation reader must still be used for movetext play/resolution');
+  });
+
+  it('preserves explicit [FEN] tag in PGN import override', async () => {
+    const repo = new InMemoryStudiesRepository(mockReader);
+    await repo.createStudy('s-horde-custom-import', 'p-owner', 'Custom Horde Import', 'Desc', 'public', new Date(), { variant: 'horde' });
+
+    const customFen = 'rnbqkbnr/8/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const pgn = `[Event "Custom FEN"]
+[FEN "${customFen}"]
+
+1. e4 *`;
+
+    const imported = await repo.importPgn('s-horde-custom-import', 'p-owner', pgn, mockReader);
+    assert.equal(imported.length, 1);
+    assert.equal(imported[0].startingFen, customFen, 'Explicit PGN [FEN] tag must be preserved');
   });
 });

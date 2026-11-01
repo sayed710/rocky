@@ -27,7 +27,7 @@ import { parsePgn } from './pgn-parse';
 import { serializePgnGames } from './pgn-serialize';
 import type { PgnGame, PgnMoveNode } from './pgn-model';
 import { MAX_GAMES_PER_IMPORT, MAX_PGN_BYTES, tagValue } from './pgn-model';
-import type { PositionReader } from './move-resolver';
+import type { InitialPositionPort, PositionReader } from './move-resolver';
 import { resolveSan } from './move-resolver';
 import { chapterNameFor } from './import';
 
@@ -197,6 +197,8 @@ export class InMemoryStudiesRepository implements StudiesRepository {
   private readonly collaborators = new Map<string, Collaborator>(); // key: `${studyId}:${playerId}`
   private readonly chapters = new Map<string, Chapter>();
   private readonly treeNodes = new Map<string, TreeNode>(); // key: nodeId
+
+  constructor(private readonly positionReader: InitialPositionPort) {}
 
   private collabKey(studyId: string, playerId: string): string {
     return `${studyId}:${playerId}`;
@@ -509,10 +511,10 @@ export class InMemoryStudiesRepository implements StudiesRepository {
     studyId: string,
     actorId: string,
     name: string,
-    startingFen = DEFAULT_STARTING_FEN,
+    startingFen?: string,
     at = new Date()
   ): Promise<Chapter> {
-    this.findVisibleStudy(studyId, actorId);
+    const study = this.findVisibleStudy(studyId, actorId);
     this.assertAuthority(studyId, actorId, 'contributor');
 
     const validName = normalizeChapterName(name);
@@ -520,6 +522,10 @@ export class InMemoryStudiesRepository implements StudiesRepository {
     if (this.chapters.has(id)) {
       throw new StudyRuleError('invalid_input', `Chapter '${id}' already exists`);
     }
+
+    const resolvedStartingFen = startingFen !== undefined
+      ? startingFen
+      : this.positionReader.initialFen(study.variant);
 
     const activeChapters = Array.from(this.chapters.values()).filter(
       (c) => c.studyId === studyId && c.deletedAt === undefined
@@ -531,11 +537,10 @@ export class InMemoryStudiesRepository implements StudiesRepository {
       studyId,
       name: validName,
       orderIndex,
-      startingFen,
+      startingFen: resolvedStartingFen,
     };
     this.chapters.set(id, chapter);
 
-    const study = this.studies.get(studyId)!;
     this.studies.set(studyId, { ...study, updatedAt: at });
 
     return chapter;
@@ -772,7 +777,7 @@ export class InMemoryStudiesRepository implements StudiesRepository {
       const game = games[i];
       const name = chapterNameFor(game, i);
 
-      const startingFen = tagValue(game, 'FEN') || reader.initialFen(study.variant);
+      const startingFen = tagValue(game, 'FEN') || this.positionReader.initialFen(study.variant);
 
       // The starting position itself, before the movetext. A game with moves already reaches the
       // reader on its first SAN, so this is load-bearing only for a game with none — and that is

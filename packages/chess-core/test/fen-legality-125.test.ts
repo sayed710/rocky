@@ -105,6 +105,29 @@ test('F125-02: atomic legal king explosion vs illegal self explosion', () => {
   assert.throws(() => pExplodeBoth.play('f4d5'), IllegalMoveError);
 });
 
+test('F125-02: atomic legal opening sequence with adjacent blast threat is valid and not opposite-check', () => {
+  // Opening sequence: 1. e4 Nc6 2. Qh5 a6
+  // Verified with python-chess 1.11.2 oracle and Lichess Atomic rules: all 4 moves are legal from initial setup.
+  let pos = Position.initial('atomic');
+  for (const uci of ['e2e4', 'b8c6', 'd1h5', 'a7a6']) {
+    pos = pos.play(uci);
+  }
+
+  const fen = pos.fen();
+  assert.equal(fen, 'r1bqkbnr/1ppppppp/p1n5/7Q/4P3/8/PPPP1PPP/RNB1KBNR w KQkq - 0 3');
+  assert.equal(pos.status().over, false);
+
+  // Bounded semantic validation accepts this position (blast threat on f7 is NOT opposite-check)
+  assert.doesNotThrow(() => validateFen(fen, 'atomic'));
+  assert.doesNotThrow(() => validatePositionSemantics(pos.snapshot()));
+
+  // Winning capture Qxf7 explodes Black king and terminates the game as variant_win
+  const legalUcis = pos.legalMoves().map((m) => pos.toUci(m));
+  assert.ok(legalUcis.includes('h5f7'), 'Qh5xf7 must be legal winning capture');
+  const won = pos.play('h5f7');
+  assert.deepEqual(won.status(), { over: true, reason: 'variant_win', winner: 'w' });
+});
+
 test('F125-02: horde variant rules (White 0 kings, Black 1 king, rank 1 pawns, check rules)', () => {
   const hordeStart = Position.initial('horde').fen();
   assert.doesNotThrow(() => validateFen(hordeStart, 'horde'));

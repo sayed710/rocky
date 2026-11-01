@@ -12,6 +12,7 @@ import { ArenaService } from './tournament/arena.service';
 import { ArenaDeadlineWorker } from './tournament/arena-deadline-worker';
 import { uuidv7 } from '@chess-platform/persistence';
 import type { EventStore, TournamentsRepository } from '@chess-platform/persistence';
+import { CorePositionReader } from './studies/position-reader';
 import {
   createPool,
   PgGamesRepository,
@@ -408,7 +409,7 @@ export function createPgDependencies(options: PgBootstrapOptions = {}): {
 
   const studiesEnabled = process.env['STUDIES_ENABLED'] === '1';
   const studiesRepository = studiesEnabled
-    ? (options.studiesRepository ?? new PgStudiesRepository(pool))
+    ? (options.studiesRepository ?? new PgStudiesRepository(pool, new CorePositionReader()))
     : undefined;
 
   const learningEnabled = process.env['LEARNING_ENABLED'] === '1';

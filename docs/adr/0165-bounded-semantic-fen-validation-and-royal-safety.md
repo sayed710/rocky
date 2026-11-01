@@ -64,18 +64,26 @@ All 10 caller ingress routes enforce strict validation and return stable HTTP 42
 
 Provider dispatch (engine and LLM) is verified to remain at baseline when invalid FENs are submitted. Corrupt historical StudyPartner sessions return 422 instead of crashing with unhandled 500 or dispatching to engine/LLM.
 
-### 5. Engine-Neutral `PositionReader.initialFen` & Horde Study Defaults
-To fix Horde study chapter creation and PGN import without hardcoding engine logic into domain packages:
-- The `PositionReader` port in `@chess-platform/studies` is extended with `initialFen(variant?: StudyVariant): string;`.
-- Implemented in `@chess-platform/api` by `CorePositionReader.initialFen`, delegating to `Position.initial(variant).fen()`.
-- `POST /v1/studies/:id/chapters` resolves `startingFen = Position.initial(study.variant).fen()` when omitted.
-- `importPgn` in both `InMemoryStudiesRepository` and `PgStudiesRepository` falls back to `reader.initialFen(study.variant)` when `[FEN]` is absent.
-- Domain package boundaries remain engine-free; existing test doubles and fakes implement `initialFen`. No stored study migration or DB schema migration is required.
+### 5. Engine-Neutral Initial Position Port & Repository Default Resolution
+To fix variant-derived default FENs (such as Horde and Racing Kings) across study chapter creation and PGN import without hardcoding engine logic into domain or persistence packages:
+- An engine-neutral interface `InitialPositionPort` is defined in `@chess-platform/studies`:
+  ```typescript
+  export interface InitialPositionPort {
+    initialFen(variant?: StudyVariant): string;
+  }
+  ```
+- The existing `PositionReader` port extends `InitialPositionPort`.
+- Both `InMemoryStudiesRepository` and `PgStudiesRepository` require `positionReader: InitialPositionPort` via mandatory constructor injection.
+- When creating a chapter (`createChapter`), both repositories consistently resolve `startingFen !== undefined ? startingFen : this.positionReader.initialFen(study.variant)`. When importing PGN (`importPgn`), missing `[FEN]` tags resolve via the same canonical repository port `tagValue(game, 'FEN') || this.positionReader.initialFen(study.variant)`. The operation-supplied `PositionReader` passed into `importPgn` is preserved for legal SAN evaluation, move resolution, and tree construction.
+- The `POST /v1/studies/:id/chapters` route handler in `@chess-platform/api` does not compute a competing default; it leaves `startingFen` undefined when omitted and validates against `coreFenValidator` only when an explicit FEN is provided.
+- In production compositions (`bootstrap.ts`, `fakes.ts`, `harness.ts`), `CorePositionReader` from `@chess-platform/api` is injected, delegating `initialFen` to `Position.initial(variant).fen()`.
+- Package boundaries remain clean and dependency-free; no database schema migrations or stored study rewrites are required.
 
-### 6. Atomic Strict Input vs. Derived Terminal Leaves
-- No 1-king exception is introduced into FEN ingress validation. Input validation strictly requires 2 kings for Atomic positions.
-- A legally played Atomic winning move (e.g. `Nxd5` exploding Black's king) produces a 1-king terminal state that can be appended, stored, read, and exported via PGN as a leaf node.
+### 6. Atomic Strict Input vs. Derived Terminal Leaves & Tactical Blast Threats
+- **Two-King Input Invariant**: No 1-king exception is introduced into FEN ingress validation. Input validation strictly requires 2 kings for Atomic positions.
+- **Derived Terminal Leaves**: A legally played Atomic winning move (e.g. `Nxd5` or `Qxf7` exploding Black's king) produces a 1-king terminal state that can be appended, stored, read, and exported via PGN as a leaf node.
 - Attempting to continue past that terminal leaf, append further moves, or forge a 1-king starting FEN strictly returns HTTP 422 with zero partial writes.
+- **Tactical Blast Threats vs. Check (Qodo 28f1a7ad Clarification)**: In Atomic chess rules (aligned with actual Lichess Atomic rules and verified against isolated python-chess 1.11.2 variant oracle), an attack on an enemy piece adjacent to the enemy king constitutes a tactical explosion threat, NOT a check on the king itself. A king is in check only when its own square is directly attacked (and kings are not connected). For example, after `1. e4 Nc6 2. Qh5 a6`, White's queen attacks `f7`, which is adjacent to Black's king on `e8`. Black's move `2... a6` is legal, and the resulting position `r1bqkbnr/1ppppppp/p1n5/7Q/4P3/8/PPPP1PPP/RNB1KBNR w KQkq - 0 3` is valid, legal, and in progress. On move 3, White can play `3. Qxf7#` (`h5f7`), detonating the queen, pawn, and king. Ingress validation correctly accepts this position without falsely treating blast threats as illegal opposite-check.
 
 ## Consequences & Verification
 
@@ -83,10 +91,12 @@ To fix Horde study chapter creation and PGN import without hardcoding engine log
   - Initial baseline probe on HEAD `e1797525b7f736e15dd69cafb80327fb691c5622` confirmed 5/5 behavioral RED failures (king capture generated, pocket king dropped, adjacent kings accepted, side-not-to-move in check accepted, pocket king accepted); unchanged candidate probe passed 5/5 GREEN.
   - Coordinator independently reran 27 focused tests across core (14), API ingress (5), and game stored-history (8): 27 passed, 0 failed, 0 skipped.
   - Follow-up fixture correction: Black rook capture fixture corrected to `4r1k1/8/8/8/8/8/8/4K3 b - - 0 1` (asserting `e8e1` capture omitted and rejected); expanded six-case probe verified baseline fails 6/6 (exit 1) and candidate passes 6/6 (exit 0); author executed core package tests (`npm test -w @chess-platform/core`) passing 182/182 tests and compiled `fen-legality-125.test.js` passing 14/14 tests. Subsequent root independent rerun verified baseline 6 FAIL exit 1 (`outputs/issue125-root-six-red.log`), candidate 6 PASS exit 0 (`outputs/issue125-root-six-green.log`), and full core npm test 182 PASS, 0 FAIL, 0 SKIP exit 0 (`outputs/issue125-root-corrected-core.log`).
+  - Qodo 1733893 review response: supported finding `c8aa2377-bed4-4dbf-9a10-710c4d4e6716` resolved via unified `InitialPositionPort` default in `createChapter` and `importPgn` across `InMemoryStudiesRepository` and `PgStudiesRepository`, with route competing default removed; finding `28f1a7ad-c140-45ca-812b-ebcfa614211f` clarified with Lichess and python-chess 1.11.2 oracle-verified positive regressions in core (`fen-legality-125.test.ts`) and API (`fen-ingress-125.test.ts`). Provider disposition for both findings remains pending root owner actions.
+  - Author-observed unit verification counts: `@chess-platform/studies` 59/59 PASS; `@chess-platform/persistence` 113/113 PASS (unit tests; live PostgreSQL integration PASS not claimed); `@chess-platform/core` 183/183 PASS; `@chess-platform/api` fen-ingress 6/6 PASS.
   - Zero OpenAPI specification drift on `packages/api/openapi.json`.
   - Zero lint errors across `@chess-platform/core`, `@chess-platform/api`, and `@chess-platform/studies`.
-  - Zero `as any` introduced.
+  - Zero `as any` introduced across all touched packages.
 - **Remaining Limitations**:
-  - Current-head integration verification, renewed new-head review, and remote CI remain pending.
+  - Independent root integrated CORE13 gate execution, renewed new-head review, remote CI, and review provider disposition on Qodo findings remain pending root owner actions.
   - Live PostgreSQL integration tests and real binary engine smoke tests remain root-owned.
   - Full repository CI and gateway clean-install verification remain root-owned.

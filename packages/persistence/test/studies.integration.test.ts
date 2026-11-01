@@ -51,8 +51,8 @@ test('pg studies repository integration tests', { skip }, async () => {
   const pool = createPool();
   await migrate(pool, join(process.cwd(), 'migrations'));
 
-  const repo = new PgStudiesRepository(pool);
   const reader = new CorePositionReader();
+  const repo = new PgStudiesRepository(pool, reader);
 
   const createdUserIds: string[] = [];
   /** Inserts and tracks a disposable integration-test user. */
@@ -134,6 +134,21 @@ test('pg studies repository integration tests', { skip }, async () => {
     const chId1 = uuidv7();
     const ch1 = await repo.createChapter(chId1, studyId1, bob, 'Mainline e4', undefined, t0);
     assert.equal(ch1.orderIndex, 0);
+
+    // Direct repository variant-derived default regression (Qodo c8aa2377):
+    const hordeStudyId = uuidv7();
+    await repo.createStudy(hordeStudyId, bob, 'Horde Study', '', 'public', t0, { variant: 'horde' });
+    const hordeCh1 = await repo.createChapter(uuidv7(), hordeStudyId, bob, 'Horde Default', undefined, t0);
+    assert.equal(hordeCh1.startingFen, Position.initial('horde').fen(), 'omitted FEN on Horde study must derive Horde initial position');
+
+    const explicitFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+    const hordeCh2 = await repo.createChapter(uuidv7(), hordeStudyId, bob, 'Horde Explicit', explicitFen, t1);
+    assert.equal(hordeCh2.startingFen, explicitFen, 'explicit FEN override must be preserved');
+
+    const rkStudyId = uuidv7();
+    await repo.createStudy(rkStudyId, bob, 'RK Study', '', 'public', t0, { variant: 'racingkings' });
+    const rkCh = await repo.createChapter(uuidv7(), rkStudyId, bob, 'RK Default', undefined, t0);
+    assert.equal(rkCh.startingFen, Position.initial('racingkings').fen(), 'omitted FEN on Racing Kings study must derive RK initial position');
 
     const chId2 = uuidv7();
     const ch2 = await repo.createChapter(chId2, studyId1, bob, 'Sideline d4', undefined, t1);

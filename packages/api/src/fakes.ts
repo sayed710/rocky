@@ -1032,6 +1032,7 @@ export class InMemoryWebAuthnCredentialsRepository implements WebAuthnCredential
 
 /** A bundle of in-memory repositories plus the concrete audit repo for tests. */
 import { InMemoryStudiesRepository } from '@chess-platform/studies';
+import { CorePositionReader } from './studies/position-reader';
 
 export interface InMemoryRepositories extends Repositories {
   /** Shared event log so local API and realtime authority can use one source of truth. */
@@ -1087,7 +1088,7 @@ export function createInMemoryRepositories(clock: Clock = systemClock): InMemory
     gameStarter: new InMemoryGameStarter(events, games),
     antiCheat: new InMemoryAntiCheatReportRepository(),
     botReports: new InMemoryBotBehaviorReportRepository(),
-    studies: new InMemoryStudiesRepository(),
+    studies: new InMemoryStudiesRepository(new CorePositionReader()),
     learning: new InMemoryLearningRepository(),
     studyPartner: new InMemoryStudyPartnerRepository(),
     playerReports,

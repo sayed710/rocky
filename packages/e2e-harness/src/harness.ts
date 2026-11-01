@@ -226,7 +226,7 @@ export function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   // as an error rather than as an empty catalogue.
   const achievementsRepository = new InMemoryAchievementsRepository();
   const learningRepository = new InMemoryLearningRepository();
-  const studiesRepository = new InMemoryStudiesRepository();
+  const studiesRepository = new InMemoryStudiesRepository(new CorePositionReader());
   // Engine analysis is OPTIONAL too (ADR-0113): absent, `POST /v1/analysis` answers 503 and
   // `GET /v1/capabilities` reports `analysis: false`, which makes the game sidebar's analysis panel
   // hide itself — so an e2e spec could only ever assert that the feature is missing.

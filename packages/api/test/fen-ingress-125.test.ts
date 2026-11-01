@@ -401,6 +401,21 @@ test('F125-C2: Horde study chapter creation and PGN import default to Horde init
   assert.equal(importRes.status, 200);
   assert.equal(importRes.body.items[0].startingFen, hordeInitial, 'PGN import without FEN must use hordeInitial');
 
+  // 3b. Create a Racing Kings study with omitted startingFen
+  const rkStudyRes = await h.json('POST', '/v1/studies', {
+    token: user.token,
+    body: { name: 'RK Repertoire', visibility: 'public', variant: 'racingkings' },
+  });
+  assert.equal(rkStudyRes.status, 201);
+  const rkStudyId = rkStudyRes.body.id as string;
+  const rkInitial = Position.initial('racingkings').fen();
+  const rkChapterRes = await h.json('POST', `/v1/studies/${rkStudyId}/chapters`, {
+    token: user.token,
+    body: { name: 'RK Chapter 1' },
+  });
+  assert.equal(rkChapterRes.status, 201);
+  assert.equal(rkChapterRes.body.startingFen, rkInitial, 'omitted startingFen must default to rkInitial');
+
   // 4. Engine-neutral initialFen control across all variants
   const reader = new CorePositionReader();
   const variants = ['standard', 'chess960', 'threecheck', 'crazyhouse', 'kingofthehill', 'atomic', 'horde', 'racingkings'] as const;
@@ -578,4 +593,65 @@ test('F125-05: historical stored invalid StudyPartner session turn returns 422 a
   // Engine and LLM must not be called
   assert.equal(provider.calls, 0);
   assert.equal(fakeAi.calls.length, 0);
+});
+
+test('Atomic four-move sequence reachable FEN accepted across caller ingress with winning blast capture', async (t) => {
+  const provider = new CountingAnalysisProvider();
+  const analysis = new AnalysisService({ provider });
+  const h = await startHarness({}, { analysis });
+  t.after(() => h.close());
+  const user = await h.makeUser('atomic-blast-tester', ['admin']);
+
+  // Four legal Atomic moves from initial setup: 1. e4 Nc6 2. Qh5 a6
+  // Exact reachable FEN before winning capture Qxf7#:
+  const blastFen = 'r1bqkbnr/1ppppppp/p1n5/7Q/4P3/8/PPPP1PPP/RNB1KBNR w KQkq - 0 3';
+
+  // 1. Validator directly accepts the reachable setup
+  const validator = new CoreFenValidator();
+  assert.doesNotThrow(() => validator.validate(blastFen, 'atomic'));
+
+  // 2. POST /v1/analysis accepts the FEN
+  const analysisRes = await h.json('POST', '/v1/analysis', {
+    token: user.token,
+    body: {
+      fen: blastFen,
+      variant: 'atomic',
+    },
+  });
+  assert.equal(analysisRes.status, 200, 'analysis must accept valid Atomic blast setup');
+  assert.equal(analysisRes.body.variant, 'atomic');
+
+  // 3. POST /v1/studies creates an atomic study and chapter with this starting position
+  const studyRes = await h.json('POST', '/v1/studies', {
+    token: user.token,
+    body: { name: 'Atomic Blast Study', visibility: 'public', variant: 'atomic' },
+  });
+  assert.equal(studyRes.status, 201);
+  const studyId = studyRes.body.id as string;
+
+  const chapterRes = await h.json('POST', `/v1/studies/${studyId}/chapters`, {
+    token: user.token,
+    body: { name: 'Qxf7 Blast Chapter', startingFen: blastFen },
+  });
+  assert.equal(chapterRes.status, 201);
+  const chapterId = chapterRes.body.id as string;
+
+  // 4. Append winning capture Qxf7 (explodes Black king on e8)
+  const appendWin = await h.json('POST', `/v1/studies/${studyId}/chapters/${chapterId}/nodes`, {
+    token: user.token,
+    body: { san: 'Qxf7' },
+  });
+  assert.equal(appendWin.status, 201, 'winning capture Qxf7 must succeed');
+  assert.equal(
+    appendWin.body.fenAfter,
+    'r1bq3r/1pppp1pp/p1n5/8/4P3/8/PPPP1PPP/RNB1KBNR b KQkq - 0 3',
+    'winning blast eliminates Black king leaving 1-king leaf',
+  );
+
+  // 5. Continuation past winning leaf is rejected
+  const contRes = await h.json('POST', `/v1/studies/${studyId}/chapters/${chapterId}/nodes`, {
+    token: user.token,
+    body: { san: 'e5', parentId: appendWin.body.id },
+  });
+  assert.equal(contRes.status, 422, 'continuation past terminal blast leaf must return 422');
 });
