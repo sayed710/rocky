@@ -229,6 +229,13 @@ interface VisitedRecord {
   state: PositionState;
   parentKey: string | null;
   moveFromParent: Move | null;
+  depth: number;
+}
+
+interface ExactReconstructionCursor {
+  currentKey: string | null;
+  destination: Move[];
+  writeIndex: number;
 }
 
 const DEFAULT_MAX_RETAINED_STATES = 50000;
@@ -248,11 +255,13 @@ export class CooperativeSearchSession {
   private queueHead = 0;
   private totalSteps = 0;
   private materialPrunedCount = 0;
+  private totalWorkUnits = 0;
 
   private currentEdges: Move[] | null = null;
   private currentEdgeIndex = 0;
 
   private finalizedResult: WinnabilityResult | null = null;
+  private exactReconstruction: ExactReconstructionCursor | null = null;
 
   constructor(root: PositionState, intendedWinner: Color, options?: CooperativeSearchOptions) {
     this.intendedWinner = intendedWinner;
@@ -278,30 +287,35 @@ export class CooperativeSearchSession {
     const admission = validateAdmittedProofState(root);
     if (!admission.ok) {
       this.ownedRoot = null;
-      this.finalizedResult = {
+      this.finalizedResult = Object.freeze({
         status: 'pending',
         winner: intendedWinner,
         reason: admission.reason ?? 'unsupported_state',
         steps: 0,
         session: this,
-      };
+      });
       return;
     }
 
     this.ownedRoot = cloneState(root);
 
     if (this.isTerminalCheckmate(this.ownedRoot)) {
-      this.finalizedResult = {
+      this.finalizedResult = Object.freeze({
         status: 'reachable',
         winner: intendedWinner,
-        witness: [],
+        witness: Object.freeze([]),
         steps: 0,
-      };
+      });
       return;
     }
 
     const rootKey = canonicalStateKey(this.ownedRoot);
-    this.visited.set(rootKey, { state: cloneState(this.ownedRoot), parentKey: null, moveFromParent: null });
+    this.visited.set(rootKey, {
+      state: cloneState(this.ownedRoot),
+      parentKey: null,
+      moveFromParent: null,
+      depth: 0,
+    });
     this.queue.push(rootKey);
   }
 
@@ -348,36 +362,45 @@ export class CooperativeSearchSession {
     return this.totalSteps;
   }
 
+  get totalWork(): number {
+    return this.totalWorkUnits;
+  }
+
+  getWorkUnits(): number {
+    return this.totalWorkUnits;
+  }
+
   get materialDischarges(): number {
     return this.materialPrunedCount;
   }
 
   getStatus(): WinnabilityResult {
     if (this.finalizedResult) {
-      return cloneWinnabilityResult(this.finalizedResult);
+      return this.finalizedResult;
     }
 
     const reason: PendingReason =
       this.visited.size >= this.maxRetainedStates ? 'resource_limit' : 'budget_exhausted';
 
-    return {
+    return Object.freeze({
       status: 'pending',
       winner: this.intendedWinner,
       reason,
       steps: this.totalSteps,
       session: this,
-    };
+    });
   }
 
   cancel(): void {
     if (this.finalizedResult) return;
-    this.finalizedResult = {
+    this.exactReconstruction = null;
+    this.finalizedResult = Object.freeze({
       status: 'pending',
       winner: this.intendedWinner,
       reason: 'cancelled',
       steps: this.totalSteps,
       session: this,
-    };
+    });
   }
 
   private isTerminalCheckmate(state: PositionState): boolean {
@@ -417,10 +440,12 @@ export class CooperativeSearchSession {
       if (this.visited.size >= this.maxRetainedStates) {
         return { hitCapacity: true };
       }
+      const parentRecord = this.visited.get(currKey)!;
       this.visited.set(nextKey, {
         state: nextState,
         parentKey: currKey,
         moveFromParent: move,
+        depth: parentRecord.depth + 1,
       });
       this.queue.push(nextKey);
     }
@@ -440,22 +465,22 @@ export class CooperativeSearchSession {
     while (this.currentEdgeIndex < this.currentEdges!.length) {
       const edgeResult = this.expandNextEdge(currKey, currState);
       if (edgeResult.mateWitness) {
-        this.finalizedResult = {
+        this.finalizedResult = Object.freeze({
           status: 'reachable',
           winner: this.intendedWinner,
-          witness: edgeResult.mateWitness,
+          witness: Object.freeze(edgeResult.mateWitness.map(m => Object.freeze(cloneMove(m)))),
           steps: this.totalSteps,
-        };
+        });
         return cloneWinnabilityResult(this.finalizedResult);
       }
       if (edgeResult.hitCapacity) {
-        return {
+        return Object.freeze({
           status: 'pending',
           winner: this.intendedWinner,
           reason: 'resource_limit',
           steps: this.totalSteps,
           session: this,
-        };
+        });
       }
     }
     return null;
@@ -465,14 +490,120 @@ export class CooperativeSearchSession {
     const provenance: ProofProvenance =
       this.materialPrunedCount > 0 ? 'closed_graph_material_pruned' : 'closed_graph';
 
-    this.finalizedResult = {
+    this.finalizedResult = Object.freeze({
       status: 'impossible',
       winner: this.intendedWinner,
       provenance,
       steps: this.totalSteps,
       materialPrunedCount: this.materialPrunedCount > 0 ? this.materialPrunedCount : undefined,
-    };
-    return cloneWinnabilityResult(this.finalizedResult);
+    });
+    return this.finalizedResult;
+  }
+
+  private stepMaterialOrMovePrep(currState: PositionState): boolean {
+    this.totalWorkUnits++;
+    if (isPawnFreeMaterialUnwinnable(currState, this.intendedWinner)) {
+      this.materialPrunedCount++;
+      return false;
+    }
+    const legals = generateLegalMoves(currState);
+    if (legals.length === 0) {
+      return false;
+    }
+    this.currentEdges = legals;
+    this.currentEdgeIndex = 0;
+    return true;
+  }
+
+  private expandNextEdgeForWork(
+    currKey: string,
+    currState: PositionState,
+  ): { mateFound?: Move; hitCapacity?: boolean } {
+    const move = this.currentEdges![this.currentEdgeIndex];
+    const nextState = applyMove(currState, move);
+
+    if (this.isTerminalCheckmate(nextState)) {
+      return { mateFound: move };
+    }
+
+    const nextKey = canonicalStateKey(nextState);
+    if (!this.visited.has(nextKey)) {
+      if (this.visited.size >= this.maxRetainedStates) {
+        return { hitCapacity: true };
+      }
+      const parentRecord = this.visited.get(currKey)!;
+      this.visited.set(nextKey, {
+        state: nextState,
+        parentKey: currKey,
+        moveFromParent: move,
+        depth: parentRecord.depth + 1,
+      });
+      this.queue.push(nextKey);
+    }
+
+    this.currentEdgeIndex++;
+    return {};
+  }
+
+  /**
+   * Publication Array Integrity Qualification:
+   * Moves are individually copied and frozen in charged reconstruction steps (O(1) per step).
+   * Native Object.freeze(destination) seals the destination array upon completion outside the
+   * enforced search unit ledger with O(witness.length) integrity work, bounded strictly by
+   * parentRecord.depth + 1 (the discovered state chain length, uncapped by 500).
+   * Repeated reads (getStatus, resumeWork(0)) are zero-copy cached returns.
+   */
+  private stepExactReconstruction(): WinnabilityResult | null {
+    this.totalWorkUnits++;
+    const cursor = this.exactReconstruction!;
+    if (cursor.writeIndex >= 0 && cursor.currentKey !== null) {
+      const entry = this.visited.get(cursor.currentKey);
+      if (entry && entry.moveFromParent) {
+        cursor.destination[cursor.writeIndex] = Object.freeze(cloneMove(entry.moveFromParent));
+        cursor.writeIndex--;
+        cursor.currentKey = entry.parentKey;
+      } else {
+        cursor.currentKey = null;
+      }
+      return null;
+    }
+
+    const fullWitness = Object.freeze(cursor.destination);
+    this.exactReconstruction = null;
+    this.finalizedResult = Object.freeze({
+      status: 'reachable',
+      winner: this.intendedWinner,
+      witness: fullWitness,
+      steps: this.totalSteps,
+    });
+    return this.finalizedResult;
+  }
+
+  private stepSingleEdge(currKey: string, currState: PositionState): WinnabilityResult | null {
+    this.totalWorkUnits++;
+    const edgeResult = this.expandNextEdgeForWork(currKey, currState);
+    if (edgeResult.mateFound) {
+      const parentRecord = this.visited.get(currKey)!;
+      const totalLength = parentRecord.depth + 1;
+      const destination = new Array<Move>(totalLength);
+      destination[totalLength - 1] = Object.freeze(cloneMove(edgeResult.mateFound));
+      this.exactReconstruction = {
+        currentKey: currKey,
+        destination,
+        writeIndex: totalLength - 2,
+      };
+      return null;
+    }
+    if (edgeResult.hitCapacity) {
+      return Object.freeze({
+        status: 'pending',
+        winner: this.intendedWinner,
+        reason: 'resource_limit',
+        steps: this.totalSteps,
+        session: this,
+      });
+    }
+    return null;
   }
 
   resume(stepBudget: number): WinnabilityResult {
@@ -480,7 +611,7 @@ export class CooperativeSearchSession {
       return cloneWinnabilityResult(this.finalizedResult);
     }
     if (!isPositiveSafeInteger(stepBudget)) {
-      return this.getStatus();
+      return cloneWinnabilityResult(this.getStatus());
     }
 
     let stepsThisCall = 0;
@@ -495,10 +626,63 @@ export class CooperativeSearchSession {
       }
 
       const interruption = this.processCurrentNodeEdges(currKey, currState);
-      if (interruption) return interruption;
+      if (interruption) return cloneWinnabilityResult(interruption);
 
       this.advanceQueueNode(1);
       stepsThisCall++;
+    }
+
+    if (this.queueHead >= this.queue.length) {
+      this.finalizeImpossibleResult();
+      return cloneWinnabilityResult(this.finalizedResult!);
+    }
+    return cloneWinnabilityResult(this.getStatus());
+  }
+
+  private canContinueWork(startWork: number, workBudget: number): boolean {
+    const hasWork = this.exactReconstruction !== null || this.queueHead < this.queue.length;
+    return hasWork && (this.totalWorkUnits - startWork) < workBudget;
+  }
+
+  private processQueueHeadWork(startWork: number, workBudget: number): WinnabilityResult | null {
+    if (this.exactReconstruction !== null) {
+      return this.stepExactReconstruction();
+    }
+    const currKey = this.queue[this.queueHead];
+    const currState = this.visited.get(currKey)!.state;
+
+    if (this.currentEdges === null) {
+      const hasEdges = this.stepMaterialOrMovePrep(currState);
+      if (!hasEdges) {
+        this.advanceQueueNode(1);
+        return null;
+      }
+      if ((this.totalWorkUnits - startWork) >= workBudget) {
+        return this.getStatus();
+      }
+    }
+
+    const interruption = this.stepSingleEdge(currKey, currState);
+    if (interruption) return interruption;
+
+    if (this.currentEdgeIndex >= this.currentEdges!.length) {
+      this.advanceQueueNode(1);
+    }
+    return null;
+  }
+
+  resumeWork(workBudget: number): WinnabilityResult {
+    if (this.finalizedResult) {
+      return this.finalizedResult;
+    }
+    if (!isPositiveSafeInteger(workBudget)) {
+      return this.getStatus();
+    }
+
+    const startWork = this.totalWorkUnits;
+    while (this.canContinueWork(startWork, workBudget)) {
+      const interruption = this.processQueueHeadWork(startWork, workBudget);
+      if (interruption) return interruption;
     }
 
     if (this.queueHead >= this.queue.length) {
@@ -508,14 +692,19 @@ export class CooperativeSearchSession {
   }
 
   private reconstructWitness(lastVisitedKey: string, lastMove: Move): Move[] {
-    const path: Move[] = [cloneMove(lastMove)];
+    const parentRecord = this.visited.get(lastVisitedKey);
+    const totalLength = (parentRecord ? parentRecord.depth : 0) + 1;
+    const path: Move[] = new Array<Move>(totalLength);
+    path[totalLength - 1] = cloneMove(lastMove);
+    let writeIdx = totalLength - 2;
     let currKey: string | null = lastVisitedKey;
 
-    while (currKey !== null) {
+    while (currKey !== null && writeIdx >= 0) {
       const entry = this.visited.get(currKey);
       if (!entry) break;
       if (entry.moveFromParent !== null) {
-        path.unshift(cloneMove(entry.moveFromParent));
+        path[writeIdx] = cloneMove(entry.moveFromParent);
+        writeIdx--;
       }
       currKey = entry.parentKey;
     }

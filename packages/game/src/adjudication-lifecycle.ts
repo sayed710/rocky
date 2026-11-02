@@ -699,10 +699,12 @@ function validateRecordedTimeoutEvidence(
   validateRecordedTimeoutDetails(rec.outcome, prospectiveWinner, basePos);
 }
 
-function isSuccessorCheapEnding(succPos: Position, repetition: RepetitionHistory): boolean {
+export function isSuccessorCheapEnding(succPos: Position, repetition?: RepetitionHistory): boolean {
   if (resolveTerminalEnding(succPos, 0)) return true;
-  const key = repetitionKey(succPos.snapshot());
-  if ((repetition.get(key) ?? 0) + 1 >= 3) return true;
+  if (repetition) {
+    const key = repetitionKey(succPos.snapshot());
+    if ((repetition.get(key) ?? 0) + 1 >= 3) return true;
+  }
   return resolveCheapDeadEnding(succPos, 0) !== null;
 }
 
@@ -748,7 +750,13 @@ function validateRecordedResolutionEvidence(
 }
 
 function assertBundleNotEmpty(evidence: AdjudicationEvidenceInput): void {
-  if (isEvidenceBundle(evidence) && !evidence.base && !evidence.successor && !evidence.timeout) {
+  if (
+    isEvidenceBundle(evidence) &&
+    !evidence.base &&
+    !evidence.successor &&
+    !evidence.timeout &&
+    !evidence.terminal
+  ) {
     throw new GameError('Empty evidence bundle cannot authorize settlement');
   }
 }
@@ -819,6 +827,7 @@ export type AdjudicationEvidenceBundle = {
   readonly base?: AdjudicationEvidenceHandle;
   readonly successor?: AdjudicationEvidenceHandle;
   readonly timeout?: AdjudicationEvidenceHandle;
+  readonly terminal?: AdjudicationEvidenceHandle;
 };
 
 /** Input evidence to settlePrepared. Can be a single handle, handle array, or bundle object. */
@@ -829,8 +838,9 @@ export type AdjudicationEvidenceInput =
 
 function findHandleInBundle(
   bundle: AdjudicationEvidenceBundle,
-  kind: 'global_deadness' | 'directional_reachability' | 'successor_deadness',
+  kind: 'global_deadness' | 'directional_reachability' | 'successor_deadness' | 'terminal_authorization',
 ): AdjudicationEvidenceHandle | undefined {
+  if (kind === 'terminal_authorization') return bundle.terminal;
   if (kind === 'successor_deadness') return bundle.successor;
   if (kind === 'directional_reachability') {
     if (bundle.timeout) return bundle.timeout;
@@ -845,7 +855,7 @@ function isEvidenceBundle(evidence: unknown): evidence is AdjudicationEvidenceBu
 
 function findEvidenceHandle(
   evidence: AdjudicationEvidenceInput,
-  kind: 'global_deadness' | 'directional_reachability' | 'successor_deadness',
+  kind: 'global_deadness' | 'directional_reachability' | 'successor_deadness' | 'terminal_authorization',
 ): AdjudicationEvidenceHandle | undefined {
   if (Array.isArray(evidence)) {
     return evidence.find(h => h.questionKind === kind);
@@ -928,6 +938,12 @@ function extractRecordedEvidence(
     successor?: { fen: string; outcome: RecordedGlobalOutcome };
     timeout?: { winner: Color; outcome: RecordedImpossible | RecordedReachable };
   } = {};
+
+  const termHandle = findEvidenceHandle(evidence, 'terminal_authorization');
+  if (termHandle) {
+    getRegisteredEvidence(termHandle, pending.prepared, { kind: 'terminal_authorization' });
+    return Object.freeze(result);
+  }
 
   const baseHandle = findEvidenceHandle(evidence, 'global_deadness');
   if (baseHandle) {

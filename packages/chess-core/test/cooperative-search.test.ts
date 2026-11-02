@@ -519,3 +519,238 @@ test('cycle with exit: cooperative search explores cycles without prematurely de
   assert.equal(res.winner, 'b');
   assert.ok(res.witness.length > 0);
 });
+
+test('resumeWork exact entrypoint: deterministic per-successor slicing matches uninterrupted execution', () => {
+  // Line 46 position
+  const pos = Position.fromFen('8/8/8/8/2b5/1kB5/1B6/BKB5 w - - 0 1');
+
+  // Monolithic run
+  const sessionMono = new CooperativeSearchSession(pos.snapshot(), 'b');
+  const resMono = sessionMono.resumeWork(5000);
+  assert.equal(resMono.status, 'reachable');
+  assert.equal(resMono.winner, 'b');
+  assert.ok(resMono.witness.length > 0);
+
+  // Sliced run with 3 work units per slice
+  const sessionSliced = new CooperativeSearchSession(pos.snapshot(), 'b');
+  let resSliced = sessionSliced.resumeWork(0);
+  assert.equal(resSliced.status, 'pending');
+  assert.equal(sessionSliced.totalWork, 0);
+
+  while (resSliced.status === 'pending') {
+    resSliced = sessionSliced.resumeWork(3);
+  }
+
+  assert.equal(resSliced.status, 'reachable');
+  assert.equal(resSliced.winner, 'b');
+  assert.equal(resSliced.witness.length, resMono.witness.length);
+  assert.deepEqual(resSliced.witness, resMono.witness);
+  assert.equal(sessionSliced.totalWork, sessionMono.totalWork);
+});
+
+test('resumeWork exact entrypoint: proves impossible closed graph with material pruning', () => {
+  const pos = Position.fromFen('3qk3/8/8/8/8/5N2/8/4K3 w - - 0 1');
+  const session = new CooperativeSearchSession(pos.snapshot(), 'w');
+
+  let res = session.resumeWork(5);
+  while (res.status === 'pending') {
+    res = session.resumeWork(5);
+  }
+
+  assert.equal(res.status, 'impossible');
+  assert.equal(res.provenance, 'closed_graph_material_pruned');
+  assert.ok(session.totalWork > 0);
+  assert.ok(session.materialDischarges > 0);
+});
+
+test('resumeWork exact entrypoint: resumeWork(1) on mate strictly spends 1 unit per call', () => {
+  const pos = Position.fromFen('7k/4Q3/6K1/8/8/8/8/8 w - - 0 1');
+  const session = new CooperativeSearchSession(pos.snapshot(), 'w');
+
+  let res = session.resumeWork(1);
+  while (res.status === 'pending') {
+    const before = session.getWorkUnits();
+    res = session.resumeWork(1);
+    const delta = session.getWorkUnits() - before;
+    assert.equal(delta, 1, `Every step must spend exactly 1 unit, got ${delta}`);
+  }
+
+  assert.equal(res.status, 'reachable');
+  assert.equal(res.witness?.length, 1);
+});
+
+test('resumeWork exact entrypoint: slices of 1, 2, and 7 on multi-ply mate strictly bound delta work', () => {
+  const budgets = [1, 2, 7];
+  for (const budget of budgets) {
+    // 3-ply rook mate position for White (1. Kg6 Kg8 2. Ra8#)
+    const pos = Position.fromFen('7k/8/5K2/8/8/8/8/R7 w - - 0 1');
+    const session = new CooperativeSearchSession(pos.snapshot(), 'w');
+    let res = session.getStatus();
+    while (res.status === 'pending') {
+      const before = session.getWorkUnits();
+      res = session.resumeWork(budget);
+      const delta = session.getWorkUnits() - before;
+      assert.ok(delta <= budget, `Delta ${delta} must not exceed budget ${budget}`);
+      if (res.status === 'pending') {
+        assert.equal(delta, budget, `Pending step must consume full budget ${budget}`);
+      }
+    }
+    assert.equal(res.status, 'reachable');
+    assert.equal(res.witness.length, 3);
+  }
+});
+
+test('resumeWork exact entrypoint: 3-ply rook checkmate monolithic vs sliced parity and mixed legacy reads', () => {
+  const pos = Position.fromFen('7k/8/5K2/8/8/8/8/R7 w - - 0 1');
+
+  // Monolithic run
+  const sessionMono = new CooperativeSearchSession(pos.snapshot(), 'w');
+  const resMono = sessionMono.resumeWork(5000);
+  assert.equal(resMono.status, 'reachable');
+  assert.equal(resMono.witness.length, 3);
+
+  // Sliced 1-unit run
+  const sessionSliced = new CooperativeSearchSession(pos.snapshot(), 'w');
+  let resSliced = sessionSliced.getStatus();
+  while (resSliced.status === 'pending') {
+    const before = sessionSliced.getWorkUnits();
+    resSliced = sessionSliced.resumeWork(1);
+    const delta = sessionSliced.getWorkUnits() - before;
+    assert.equal(delta, 1, `1-unit step must spend exactly 1 unit, got ${delta}`);
+  }
+  assert.equal(resSliced.status, 'reachable');
+  assert.equal(resSliced.witness.length, 3);
+  assert.deepEqual(resSliced.witness, resMono.witness);
+  assert.equal(sessionSliced.totalWork, sessionMono.totalWork);
+
+  // Cached repeat read spends zero work
+  const workAfter = sessionSliced.getWorkUnits();
+  const resRepeat = sessionSliced.resumeWork(0);
+  assert.equal(sessionSliced.getWorkUnits(), workAfter);
+  assert.strictEqual(resRepeat, resSliced);
+
+  // Mixed legacy read returns a detached mutable copy
+  const resLegacy = sessionSliced.resume(10);
+  assert.equal(resLegacy.status, 'reachable');
+  assert.notStrictEqual(resLegacy, resSliced, 'Legacy resume must return a detached clone');
+  const legacyMove = resLegacy.witness[0] as MutableMoveRecord;
+  const originalFrom = legacyMove.from;
+  legacyMove.from = 999;
+  assert.equal(legacyMove.from, 999);
+  assert.equal(resSliced.witness[0].from, originalFrom, 'Cached result must not be mutated');
+});
+
+test('cached finalized outcomes: cancel, unsupported admission, capacity limit, and impossible are top-level frozen while session is not', () => {
+  // 1. Cancelled outcome
+  const posNormal = Position.fromFen('7k/8/5K2/8/8/8/8/R7 w - - 0 1');
+  const sessionCancel = new CooperativeSearchSession(posNormal.snapshot(), 'w');
+  sessionCancel.cancel();
+  const resCancel = sessionCancel.getStatus();
+  assert.equal(resCancel.status, 'pending');
+  assert.equal(resCancel.reason, 'cancelled');
+  assert.ok(Object.isFrozen(resCancel), 'Cancelled result is top-level frozen');
+  if (resCancel.status === 'pending') {
+    assert.ok(resCancel.session);
+    assert.equal(Object.isFrozen(resCancel.session), false, 'Session is not frozen');
+  }
+  assert.throws(() => {
+    Object.assign(resCancel, { status: 'impossible' });
+  }, TypeError);
+  assert.strictEqual(sessionCancel.getStatus(), resCancel);
+  assert.strictEqual(sessionCancel.resumeWork(0), resCancel);
+
+  // 2. Unsupported admission outcome
+  const posUnsupported = Position.fromFen('8/8/8/8/8/8/8/8 w - - 0 1'); // No kings
+  const sessionUnsupported = new CooperativeSearchSession(posUnsupported.snapshot(), 'w');
+  const resUnsupported = sessionUnsupported.getStatus();
+  assert.equal(resUnsupported.status, 'pending');
+  assert.equal(resUnsupported.reason, 'unsupported_state');
+  assert.ok(Object.isFrozen(resUnsupported), 'Unsupported admission result is top-level frozen');
+  if (resUnsupported.status === 'pending') {
+    assert.ok(resUnsupported.session);
+    assert.equal(Object.isFrozen(resUnsupported.session), false, 'Session is not frozen');
+  }
+  assert.throws(() => {
+    Object.assign(resUnsupported, { status: 'impossible' });
+  }, TypeError);
+  assert.strictEqual(sessionUnsupported.getStatus(), resUnsupported);
+  assert.strictEqual(sessionUnsupported.resumeWork(0), resUnsupported);
+
+  // 3. Resource limit capacity hit outcome
+  const posCycle = Position.fromFen('8/8/8/8/2b5/1kB5/1B6/BKB5 w - - 0 1');
+  const sessionCap = new CooperativeSearchSession(posCycle.snapshot(), 'b', { maxRetainedStates: 1 });
+  const resCap = sessionCap.resumeWork(10);
+  assert.equal(resCap.status, 'pending');
+  assert.equal(resCap.reason, 'resource_limit');
+  assert.ok(Object.isFrozen(resCap), 'Capacity-limited result is top-level frozen');
+  if (resCap.status === 'pending') {
+    assert.ok(resCap.session);
+    assert.equal(Object.isFrozen(resCap.session), false, 'Session is not frozen');
+    // Session is not frozen, so setCapacity and recovery work!
+    resCap.session.setCapacity(5000);
+    assert.equal(resCap.session.getCapacity(), 5000);
+  }
+  assert.throws(() => {
+    Object.assign(resCap, { status: 'impossible' });
+  }, TypeError);
+  const recovered = sessionCap.resumeWork(5000);
+  assert.equal(recovered.status, 'reachable');
+
+  // 4. Impossible outcome
+  const posImpossible = Position.fromFen('3qk3/8/8/8/8/5N2/8/4K3 w - - 0 1');
+  const sessionImp = new CooperativeSearchSession(posImpossible.snapshot(), 'w');
+  const resImp = sessionImp.resumeWork(5000);
+  assert.equal(resImp.status, 'impossible');
+  assert.ok(Object.isFrozen(resImp), 'Impossible result is top-level frozen');
+  assert.throws(() => {
+    Object.assign(resImp, { status: 'reachable' });
+  }, TypeError);
+
+  // 5. Legacy resume returns detached mutable copies even for pending states
+  const sessionLegacyPending = new CooperativeSearchSession(posCycle.snapshot(), 'b');
+  const legacyPending = sessionLegacyPending.resume(0);
+  assert.equal(legacyPending.status, 'pending');
+  assert.equal(Object.isFrozen(legacyPending), false, 'Legacy resume must return unfrozen mutable copy');
+  Object.assign(legacyPending, { status: 'impossible' });
+  assert.equal(legacyPending.status, 'impossible');
+  // Internal session status remains pending
+  assert.equal(sessionLegacyPending.getStatus().status, 'pending');
+});
+
+test('resumeWork exact entrypoint: cached immutable result returned with zero work on repeated reads', () => {
+  const pos = Position.fromFen('7k/4Q3/6K1/8/8/8/8/8 w - - 0 1');
+  const session = new CooperativeSearchSession(pos.snapshot(), 'w');
+  const res = session.resumeWork(100);
+  assert.equal(res.status, 'reachable');
+  assert.ok(res.witness.length >= 1);
+  assert.ok(Object.isFrozen(res), 'Result object is deeply frozen');
+  assert.ok(Object.isFrozen(res.witness), 'Witness array is deeply frozen');
+  assert.ok(Object.isFrozen(res.witness[0]), 'Move objects are deeply frozen');
+
+  const workBefore = session.getWorkUnits();
+  const resRepeated = session.resumeWork(0);
+  const statusRepeated = session.getStatus();
+  assert.equal(session.getWorkUnits(), workBefore, 'Zero work spent on repeated inquiry');
+  assert.strictEqual(resRepeated, res, 'resumeWork returns exact cached instance without copy');
+  assert.strictEqual(statusRepeated, res, 'getStatus returns exact cached instance without copy');
+});
+
+test('resume legacy API: detached mutable output behavior is fully preserved', () => {
+  const pos = Position.fromFen('7k/4Q3/6K1/8/8/8/8/8 w - - 0 1');
+  const session = new CooperativeSearchSession(pos.snapshot(), 'w');
+  const resLegacy = session.resume(100);
+  assert.equal(resLegacy.status, 'reachable');
+  assert.ok(resLegacy.witness.length >= 1);
+
+  // Legacy returned witness is mutable and detached
+  const firstMove = resLegacy.witness[0] as MutableMoveRecord;
+  const originalFrom = firstMove.from;
+  firstMove.from = 999;
+  assert.equal(firstMove.from, 999, 'Legacy caller can mutate detached result');
+
+  // Session internal state and getStatus are protected
+  const status = session.getStatus();
+  if (status.status === 'reachable') {
+    assert.equal(status.witness[0].from, originalFrom, 'Session internal state remains intact');
+  }
+});
