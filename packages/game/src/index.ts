@@ -10,3 +10,6 @@ export * from './events';
 export { ENGINE_BOT_USER_IDS, isEngineBotUserId, isHumanGamePlayers } from './bot-accounts';
 export { Game, GameError, NOT_READY_MESSAGE, canMate } from './game';
 export type { GameState, GameStatus, CreateGameParams, NoShowVerdict } from './game';
+export * from './prepared-command';
+export * from './adjudication-proof';
+export * from './adjudication-lifecycle';
