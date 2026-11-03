@@ -251,6 +251,27 @@ export interface AdjudicationResolvedEvent {
   readonly clockCompletion?: AdjudicationClockCompletionDescriptor;
 }
 
+/**
+ * Adjudication clocks started (released) after stopped completion (Issue #124, Stage K).
+ * Replays deterministic release instant S, resuming applicable countdowns.
+ */
+export interface AdjudicationClocksStartedEvent {
+  readonly type: 'AdjudicationClocksStarted';
+  readonly gameId: string;
+  readonly clockPolicy: AdjudicationClockPolicy;
+  readonly rulesVersion: string;
+  readonly releaseRequestId: string;
+  readonly stopId: string;
+  readonly originatingOperationId: string;
+  readonly originatingResolvedSeq: number;
+  readonly completionHead: number;
+  readonly expectedHead: number;
+  readonly turnLineageId: string;
+  readonly side: Color;
+  readonly ply: number;
+  readonly at: number;
+}
+
 /** The discriminated union of all persisted game events. */
 export type GameEvent =
   | GameCreatedEvent
@@ -260,4 +281,5 @@ export type GameEvent =
   | DrawDeclinedEvent
   | GameEndedEvent
   | AdjudicationStartedEvent
-  | AdjudicationResolvedEvent;
+  | AdjudicationResolvedEvent
+  | AdjudicationClocksStartedEvent;

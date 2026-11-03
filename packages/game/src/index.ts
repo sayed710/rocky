@@ -38,3 +38,4 @@ export {
 } from './adjudication-controller';
 export * from './adjudication-clock-accounting';
 export * from './adjudication-completion';
+export * from './adjudication-release';

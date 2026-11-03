@@ -656,16 +656,25 @@ function assertUnstartedNonStoppedLineage(game: Game, prepared: PreparedOperatio
 
 function assertUnstartedClockMetadata(game: Game, prepared: PreparedOperation): void {
   assertUnstartedPolicy(game, prepared);
-  if (game.stoppedClock === null) {
-    assertUnstartedNonStoppedLineage(game, prepared);
+  if (game.stoppedClock !== null) {
+    if (prepared.parentStopId !== game.stoppedClock.stopId) {
+      throw new GameError(`Context game parentStopId does not match prepared: expected "${game.stoppedClock.stopId}", got "${String(prepared.parentStopId)}"`);
+    }
+    if (prepared.turnLineageId !== game.stoppedClock.turnLineageId) {
+      throw new GameError(`Context game turnLineageId does not match prepared: expected "${game.stoppedClock.turnLineageId}", got "${String(prepared.turnLineageId)}"`);
+    }
     return;
   }
-  if (prepared.parentStopId !== game.stoppedClock.stopId) {
-    throw new GameError(`Context game parentStopId does not match prepared: expected "${game.stoppedClock.stopId}", got "${String(prepared.parentStopId)}"`);
+  if (game.releasedClock !== null) {
+    if (prepared.parentStopId !== game.releasedClock.consumedStopId) {
+      throw new GameError(`Context game parentStopId does not match prepared: expected "${game.releasedClock.consumedStopId}", got "${String(prepared.parentStopId)}"`);
+    }
+    if (prepared.turnLineageId !== game.releasedClock.turnLineageId) {
+      throw new GameError(`Context game turnLineageId does not match prepared: expected "${game.releasedClock.turnLineageId}", got "${String(prepared.turnLineageId)}"`);
+    }
+    return;
   }
-  if (prepared.turnLineageId !== game.stoppedClock.turnLineageId) {
-    throw new GameError(`Context game turnLineageId does not match prepared: expected "${game.stoppedClock.turnLineageId}", got "${String(prepared.turnLineageId)}"`);
-  }
+  assertUnstartedNonStoppedLineage(game, prepared);
 }
 
 function assertContextMatchesGame(game: Game, snap: ReturnType<Game['snapshot']>, prepared: PreparedOperation): void {

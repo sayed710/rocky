@@ -20,6 +20,7 @@ import {
 import type {
   AdjudicationClockCompletionDescriptor,
   AdjudicationClockPolicy,
+  AdjudicationClocksStartedEvent,
   AdjudicationEffect,
   AdjudicationResolvedEvent,
   GameEndedEvent,
@@ -49,6 +50,7 @@ import {
   deriveTurnLineageId,
   type GameStoppedClockState,
 } from './adjudication-completion';
+import { validateStandaloneRecordedReleaseBatch } from './adjudication-release';
 
 /** Adjudication phase of the game aggregate. */
 export type AdjudicationPhase = 'idle' | 'proving' | 'settling' | 'ended';
@@ -194,6 +196,16 @@ export function validateAdjudicationAppendBatch(before: Game, batch: readonly Ga
   }
   if (before.phase === 'settling') {
     throw new GameError('Append batch cannot commit from an already settling state');
+  }
+
+  const releaseCount = batch.filter(e => e.type === 'AdjudicationClocksStarted').length;
+  if (releaseCount > 0) {
+    if (batch.length !== 1) {
+      throw new GameError('AdjudicationClocksStarted must occupy a standalone append batch; cannot be combined with other events or resolution effects');
+    }
+    const releaseEvent = batch[0] as AdjudicationClocksStartedEvent;
+    validateStandaloneRecordedReleaseBatch(before, releaseEvent);
+    return;
   }
 
   assertBatchCompletePlan(before, batch);
@@ -630,7 +642,12 @@ function assertResolvedIdentities(context: ResolutionContext, event: Adjudicatio
 
 function assertDeclaredLifecycleShape(effects: readonly AdjudicationEffect[]): void {
   for (const [idx, effect] of effects.entries()) {
-    if ((effect.type as string) === 'AdjudicationStarted' || (effect.type as string) === 'AdjudicationResolved' || (effect.type as string) === 'GameCreated') {
+    if (
+      (effect.type as string) === 'AdjudicationStarted' ||
+      (effect.type as string) === 'AdjudicationResolved' ||
+      (effect.type as string) === 'GameCreated' ||
+      (effect.type as string) === 'AdjudicationClocksStarted'
+    ) {
       throw new GameError(`Forbidden nested lifecycle event ${effect.type}`);
     }
     if (effect.type === 'GameEnded' && idx !== effects.length - 1) {

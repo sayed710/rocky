@@ -8,13 +8,15 @@
 
 import type { Color, Position, Variant } from '@chess-platform/core';
 import type { AdjudicationClockPolicy, GameEndedEvent } from './events';
-import { hasFlagged, validateTimestamp } from './clock';
+import { type TimeControl, hasFlagged, validateTimestamp } from './clock';
 import { Game, GameError, NOT_READY_MESSAGE } from './game';
 import {
+  type GameStoppedClockState,
   isChessClockApplicable,
   validateClockPolicy,
   validateIntegerPolicyInputs,
 } from './adjudication-completion';
+import type { GameReleasedClockState } from './adjudication-release';
 import {
   computeDisplayBalances,
   hasFlaggedAt,
@@ -167,6 +169,49 @@ export function clonePreparedOperation(op: PreparedOperation): PreparedOperation
   });
 }
 
+function resolveParentStopId(
+  stopped: GameStoppedClockState | null,
+  released: GameReleasedClockState | null,
+): string | null {
+  if (stopped !== null) return stopped.stopId;
+  if (released !== null) return released.consumedStopId;
+  return null;
+}
+
+function resolveActivePolicyInfo(
+  game: Game,
+  activePolicy: AdjudicationClockPolicy,
+  explicitPolicy?: AdjudicationClockPolicy,
+): { clockPolicy: AdjudicationClockPolicy; parentStopId: string | null; turnLineageId: string | null } {
+  if (explicitPolicy !== undefined && explicitPolicy !== activePolicy) {
+    throw new GameError(`Cannot downgrade or strip active managed clock policy "${activePolicy}"`);
+  }
+  const stopped = game.stoppedClock;
+  const released = game.releasedClock;
+  const currentOrigin = stopped ?? released;
+  const parentStopId = resolveParentStopId(stopped, released);
+  const turnLineageId = currentOrigin !== null ? currentOrigin.turnLineageId : null;
+  return { clockPolicy: activePolicy, parentStopId, turnLineageId };
+}
+
+function resolveInitialNoShowRemainder(game: Game): number | null {
+  if (game.stoppedClock !== null) return game.stoppedClock.basis.noShowRemainderMs;
+  if (game.releasedClock !== null) return game.releasedClock.basis.noShowRemainderMs;
+  const snap = game.snapshot();
+  if (snap.noShowAt !== null) return Math.max(0, snap.noShowAt - snap.createdAt);
+  return null;
+}
+
+function resolveExplicitPolicyInfo(
+  game: Game,
+  explicitPolicy: AdjudicationClockPolicy,
+): { clockPolicy: AdjudicationClockPolicy } {
+  validateClockPolicy(explicitPolicy);
+  const noShowRemainder = resolveInitialNoShowRemainder(game);
+  validateIntegerPolicyInputs(game.timeControl, game.clock.remaining, noShowRemainder);
+  return { clockPolicy: explicitPolicy };
+}
+
 function resolveCommandPolicy(
   game: Game,
   explicitPolicy?: AdjudicationClockPolicy,
@@ -177,25 +222,10 @@ function resolveCommandPolicy(
 } {
   const activePolicy = game.clockPolicy;
   if (activePolicy !== null && activePolicy !== undefined) {
-    if (explicitPolicy !== undefined && explicitPolicy !== activePolicy) {
-      throw new GameError(`Cannot downgrade or strip active managed clock policy "${activePolicy}"`);
-    }
-    return {
-      clockPolicy: activePolicy,
-      parentStopId: game.stoppedClock?.stopId ?? null,
-      turnLineageId: game.stoppedClock?.turnLineageId ?? null,
-    };
+    return resolveActivePolicyInfo(game, activePolicy, explicitPolicy);
   }
   if (explicitPolicy !== undefined) {
-    validateClockPolicy(explicitPolicy);
-    const snap = game.snapshot();
-    const noShowRemainder = game.stoppedClock?.basis.noShowRemainderMs ?? (snap.noShowAt !== null ? Math.max(0, snap.noShowAt - snap.createdAt) : null);
-    validateIntegerPolicyInputs(
-      game.timeControl,
-      game.clock.remaining,
-      noShowRemainder,
-    );
-    return { clockPolicy: explicitPolicy };
+    return resolveExplicitPolicyInfo(game, explicitPolicy);
   }
   return {};
 }
@@ -219,6 +249,18 @@ function assertValidOperationMetadata(operationId: string, rulesVersion: string,
   validateTimestamp(at, 'Suspension timestamp');
 }
 
+function assertPreparationCausalFloor(game: Game, at: number): void {
+  if (game.stoppedClock !== null && game.stoppedClock.basis.stoppedAt !== null) {
+    if (at < game.stoppedClock.basis.stoppedAt) {
+      throw new GameError(`Command timestamp ${at} cannot precede last stop observation ${game.stoppedClock.basis.stoppedAt}`);
+    }
+  } else if (game.releasedClock !== null) {
+    if (at < game.releasedClock.releasedAt) {
+      throw new GameError(`Command timestamp ${at} cannot precede active release floor ${game.releasedClock.releasedAt}`);
+    }
+  }
+}
+
 /** Resolves a legal move matching a UCI string on a Position, or throws GameError. */
 export function resolveLegalMove(pos: Position, uci: string): ReturnType<Position['legalMoves']>[number] {
   const legal = pos.legalMoves();
@@ -237,21 +279,61 @@ export interface PrepareMoveParams {
   readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
+function assertReleasedNoShowExpired(released: GameReleasedClockState | null, at: number): void {
+  if (released === null) return;
+  if (released.basis.noShowRemainderMs === 0) {
+    throw new GameError('Cannot play move: no-show deadline has expired');
+  }
+  if (released.noShowRunningSince !== null && released.basis.noShowRemainderMs !== null) {
+    if (at >= released.noShowRunningSince + released.basis.noShowRemainderMs) {
+      throw new GameError('Cannot play move: no-show deadline has expired');
+    }
+  }
+}
+
 function assertMoveReadiness(game: Game, at: number): void {
   if (game.stoppedClock) {
     if (game.stoppedClock.basis.noShowRemainderMs === 0) {
       throw new GameError('Cannot play move: no-show deadline has expired');
     }
-    if (game.awaitingReadiness) {
-      throw new GameError(NOT_READY_MESSAGE);
-    }
-    return;
-  }
-  if (game.noShowVerdict(at).kind === 'expire') {
+  } else if (game.releasedClock) {
+    assertReleasedNoShowExpired(game.releasedClock, at);
+  } else if (game.noShowVerdict(at).kind === 'expire') {
     throw new GameError('Cannot play move: no-show deadline has expired');
   }
   if (game.awaitingReadiness) {
     throw new GameError(NOT_READY_MESSAGE);
+  }
+}
+
+function assertReleasedClockNotExpired(
+  rel: GameReleasedClockState,
+  mover: Color,
+  at: number,
+  tc: TimeControl,
+): void {
+  if (rel.isChessApplicable) {
+    const dispBalances = computeDisplayBalances(rel.basis, at, tc);
+    if (tc.kind !== 'unlimited' && dispBalances[mover] <= 0) {
+      throw new GameError(`Cannot play move: clock expired for ${mover}`);
+    }
+    return;
+  }
+  if (tc.kind !== 'unlimited' && rel.basis.turnBaseBalances[mover] <= 0) {
+    throw new GameError(`Cannot play move: clock expired for ${mover}`);
+  }
+}
+
+function assertMoveClockNotExpired(game: Game, mover: Color, at: number, snap: ReturnType<Game['snapshot']>): void {
+  if (game.stoppedClock) {
+    const dispBalances = computeDisplayBalances(game.stoppedClock.basis, at, snap.timeControl);
+    if (snap.timeControl.kind !== 'unlimited' && dispBalances[mover] <= 0) {
+      throw new GameError(`Cannot play move: clock expired for ${mover}`);
+    }
+  } else if (game.releasedClock) {
+    assertReleasedClockNotExpired(game.releasedClock, mover, at, snap.timeControl);
+  } else if (hasFlagged(snap.clock, mover, at, snap.timeControl)) {
+    throw new GameError(`Cannot play move: clock expired for ${mover}`);
   }
 }
 
@@ -262,19 +344,12 @@ function assertMoveReadiness(game: Game, at: number): void {
 export function prepareMove(game: Game, params: PrepareMoveParams): PreparedOperation {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  assertPreparationCausalFloor(game, params.at);
   assertMoveReadiness(game, params.at);
 
   const snap = game.snapshot();
   const mover = snap.position.turn;
-
-  if (game.stoppedClock) {
-    const dispBalances = computeDisplayBalances(game.stoppedClock.basis, params.at, snap.timeControl);
-    if (snap.timeControl.kind !== 'unlimited' && dispBalances[mover] <= 0) {
-      throw new GameError(`Cannot play move: clock expired for ${mover}`);
-    }
-  } else if (hasFlagged(snap.clock, mover, params.at, snap.timeControl)) {
-    throw new GameError(`Cannot play move: clock expired for ${mover}`);
-  }
+  assertMoveClockNotExpired(game, mover, params.at, snap);
 
   let moveObj;
   try {
@@ -324,6 +399,7 @@ export interface PrepareResignParams {
 export function prepareResign(game: Game, params: PrepareResignParams): PreparedOperation {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  assertPreparationCausalFloor(game, params.at);
   if (params.color !== 'w' && params.color !== 'b') {
     throw new GameError(`Invalid resigning color ${JSON.stringify(params.color)}`);
   }
@@ -354,6 +430,7 @@ export interface PrepareDrawActionParams {
 export function prepareDrawOffer(game: Game, params: PrepareDrawActionParams): PreparedOperation {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  assertPreparationCausalFloor(game, params.at);
   if (params.color !== 'w' && params.color !== 'b') {
     throw new GameError(`Invalid draw offer color ${JSON.stringify(params.color)}`);
   }
@@ -378,6 +455,7 @@ export function prepareDrawOffer(game: Game, params: PrepareDrawActionParams): P
 export function prepareDrawAccept(game: Game, params: PrepareDrawActionParams): PreparedOperation {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  assertPreparationCausalFloor(game, params.at);
   const snap = game.snapshot();
   const opponent: Color = params.color === 'w' ? 'b' : 'w';
   if (snap.drawOffer !== opponent) {
@@ -400,6 +478,7 @@ export function prepareDrawAccept(game: Game, params: PrepareDrawActionParams): 
 export function prepareDrawDecline(game: Game, params: PrepareDrawActionParams): PreparedOperation {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  assertPreparationCausalFloor(game, params.at);
   const snap = game.snapshot();
   if (snap.drawOffer === null) {
     throw new GameError('No draw offer to decline');
@@ -430,6 +509,7 @@ export interface PrepareAbortParams {
 export function prepareAbort(game: Game, params: PrepareAbortParams): PreparedOperation {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  assertPreparationCausalFloor(game, params.at);
   const snap = game.snapshot();
   if (snap.ply >= 2) {
     throw new GameError('Game can no longer be aborted');
@@ -457,17 +537,23 @@ export interface PrepareReadyParams {
   readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
+function isReadyLate(game: Game, at: number): boolean {
+  if (game.stoppedClock !== null) {
+    return game.stoppedClock.basis.noShowRemainderMs === 0;
+  }
+  if (game.releasedClock !== null && game.releasedClock.basis.noShowRemainderMs === 0) {
+    return true;
+  }
+  return game.noShowDeadline !== null && at >= game.noShowDeadline;
+}
+
 function classifyReadyNoop(game: Game, color: Color, at: number): ReadyNoopReason | null {
   const snap = game.snapshot();
   if (snap.status.over) return 'game_over';
   if (snap.source === null) return 'unsourced';
   if (snap.ply > 0) return 'post_first_move';
   if (snap.ready[color] === true) return 'already_ready';
-  if (game.stoppedClock) {
-    if (game.stoppedClock.basis.noShowRemainderMs === 0) return 'late';
-  } else if (game.noShowDeadline !== null && at >= game.noShowDeadline) {
-    return 'late';
-  }
+  if (isReadyLate(game, at)) return 'late';
   return null;
 }
 
@@ -483,6 +569,7 @@ export function prepareReady(game: Game, params: PrepareReadyParams): PrepareRea
   if (noopReason !== null) {
     return { kind: 'noop', reason: noopReason };
   }
+  assertPreparationCausalFloor(game, params.at);
   const snap = game.snapshot();
   const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
@@ -508,24 +595,41 @@ export interface PrepareFlagExpiryParams {
   readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
+function isManagedGameOrParam(game: Game, paramPolicy?: AdjudicationClockPolicy): boolean {
+  if (game.clockPolicy !== null || paramPolicy !== undefined) return true;
+  return game.stoppedClock !== null || game.releasedClock !== null;
+}
+
+function assertFlagHasFallen(game: Game, flagged: Color, at: number, snap: ReturnType<Game['snapshot']>): void {
+  if (game.stoppedClock) {
+    if (!hasFlaggedAt(game.stoppedClock.basis, at, snap.timeControl)) {
+      throw new GameError(`Flag has not fallen for ${flagged} at ${at}`);
+    }
+    return;
+  }
+  if (game.releasedClock) {
+    if (!game.releasedClock.isChessApplicable || !hasFlaggedAt(game.releasedClock.basis, at, snap.timeControl)) {
+      throw new GameError(`Flag has not fallen for ${flagged} at ${at}`);
+    }
+    return;
+  }
+  if (!hasFlagged(snap.clock, flagged, at, snap.timeControl)) {
+    throw new GameError(`Flag has not fallen for ${flagged} at ${at}`);
+  }
+}
+
 export function prepareFlagExpiry(game: Game, params: PrepareFlagExpiryParams): PreparedOperation {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  assertPreparationCausalFloor(game, params.at);
   const snap = game.snapshot();
   if (snap.position.turn !== params.flagged) {
     throw new GameError(`Flag request invalid: ${params.flagged} is not side to move`);
   }
-  const isManaged = game.clockPolicy !== null || params.clockPolicy !== undefined || game.stoppedClock !== null;
-  if (isManaged && !isChessClockApplicable(snap.source, snap.ply, snap.timeControl)) {
+  if (isManagedGameOrParam(game, params.clockPolicy) && !isChessClockApplicable(snap.source, snap.ply, snap.timeControl)) {
     throw new GameError(`Chess clock flag expiry is not applicable for ${params.flagged} at ply ${snap.ply}`);
   }
-  if (game.stoppedClock) {
-    if (!hasFlaggedAt(game.stoppedClock.basis, params.at, snap.timeControl)) {
-      throw new GameError(`Flag has not fallen for ${params.flagged} at ${params.at}`);
-    }
-  } else if (!hasFlagged(snap.clock, params.flagged, params.at, snap.timeControl)) {
-    throw new GameError(`Flag has not fallen for ${params.flagged} at ${params.at}`);
-  }
+  assertFlagHasFallen(game, params.flagged, params.at, snap);
   const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     operationId: params.operationId,
@@ -612,6 +716,7 @@ export interface PrepareNoShowExpiryParams {
 export function prepareNoShowExpiry(game: Game, params: PrepareNoShowExpiryParams): PreparedOperation {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  assertPreparationCausalFloor(game, params.at);
   const verdict = game.noShowVerdict(params.at);
   if (verdict.kind !== 'expire') {
     throw new GameError(`No-show expiry refused: ${verdict.kind}`);
@@ -735,6 +840,7 @@ export function prepareAuthoritativeCommand(
 ): AuthoritativeAdmissionResult {
   assertOngoingAndNotBlocked(game);
   assertValidOperationMetadata(ctx.operationId, ctx.rulesVersion, ctx.at);
+  assertPreparationCausalFloor(game, ctx.at);
   if (ctx.color !== 'w' && ctx.color !== 'b') {
     throw new GameError(`Invalid player color ${JSON.stringify(ctx.color)}`);
   }

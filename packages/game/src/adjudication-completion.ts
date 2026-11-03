@@ -24,12 +24,19 @@ import {
   freezeClockBasis,
   validateTimeControl,
 } from './adjudication-clock-accounting';
+import {
+  type GameReleasedClockState,
+  freezeReleasedClockBasis,
+} from './adjudication-release';
 
 /** State record capturing a game's stopped-turn clock accounting basis and lineage. */
 export interface GameStoppedClockState {
   readonly basis: AdjudicationClockBasis;
   readonly stopId: string;
   readonly originatingOperationId: string;
+  readonly originatingResolvedSeq: number;
+  readonly startedSeq: number;
+  readonly rulesVersion: string;
   readonly turnLineageId: string;
   readonly parentStopId: string | null;
   readonly completionHead: number;
@@ -263,6 +270,9 @@ export function cloneStoppedClockState(sc: GameStoppedClockState | null): GameSt
     basis: clonedBasis,
     stopId: sc.stopId,
     originatingOperationId: sc.originatingOperationId,
+    originatingResolvedSeq: sc.originatingResolvedSeq ?? 0,
+    startedSeq: sc.startedSeq ?? 0,
+    rulesVersion: sc.rulesVersion ?? '',
     turnLineageId: sc.turnLineageId,
     parentStopId: sc.parentStopId,
     completionHead: sc.completionHead,
@@ -273,6 +283,7 @@ export function cloneStoppedClockState(sc: GameStoppedClockState | null): GameSt
 export interface InitStartedBasisParams {
   readonly clockPolicy?: AdjudicationClockPolicy;
   readonly stoppedClock: GameStoppedClockState | null;
+  readonly releasedClock?: GameReleasedClockState | null;
   readonly timeControl: TimeControl;
   readonly turnStartedAt: number | null;
   readonly remainingBalances: { readonly w: number; readonly b: number };
@@ -291,6 +302,9 @@ export function deriveStartedBasis(params: InitStartedBasisParams): Adjudication
 
   if (params.stoppedClock !== null) {
     return freezeClockBasis(params.stoppedClock.basis, params.atA, params.timeControl);
+  }
+  if (params.releasedClock !== null && params.releasedClock !== undefined) {
+    return freezeReleasedClockBasis(params.releasedClock, params.atA, params.timeControl);
   }
 
   // First managed operation on game: create initial basis

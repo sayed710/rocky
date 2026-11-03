@@ -36,6 +36,7 @@ import {
 import { adjudicateTimeoutPossibility } from './timeout-adjudication';
 import type {
   AdjudicationClockPolicy,
+  AdjudicationClocksStartedEvent,
   AdjudicationEffect,
   AdjudicationResolvedEvent,
   AdjudicationStartedEvent,
@@ -70,6 +71,7 @@ import {
 import {
   applyCompletedTurn,
   computeDisplayBalances,
+  computeFlagDeadline,
   createAdjudicationClockBasis,
   getClockAccountingSnapshot,
   hasFlaggedAt,
@@ -86,6 +88,18 @@ import {
   validateIntegerPolicyInputs,
   type GameStoppedClockState,
 } from './adjudication-completion';
+import {
+  cloneReleasedClockState,
+  cloneReleaseReceipt,
+  cloneReleaseReceiptsMap,
+  validateRecordedReleaseEvent,
+  buildReleasedClockState,
+  getActiveCausalBasis,
+  type AdjudicationReleaseReceipt,
+  type GameReleasedClockState,
+} from './adjudication-release';
+
+const REPLAY_TOKEN = Symbol('REPLAY_TOKEN');
 
 export { FOLD_STORED, GameError };
 export { repetitionKey } from '@chess-platform/core';
@@ -146,6 +160,8 @@ export interface GameState {
   readonly lastResolutionAt: number | null;
   readonly clockPolicy: AdjudicationClockPolicy | null;
   readonly stoppedClock: GameStoppedClockState | null;
+  readonly releasedClock: GameReleasedClockState | null;
+  readonly releaseReceipts: ReadonlyMap<string, AdjudicationReleaseReceipt>;
   readonly releaseNeeded: boolean;
 }
 
@@ -316,6 +332,8 @@ function isolateState(state: GameState): GameState {
     repetition: new Map(state.repetition),
     adjudication: state.adjudication ? deepClonePendingState(state.adjudication) : null,
     stoppedClock: cloneStoppedClockState(state.stoppedClock),
+    releasedClock: cloneReleasedClockState(state.releasedClock),
+    releaseReceipts: cloneReleaseReceiptsMap(state.releaseReceipts),
     clockPolicy: state.clockPolicy,
     releaseNeeded: state.releaseNeeded,
   });
@@ -336,8 +354,66 @@ function isolateSnapshot(state: GameState): GameState {
     repetition: freezeMap(new Map(state.repetition)),
     adjudication: state.adjudication ? deepClonePendingState(state.adjudication) : null,
     stoppedClock: cloneStoppedClockState(state.stoppedClock),
+    releasedClock: cloneReleasedClockState(state.releasedClock),
+    releaseReceipts: freezeMap(cloneReleaseReceiptsMap(state.releaseReceipts)),
     clockPolicy: state.clockPolicy,
     releaseNeeded: state.releaseNeeded,
+  });
+}
+
+function isNoShowSuppressedInPhase(s: GameState): boolean {
+  return s.phase === 'proving' || s.phase === 'settling' || s.phase === 'ended' || s.status.over;
+}
+
+function resolveManagedNoShowDeadline(s: GameState): number | null {
+  if (s.stoppedClock !== null || isNoShowSuppressedInPhase(s)) {
+    return null;
+  }
+  const rc = s.releasedClock;
+  if (rc === null) return s.noShowAt;
+  if (rc.noShowRunningSince === null || rc.basis.noShowRemainderMs === null) {
+    return null;
+  }
+  return rc.noShowRunningSince + rc.basis.noShowRemainderMs;
+}
+
+function resolveLegacyNoShowDeadline(s: GameState): number | null {
+  if (s.phase === 'proving' || s.phase === 'settling' || s.stoppedClock !== null) {
+    return null;
+  }
+  return s.noShowAt;
+}
+
+function getStoppedAccountingSnapshot(
+  stopped: GameStoppedClockState,
+  timeControl: TimeControl,
+  createdAt: number,
+  at?: number,
+): ClockAccountingSnapshot {
+  const basis = stopped.basis;
+  const now = at ?? basis.stoppedAt ?? createdAt;
+  return getClockAccountingSnapshot(basis, now, timeControl);
+}
+
+function getReleasedAccountingSnapshot(
+  rel: GameReleasedClockState,
+  timeControl: TimeControl,
+  at?: number,
+): ClockAccountingSnapshot {
+  const now = at ?? rel.releasedAt;
+  const snap = getClockAccountingSnapshot(rel.basis, now, timeControl);
+  if (rel.isChessApplicable) {
+    return snap;
+  }
+  const noShowDl = rel.noShowRunningSince !== null && rel.basis.noShowRemainderMs !== null
+    ? rel.noShowRunningSince + rel.basis.noShowRemainderMs
+    : null;
+  return Object.freeze({
+    ...snap,
+    flagDeadline: null,
+    flagged: false,
+    noShowDeadline: noShowDl,
+    isRunning: rel.noShowRunningSince !== null,
   });
 }
 
@@ -384,7 +460,7 @@ export class Game {
     }
     let state: GameState | null = null;
     for (const event of events) {
-      state = Game.reduce(state, event);
+      state = Game.reduce(state, event, REPLAY_TOKEN);
     }
     return new Game(state as GameState);
   }
@@ -423,26 +499,43 @@ export class Game {
   get noShowDeadline(): number | null {
     const s = this.state;
     if (s.clockPolicy === 'observed-release-v1') {
-      if (s.stoppedClock !== null || s.phase === 'settling' || s.phase === 'proving' || s.status.over || s.phase === 'ended') {
-        return null;
-      }
-    } else if (s.phase === 'proving' || s.phase === 'settling' || s.stoppedClock !== null) {
-      return null;
+      return resolveManagedNoShowDeadline(s);
     }
-    return s.noShowAt;
+    return resolveLegacyNoShowDeadline(s);
   }
   get phase(): AdjudicationPhase { return this.state.phase; }
   get isBlocked(): boolean { return this.state.phase === 'proving' || this.state.phase === 'settling'; }
 
   get clockPolicy(): AdjudicationClockPolicy | null { return this.state.clockPolicy; }
   get stoppedClock(): GameStoppedClockState | null { return cloneStoppedClockState(this.state.stoppedClock); }
+  get releasedClock(): GameReleasedClockState | null { return cloneReleasedClockState(this.state.releasedClock); }
   get releaseNeeded(): boolean { return this.state.releaseNeeded; }
 
+  get releaseReceipts(): readonly AdjudicationReleaseReceipt[] {
+    return Object.freeze(Array.from(this.state.releaseReceipts.values()).map(r => cloneReleaseReceipt(r)));
+  }
+
+  getReleaseReceipt(requestId: string): AdjudicationReleaseReceipt | null {
+    const r = this.state.releaseReceipts.get(requestId);
+    return r ? cloneReleaseReceipt(r) : null;
+  }
+
+  isStopConsumed(stopId: string): boolean {
+    for (const r of this.state.releaseReceipts.values()) {
+      if (r.stopId === stopId) return true;
+    }
+    return false;
+  }
+
   clockAccountingSnapshot(at?: number): ClockAccountingSnapshot | null {
-    if (!this.state.stoppedClock) return null;
-    const basis = this.state.stoppedClock.basis;
-    const now = at ?? basis.stoppedAt ?? this.state.createdAt;
-    return getClockAccountingSnapshot(basis, now, this.state.timeControl);
+    const s = this.state;
+    if (s.stoppedClock !== null) {
+      return getStoppedAccountingSnapshot(s.stoppedClock, s.timeControl, s.createdAt, at);
+    }
+    if (s.releasedClock !== null) {
+      return getReleasedAccountingSnapshot(s.releasedClock, s.timeControl, at);
+    }
+    return null;
   }
 
   get fen(): string {
@@ -451,7 +544,12 @@ export class Game {
 
   get flagDeadline(): number | null {
     const s = this.state;
-    if (s.status.over || s.stoppedClock !== null || s.ply === 0) return null;
+    if (s.status.over || s.stoppedClock !== null) return null;
+    if (s.releasedClock !== null) {
+      if (!s.releasedClock.isChessApplicable) return null;
+      return computeFlagDeadline(s.releasedClock.basis, s.timeControl);
+    }
+    if (s.ply === 0) return null;
     return flagDeadline(s.clock, s.position.turn, s.timeControl);
   }
 
@@ -461,6 +559,10 @@ export class Game {
     if (s.stoppedClock !== null) {
       if (!isChessClockApplicable(s.source, s.ply, s.timeControl)) return false;
       return hasFlaggedAt(s.stoppedClock.basis, at, s.timeControl);
+    }
+    if (s.releasedClock !== null) {
+      if (!s.releasedClock.isChessApplicable) return false;
+      return hasFlaggedAt(s.releasedClock.basis, at, s.timeControl);
     }
     if (s.ply === 0) return false;
     return hasFlagged(s.clock, s.position.turn, at, s.timeControl);
@@ -840,7 +942,7 @@ export class Game {
         throw new GameError(`${event.type} after GameEnded`);
       }
       if (event.type !== 'MovePlayed' || state === null) {
-        state = Game.reduce(state, event);
+        state = Game.reduce(state, event, REPLAY_TOKEN);
         continue;
       }
       assertStoredMoveAllowed(state, event);
@@ -873,7 +975,7 @@ export class Game {
     };
   }
 
-  private static reduce(state: GameState | null, event: GameEvent): GameState {
+  private static reduce(state: GameState | null, event: GameEvent, replayToken?: symbol): GameState {
     assertLifecyclePreconditions(state, event);
 
     switch (event.type) {
@@ -889,14 +991,30 @@ export class Game {
         return reduceDrawDeclined(state as GameState, event);
       case 'GameEnded':
         return reduceGameEnded(state as GameState, event);
-      case 'AdjudicationStarted':
-        return reduceAdjudicationStarted(state as GameState, event);
-      case 'AdjudicationResolved':
-        return reduceAdjudicationResolved(state as GameState, event);
       default:
-        throw new GameError(`Unknown event type ${JSON.stringify((event as { type: unknown }).type)}`);
+        return reduceAdjudicationEvent(state as GameState, event, replayToken);
     }
   }
+}
+
+function reduceAdjudicationEvent(
+  state: GameState,
+  event: GameEvent,
+  replayToken?: symbol,
+): GameState {
+  if (event.type === 'AdjudicationStarted') {
+    return reduceAdjudicationStarted(state, event);
+  }
+  if (event.type === 'AdjudicationResolved') {
+    return reduceAdjudicationResolved(state, event);
+  }
+  if (event.type === 'AdjudicationClocksStarted') {
+    if (replayToken !== REPLAY_TOKEN) {
+      throw new GameError('AdjudicationClocksStarted cannot be submitted directly via live Game.withEvents; replay/reconstruction route required');
+    }
+    return reduceAdjudicationClocksStarted(state, event);
+  }
+  throw new GameError(`Unknown event type ${JSON.stringify((event as { type: unknown }).type)}`);
 }
 
 function finalizeLegacyCompletion(
@@ -958,6 +1076,8 @@ function finalizeManagedTerminal(
     clock: { ...state.clock, turnStartedAt: null },
     noShowAt: null,
     stoppedClock: null,
+    releasedClock: null,
+    releaseReceipts: state.releaseReceipts,
     releaseNeeded: false,
   };
 }
@@ -1028,6 +1148,9 @@ function finalizeManagedCompletion(
     basis: nextBasis,
     stopId,
     originatingOperationId: adjudication.operationId,
+    originatingResolvedSeq: resolvedSeq,
+    startedSeq: adjudication.startedSeq,
+    rulesVersion: adjudication.rulesVersion,
     turnLineageId,
     parentStopId: adjudication.prepared.parentStopId ?? null,
     completionHead,
@@ -1049,6 +1172,8 @@ function finalizeManagedCompletion(
     clock: exposedClock,
     clockPolicy: 'observed-release-v1',
     stoppedClock,
+    releasedClock: null,
+    releaseReceipts: state.releaseReceipts,
     releaseNeeded,
   };
 }
@@ -1099,6 +1224,19 @@ function resolveStoredMovePosition(
   }
 }
 
+function assertIdlePhasePreconditions(state: GameState, event: GameEvent): void {
+  if (event.type === 'AdjudicationResolved') {
+    throw new GameError('AdjudicationResolved without matching AdjudicationStarted');
+  }
+  if (
+    state.clockPolicy === 'observed-release-v1' &&
+    event.type !== 'AdjudicationStarted' &&
+    event.type !== 'AdjudicationClocksStarted'
+  ) {
+    throw new GameError(`Raw ${event.type} cannot bypass managed adjudication route when clock policy is observed-release-v1`);
+  }
+}
+
 function assertLifecyclePreconditions(state: GameState | null, event: GameEvent): void {
   if (state === null) return;
   if (state.status.over) {
@@ -1111,17 +1249,16 @@ function assertLifecyclePreconditions(state: GameState | null, event: GameEvent)
     assertSettlingEventAllowed(state, event);
   }
   if (state.phase === 'idle') {
-    if (event.type === 'AdjudicationResolved') {
-      throw new GameError('AdjudicationResolved without matching AdjudicationStarted');
-    }
-    if (state.clockPolicy === 'observed-release-v1' && event.type !== 'AdjudicationStarted') {
-      throw new GameError(`Raw ${event.type} cannot bypass managed adjudication route when clock policy is observed-release-v1`);
-    }
+    assertIdlePhasePreconditions(state, event);
   }
 }
 
 function assertSettlingEventAllowed(state: GameState, event: GameEvent): void {
-  if (event.type === 'AdjudicationStarted' || event.type === 'AdjudicationResolved') {
+  if (
+    event.type === 'AdjudicationStarted' ||
+    event.type === 'AdjudicationResolved' ||
+    event.type === 'AdjudicationClocksStarted'
+  ) {
     throw new GameError(`${event.type} forbidden while settling adjudication effects`);
   }
   const adjudication = state.adjudication;
@@ -1167,6 +1304,8 @@ function reduceGameCreated(state: GameState | null, event: GameCreatedEvent): Ga
     lastResolutionAt: null,
     clockPolicy: null,
     stoppedClock: null,
+    releasedClock: null,
+    releaseReceipts: Object.freeze(new Map()),
     releaseNeeded: false,
   };
 }
@@ -1228,19 +1367,29 @@ function reduceGameEnded(state: GameState, event: GameEndedEvent): GameState {
   return intermediate;
 }
 
-function getActiveCausalBasis(state: GameState): number {
-  let basis = state.createdAt;
-  if (state.clock.turnStartedAt !== null && state.clock.turnStartedAt > basis) {
-    basis = state.clock.turnStartedAt;
-  }
-  if (state.lastResolutionAt !== null && state.lastResolutionAt !== undefined && state.lastResolutionAt > basis) {
-    basis = state.lastResolutionAt;
-  }
-  if (state.moves.length > 0) {
-    const lastMoveAt = state.moves[state.moves.length - 1].at;
-    if (lastMoveAt > basis) basis = lastMoveAt;
-  }
-  return basis;
+function reduceAdjudicationClocksStarted(state: GameState, event: AdjudicationClocksStartedEvent): GameState {
+  const causalFloor = getActiveCausalBasis(state);
+  const isChessApplicable = validateRecordedReleaseEvent(state, event, causalFloor);
+  const { releasedClock, receipt } = buildReleasedClockState(state, event, isChessApplicable);
+  const nextReceipts = new Map(state.releaseReceipts);
+  nextReceipts.set(event.releaseRequestId, receipt);
+
+  const dispBalances = computeDisplayBalances(releasedClock.basis, event.at, state.timeControl);
+  const exposedClock: ClockState = Object.freeze({
+    remaining: dispBalances,
+    turnStartedAt: null,
+  });
+
+  return {
+    ...state,
+    stoppedClock: null,
+    releasedClock,
+    releaseReceipts: Object.freeze(nextReceipts),
+    releaseNeeded: false,
+    clock: exposedClock,
+    eventSequence: state.eventSequence + 1,
+    lastResolutionAt: event.at,
+  };
 }
 
 function assertStartedTopLevel(state: GameState, event: AdjudicationStartedEvent): void {
@@ -1289,12 +1438,66 @@ function assertUnstoppedMoveReadiness(state: GameState, at: number): void {
   }
 }
 
+function assertReleasedMoveReadiness(state: GameState, at: number): void {
+  const rel = state.releasedClock!;
+  if (rel.basis.noShowRemainderMs === 0) {
+    throw new GameError('Cannot play move: no-show deadline has expired');
+  }
+  if (rel.noShowRunningSince !== null && rel.basis.noShowRemainderMs !== null) {
+    if (at >= rel.noShowRunningSince + rel.basis.noShowRemainderMs) {
+      throw new GameError('Cannot play move: no-show deadline has expired');
+    }
+  }
+  if (state.source !== null && state.ply === 0 && (!state.ready.w || !state.ready.b)) {
+    throw new GameError(NOT_READY_MESSAGE);
+  }
+}
+
 function assertStartedMoveReadiness(state: GameState, at: number): void {
   if (state.stoppedClock !== null) {
     assertStoppedMoveReadiness(state);
     return;
   }
+  if (state.releasedClock !== null) {
+    assertReleasedMoveReadiness(state, at);
+    return;
+  }
   assertUnstoppedMoveReadiness(state, at);
+}
+
+function assertReleasedMoveBalanceNotExpired(
+  rc: GameReleasedClockState,
+  tc: TimeControl,
+  mover: Color,
+  at: number,
+): void {
+  if (rc.isChessApplicable) {
+    const dispBalances = computeDisplayBalances(rc.basis, at, tc);
+    if (tc.kind !== 'unlimited' && dispBalances[mover] <= 0) {
+      throw new GameError(`Cannot play move: clock expired for ${mover}`);
+    }
+    return;
+  }
+  if (tc.kind !== 'unlimited' && rc.basis.turnBaseBalances[mover] <= 0) {
+    throw new GameError(`Cannot play move: clock expired for ${mover}`);
+  }
+}
+
+function assertMoveBalanceNotExpired(state: GameState, mover: Color, at: number): void {
+  if (state.stoppedClock !== null) {
+    const dispBalances = computeDisplayBalances(state.stoppedClock.basis, at, state.timeControl);
+    if (state.timeControl.kind !== 'unlimited' && dispBalances[mover] <= 0) {
+      throw new GameError(`Cannot play move: clock expired for ${mover}`);
+    }
+    return;
+  }
+  if (state.releasedClock !== null) {
+    assertReleasedMoveBalanceNotExpired(state.releasedClock, state.timeControl, mover, at);
+    return;
+  }
+  if (hasFlagged(state.clock, mover, at, state.timeControl)) {
+    throw new GameError(`Cannot play move: clock expired for ${mover}`);
+  }
 }
 
 function assertStartedMoveAdmission(state: GameState, op: PreparedOperation): void {
@@ -1303,14 +1506,7 @@ function assertStartedMoveAdmission(state: GameState, op: PreparedOperation): vo
     throw new GameError(`Move mover mismatch: expected ${state.position.turn}, got ${intent.mover}`);
   }
   assertStartedMoveReadiness(state, op.at);
-  if (state.stoppedClock !== null) {
-    const dispBalances = computeDisplayBalances(state.stoppedClock.basis, op.at, state.timeControl);
-    if (state.timeControl.kind !== 'unlimited' && dispBalances[intent.mover] <= 0) {
-      throw new GameError(`Cannot play move: clock expired for ${intent.mover}`);
-    }
-  } else if (hasFlagged(state.clock, intent.mover, op.at, state.timeControl)) {
-    throw new GameError(`Cannot play move: clock expired for ${intent.mover}`);
-  }
+  assertMoveBalanceNotExpired(state, intent.mover, op.at);
   const moveObj = resolveStartedMove(state.position, intent.uci);
   const san = state.position.toSan(moveObj);
   if (intent.san !== san) {
@@ -1379,9 +1575,30 @@ function checkStoppedNoShowVerdict(s: GameState, at: number): NoShowVerdict {
   return { kind: 'not_due' };
 }
 
+function checkReleasedNoShowVerdict(s: GameState, at: number, isBlocked: boolean): NoShowVerdict {
+  const rel = s.releasedClock;
+  if (!rel) return { kind: 'not_applicable' };
+  if (rel.basis.noShowRemainderMs === null || s.status.over || s.ply > 0) {
+    return { kind: 'not_applicable' };
+  }
+  if (rel.basis.noShowRemainderMs === 0) {
+    return resolveNoShowEndingForSource(s.source, s.ready, at);
+  }
+  if (rel.noShowRunningSince !== null) {
+    const deadline = rel.noShowRunningSince + rel.basis.noShowRemainderMs;
+    if (!isBlocked && at >= deadline) {
+      return resolveNoShowEndingForSource(s.source, s.ready, at);
+    }
+  }
+  return { kind: 'not_due' };
+}
+
 function checkStateNoShowVerdict(s: GameState, at: number, isBlocked: boolean = false): NoShowVerdict {
   if (s.stoppedClock !== null) {
     return checkStoppedNoShowVerdict(s, at);
+  }
+  if (s.releasedClock !== null) {
+    return checkReleasedNoShowVerdict(s, at, isBlocked);
   }
   if (!checkNoShowApplicable(s, isBlocked, at)) {
     return (s.noShowAt === null || s.status.over || s.ply > 0)
@@ -1391,11 +1608,26 @@ function checkStateNoShowVerdict(s: GameState, at: number, isBlocked: boolean = 
   return resolveNoShowEndingForSource(s.source, s.ready, at);
 }
 
+function assertReleasedReadyDeadline(rel: GameReleasedClockState, at: number): void {
+  if (rel.basis.noShowRemainderMs === 0) {
+    throw new GameError('Cannot mark ready after no-show deadline');
+  }
+  if (rel.noShowRunningSince !== null && rel.basis.noShowRemainderMs !== null) {
+    if (at >= rel.noShowRunningSince + rel.basis.noShowRemainderMs) {
+      throw new GameError('Cannot mark ready after no-show deadline');
+    }
+  }
+}
+
 function assertReadyDeadlineValid(state: GameState, at: number): void {
   if (state.stoppedClock !== null) {
     if (state.stoppedClock.basis.noShowRemainderMs === 0) {
       throw new GameError('Cannot mark ready after no-show deadline');
     }
+    return;
+  }
+  if (state.releasedClock !== null) {
+    assertReleasedReadyDeadline(state.releasedClock, at);
     return;
   }
   if (state.noShowAt !== null && at >= state.noShowAt) {
@@ -1464,18 +1696,32 @@ function assertStartedPregameAdmission(state: GameState, intent: PreparedIntent,
   }
 }
 
-function assertStartedTimeoutAdmission(state: GameState, intent: PreparedIntent, at: number, tc: TimeControl): void {
-  if (intent.kind !== 'expireFlag') return;
-  if (intent.flagged !== state.position.turn) throw new GameError(`Flagged color ${intent.flagged} is not side to move`);
-  const isManaged = state.clockPolicy === 'observed-release-v1' || state.stoppedClock !== null;
-  if (isManaged && !isChessClockApplicable(state.source, state.ply, tc)) {
-    throw new GameError(`Chess clock flag expiry is not applicable for ${intent.flagged} at ply ${state.ply}`);
+function assertManagedFlagFallen(state: GameState, flagged: Color, at: number, tc: TimeControl): void {
+  if (!isChessClockApplicable(state.source, state.ply, tc)) {
+    throw new GameError(`Chess clock flag expiry is not applicable for ${flagged} at ply ${state.ply}`);
   }
   if (state.stoppedClock !== null) {
     if (!hasFlaggedAt(state.stoppedClock.basis, at, tc)) {
-      throw new GameError(`Flag has not fallen for ${intent.flagged} at ${at}`);
+      throw new GameError(`Flag has not fallen for ${flagged} at ${at}`);
     }
-  } else if (!hasFlagged(state.clock, intent.flagged, at, tc)) {
+    return;
+  }
+  if (state.releasedClock !== null) {
+    if (!state.releasedClock.isChessApplicable || !hasFlaggedAt(state.releasedClock.basis, at, tc)) {
+      throw new GameError(`Flag has not fallen for ${flagged} at ${at}`);
+    }
+  }
+}
+
+function assertStartedTimeoutAdmission(state: GameState, intent: PreparedIntent, at: number, tc: TimeControl): void {
+  if (intent.kind !== 'expireFlag') return;
+  if (intent.flagged !== state.position.turn) throw new GameError(`Flagged color ${intent.flagged} is not side to move`);
+  const isManaged = state.clockPolicy === 'observed-release-v1' || state.stoppedClock !== null || state.releasedClock !== null;
+  if (isManaged) {
+    assertManagedFlagFallen(state, intent.flagged, at, tc);
+    return;
+  }
+  if (!hasFlagged(state.clock, intent.flagged, at, tc)) {
     throw new GameError(`Flag has not fallen for ${intent.flagged} at ${at}`);
   }
 }
@@ -1527,6 +1773,15 @@ function assertStoppedLineage(stoppedClock: GameStoppedClockState, prepared: Pre
   }
 }
 
+function assertReleasedLineage(releasedClock: GameReleasedClockState, prepared: PreparedOperation): void {
+  if (typeof prepared.parentStopId !== 'string' || prepared.parentStopId !== releasedClock.consumedStopId) {
+    throw new GameError(`AdjudicationStarted prepared parentStopId mismatch: expected "${releasedClock.consumedStopId}", got "${String(prepared.parentStopId)}"`);
+  }
+  if (typeof prepared.turnLineageId !== 'string' || prepared.turnLineageId !== releasedClock.turnLineageId) {
+    throw new GameError(`AdjudicationStarted prepared turnLineageId mismatch: expected "${releasedClock.turnLineageId}", got "${String(prepared.turnLineageId)}"`);
+  }
+}
+
 function assertUnstoppedLineage(gameId: string, ply: number, prepared: PreparedOperation): void {
   if (prepared.parentStopId !== null && prepared.parentStopId !== undefined) {
     throw new GameError('AdjudicationStarted prepared parentStopId must be null for non-stopped game');
@@ -1539,15 +1794,29 @@ function assertUnstoppedLineage(gameId: string, ply: number, prepared: PreparedO
   }
 }
 
+function resolveRemainingNoShow(state: GameState, at: number): number | null {
+  if (state.stoppedClock !== null) {
+    return state.stoppedClock.basis.noShowRemainderMs;
+  }
+  if (state.releasedClock !== null) {
+    const rel = state.releasedClock;
+    if (rel.noShowRunningSince !== null && rel.basis.noShowRemainderMs !== null) {
+      return Math.max(0, rel.basis.noShowRemainderMs - Math.max(0, at - rel.noShowRunningSince));
+    }
+    return rel.basis.noShowRemainderMs;
+  }
+  return state.noShowAt !== null ? Math.max(0, state.noShowAt - at) : null;
+}
+
 function assertStartedLineageAndBounds(state: GameState, event: AdjudicationStartedEvent): void {
   if (state.stoppedClock !== null) {
     assertStoppedLineage(state.stoppedClock, event.prepared);
+  } else if (state.releasedClock !== null) {
+    assertReleasedLineage(state.releasedClock, event.prepared);
   } else {
     assertUnstoppedLineage(state.gameId, state.ply, event.prepared);
   }
-  const remainingNoShow = state.stoppedClock
-    ? state.stoppedClock.basis.noShowRemainderMs
-    : (state.noShowAt !== null ? Math.max(0, state.noShowAt - event.at) : null);
+  const remainingNoShow = resolveRemainingNoShow(state, event.at);
   validateIntegerPolicyInputs(state.timeControl, state.clock.remaining, remainingNoShow);
 }
 
@@ -1568,13 +1837,12 @@ function assertStartedMetadata(state: GameState, event: AdjudicationStartedEvent
 function reduceAdjudicationStarted(state: GameState, event: AdjudicationStartedEvent): GameState {
   assertStartedMetadata(state, event);
   const { frozenClock, elapsed } = freezeClock(state.clock, state.position.turn, event.at, state.timeControl);
-  const remainingNoShow = state.stoppedClock
-    ? state.stoppedClock.basis.noShowRemainderMs
-    : (state.noShowAt !== null ? Math.max(0, state.noShowAt - event.at) : null);
+  const remainingNoShow = resolveRemainingNoShow(state, event.at);
 
   const basis = deriveStartedBasis({
     clockPolicy: event.clockPolicy,
     stoppedClock: state.stoppedClock,
+    releasedClock: state.releasedClock,
     timeControl: state.timeControl,
     turnStartedAt: state.clock.turnStartedAt,
     remainingBalances: state.clock.remaining,
@@ -1584,6 +1852,15 @@ function reduceAdjudicationStarted(state: GameState, event: AdjudicationStartedE
     noShowRemainderMs: remainingNoShow,
   });
 
+  const publicFrozenClock: ClockState = basis !== null
+    ? Object.freeze({
+        remaining: computeDisplayBalances(basis, event.at, state.timeControl),
+        turnStartedAt: null,
+      })
+    : frozenClock;
+  const thinkingElapsed = basis !== null ? basis.elapsedThinkingMs : elapsed;
+  const pendingNoShowRemainder = basis !== null ? basis.noShowRemainderMs : remainingNoShow;
+
   const pending: PendingAdjudicationState = deepClonePendingState({
     operationId: event.operationId,
     baseRevision: event.baseRevision,
@@ -1592,9 +1869,9 @@ function reduceAdjudicationStarted(state: GameState, event: AdjudicationStartedE
     rulesVersion: event.rulesVersion,
     prepared: event.prepared,
     originalClock: state.clock,
-    thinkingElapsedAtA: elapsed,
+    thinkingElapsedAtA: thinkingElapsed,
     originalNoShowAt: state.noShowAt,
-    remainingNoShowTimeAtA: remainingNoShow,
+    remainingNoShowTimeAtA: pendingNoShowRemainder,
     cursor: 0,
     expectedEffects: [],
     ...(event.clockPolicy ? { clockPolicy: event.clockPolicy } : {}),
@@ -1603,7 +1880,7 @@ function reduceAdjudicationStarted(state: GameState, event: AdjudicationStartedE
 
   return {
     ...state,
-    clock: frozenClock,
+    clock: publicFrozenClock,
     phase: 'proving',
     isBlocked: true,
     adjudication: pending,
