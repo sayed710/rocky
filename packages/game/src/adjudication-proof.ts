@@ -43,6 +43,10 @@ import {
   resolveRequiredProofRoles,
   type RequiredProofRole,
 } from './adjudication-requirements';
+import {
+  deriveTurnLineageId,
+  validateClockPolicy,
+} from './adjudication-completion';
 
 /** The question evaluated by proof analysis. */
 export type ProofQuestion =
@@ -533,15 +537,26 @@ function areIntentsMatching(a: PreparedIntent, b: PreparedIntent): boolean {
   return areSimpleIntentsMatching(a, b);
 }
 
-function assertIdenticalPrepared(a: PreparedOperation, b: PreparedOperation): void {
+function assertIdenticalPreparedCore(a: PreparedOperation, b: PreparedOperation): void {
   if (a.operationId !== b.operationId) throw new GameError('Conflicting prepared operation: operationId mismatch');
   if (a.gameId !== b.gameId) throw new GameError('Conflicting prepared operation: gameId mismatch');
   if (a.baseRevision !== b.baseRevision) throw new GameError('Conflicting prepared operation: baseRevision mismatch');
   if (a.baseFen !== b.baseFen) throw new GameError('Conflicting prepared operation: baseFen mismatch');
   if (a.variant !== b.variant) throw new GameError('Conflicting prepared operation: variant mismatch');
   if (a.rulesVersion !== b.rulesVersion) throw new GameError('Conflicting prepared operation: rulesVersion mismatch');
+}
+
+function assertIdenticalPreparedContext(a: PreparedOperation, b: PreparedOperation): void {
   if (a.at !== b.at) throw new GameError('Conflicting prepared operation: timestamp at mismatch');
   if (!areIntentsMatching(a.intent, b.intent)) throw new GameError('Conflicting prepared operation: intent mismatch');
+  if (a.clockPolicy !== b.clockPolicy) throw new GameError('Conflicting prepared operation: clockPolicy mismatch');
+  if (a.parentStopId !== b.parentStopId) throw new GameError('Conflicting prepared operation: parentStopId mismatch');
+  if (a.turnLineageId !== b.turnLineageId) throw new GameError('Conflicting prepared operation: turnLineageId mismatch');
+}
+
+function assertIdenticalPrepared(a: PreparedOperation, b: PreparedOperation): void {
+  assertIdenticalPreparedCore(a, b);
+  assertIdenticalPreparedContext(a, b);
 }
 
 function initFinderLane(pos: Position, winner: Color): FinderLaneState {
@@ -582,27 +597,6 @@ function initTimeoutLanes(fen: string, variant: PreparedOperation['variant'], wi
   };
 }
 
-function isMatchingGameBase(
-  game: Game,
-  snap: ReturnType<Game['snapshot']>,
-  prepared: PreparedOperation,
-): boolean {
-  if (snap.position.fen() !== prepared.baseFen) return false;
-  if (game.eventSequence === prepared.baseRevision && game.adjudication === null) {
-    return true;
-  }
-  const adj = game.adjudication;
-  if (!adj) return false;
-  return (
-    adj.operationId === prepared.operationId &&
-    adj.baseRevision === prepared.baseRevision &&
-    game.eventSequence === adj.startedSeq &&
-    adj.rulesVersion === prepared.rulesVersion &&
-    adj.prepared.at === prepared.at &&
-    areIntentsMatching(adj.prepared.intent, prepared.intent)
-  );
-}
-
 function resolveGameFromContext(
   gameOrContext?: Game | { game?: Game; repetition?: RepetitionHistory },
 ): Game | null {
@@ -624,17 +618,72 @@ function assertDetailedPendingMismatch(adj: ReturnType<Game['snapshot']>['adjudi
   if (!areIntentsMatching(adj.prepared.intent, prepared.intent)) {
     throw new GameError('Context game intent does not match prepared operation intent');
   }
+  if (adj.prepared.clockPolicy !== prepared.clockPolicy) {
+    throw new GameError(`Context game clockPolicy does not match prepared: expected "${String(adj.prepared.clockPolicy)}", got "${String(prepared.clockPolicy)}"`);
+  }
+  if (adj.prepared.parentStopId !== prepared.parentStopId) {
+    throw new GameError(`Context game parentStopId does not match prepared: expected "${String(adj.prepared.parentStopId)}", got "${String(prepared.parentStopId)}"`);
+  }
+  if (adj.prepared.turnLineageId !== prepared.turnLineageId) {
+    throw new GameError(`Context game turnLineageId does not match prepared: expected "${String(adj.prepared.turnLineageId)}", got "${String(prepared.turnLineageId)}"`);
+  }
 }
 
-function assertContextMatchesBase(game: Game, snap: ReturnType<Game['snapshot']>, prepared: PreparedOperation): void {
+function assertUnstartedPolicy(game: Game, prepared: PreparedOperation): void {
+  if (game.clockPolicy !== null) {
+    if (prepared.clockPolicy !== game.clockPolicy) {
+      throw new GameError(`Context game clockPolicy does not match prepared: expected "${game.clockPolicy}", got "${String(prepared.clockPolicy)}"`);
+    }
+    return;
+  }
+  if (prepared.clockPolicy !== undefined) {
+    validateClockPolicy(prepared.clockPolicy);
+  }
+}
+
+function assertUnstartedNonStoppedLineage(game: Game, prepared: PreparedOperation): void {
+  if (prepared.parentStopId !== null && prepared.parentStopId !== undefined) {
+    throw new GameError('Context game parentStopId must be null for non-stopped game');
+  }
+  if (prepared.turnLineageId === null || prepared.turnLineageId === undefined) {
+    return;
+  }
+  const canonical = deriveTurnLineageId(game.id, game.ply);
+  if (typeof prepared.turnLineageId !== 'string' || prepared.turnLineageId !== canonical) {
+    throw new GameError('Context game turnLineageId must be null or canonical for non-stopped game');
+  }
+}
+
+function assertUnstartedClockMetadata(game: Game, prepared: PreparedOperation): void {
+  assertUnstartedPolicy(game, prepared);
+  if (game.stoppedClock === null) {
+    assertUnstartedNonStoppedLineage(game, prepared);
+    return;
+  }
+  if (prepared.parentStopId !== game.stoppedClock.stopId) {
+    throw new GameError(`Context game parentStopId does not match prepared: expected "${game.stoppedClock.stopId}", got "${String(prepared.parentStopId)}"`);
+  }
+  if (prepared.turnLineageId !== game.stoppedClock.turnLineageId) {
+    throw new GameError(`Context game turnLineageId does not match prepared: expected "${game.stoppedClock.turnLineageId}", got "${String(prepared.turnLineageId)}"`);
+  }
+}
+
+function assertContextMatchesGame(game: Game, snap: ReturnType<Game['snapshot']>, prepared: PreparedOperation): void {
   if (snap.position.fen() !== prepared.baseFen) {
     throw new GameError('Context game position FEN does not match prepared operation base');
   }
   const adj = game.adjudication;
-  if (adj !== null && adj.operationId === prepared.operationId) {
+  if (adj !== null) {
+    if (adj.operationId !== prepared.operationId || adj.baseRevision !== prepared.baseRevision || game.eventSequence !== adj.startedSeq) {
+      throw new GameError('Context game revision does not match prepared operation base');
+    }
     assertDetailedPendingMismatch(adj, prepared);
+    return;
   }
-  throw new GameError('Context game revision does not match prepared operation base');
+  if (game.eventSequence !== prepared.baseRevision) {
+    throw new GameError('Context game revision does not match prepared operation base');
+  }
+  assertUnstartedClockMetadata(game, prepared);
 }
 
 function extractAndValidateContext(
@@ -651,9 +700,7 @@ function extractAndValidateContext(
   if (snap.variant !== prepared.variant) {
     throw new GameError(`Context variant "${snap.variant}" does not match prepared "${prepared.variant}"`);
   }
-  if (!isMatchingGameBase(game, snap, prepared)) {
-    assertContextMatchesBase(game, snap, prepared);
-  }
+  assertContextMatchesGame(game, snap, prepared);
   return snap.repetition ? new Map(snap.repetition) : undefined;
 }
 

@@ -37,3 +37,4 @@ export {
   type AllStepResult,
 } from './adjudication-controller';
 export * from './adjudication-clock-accounting';
+export * from './adjudication-completion';

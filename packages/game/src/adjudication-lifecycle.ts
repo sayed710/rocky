@@ -18,6 +18,8 @@ import {
   type Variant,
 } from '@chess-platform/core';
 import type {
+  AdjudicationClockCompletionDescriptor,
+  AdjudicationClockPolicy,
   AdjudicationEffect,
   AdjudicationResolvedEvent,
   GameEndedEvent,
@@ -37,6 +39,16 @@ import {
   getRegisteredEvidence,
   type AdjudicationEvidenceHandle,
 } from './adjudication-proof';
+import {
+  applyCompletedTurn,
+  type AdjudicationClockBasis,
+} from './adjudication-clock-accounting';
+import {
+  assertClockCompletionDescriptorMatch,
+  buildClockCompletionDescriptor,
+  deriveTurnLineageId,
+  type GameStoppedClockState,
+} from './adjudication-completion';
 
 /** Adjudication phase of the game aggregate. */
 export type AdjudicationPhase = 'idle' | 'proving' | 'settling' | 'ended';
@@ -56,6 +68,8 @@ export interface PendingAdjudicationState {
   readonly resolutionAt?: number;
   readonly cursor: number;
   readonly expectedEffects: readonly AdjudicationEffect[];
+  readonly clockPolicy?: AdjudicationClockPolicy;
+  readonly originalBasis?: AdjudicationClockBasis | null;
 }
 
 export interface ResolutionContext {
@@ -69,6 +83,8 @@ export interface ResolutionContext {
   readonly source: GameSource | null;
   readonly noShowAt: number | null;
   readonly ply: number;
+  readonly clockPolicy?: AdjudicationClockPolicy;
+  readonly stoppedClock?: GameStoppedClockState | null;
 }
 
 /** Deeply clones and freezes an effect, preventing balance/payload aliasing. */
@@ -147,11 +163,19 @@ export function assertEffectsMatch(actual: GameEvent, expected: GameEvent, curso
   }
 }
 
-function assertBatchCompletePlan(batch: readonly GameEvent[]): void {
+function assertBatchCompletePlan(before: Game, batch: readonly GameEvent[]): void {
   for (const [idx, event] of batch.entries()) {
     if (event.type === 'AdjudicationResolved') {
       const remainingEffects = batch.slice(idx + 1);
-      if (remainingEffects.length < event.effects.length) {
+      const isManaged = before.clockPolicy === 'observed-release-v1' || event.clockCompletion !== undefined;
+      if (isManaged) {
+        if (remainingEffects.length < event.effects.length) {
+          throw new GameError('Append batch truncated: declared resolution effects omitted from batch leaving incomplete settling state');
+        }
+        if (remainingEffects.length > event.effects.length) {
+          throw new GameError('Append batch cannot append events after declared resolution suffix');
+        }
+      } else if (remainingEffects.length < event.effects.length) {
         throw new GameError('Append batch truncated: declared resolution effects omitted from batch leaving incomplete settling state');
       }
     }
@@ -172,7 +196,7 @@ export function validateAdjudicationAppendBatch(before: Game, batch: readonly Ga
     throw new GameError('Append batch cannot commit from an already settling state');
   }
 
-  assertBatchCompletePlan(batch);
+  assertBatchCompletePlan(before, batch);
   const folded = before.withEvents(batch);
 
   if (folded.phase === 'settling') {
@@ -272,7 +296,31 @@ function deriveMoveEffects(
   const moveObj = resolveLegalMove(context.basePosition, intent.uci);
   const san = context.basePosition.toSan(moveObj);
   const succPos = context.basePosition.play(moveObj);
-  const charged = charge(context.pending.originalClock, mover, resolutionAt, context.timeControl, context.pending.thinkingElapsedAtA);
+
+  let moveTimeMs = context.pending.thinkingElapsedAtA;
+  let remaining: { readonly w: number; readonly b: number };
+
+  if (context.pending.clockPolicy === 'observed-release-v1' && context.pending.originalBasis) {
+    const turnComp = applyCompletedTurn(
+      context.pending.originalBasis,
+      resolutionAt,
+      context.timeControl,
+      {
+        clearNoShow: true,
+        nextLineage: {
+          policy: 'observed-release-v1',
+        },
+      },
+    );
+    if (turnComp.flagged) {
+      throw new GameError(`Cannot play move: clock expired for ${mover}`);
+    }
+    moveTimeMs = turnComp.moveTimeMs;
+    remaining = Object.freeze({ ...turnComp.nextBasis.turnBaseBalances });
+  } else {
+    const charged = charge(context.pending.originalClock, mover, resolutionAt, context.timeControl, context.pending.thinkingElapsedAtA);
+    remaining = Object.freeze({ ...charged.clock.remaining });
+  }
 
   const moveEvent: MovePlayedEvent = {
     type: 'MovePlayed',
@@ -280,8 +328,8 @@ function deriveMoveEffects(
     uci: intent.uci,
     san,
     by: mover,
-    moveTimeMs: context.pending.thinkingElapsedAtA,
-    remaining: Object.freeze({ ...charged.clock.remaining }),
+    moveTimeMs,
+    remaining,
     at: resolutionAt,
   };
 
@@ -543,19 +591,21 @@ export function deriveResolutionPlan(
   resolutionAt: number,
 ): readonly AdjudicationEffect[] {
   const plan = deriveRawPlan(context, evidence, resolutionAt);
-  projectSurvivingObligations(
-    context.pending,
-    plan,
-    resolutionAt,
-    {
-      source: context.source,
-      ply: context.ply,
-      ready: context.ready,
-      timeControl: context.timeControl,
-      sideToMove: context.basePosition.turn,
-      historicalNoShowAt: context.noShowAt,
-    },
-  );
+  if (context.pending.clockPolicy !== 'observed-release-v1') {
+    projectSurvivingObligations(
+      context.pending,
+      plan,
+      resolutionAt,
+      {
+        source: context.source,
+        ply: context.ply,
+        ready: context.ready,
+        timeControl: context.timeControl,
+        sideToMove: context.basePosition.turn,
+        historicalNoShowAt: context.noShowAt,
+      },
+    );
+  }
   return plan;
 }
 
@@ -820,6 +870,33 @@ export function validateRecordedResolution(
     assertEffectsMatch(event.effects[i]!, derivedPlan[i]!, i);
   }
 
+  const hasEnding = derivedPlan.some(e => e.type === 'GameEnded');
+  const moveEffect = derivedPlan.find(e => e.type === 'MovePlayed') as MovePlayedEvent | undefined;
+  const resultingSide = moveEffect ? (moveEffect.by === 'w' ? 'b' : 'w') : context.basePosition.turn;
+  const resultingPly = moveEffect ? moveEffect.ply : context.ply;
+  const turnLineageId = deriveTurnLineageId(
+    context.pending.prepared.gameId,
+    resultingPly,
+    context.pending.prepared.turnLineageId,
+    moveEffect !== undefined,
+  );
+  const resolvedSeq = context.pending.startedSeq + 1;
+  const expectedDescriptor = context.pending.clockPolicy === 'observed-release-v1'
+    ? buildClockCompletionDescriptor({
+        policy: 'observed-release-v1',
+        isTerminal: hasEnding,
+        operationId: context.pending.operationId,
+        startedSeq: context.pending.startedSeq,
+        resolvedSeq,
+        effectCount: derivedPlan.length,
+        resultingSideToMove: resultingSide,
+        resultingPly,
+        turnLineageId,
+        parentStopId: context.pending.prepared.parentStopId ?? null,
+      })
+    : undefined;
+  assertClockCompletionDescriptorMatch(event.clockCompletion, expectedDescriptor);
+
   return Object.freeze(derivedPlan.map(e => deepCloneEffect(e)));
 }
 
@@ -980,6 +1057,57 @@ export interface SettlementResult {
   readonly game: Game;
 }
 
+function assertSettlementPreconditions(
+  game: Game,
+  pending: PendingAdjudicationState | null,
+  resolutionAt: number,
+  evidence: AdjudicationEvidenceInput,
+): void {
+  if (game.phase !== 'proving') {
+    throw new GameError(`Cannot settle adjudication: game is in phase "${game.phase}", expected "proving"`);
+  }
+  if (!pending) {
+    throw new GameError('Missing pending adjudication state');
+  }
+  validateTimestamp(resolutionAt, 'Resolution timestamp');
+  if (resolutionAt < pending.acceptedAt) {
+    throw new GameError(`Resolution timestamp ${resolutionAt} cannot precede suspension timestamp ${pending.acceptedAt}`);
+  }
+  assertBundleNotEmpty(evidence);
+}
+
+function resolveSettlementClockCompletion(
+  pending: PendingAdjudicationState,
+  derivedPlan: readonly AdjudicationEffect[],
+  s: ReturnType<Game['snapshot']>,
+): AdjudicationClockCompletionDescriptor | undefined {
+  if (pending.clockPolicy !== 'observed-release-v1') {
+    return undefined;
+  }
+  const hasEnding = derivedPlan.some(e => e.type === 'GameEnded');
+  const moveEffect = derivedPlan.find(e => e.type === 'MovePlayed') as MovePlayedEvent | undefined;
+  const resultingSide = moveEffect ? (moveEffect.by === 'w' ? 'b' : 'w') : s.position.turn;
+  const resultingPly = moveEffect ? moveEffect.ply : s.ply;
+  const turnLineageId = deriveTurnLineageId(
+    pending.prepared.gameId,
+    resultingPly,
+    pending.prepared.turnLineageId,
+    moveEffect !== undefined,
+  );
+  return buildClockCompletionDescriptor({
+    policy: 'observed-release-v1',
+    isTerminal: hasEnding,
+    operationId: pending.operationId,
+    startedSeq: pending.startedSeq,
+    resolvedSeq: pending.startedSeq + 1,
+    effectCount: derivedPlan.length,
+    resultingSideToMove: resultingSide,
+    resultingPly,
+    turnLineageId,
+    parentStopId: pending.prepared.parentStopId ?? null,
+  });
+}
+
 /**
  * Builds an atomic settlement batch from a pending game and verified evidence handle.
  * Binds resolution and declared effect events, validates the batch, and applies it.
@@ -989,26 +1117,14 @@ export function settlePrepared(
   evidence: AdjudicationEvidenceInput,
   resolutionAt: number,
 ): SettlementResult {
-  if (game.phase !== 'proving') {
-    throw new GameError(`Cannot settle adjudication: game is in phase "${game.phase}", expected "proving"`);
-  }
   const pending = game.adjudication;
-  if (!pending) {
-    throw new GameError('Missing pending adjudication state');
-  }
-
-  validateTimestamp(resolutionAt, 'Resolution timestamp');
-  if (resolutionAt < pending.acceptedAt) {
-    throw new GameError(`Resolution timestamp ${resolutionAt} cannot precede suspension timestamp ${pending.acceptedAt}`);
-  }
-
-  assertBundleNotEmpty(evidence);
-  const recordedEvidence = extractRecordedEvidence(evidence, pending);
+  assertSettlementPreconditions(game, pending, resolutionAt, evidence);
+  const recordedEvidence = extractRecordedEvidence(evidence, pending!);
   const s = game.snapshot();
   const rootEnding = resolveRootPrecedenceEnding(s.position, resolutionAt);
 
   const context: ResolutionContext = {
-    pending,
+    pending: pending!,
     basePosition: s.position,
     variant: s.variant,
     timeControl: s.timeControl,
@@ -1018,27 +1134,32 @@ export function settlePrepared(
     source: s.source,
     noShowAt: s.noShowAt,
     ply: s.ply,
+    ...(pending!.clockPolicy ? { clockPolicy: pending!.clockPolicy } : {}),
+    stoppedClock: game.stoppedClock,
   };
   assertSettlePreparedEvidence(recordedEvidence, context, rootEnding !== null);
 
   const derivedPlan = deriveResolutionPlan(context, recordedEvidence, resolutionAt);
 
-  if ((pending.prepared.intent.kind === 'move' || pending.prepared.intent.kind === 'resign') && derivedPlan.length === 0) {
-    throw new GameError(`No-op resolution cannot swallow ${pending.prepared.intent.kind}`);
+  if ((pending!.prepared.intent.kind === 'move' || pending!.prepared.intent.kind === 'resign') && derivedPlan.length === 0) {
+    throw new GameError(`No-op resolution cannot swallow ${pending!.prepared.intent.kind}`);
   }
 
   validateDeclaredPlan(derivedPlan);
 
+  const clockCompletion = resolveSettlementClockCompletion(pending!, derivedPlan, s);
+
   const resolved: AdjudicationResolvedEvent = Object.freeze({
     type: 'AdjudicationResolved',
-    gameId: pending.prepared.gameId,
-    operationId: pending.operationId,
-    baseRevision: pending.baseRevision,
-    startedSeq: pending.startedSeq,
+    gameId: pending!.prepared.gameId,
+    operationId: pending!.operationId,
+    baseRevision: pending!.baseRevision,
+    startedSeq: pending!.startedSeq,
     at: resolutionAt,
-    rulesVersion: pending.rulesVersion,
+    rulesVersion: pending!.rulesVersion,
     evidence: recordedEvidence,
     effects: Object.freeze(derivedPlan.map(e => deepCloneEffect(e))),
+    ...(clockCompletion !== undefined ? { clockCompletion } : {}),
   });
 
   const batch: readonly GameEvent[] = Object.freeze([resolved, ...resolved.effects]);

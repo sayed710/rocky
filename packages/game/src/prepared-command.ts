@@ -7,9 +7,18 @@
  */
 
 import type { Color, Position, Variant } from '@chess-platform/core';
-import type { GameEndedEvent } from './events';
+import type { AdjudicationClockPolicy, GameEndedEvent } from './events';
 import { hasFlagged, validateTimestamp } from './clock';
 import { Game, GameError, NOT_READY_MESSAGE } from './game';
+import {
+  isChessClockApplicable,
+  validateClockPolicy,
+  validateIntegerPolicyInputs,
+} from './adjudication-completion';
+import {
+  computeDisplayBalances,
+  hasFlaggedAt,
+} from './adjudication-clock-accounting';
 
 /** Normalized command intent held under adjudication. */
 export type PreparedIntent =
@@ -41,6 +50,9 @@ export interface PreparedOperation {
   readonly rulesVersion: string;
   readonly intent: PreparedIntent;
   readonly at: number;
+  readonly clockPolicy?: AdjudicationClockPolicy;
+  readonly parentStopId?: string | null;
+  readonly turnLineageId?: string | null;
 }
 
 /** Legitimate readiness no-op reasons. */
@@ -76,6 +88,7 @@ export interface AuthoritativeCommandContext {
   readonly at: number;
   readonly operationId: string;
   readonly rulesVersion: string;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 /** Outcome of authoritative player command arbitration. */
@@ -148,7 +161,43 @@ export function clonePreparedOperation(op: PreparedOperation): PreparedOperation
     rulesVersion: op.rulesVersion,
     intent: clonePreparedIntent(op.intent),
     at: op.at,
+    ...(op.clockPolicy !== undefined ? { clockPolicy: op.clockPolicy } : {}),
+    ...(op.parentStopId !== undefined ? { parentStopId: op.parentStopId } : {}),
+    ...(op.turnLineageId !== undefined ? { turnLineageId: op.turnLineageId } : {}),
   });
+}
+
+function resolveCommandPolicy(
+  game: Game,
+  explicitPolicy?: AdjudicationClockPolicy,
+): {
+  clockPolicy?: AdjudicationClockPolicy;
+  parentStopId?: string | null;
+  turnLineageId?: string | null;
+} {
+  const activePolicy = game.clockPolicy;
+  if (activePolicy !== null && activePolicy !== undefined) {
+    if (explicitPolicy !== undefined && explicitPolicy !== activePolicy) {
+      throw new GameError(`Cannot downgrade or strip active managed clock policy "${activePolicy}"`);
+    }
+    return {
+      clockPolicy: activePolicy,
+      parentStopId: game.stoppedClock?.stopId ?? null,
+      turnLineageId: game.stoppedClock?.turnLineageId ?? null,
+    };
+  }
+  if (explicitPolicy !== undefined) {
+    validateClockPolicy(explicitPolicy);
+    const snap = game.snapshot();
+    const noShowRemainder = game.stoppedClock?.basis.noShowRemainderMs ?? (snap.noShowAt !== null ? Math.max(0, snap.noShowAt - snap.createdAt) : null);
+    validateIntegerPolicyInputs(
+      game.timeControl,
+      game.clock.remaining,
+      noShowRemainder,
+    );
+    return { clockPolicy: explicitPolicy };
+  }
+  return {};
 }
 
 function assertOngoingAndNotBlocked(game: Game): void {
@@ -185,9 +234,19 @@ export interface PrepareMoveParams {
   readonly at: number;
   readonly operationId: string;
   readonly rulesVersion: string;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 function assertMoveReadiness(game: Game, at: number): void {
+  if (game.stoppedClock) {
+    if (game.stoppedClock.basis.noShowRemainderMs === 0) {
+      throw new GameError('Cannot play move: no-show deadline has expired');
+    }
+    if (game.awaitingReadiness) {
+      throw new GameError(NOT_READY_MESSAGE);
+    }
+    return;
+  }
   if (game.noShowVerdict(at).kind === 'expire') {
     throw new GameError('Cannot play move: no-show deadline has expired');
   }
@@ -208,7 +267,12 @@ export function prepareMove(game: Game, params: PrepareMoveParams): PreparedOper
   const snap = game.snapshot();
   const mover = snap.position.turn;
 
-  if (hasFlagged(snap.clock, mover, params.at, snap.timeControl)) {
+  if (game.stoppedClock) {
+    const dispBalances = computeDisplayBalances(game.stoppedClock.basis, params.at, snap.timeControl);
+    if (snap.timeControl.kind !== 'unlimited' && dispBalances[mover] <= 0) {
+      throw new GameError(`Cannot play move: clock expired for ${mover}`);
+    }
+  } else if (hasFlagged(snap.clock, mover, params.at, snap.timeControl)) {
     throw new GameError(`Cannot play move: clock expired for ${mover}`);
   }
 
@@ -227,6 +291,8 @@ export function prepareMove(game: Game, params: PrepareMoveParams): PreparedOper
     throw new GameError(`Illegal move "${params.uci}": ${(err as Error).message}`);
   }
 
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
+
   return {
     operationId: params.operationId,
     gameId: snap.gameId,
@@ -242,6 +308,7 @@ export function prepareMove(game: Game, params: PrepareMoveParams): PreparedOper
       successorFen: successorPos.fen(),
     },
     at: params.at,
+    ...policyInfo,
   };
 }
 
@@ -251,6 +318,7 @@ export interface PrepareResignParams {
   readonly at: number;
   readonly operationId: string;
   readonly rulesVersion: string;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 export function prepareResign(game: Game, params: PrepareResignParams): PreparedOperation {
@@ -260,6 +328,7 @@ export function prepareResign(game: Game, params: PrepareResignParams): Prepared
     throw new GameError(`Invalid resigning color ${JSON.stringify(params.color)}`);
   }
   const snap = game.snapshot();
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     operationId: params.operationId,
     gameId: snap.gameId,
@@ -269,6 +338,7 @@ export function prepareResign(game: Game, params: PrepareResignParams): Prepared
     rulesVersion: params.rulesVersion,
     intent: { kind: 'resign', color: params.color },
     at: params.at,
+    ...policyInfo,
   };
 }
 
@@ -278,6 +348,7 @@ export interface PrepareDrawActionParams {
   readonly at: number;
   readonly operationId: string;
   readonly rulesVersion: string;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 export function prepareDrawOffer(game: Game, params: PrepareDrawActionParams): PreparedOperation {
@@ -290,6 +361,7 @@ export function prepareDrawOffer(game: Game, params: PrepareDrawActionParams): P
   if (snap.drawOffer === params.color) {
     throw new GameError('Draw already offered by this side');
   }
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     operationId: params.operationId,
     gameId: snap.gameId,
@@ -299,6 +371,7 @@ export function prepareDrawOffer(game: Game, params: PrepareDrawActionParams): P
     rulesVersion: params.rulesVersion,
     intent: { kind: 'offerDraw', color: params.color },
     at: params.at,
+    ...policyInfo,
   };
 }
 
@@ -310,6 +383,7 @@ export function prepareDrawAccept(game: Game, params: PrepareDrawActionParams): 
   if (snap.drawOffer !== opponent) {
     throw new GameError('No draw offer to accept');
   }
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     operationId: params.operationId,
     gameId: snap.gameId,
@@ -319,6 +393,7 @@ export function prepareDrawAccept(game: Game, params: PrepareDrawActionParams): 
     rulesVersion: params.rulesVersion,
     intent: { kind: 'acceptDraw', color: params.color },
     at: params.at,
+    ...policyInfo,
   };
 }
 
@@ -329,6 +404,7 @@ export function prepareDrawDecline(game: Game, params: PrepareDrawActionParams):
   if (snap.drawOffer === null) {
     throw new GameError('No draw offer to decline');
   }
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     operationId: params.operationId,
     gameId: snap.gameId,
@@ -338,6 +414,7 @@ export function prepareDrawDecline(game: Game, params: PrepareDrawActionParams):
     rulesVersion: params.rulesVersion,
     intent: { kind: 'declineDraw', color: params.color },
     at: params.at,
+    ...policyInfo,
   };
 }
 
@@ -347,6 +424,7 @@ export interface PrepareAbortParams {
   readonly at: number;
   readonly operationId: string;
   readonly rulesVersion: string;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 export function prepareAbort(game: Game, params: PrepareAbortParams): PreparedOperation {
@@ -356,6 +434,7 @@ export function prepareAbort(game: Game, params: PrepareAbortParams): PreparedOp
   if (snap.ply >= 2) {
     throw new GameError('Game can no longer be aborted');
   }
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     operationId: params.operationId,
     gameId: snap.gameId,
@@ -365,6 +444,7 @@ export function prepareAbort(game: Game, params: PrepareAbortParams): PreparedOp
     rulesVersion: params.rulesVersion,
     intent: { kind: 'abort', ...(params.color !== undefined ? { color: params.color } : {}) },
     at: params.at,
+    ...policyInfo,
   };
 }
 
@@ -374,6 +454,7 @@ export interface PrepareReadyParams {
   readonly at: number;
   readonly operationId: string;
   readonly rulesVersion: string;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 function classifyReadyNoop(game: Game, color: Color, at: number): ReadyNoopReason | null {
@@ -382,7 +463,11 @@ function classifyReadyNoop(game: Game, color: Color, at: number): ReadyNoopReaso
   if (snap.source === null) return 'unsourced';
   if (snap.ply > 0) return 'post_first_move';
   if (snap.ready[color] === true) return 'already_ready';
-  if (game.noShowDeadline !== null && at >= game.noShowDeadline) return 'late';
+  if (game.stoppedClock) {
+    if (game.stoppedClock.basis.noShowRemainderMs === 0) return 'late';
+  } else if (game.noShowDeadline !== null && at >= game.noShowDeadline) {
+    return 'late';
+  }
   return null;
 }
 
@@ -399,6 +484,7 @@ export function prepareReady(game: Game, params: PrepareReadyParams): PrepareRea
     return { kind: 'noop', reason: noopReason };
   }
   const snap = game.snapshot();
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     kind: 'prepared',
     operationId: params.operationId,
@@ -409,6 +495,7 @@ export function prepareReady(game: Game, params: PrepareReadyParams): PrepareRea
     rulesVersion: params.rulesVersion,
     intent: { kind: 'ready', color: params.color, isNoop: false },
     at: params.at,
+    ...policyInfo,
   };
 }
 
@@ -418,6 +505,7 @@ export interface PrepareFlagExpiryParams {
   readonly at: number;
   readonly operationId: string;
   readonly rulesVersion: string;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 export function prepareFlagExpiry(game: Game, params: PrepareFlagExpiryParams): PreparedOperation {
@@ -427,9 +515,18 @@ export function prepareFlagExpiry(game: Game, params: PrepareFlagExpiryParams): 
   if (snap.position.turn !== params.flagged) {
     throw new GameError(`Flag request invalid: ${params.flagged} is not side to move`);
   }
-  if (!hasFlagged(snap.clock, params.flagged, params.at, snap.timeControl)) {
+  const isManaged = game.clockPolicy !== null || params.clockPolicy !== undefined || game.stoppedClock !== null;
+  if (isManaged && !isChessClockApplicable(snap.source, snap.ply, snap.timeControl)) {
+    throw new GameError(`Chess clock flag expiry is not applicable for ${params.flagged} at ply ${snap.ply}`);
+  }
+  if (game.stoppedClock) {
+    if (!hasFlaggedAt(game.stoppedClock.basis, params.at, snap.timeControl)) {
+      throw new GameError(`Flag has not fallen for ${params.flagged} at ${params.at}`);
+    }
+  } else if (!hasFlagged(snap.clock, params.flagged, params.at, snap.timeControl)) {
     throw new GameError(`Flag has not fallen for ${params.flagged} at ${params.at}`);
   }
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     operationId: params.operationId,
     gameId: snap.gameId,
@@ -439,10 +536,19 @@ export function prepareFlagExpiry(game: Game, params: PrepareFlagExpiryParams): 
     rulesVersion: params.rulesVersion,
     intent: { kind: 'expireFlag', flagged: params.flagged },
     at: params.at,
+    ...policyInfo,
   };
 }
 
-/** Preflight parameters for creation admission. */
+/** Preflight parameters for creation admission on a game aggregate. */
+export interface PrepareCreationAdmissionParams {
+  readonly operationId: string;
+  readonly rulesVersion: string;
+  readonly at: number;
+  readonly clockPolicy?: AdjudicationClockPolicy;
+}
+
+/** Preflight parameters for creation admission from raw parameters. */
 export interface PrepareCreationParams {
   readonly operationId: string;
   readonly gameId: string;
@@ -450,10 +556,38 @@ export interface PrepareCreationParams {
   readonly initialFen: string;
   readonly variant: Variant;
   readonly at: number;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
-export function prepareCreationAdmission(params: PrepareCreationParams): PreparedOperation {
+export function prepareCreationAdmission(
+  gameOrParams: Game | PrepareCreationParams,
+  maybeParams?: PrepareCreationAdmissionParams,
+): PreparedOperation {
+  if (gameOrParams instanceof Game) {
+    const game = gameOrParams;
+    if (!maybeParams) {
+      throw new GameError('Missing parameters for prepareCreationAdmission(game, params)');
+    }
+    assertValidOperationMetadata(maybeParams.operationId, maybeParams.rulesVersion, maybeParams.at);
+    const snap = game.snapshot();
+    const policyInfo = resolveCommandPolicy(game, maybeParams.clockPolicy);
+    return {
+      operationId: maybeParams.operationId,
+      gameId: snap.gameId,
+      baseRevision: 0,
+      baseFen: snap.position.fen(),
+      variant: snap.variant,
+      rulesVersion: maybeParams.rulesVersion,
+      intent: { kind: 'creationAdmission' },
+      at: maybeParams.at,
+      ...policyInfo,
+    };
+  }
+  const params = gameOrParams;
   assertValidOperationMetadata(params.operationId, params.rulesVersion, params.at);
+  if (params.clockPolicy !== undefined) {
+    validateClockPolicy(params.clockPolicy);
+  }
   return {
     operationId: params.operationId,
     gameId: params.gameId,
@@ -463,6 +597,7 @@ export function prepareCreationAdmission(params: PrepareCreationParams): Prepare
     rulesVersion: params.rulesVersion,
     intent: { kind: 'creationAdmission' },
     at: params.at,
+    ...(params.clockPolicy !== undefined ? { clockPolicy: params.clockPolicy } : {}),
   };
 }
 
@@ -471,6 +606,7 @@ export interface PrepareNoShowExpiryParams {
   readonly at: number;
   readonly operationId: string;
   readonly rulesVersion: string;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 export function prepareNoShowExpiry(game: Game, params: PrepareNoShowExpiryParams): PreparedOperation {
@@ -481,6 +617,7 @@ export function prepareNoShowExpiry(game: Game, params: PrepareNoShowExpiryParam
     throw new GameError(`No-show expiry refused: ${verdict.kind}`);
   }
   const snap = game.snapshot();
+  const policyInfo = resolveCommandPolicy(game, params.clockPolicy);
   return {
     operationId: params.operationId,
     gameId: snap.gameId,
@@ -490,6 +627,7 @@ export function prepareNoShowExpiry(game: Game, params: PrepareNoShowExpiryParam
     rulesVersion: params.rulesVersion,
     intent: { kind: 'expireNoShow', ending: verdict.ending },
     at: params.at,
+    ...policyInfo,
   };
 }
 
@@ -511,6 +649,7 @@ function arbitrateMoveCommand(
       at: ctx.at,
       operationId: ctx.operationId,
       rulesVersion: ctx.rulesVersion,
+      clockPolicy: ctx.clockPolicy,
     }),
   };
 }
@@ -525,6 +664,7 @@ function arbitrateDrawCommand(
     at: ctx.at,
     operationId: ctx.operationId,
     rulesVersion: ctx.rulesVersion,
+    clockPolicy: ctx.clockPolicy,
   };
   if (kind === 'offerDraw') {
     return { kind: 'prepared', operation: prepareDrawOffer(game, params) };
@@ -551,6 +691,7 @@ function arbitrateRequestedCommand(
         at: ctx.at,
         operationId: ctx.operationId,
         rulesVersion: ctx.rulesVersion,
+        clockPolicy: ctx.clockPolicy,
       }),
     };
   }
@@ -565,6 +706,7 @@ function arbitrateRequestedCommand(
         at: ctx.at,
         operationId: ctx.operationId,
         rulesVersion: ctx.rulesVersion,
+        clockPolicy: ctx.clockPolicy,
       }),
     };
   }
@@ -574,6 +716,7 @@ function arbitrateRequestedCommand(
       at: ctx.at,
       operationId: ctx.operationId,
       rulesVersion: ctx.rulesVersion,
+      clockPolicy: ctx.clockPolicy,
     });
     if (res.kind === 'noop') return res;
     return { kind: 'prepared', operation: res };
@@ -602,6 +745,7 @@ export function prepareAuthoritativeCommand(
         at: ctx.at,
         operationId: ctx.operationId,
         rulesVersion: ctx.rulesVersion,
+        clockPolicy: ctx.clockPolicy,
       }),
     };
   }
@@ -613,6 +757,7 @@ export function prepareAuthoritativeCommand(
         at: ctx.at,
         operationId: ctx.operationId,
         rulesVersion: ctx.rulesVersion,
+        clockPolicy: ctx.clockPolicy,
       }),
     };
   }

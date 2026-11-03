@@ -180,6 +180,41 @@ export type AdjudicationEffect =
   | DrawDeclinedEvent
   | PlayerReadyEvent;
 
+/** Supported clock management policies for adjudication (Issue #124, Stage R1). */
+export type AdjudicationClockPolicy = 'observed-release-v1';
+
+/** Nonterminal stopped-turn clock completion descriptor (Issue #124, Stage R1). */
+export interface AdjudicationClockStoppedDescriptor {
+  readonly policy: 'observed-release-v1';
+  readonly kind: 'stopped';
+  readonly stopId: string;
+  readonly originatingOperationId: string;
+  readonly startedSeq: number;
+  readonly resolvedSeq: number;
+  readonly completionHead: number;
+  readonly resultingSideToMove: Color;
+  readonly resultingPly: number;
+  readonly turnLineageId: string;
+  readonly parentStopId: string | null;
+  readonly runningSince: null;
+}
+
+/** Terminal clock completion descriptor (Issue #124, Stage R1). */
+export interface AdjudicationClockTerminalDescriptor {
+  readonly policy: 'observed-release-v1';
+  readonly kind: 'terminal';
+  readonly originatingOperationId: string;
+  readonly startedSeq: number;
+  readonly resolvedSeq: number;
+  readonly completionHead: number;
+  readonly runningSince: null;
+}
+
+/** Discriminated union of clock completion descriptors for observed-release-v1. */
+export type AdjudicationClockCompletionDescriptor =
+  | AdjudicationClockStoppedDescriptor
+  | AdjudicationClockTerminalDescriptor;
+
 /**
  * Adjudication began for an admitted operation (Issue #124, Stage 1).
  * Records immutable prepared operation, suspension instant A, and rules version.
@@ -193,6 +228,7 @@ export interface AdjudicationStartedEvent {
   readonly at: number;
   readonly rulesVersion: string;
   readonly prepared: PreparedOperation;
+  readonly clockPolicy?: AdjudicationClockPolicy;
 }
 
 /**
@@ -212,6 +248,7 @@ export interface AdjudicationResolvedEvent {
   readonly witness?: readonly string[];
   readonly evidence?: RecordedResolutionEvidence;
   readonly effects: readonly AdjudicationEffect[];
+  readonly clockCompletion?: AdjudicationClockCompletionDescriptor;
 }
 
 /** The discriminated union of all persisted game events. */

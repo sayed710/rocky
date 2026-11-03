@@ -35,6 +35,8 @@ import {
 } from './clock';
 import { adjudicateTimeoutPossibility } from './timeout-adjudication';
 import type {
+  AdjudicationClockPolicy,
+  AdjudicationEffect,
   AdjudicationResolvedEvent,
   AdjudicationStartedEvent,
   DrawDeclinedEvent,
@@ -65,6 +67,25 @@ import {
   type PreparedIntent,
   type PreparedOperation,
 } from './prepared-command';
+import {
+  applyCompletedTurn,
+  computeDisplayBalances,
+  createAdjudicationClockBasis,
+  getClockAccountingSnapshot,
+  hasFlaggedAt,
+  type AdjudicationClockBasis,
+  type ClockAccountingSnapshot,
+} from './adjudication-clock-accounting';
+import {
+  cloneStoppedClockState,
+  deriveStartedBasis,
+  deriveStopId,
+  deriveTurnLineageId,
+  isChessClockApplicable,
+  validateClockPolicy,
+  validateIntegerPolicyInputs,
+  type GameStoppedClockState,
+} from './adjudication-completion';
 
 export { FOLD_STORED, GameError };
 export { repetitionKey } from '@chess-platform/core';
@@ -123,6 +144,9 @@ export interface GameState {
   readonly adjudication: PendingAdjudicationState | null;
   readonly eventSequence: number;
   readonly lastResolutionAt: number | null;
+  readonly clockPolicy: AdjudicationClockPolicy | null;
+  readonly stoppedClock: GameStoppedClockState | null;
+  readonly releaseNeeded: boolean;
 }
 
 export type GameSnapshot = GameState;
@@ -203,6 +227,8 @@ function deepClonePendingState(pending: PendingAdjudicationState): PendingAdjudi
       remaining: Object.freeze({ ...pending.originalClock.remaining }),
     }),
     expectedEffects: Object.freeze(pending.expectedEffects.map(e => deepCloneEffect(e))),
+    ...(pending.clockPolicy !== undefined ? { clockPolicy: pending.clockPolicy } : {}),
+    ...(pending.originalBasis !== undefined ? { originalBasis: pending.originalBasis } : {}),
   });
 }
 
@@ -289,6 +315,9 @@ function isolateState(state: GameState): GameState {
     moves: Object.freeze(state.moves.map(cloneMovePlayedEvent)),
     repetition: new Map(state.repetition),
     adjudication: state.adjudication ? deepClonePendingState(state.adjudication) : null,
+    stoppedClock: cloneStoppedClockState(state.stoppedClock),
+    clockPolicy: state.clockPolicy,
+    releaseNeeded: state.releaseNeeded,
   });
 }
 
@@ -306,6 +335,9 @@ function isolateSnapshot(state: GameState): GameState {
     moves: Object.freeze(state.moves.map(cloneMovePlayedEvent)),
     repetition: freezeMap(new Map(state.repetition)),
     adjudication: state.adjudication ? deepClonePendingState(state.adjudication) : null,
+    stoppedClock: cloneStoppedClockState(state.stoppedClock),
+    clockPolicy: state.clockPolicy,
+    releaseNeeded: state.releaseNeeded,
   });
 }
 
@@ -388,9 +420,30 @@ export class Game {
   get drawOffer(): Color | null { return this.state.drawOffer; }
   get chess960StartId(): number | null { return this.state.chess960StartId; }
   get pregameSource(): GameSource | null { return this.state.source; }
-  get noShowDeadline(): number | null { return this.state.noShowAt; }
+  get noShowDeadline(): number | null {
+    const s = this.state;
+    if (s.clockPolicy === 'observed-release-v1') {
+      if (s.stoppedClock !== null || s.phase === 'settling' || s.phase === 'proving' || s.status.over || s.phase === 'ended') {
+        return null;
+      }
+    } else if (s.phase === 'proving' || s.phase === 'settling' || s.stoppedClock !== null) {
+      return null;
+    }
+    return s.noShowAt;
+  }
   get phase(): AdjudicationPhase { return this.state.phase; }
   get isBlocked(): boolean { return this.state.phase === 'proving' || this.state.phase === 'settling'; }
+
+  get clockPolicy(): AdjudicationClockPolicy | null { return this.state.clockPolicy; }
+  get stoppedClock(): GameStoppedClockState | null { return cloneStoppedClockState(this.state.stoppedClock); }
+  get releaseNeeded(): boolean { return this.state.releaseNeeded; }
+
+  clockAccountingSnapshot(at?: number): ClockAccountingSnapshot | null {
+    if (!this.state.stoppedClock) return null;
+    const basis = this.state.stoppedClock.basis;
+    const now = at ?? basis.stoppedAt ?? this.state.createdAt;
+    return getClockAccountingSnapshot(basis, now, this.state.timeControl);
+  }
 
   get fen(): string {
     return this.state.position.fen();
@@ -398,13 +451,19 @@ export class Game {
 
   get flagDeadline(): number | null {
     const s = this.state;
-    if (s.status.over || s.ply === 0) return null;
+    if (s.status.over || s.stoppedClock !== null || s.ply === 0) return null;
     return flagDeadline(s.clock, s.position.turn, s.timeControl);
   }
 
   timeoutDue(at: number): boolean {
     const s = this.state;
-    return !s.status.over && s.ply > 0 && hasFlagged(s.clock, s.position.turn, at, s.timeControl);
+    if (s.status.over) return false;
+    if (s.stoppedClock !== null) {
+      if (!isChessClockApplicable(s.source, s.ply, s.timeControl)) return false;
+      return hasFlaggedAt(s.stoppedClock.basis, at, s.timeControl);
+    }
+    if (s.ply === 0) return false;
+    return hasFlagged(s.clock, s.position.turn, at, s.timeControl);
   }
 
   get adjudication(): PendingAdjudicationState | null {
@@ -447,6 +506,9 @@ export class Game {
   playMove(uci: string, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
     this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
     const verdict = this.noShowVerdict(at);
     if (verdict.kind === 'expire') {
       return this.expireNoShow(at);
@@ -490,6 +552,10 @@ export class Game {
       }
     }
     return { game: Game.applyAll(this, events), events };
+  }
+
+  move(uci: string, at: number): { game: Game; events: GameEvent[] } {
+    return this.playMove(uci, at);
   }
 
   private terminalEventFor(
@@ -541,6 +607,9 @@ export class Game {
   resign(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
     this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
     const dead = this.deadPositionEnding(at);
     if (dead) return dead;
     const ending: GameEndedEvent = {
@@ -556,6 +625,9 @@ export class Game {
   offerDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
     this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
     if (this.state.drawOffer === color) throw new GameError('Draw already offered by this side');
     const dead = this.deadPositionEnding(at);
     if (dead) return dead;
@@ -566,6 +638,9 @@ export class Game {
   acceptDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
     this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
     const offer = this.state.drawOffer;
     if (offer === null || offer === color) {
       throw new GameError('No draw offer from the opponent to accept');
@@ -579,6 +654,9 @@ export class Game {
   declineDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
     this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
     if (this.state.drawOffer === null) throw new GameError('No draw offer to decline');
     const dead = this.deadPositionEnding(at);
     if (dead) return dead;
@@ -620,6 +698,9 @@ export class Game {
   abort(at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
     this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
     if (this.state.ply >= 2) throw new GameError('Game can no longer be aborted');
     const dead = this.deadPositionEnding(at);
     if (dead) return dead;
@@ -629,6 +710,9 @@ export class Game {
 
   markReady(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
     const s = this.state;
     if (s.noShowAt === null || at >= s.noShowAt) return { game: this, events: [] };
     if (s.status.over || s.ply > 0 || s.ready[color]) return { game: this, events: [] };
@@ -637,15 +721,7 @@ export class Game {
   }
 
   noShowVerdict(at: number): NoShowVerdict {
-    if (!checkNoShowApplicable(this.state, this.isBlocked, at)) {
-      return this.state.noShowAt === null || this.state.status.over || this.state.ply > 0
-        ? { kind: 'not_applicable' }
-        : { kind: 'not_due' };
-    }
-    if (this.state.source === 'seek') {
-      return { kind: 'expire', ending: { type: 'GameEnded', result: '*', termination: 'no_show', winner: null, at } };
-    }
-    return resolveTournamentNoShowEnding(this.state.ready, at);
+    return checkStateNoShowVerdict(this.state, at, this.isBlocked);
   }
 
   expireNoShow(at: number): { game: Game; events: GameEvent[] } {
@@ -684,42 +760,73 @@ export class Game {
     return id;
   }
 
-  private static foldMove(state: GameState, event: MovePlayedEvent, position: Position): GameState {
+  private static computeMoveClock(state: GameState, event: MovePlayedEvent): ClockState {
+    if (state.adjudication?.clockPolicy === 'observed-release-v1') {
+      if (!state.adjudication.originalBasis) {
+        throw new GameError('Missing originalBasis for observed-release-v1 move fold');
+      }
+      const turnComp = applyCompletedTurn(
+        state.adjudication.originalBasis,
+        event.at,
+        state.timeControl,
+        {
+          clearNoShow: true,
+          nextLineage: { policy: 'observed-release-v1' },
+        },
+      );
+      if (turnComp.flagged) {
+        throw new GameError(`Cannot play move: clock expired for ${state.position.turn}`);
+      }
+      if (
+        event.moveTimeMs !== turnComp.moveTimeMs ||
+        event.remaining.w !== turnComp.nextBasis.turnBaseBalances.w ||
+        event.remaining.b !== turnComp.nextBasis.turnBaseBalances.b
+      ) {
+        throw new GameError('MovePlayed payload does not match deterministic managed turn accounting');
+      }
+      return Object.freeze({
+        remaining: Object.freeze({ ...turnComp.nextBasis.turnBaseBalances }),
+        turnStartedAt: null,
+      });
+    }
     const clockToCharge = state.adjudication ? state.adjudication.originalClock : state.clock;
     const charged = charge(clockToCharge, event.by, event.at, state.timeControl, event.moveTimeMs);
+    return charged.clock;
+  }
+
+  private static foldMove(state: GameState, event: MovePlayedEvent, position: Position): GameState {
+    const moveClock = Game.computeMoveClock(state, event);
     const key = repetitionKey(position.snapshot());
     const rep = new Map(state.repetition);
     rep.set(key, (rep.get(key) ?? 0) + 1);
 
-    let phase = state.phase;
-    let adjudication = state.adjudication;
-    if (phase === 'settling' && adjudication) {
-      const nextCursor = adjudication.cursor + 1;
-      if (nextCursor === adjudication.expectedEffects.length) {
-        phase = 'idle';
-        adjudication = null;
-      } else {
-        adjudication = Object.freeze({ ...adjudication, cursor: nextCursor });
-      }
-    }
-
-    const clockExposed: ClockState = phase === 'settling'
-      ? { ...charged.clock, turnStartedAt: null }
-      : charged.clock;
-
-    return {
+    const intermediate: GameState = {
       ...state,
       position,
-      clock: clockExposed,
+      clock: moveClock,
       ply: event.ply,
       moves: [...state.moves, cloneMovePlayedEvent(event)],
       drawOffer: null,
       repetition: rep,
-      phase,
-      isBlocked: phase === 'settling',
-      adjudication,
       eventSequence: state.eventSequence + 1,
     };
+
+    if (state.phase === 'settling' && state.adjudication) {
+      const adjudication = state.adjudication;
+      if (adjudication.cursor + 1 === adjudication.expectedEffects.length) {
+        const resAt = adjudication.resolutionAt ?? adjudication.acceptedAt;
+        return finalizeCompletion(intermediate, adjudication, resAt, adjudication.expectedEffects);
+      }
+      return {
+        ...intermediate,
+        phase: 'settling',
+        isBlocked: true,
+        clock: { ...moveClock, turnStartedAt: null },
+        adjudication: Object.freeze({ ...adjudication, cursor: adjudication.cursor + 1 }),
+      };
+    }
+
+    return intermediate;
   }
 
   static [FOLD_STORED](
@@ -749,48 +856,20 @@ export class Game {
     return new Game(state);
   }
 
-  private static advanceSettlingNonMove(state: GameState): {
-    phase: AdjudicationPhase;
-    adjudication: PendingAdjudicationState | null;
-    clock: ClockState;
-    noShowAt: number | null;
-  } {
+  private static advanceSettlingNonMove(state: GameState): GameState {
     if (state.phase !== 'settling' || !state.adjudication) {
-      return {
-        phase: state.phase,
-        adjudication: state.adjudication,
-        clock: state.clock,
-        noShowAt: state.noShowAt,
-      };
+      return state;
     }
     const nextCursor = state.adjudication.cursor + 1;
     if (nextCursor === state.adjudication.expectedEffects.length) {
       const resAt = state.adjudication.resolutionAt ?? state.adjudication.acceptedAt;
-      const resumed = projectSurvivingObligations(
-        state.adjudication,
-        state.adjudication.expectedEffects,
-        resAt,
-        {
-          source: state.source,
-          ply: state.ply,
-          ready: state.ready,
-          timeControl: state.timeControl,
-          sideToMove: state.position.turn,
-          historicalNoShowAt: state.noShowAt,
-        },
-      );
-      return {
-        phase: 'idle',
-        adjudication: null,
-        clock: resumed.resumedClock,
-        noShowAt: resumed.resumedNoShowAt,
-      };
+      return finalizeCompletion(state, state.adjudication, resAt, state.adjudication.expectedEffects);
     }
     return {
+      ...state,
       phase: 'settling',
+      isBlocked: true,
       adjudication: Object.freeze({ ...state.adjudication, cursor: nextCursor }),
-      clock: state.clock,
-      noShowAt: state.noShowAt,
     };
   }
 
@@ -820,6 +899,175 @@ export class Game {
   }
 }
 
+function finalizeLegacyCompletion(
+  state: GameState,
+  adjudication: PendingAdjudicationState,
+  resolutionAt: number,
+  effects: readonly AdjudicationEffect[],
+): GameState {
+  if (state.status.over) {
+    return {
+      ...state,
+      phase: 'ended',
+      isBlocked: false,
+      adjudication: null,
+      clock: { ...state.clock, turnStartedAt: null },
+    };
+  }
+  const moveEffect = effects.find(e => e.type === 'MovePlayed');
+  if (moveEffect) {
+    return {
+      ...state,
+      phase: 'idle',
+      isBlocked: false,
+      adjudication: null,
+    };
+  }
+  const resumed = projectSurvivingObligations(
+    adjudication,
+    effects,
+    resolutionAt,
+    {
+      source: state.source,
+      ply: state.ply,
+      ready: state.ready,
+      timeControl: state.timeControl,
+      sideToMove: state.position.turn,
+      historicalNoShowAt: state.noShowAt,
+    },
+  );
+  return {
+    ...state,
+    phase: 'idle',
+    isBlocked: false,
+    adjudication: null,
+    clock: resumed.resumedClock,
+    noShowAt: resumed.resumedNoShowAt,
+  };
+}
+
+function finalizeManagedTerminal(
+  state: GameState,
+  _adjudication: PendingAdjudicationState,
+): GameState {
+  return {
+    ...state,
+    phase: 'ended',
+    isBlocked: false,
+    adjudication: null,
+    clock: { ...state.clock, turnStartedAt: null },
+    noShowAt: null,
+    stoppedClock: null,
+    releaseNeeded: false,
+  };
+}
+
+function deriveNextManagedBasis(
+  state: GameState,
+  adjudication: PendingAdjudicationState,
+  resolutionAt: number,
+  moveEffect?: MovePlayedEvent,
+): AdjudicationClockBasis {
+  if (moveEffect) {
+    if (!adjudication.originalBasis) {
+      throw new GameError('Missing originalBasis for observed-release-v1 move completion');
+    }
+    const turnComp = applyCompletedTurn(
+      adjudication.originalBasis,
+      resolutionAt,
+      state.timeControl,
+      {
+        clearNoShow: true,
+        nextLineage: { policy: 'observed-release-v1' },
+      },
+    );
+    return turnComp.nextBasis;
+  }
+
+  const currentBasis = adjudication.originalBasis;
+  if (!currentBasis) {
+    throw new GameError('Missing originalBasis for observed-release-v1 non-move completion');
+  }
+  const isTournamentBothReady = state.source === 'tournament' && state.ready.w && state.ready.b;
+  const nextNoShow = (isTournamentBothReady || state.ply > 0)
+    ? null
+    : currentBasis.noShowRemainderMs;
+
+  return createAdjudicationClockBasis({
+    initialBalances: currentBasis.turnBaseBalances,
+    elapsedThinkingMs: currentBasis.elapsedThinkingMs,
+    sideToMove: currentBasis.sideToMove,
+    ply: currentBasis.ply,
+    runningSince: null,
+    stoppedAt: resolutionAt,
+    policy: 'observed-release-v1',
+    noShowRemainderMs: nextNoShow,
+  });
+}
+
+function finalizeManagedCompletion(
+  state: GameState,
+  adjudication: PendingAdjudicationState,
+  resolutionAt: number,
+  effects: readonly AdjudicationEffect[],
+): GameState {
+  const moveEffect = effects.find(e => e.type === 'MovePlayed') as MovePlayedEvent | undefined;
+  const nextBasis = deriveNextManagedBasis(state, adjudication, resolutionAt, moveEffect);
+  const isNewTurn = moveEffect !== undefined;
+  const resolvedSeq = adjudication.startedSeq + 1;
+  const stopId = deriveStopId(adjudication.operationId, resolvedSeq);
+  const turnLineageId = deriveTurnLineageId(
+    adjudication.prepared.gameId,
+    state.ply,
+    adjudication.prepared.turnLineageId,
+    isNewTurn,
+  );
+  const completionHead = resolvedSeq + effects.length;
+
+  const stoppedClock: GameStoppedClockState = Object.freeze({
+    basis: nextBasis,
+    stopId,
+    originatingOperationId: adjudication.operationId,
+    turnLineageId,
+    parentStopId: adjudication.prepared.parentStopId ?? null,
+    completionHead,
+  });
+
+  const dispBalances = computeDisplayBalances(nextBasis, resolutionAt, state.timeControl);
+  const exposedClock: ClockState = Object.freeze({
+    remaining: dispBalances,
+    turnStartedAt: null,
+  });
+
+  const releaseNeeded = isChessClockApplicable(state.source, state.ply, state.timeControl) || nextBasis.noShowRemainderMs !== null;
+
+  return {
+    ...state,
+    phase: 'idle',
+    isBlocked: false,
+    adjudication: null,
+    clock: exposedClock,
+    clockPolicy: 'observed-release-v1',
+    stoppedClock,
+    releaseNeeded,
+  };
+}
+
+function finalizeCompletion(
+  state: GameState,
+  adjudication: PendingAdjudicationState,
+  resolutionAt: number,
+  effects: readonly AdjudicationEffect[],
+): GameState {
+  if (adjudication.clockPolicy !== 'observed-release-v1') {
+    return finalizeLegacyCompletion(state, adjudication, resolutionAt, effects);
+  }
+  if (state.status.over) {
+    return finalizeManagedTerminal(state, adjudication);
+  }
+  return finalizeManagedCompletion(state, adjudication, resolutionAt, effects);
+}
+
 function assertStoredMoveAllowed(state: GameState, event: MovePlayedEvent): void {
   if (state.phase === 'proving') {
     throw new GameError('MovePlayed forbidden while adjudication is pending');
@@ -830,6 +1078,9 @@ function assertStoredMoveAllowed(state: GameState, event: MovePlayedEvent): void
     const expected = adjudication.expectedEffects[adjudication.cursor];
     if (!expected) throw new GameError(`No declared effect expected at cursor ${adjudication.cursor}`);
     assertEffectsMatch(event, expected, adjudication.cursor);
+  }
+  if (state.phase === 'idle' && state.clockPolicy === 'observed-release-v1') {
+    throw new GameError('Raw MovePlayed cannot bypass managed adjudication route when clock policy is observed-release-v1');
   }
 }
 
@@ -859,8 +1110,13 @@ function assertLifecyclePreconditions(state: GameState | null, event: GameEvent)
   if (state.phase === 'settling') {
     assertSettlingEventAllowed(state, event);
   }
-  if (state.phase === 'idle' && event.type === 'AdjudicationResolved') {
-    throw new GameError('AdjudicationResolved without matching AdjudicationStarted');
+  if (state.phase === 'idle') {
+    if (event.type === 'AdjudicationResolved') {
+      throw new GameError('AdjudicationResolved without matching AdjudicationStarted');
+    }
+    if (state.clockPolicy === 'observed-release-v1' && event.type !== 'AdjudicationStarted') {
+      throw new GameError(`Raw ${event.type} cannot bypass managed adjudication route when clock policy is observed-release-v1`);
+    }
   }
 }
 
@@ -909,6 +1165,9 @@ function reduceGameCreated(state: GameState | null, event: GameCreatedEvent): Ga
     adjudication: null,
     eventSequence: 0,
     lastResolutionAt: null,
+    clockPolicy: null,
+    stoppedClock: null,
+    releaseNeeded: false,
   };
 }
 
@@ -916,17 +1175,12 @@ function reducePlayerReady(state: GameState, event: PlayerReadyEvent): GameState
   if (event.by !== 'w' && event.by !== 'b') {
     throw new GameError(`PlayerReady for unknown seat ${JSON.stringify(event.by)}`);
   }
-  const settling = Game['advanceSettlingNonMove'](state);
-  return {
+  const intermediate: GameState = {
     ...state,
     ready: { ...state.ready, [event.by]: true },
-    phase: settling.phase,
-    isBlocked: settling.phase === 'settling',
-    adjudication: settling.adjudication,
-    clock: settling.clock,
-    noShowAt: settling.noShowAt,
     eventSequence: state.eventSequence + 1,
   };
+  return Game['advanceSettlingNonMove'](intermediate);
 }
 
 function reduceMovePlayed(state: GameState, event: MovePlayedEvent): GameState {
@@ -934,31 +1188,21 @@ function reduceMovePlayed(state: GameState, event: MovePlayedEvent): GameState {
 }
 
 function reduceDrawOffered(state: GameState, event: DrawOfferedEvent): GameState {
-  const settling = Game['advanceSettlingNonMove'](state);
-  return {
+  const intermediate: GameState = {
     ...state,
     drawOffer: event.by,
-    phase: settling.phase,
-    isBlocked: settling.phase === 'settling',
-    adjudication: settling.adjudication,
-    clock: settling.clock,
-    noShowAt: settling.noShowAt,
     eventSequence: state.eventSequence + 1,
   };
+  return Game['advanceSettlingNonMove'](intermediate);
 }
 
 function reduceDrawDeclined(state: GameState, _event: DrawDeclinedEvent): GameState {
-  const settling = Game['advanceSettlingNonMove'](state);
-  return {
+  const intermediate: GameState = {
     ...state,
     drawOffer: null,
-    phase: settling.phase,
-    isBlocked: settling.phase === 'settling',
-    adjudication: settling.adjudication,
-    clock: settling.clock,
-    noShowAt: settling.noShowAt,
     eventSequence: state.eventSequence + 1,
   };
+  return Game['advanceSettlingNonMove'](intermediate);
 }
 
 function reduceGameEnded(state: GameState, event: GameEndedEvent): GameState {
@@ -968,16 +1212,20 @@ function reduceGameEnded(state: GameState, event: GameEndedEvent): GameState {
       throw new GameError('Premature GameEnded effect: declared effects plan has unconsumed suffix');
     }
   }
-  return {
+  const intermediate: GameState = {
     ...state,
     status: { over: true, result: event.result, termination: event.termination, winner: event.winner },
     drawOffer: null,
     phase: 'ended',
     isBlocked: false,
     clock: { ...state.clock, turnStartedAt: null },
-    adjudication: null,
     eventSequence: state.eventSequence + 1,
   };
+  if (state.adjudication) {
+    const resAt = state.adjudication.resolutionAt ?? state.adjudication.acceptedAt;
+    return finalizeCompletion(intermediate, state.adjudication, resAt, state.adjudication.expectedEffects);
+  }
+  return intermediate;
 }
 
 function getActiveCausalBasis(state: GameState): number {
@@ -1021,7 +1269,16 @@ function resolveStartedMove(pos: Position, uci: string): ReturnType<Position['le
   }
 }
 
-function assertStartedMoveReadiness(state: GameState, at: number): void {
+function assertStoppedMoveReadiness(state: GameState): void {
+  if (state.stoppedClock?.basis.noShowRemainderMs === 0) {
+    throw new GameError('Cannot play move: no-show deadline has expired');
+  }
+  if (state.source !== null && state.ply === 0 && (!state.ready.w || !state.ready.b)) {
+    throw new GameError(NOT_READY_MESSAGE);
+  }
+}
+
+function assertUnstoppedMoveReadiness(state: GameState, at: number): void {
   if (state.source === null || state.ply > 0) return;
   const verdict = checkStateNoShowVerdict(state, at);
   if (verdict.kind === 'expire') {
@@ -1032,13 +1289,26 @@ function assertStartedMoveReadiness(state: GameState, at: number): void {
   }
 }
 
+function assertStartedMoveReadiness(state: GameState, at: number): void {
+  if (state.stoppedClock !== null) {
+    assertStoppedMoveReadiness(state);
+    return;
+  }
+  assertUnstoppedMoveReadiness(state, at);
+}
+
 function assertStartedMoveAdmission(state: GameState, op: PreparedOperation): void {
   const intent = op.intent as { kind: 'move'; mover: Color; uci: string; san: string; successorFen: string };
   if (intent.mover !== state.position.turn) {
     throw new GameError(`Move mover mismatch: expected ${state.position.turn}, got ${intent.mover}`);
   }
   assertStartedMoveReadiness(state, op.at);
-  if (hasFlagged(state.clock, intent.mover, op.at, state.timeControl)) {
+  if (state.stoppedClock !== null) {
+    const dispBalances = computeDisplayBalances(state.stoppedClock.basis, op.at, state.timeControl);
+    if (state.timeControl.kind !== 'unlimited' && dispBalances[intent.mover] <= 0) {
+      throw new GameError(`Cannot play move: clock expired for ${intent.mover}`);
+    }
+  } else if (hasFlagged(state.clock, intent.mover, op.at, state.timeControl)) {
     throw new GameError(`Cannot play move: clock expired for ${intent.mover}`);
   }
   const moveObj = resolveStartedMove(state.position, intent.uci);
@@ -1086,24 +1356,63 @@ function assertStartedNegotiationAdmission(state: GameState, intent: PreparedInt
   assertStartedEndingNegotiation(state, intent);
 }
 
-function checkStateNoShowVerdict(s: GameState, at: number): NoShowVerdict {
-  if (!checkNoShowApplicable(s, false, at)) {
-    return s.noShowAt === null || s.status.over || s.ply > 0
+function resolveNoShowEndingForSource(
+  source: GameSource | null | undefined,
+  ready: Readonly<{ w: boolean; b: boolean }>,
+  at: number,
+): NoShowVerdict {
+  if (source === 'seek') {
+    return { kind: 'expire', ending: { type: 'GameEnded', result: '*', termination: 'no_show', winner: null, at } };
+  }
+  return resolveTournamentNoShowEnding(ready, at);
+}
+
+function checkStoppedNoShowVerdict(s: GameState, at: number): NoShowVerdict {
+  const stopped = s.stoppedClock;
+  if (!stopped) return { kind: 'not_applicable' };
+  if (stopped.basis.noShowRemainderMs === null || s.status.over || s.ply > 0) {
+    return { kind: 'not_applicable' };
+  }
+  if (stopped.basis.noShowRemainderMs === 0) {
+    return resolveNoShowEndingForSource(s.source, s.ready, at);
+  }
+  return { kind: 'not_due' };
+}
+
+function checkStateNoShowVerdict(s: GameState, at: number, isBlocked: boolean = false): NoShowVerdict {
+  if (s.stoppedClock !== null) {
+    return checkStoppedNoShowVerdict(s, at);
+  }
+  if (!checkNoShowApplicable(s, isBlocked, at)) {
+    return (s.noShowAt === null || s.status.over || s.ply > 0)
       ? { kind: 'not_applicable' }
       : { kind: 'not_due' };
   }
-  if (s.source === 'seek') {
-    return { kind: 'expire', ending: { type: 'GameEnded', result: '*', termination: 'no_show', winner: null, at } };
-  }
-  return resolveTournamentNoShowEnding(s.ready, at);
+  return resolveNoShowEndingForSource(s.source, s.ready, at);
 }
 
-function assertStartedReadyAdmission(state: GameState, intent: { kind: 'ready'; color: Color; isNoop?: boolean }, at: number): void {
+function assertReadyDeadlineValid(state: GameState, at: number): void {
+  if (state.stoppedClock !== null) {
+    if (state.stoppedClock.basis.noShowRemainderMs === 0) {
+      throw new GameError('Cannot mark ready after no-show deadline');
+    }
+    return;
+  }
+  if (state.noShowAt !== null && at >= state.noShowAt) {
+    throw new GameError('Cannot mark ready after no-show deadline');
+  }
+}
+
+function assertStartedReadyAdmission(
+  state: GameState,
+  intent: { kind: 'ready'; color: Color; isNoop?: boolean },
+  at: number,
+): void {
   if (intent.color !== 'w' && intent.color !== 'b') throw new GameError('Invalid ready seat');
   if (state.source === null || state.ply > 0) throw new GameError('Readiness is only valid before first move of sourced games');
   if (intent.isNoop === true) throw new GameError('AdjudicationStarted cannot be created for ready no-op');
   if (state.ready[intent.color] === true) throw new GameError('Player is already marked ready');
-  if (state.noShowAt !== null && at >= state.noShowAt) throw new GameError('Cannot mark ready after no-show deadline');
+  assertReadyDeadlineValid(state, at);
 }
 
 function assertEndingResultMatch(ending: Record<string, unknown>, verdict: GameEndedEvent): void {
@@ -1158,7 +1467,17 @@ function assertStartedPregameAdmission(state: GameState, intent: PreparedIntent,
 function assertStartedTimeoutAdmission(state: GameState, intent: PreparedIntent, at: number, tc: TimeControl): void {
   if (intent.kind !== 'expireFlag') return;
   if (intent.flagged !== state.position.turn) throw new GameError(`Flagged color ${intent.flagged} is not side to move`);
-  if (!hasFlagged(state.clock, intent.flagged, at, tc)) throw new GameError(`Flag has not fallen for ${intent.flagged} at ${at}`);
+  const isManaged = state.clockPolicy === 'observed-release-v1' || state.stoppedClock !== null;
+  if (isManaged && !isChessClockApplicable(state.source, state.ply, tc)) {
+    throw new GameError(`Chess clock flag expiry is not applicable for ${intent.flagged} at ply ${state.ply}`);
+  }
+  if (state.stoppedClock !== null) {
+    if (!hasFlaggedAt(state.stoppedClock.basis, at, tc)) {
+      throw new GameError(`Flag has not fallen for ${intent.flagged} at ${at}`);
+    }
+  } else if (!hasFlagged(state.clock, intent.flagged, at, tc)) {
+    throw new GameError(`Flag has not fallen for ${intent.flagged} at ${at}`);
+  }
 }
 
 function isNegotiationIntent(kind: string): boolean {
@@ -1178,13 +1497,66 @@ function assertStartedIntentAdmissible(state: GameState, event: AdjudicationStar
   }
 }
 
-function assertStartedPrepared(state: GameState, event: AdjudicationStartedEvent): void {
+function assertStartedPreparedCore(state: GameState, event: AdjudicationStartedEvent): void {
   if (event.prepared.gameId !== state.gameId) throw new GameError('AdjudicationStarted prepared gameId mismatch');
   if (event.prepared.operationId !== event.operationId) throw new GameError('AdjudicationStarted operationId mismatch');
   if (event.prepared.baseRevision !== state.eventSequence) throw new GameError('AdjudicationStarted prepared baseRevision mismatch');
   if (event.prepared.baseFen !== state.position.fen()) throw new GameError('AdjudicationStarted baseFen mismatch');
   if (event.prepared.variant !== state.variant) throw new GameError('AdjudicationStarted variant mismatch');
   if (event.rulesVersion !== event.prepared.rulesVersion) throw new GameError('AdjudicationStarted rulesVersion mismatch');
+}
+
+function assertStartedPolicyMatch(state: GameState, event: AdjudicationStartedEvent): void {
+  if (event.clockPolicy !== event.prepared.clockPolicy) {
+    throw new GameError('AdjudicationStarted clockPolicy mismatch with prepared operation');
+  }
+  if (state.clockPolicy !== null && event.clockPolicy !== state.clockPolicy) {
+    throw new GameError(`Cannot change or downgrade clock policy: active is "${state.clockPolicy}", event has "${String(event.clockPolicy)}"`);
+  }
+  if (event.clockPolicy !== undefined) {
+    validateClockPolicy(event.clockPolicy);
+  }
+}
+
+function assertStoppedLineage(stoppedClock: GameStoppedClockState, prepared: PreparedOperation): void {
+  if (typeof prepared.parentStopId !== 'string' || prepared.parentStopId !== stoppedClock.stopId) {
+    throw new GameError(`AdjudicationStarted prepared parentStopId mismatch: expected "${stoppedClock.stopId}", got "${String(prepared.parentStopId)}"`);
+  }
+  if (typeof prepared.turnLineageId !== 'string' || prepared.turnLineageId !== stoppedClock.turnLineageId) {
+    throw new GameError(`AdjudicationStarted prepared turnLineageId mismatch: expected "${stoppedClock.turnLineageId}", got "${String(prepared.turnLineageId)}"`);
+  }
+}
+
+function assertUnstoppedLineage(gameId: string, ply: number, prepared: PreparedOperation): void {
+  if (prepared.parentStopId !== null && prepared.parentStopId !== undefined) {
+    throw new GameError('AdjudicationStarted prepared parentStopId must be null for non-stopped game');
+  }
+  if (prepared.turnLineageId !== null && prepared.turnLineageId !== undefined) {
+    const canonical = deriveTurnLineageId(gameId, ply);
+    if (typeof prepared.turnLineageId !== 'string' || prepared.turnLineageId !== canonical) {
+      throw new GameError('AdjudicationStarted prepared turnLineageId must be null, undefined, or canonical for non-stopped game');
+    }
+  }
+}
+
+function assertStartedLineageAndBounds(state: GameState, event: AdjudicationStartedEvent): void {
+  if (state.stoppedClock !== null) {
+    assertStoppedLineage(state.stoppedClock, event.prepared);
+  } else {
+    assertUnstoppedLineage(state.gameId, state.ply, event.prepared);
+  }
+  const remainingNoShow = state.stoppedClock
+    ? state.stoppedClock.basis.noShowRemainderMs
+    : (state.noShowAt !== null ? Math.max(0, state.noShowAt - event.at) : null);
+  validateIntegerPolicyInputs(state.timeControl, state.clock.remaining, remainingNoShow);
+}
+
+function assertStartedPrepared(state: GameState, event: AdjudicationStartedEvent): void {
+  assertStartedPreparedCore(state, event);
+  assertStartedPolicyMatch(state, event);
+  if (event.clockPolicy === 'observed-release-v1') {
+    assertStartedLineageAndBounds(state, event);
+  }
   assertStartedIntentAdmissible(state, event);
 }
 
@@ -1196,7 +1568,22 @@ function assertStartedMetadata(state: GameState, event: AdjudicationStartedEvent
 function reduceAdjudicationStarted(state: GameState, event: AdjudicationStartedEvent): GameState {
   assertStartedMetadata(state, event);
   const { frozenClock, elapsed } = freezeClock(state.clock, state.position.turn, event.at, state.timeControl);
-  const remainingNoShow = state.noShowAt !== null ? Math.max(0, state.noShowAt - event.at) : null;
+  const remainingNoShow = state.stoppedClock
+    ? state.stoppedClock.basis.noShowRemainderMs
+    : (state.noShowAt !== null ? Math.max(0, state.noShowAt - event.at) : null);
+
+  const basis = deriveStartedBasis({
+    clockPolicy: event.clockPolicy,
+    stoppedClock: state.stoppedClock,
+    timeControl: state.timeControl,
+    turnStartedAt: state.clock.turnStartedAt,
+    remainingBalances: state.clock.remaining,
+    sideToMove: state.position.turn,
+    ply: state.ply,
+    atA: event.at,
+    noShowRemainderMs: remainingNoShow,
+  });
+
   const pending: PendingAdjudicationState = deepClonePendingState({
     operationId: event.operationId,
     baseRevision: event.baseRevision,
@@ -1210,6 +1597,8 @@ function reduceAdjudicationStarted(state: GameState, event: AdjudicationStartedE
     remainingNoShowTimeAtA: remainingNoShow,
     cursor: 0,
     expectedEffects: [],
+    ...(event.clockPolicy ? { clockPolicy: event.clockPolicy } : {}),
+    ...(basis ? { originalBasis: basis } : {}),
   });
 
   return {
@@ -1226,6 +1615,7 @@ function reduceAdjudicationResolved(state: GameState, event: AdjudicationResolve
   if (state.phase !== 'proving' || !state.adjudication) {
     throw new GameError(`Cannot resolve adjudication in phase "${state.phase}"`);
   }
+  const clockPolicy = state.adjudication.clockPolicy ?? state.clockPolicy;
   const context: ResolutionContext = {
     pending: state.adjudication,
     basePosition: state.position,
@@ -1237,6 +1627,8 @@ function reduceAdjudicationResolved(state: GameState, event: AdjudicationResolve
     source: state.source,
     noShowAt: state.noShowAt,
     ply: state.ply,
+    ...(clockPolicy ? { clockPolicy } : {}),
+    stoppedClock: state.stoppedClock,
   };
 
   const derivedEffects = validateRecordedResolution(context, event);
@@ -1246,30 +1638,12 @@ function reduceAdjudicationResolved(state: GameState, event: AdjudicationResolve
     if (kind === 'move' || kind === 'resign') {
       throw new GameError(`No-op resolution cannot swallow ${kind}`);
     }
-    const resAt = event.at;
-    const resumed = projectSurvivingObligations(
-      state.adjudication,
-      [],
-      resAt,
-      {
-        source: state.source,
-        ply: state.ply,
-        ready: state.ready,
-        timeControl: state.timeControl,
-        sideToMove: state.position.turn,
-        historicalNoShowAt: state.noShowAt,
-      },
-    );
-    return {
+    const intermediate: GameState = {
       ...state,
-      phase: 'idle',
-      isBlocked: false,
-      adjudication: null,
-      clock: resumed.resumedClock,
-      noShowAt: resumed.resumedNoShowAt,
       eventSequence: state.eventSequence + 1,
       lastResolutionAt: event.at,
     };
+    return finalizeCompletion(intermediate, state.adjudication, event.at, []);
   }
 
   return {
