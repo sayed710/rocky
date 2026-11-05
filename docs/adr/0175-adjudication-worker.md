@@ -36,6 +36,26 @@ Failures are logged and counted. A failed proof or settlement is retried once it
 a higher generation; a failed release is retried on the next pass. `stop()` halts a proof at its
 next slice and waits for the pass.
 
+Recovery and ordering:
+
+- **Retained settlement.** When a settlement was evaluated but its write failed, the next claim in
+  the same process settles that evaluation at its fixed instant without stepping the consumed job.
+- **Job cleanup.** The local proof job is cancelled and evicted after every claim, whatever the
+  outcome, so lost or superseded claims cannot fill the controller's bounded capacity.
+- **Publication obligations.** A failed publication is kept per game and retried at the start of
+  every pass; a stop is never released while its game has one outstanding. A stop is also released
+  only once its settlement is `releaseGraceMs` old (database time, default 1 s), so the replica that
+  settled it publishes first. The owner publishes from the durable log, not from the notice, so a
+  late or repeated notice still shows the settlement before the release.
+- **Restart.** The first pass of a process republishes every game with a settlement or release
+  committed within `recoveryWindowMs` (default 5 min), covering a process that died between commit
+  and publication.
+
+Privileges: the worker's role needs what every `PgAdjudicationStore` call needs, SELECT, INSERT and
+UPDATE on `game_adjudications` and `game_adjudication_releases` (and the event and queue tables it
+already writes); the migrations grant nothing to PUBLIC, so a restricted runtime role must be
+granted these explicitly when adjudication is enabled.
+
 ## Consequences
 
 - Correctness stays in the database fence: racing workers on several replicas settle an operation

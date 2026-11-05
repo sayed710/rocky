@@ -42,7 +42,8 @@ import { routedExpiry, type RoutedExpiryOptions } from './deadline-expiry.js';
 /** Exactly what the worker uses of `PgAdjudicationStore`. */
 export interface AdjudicationWorkStore {
   listClaimableAdjudications(limit: number): Promise<Array<{ gameId: string; operationId: string; generation: string }>>;
-  listReleasableStops(limit: number): Promise<Array<{ gameId: string; stopOperationId: string }>>;
+  listReleasableStops(limit: number, minAgeMs: number): Promise<Array<{ gameId: string; stopOperationId: string }>>;
+  listRecentAdjudicationChanges(withinMs: number, limit: number): Promise<string[]>;
   claimAdjudication(params: ClaimAdjudicationParams): Promise<AdjudicationClaimGrant>;
   renewAdjudication(params: RenewAdjudicationParams): Promise<AdjudicationClaimGrant>;
   createProofJob(gameId: string, operationId: string): Promise<string>;
@@ -50,6 +51,7 @@ export interface AdjudicationWorkStore {
   concludeUnresolvedProofJob(operationId: string): JobStepResult;
   retainedResolutionAt(gameId: string, operationId: string): number | undefined;
   settleAdjudication(params: SettleAdjudicationParams): Promise<AdjudicationSettlementReceipt>;
+  cancelProofJob(operationId: string): void;
   evictProofJob(operationId: string): boolean;
   releaseClocks(params: { gameId: string; releaseRequestId: string; at: number }): Promise<AdjudicationReleaseReceipt>;
 }
@@ -57,15 +59,18 @@ export interface AdjudicationWorkStore {
 /** What changed in a game's durable log, so the owner can reload and publish it. */
 export type AdjudicationChange =
   | { readonly kind: 'settled'; readonly gameId: string; readonly receipt: AdjudicationSettlementReceipt }
-  | { readonly kind: 'released'; readonly gameId: string; readonly receipt: AdjudicationReleaseReceipt };
+  | { readonly kind: 'released'; readonly gameId: string; readonly receipt: AdjudicationReleaseReceipt }
+  /** A change committed while no publication is known to have reached the owner (after a restart). */
+  | { readonly kind: 'recovered'; readonly gameId: string };
 
 export interface AdjudicationWorkerOptions {
   readonly store: AdjudicationWorkStore;
   /** This process's executor identity (a UUID), recorded with every claim it takes. */
   readonly executorId: string;
   /**
-   * Publish a durable change to the game's players: reload the owner's copy and broadcast. A stop
-   * is released only after its settlement was published, so players observe the stop first.
+   * Publish a durable change to the game's players: the owner folds the durable log into its copy
+   * and broadcasts. A failed publication is retried every pass until it succeeds, and a stop is not
+   * released while its game has one outstanding, so players observe the stop first.
    */
   readonly publish: (change: AdjudicationChange) => Promise<void>;
   /** Lease length per claim and renewal (default 30 s). */
@@ -78,6 +83,13 @@ export interface AdjudicationWorkerOptions {
   readonly pageSize?: number;
   /** Ceiling for the delay after consecutive failed passes (default 30 s). */
   readonly maxBackoffMs?: number;
+  /**
+   * A stop is released only once its settlement is this old (default 1 s), so the replica that
+   * settled it publishes first even when another replica's worker sees it.
+   */
+  readonly releaseGraceMs?: number;
+  /** On start, changes this recent are republished, in case a stopped process lost them (default 5 min). */
+  readonly recoveryWindowMs?: number;
   readonly newIntent?: () => ClaimIntent;
   readonly now?: () => number;
   readonly logger?: Logger;
@@ -115,6 +127,12 @@ export class AdjudicationWorker {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #running: Promise<void> | undefined;
   #consecutiveErrors = 0;
+  readonly #releaseGraceMs: number;
+  readonly #recoveryWindowMs: number;
+  /** Publications that failed, by game; retried every pass. Only the latest per game matters. */
+  readonly #unpublished = new Map<string, AdjudicationChange>();
+  /** The first pass republishes recent changes a previous process may not have published. */
+  #recovered = false;
 
   constructor(private readonly options: AdjudicationWorkerOptions) {
     this.#store = options.store;
@@ -125,6 +143,13 @@ export class AdjudicationWorker {
     this.#maxBackoffMs = positive(options.maxBackoffMs ?? 30_000, 'maxBackoffMs');
     this.#newIntent = options.newIntent ?? (() => PgAdjudicationStore.newClaimIntent());
     this.#now = options.now ?? (() => Date.now());
+    this.#releaseGraceMs = nonnegative(options.releaseGraceMs ?? 1_000, 'releaseGraceMs');
+    this.#recoveryWindowMs = nonnegative(options.recoveryWindowMs ?? 300_000, 'recoveryWindowMs');
+  }
+
+  /** Games with a publication still outstanding (for observability and tests). */
+  get unpublishedCount(): number {
+    return this.#unpublished.size;
   }
 
   /** Start passing at once, so work left by a process that stopped resumes immediately. */
@@ -150,6 +175,13 @@ export class AdjudicationWorker {
     let released = 0;
     let skipped = 0;
     let failed = 0;
+    if (!this.#recovered) {
+      for (const gameId of await this.#store.listRecentAdjudicationChanges(this.#recoveryWindowMs, this.#pageSize * 10)) {
+        this.#unpublished.set(gameId, { kind: 'recovered', gameId });
+      }
+      this.#recovered = true;
+    }
+    failed += await this.#flushPublications();
     const claimable = await this.#store.listClaimableAdjudications(this.#pageSize);
     for (const op of claimable) {
       if (this.#halting) break;
@@ -162,8 +194,10 @@ export class AdjudicationWorker {
         this.#fail('Adjudication failed for an operation; it is retried once its lease lapses', error, op);
       }
     }
-    const stops = await this.#store.listReleasableStops(this.#pageSize);
+    const stops = await this.#store.listReleasableStops(this.#pageSize, this.#releaseGraceMs);
     for (const stop of stops) {
+      // Players must see the settlement first: never release over an outstanding publication.
+      if (this.#unpublished.has(stop.gameId)) continue;
       try {
         await this.#release(stop.gameId, stop.stopOperationId);
         released += 1;
@@ -177,39 +211,89 @@ export class AdjudicationWorker {
   }
 
   async #adjudicate(gameId: string, operationId: string, generation: string): Promise<'settled' | 'skipped'> {
-    let grant = await this.#claim(gameId, operationId, generation);
-    if (grant === null) return 'skipped';
+    const claimed = await this.#claim(gameId, operationId, generation);
+    if (claimed === null) return 'skipped';
     try {
-      await this.#store.createProofJob(gameId, operationId);
-      let step = this.#store.stepProofJob(operationId, 0);
-      while (step.status === 'active' || step.status === 'resource_limit') {
-        if (this.#halting) return 'skipped';
-        grant = await this.#renewIfDue(grant);
-        if (step.status === 'resource_limit') {
-          // An exhausted question settles as unresolved (never a dead position); the rest go on.
-          step = this.#store.concludeUnresolvedProofJob(operationId);
-          continue;
-        }
-        await yieldToLoop();
-        step = this.#store.stepProofJob(operationId, this.#sliceBudget);
-      }
-      if (step.status !== 'ready') {
-        throw new Error(`proof job ended ${step.status}, not ready`);
-      }
-      const resolutionAt = this.#store.retainedResolutionAt(gameId, operationId) ?? this.#now();
+      // A settlement this process already evaluated (its write failed) is retried as it was,
+      // without proving again: the proof job it consumed cannot be stepped any more.
+      const retained = this.#store.retainedResolutionAt(gameId, operationId);
+      const grant = retained === undefined ? await this.#prove(gameId, operationId, claimed) : claimed;
+      if (grant === null) return 'skipped';
+      const resolutionAt = retained ?? this.#now();
       const receipt = await this.#settle({ gameId, operationId, grant, resolutionAt });
-      this.#store.evictProofJob(operationId);
       this.options.settledCounter?.inc();
-      await this.options.publish({ kind: 'settled', gameId, receipt });
+      await this.#publish({ kind: 'settled', gameId, receipt });
       return 'settled';
     } catch (error) {
-      if (error instanceof AdjudicationConflictError) {
-        // Superseded: another executor holds or completed the operation. Its job is not ours to keep.
-        this.#store.evictProofJob(operationId);
-        return 'skipped';
-      }
+      // Superseded: another executor holds or completed the operation.
+      if (error instanceof AdjudicationConflictError) return 'skipped';
       throw error;
+    } finally {
+      // Never keep a local job past its claim: it would hold controller capacity indefinitely.
+      this.#dropJob(operationId);
     }
+  }
+
+  /** Run the proof to ready, renewing the lease; returns the current grant, or null when halted. */
+  async #prove(gameId: string, operationId: string, claimed: AdjudicationClaimGrant): Promise<AdjudicationClaimGrant | null> {
+    let grant = claimed;
+    await this.#store.createProofJob(gameId, operationId);
+    let step = this.#store.stepProofJob(operationId, 0);
+    while (step.status === 'active' || step.status === 'resource_limit') {
+      if (this.#halting) return null;
+      grant = await this.#renewIfDue(grant);
+      if (step.status === 'resource_limit') {
+        // An exhausted question settles as unresolved (never a dead position); the rest go on.
+        step = this.#store.concludeUnresolvedProofJob(operationId);
+        continue;
+      }
+      await yieldToLoop();
+      step = this.#store.stepProofJob(operationId, this.#sliceBudget);
+    }
+    if (step.status !== 'ready') {
+      throw new Error(`proof job ended ${step.status}, not ready`);
+    }
+    return grant;
+  }
+
+  #dropJob(operationId: string): void {
+    try {
+      this.#store.cancelProofJob(operationId);
+    } catch {
+      /* not active, or already gone */
+    }
+    try {
+      this.#store.evictProofJob(operationId);
+    } catch {
+      /* already gone */
+    }
+  }
+
+  /** Publish once; a failure is kept and retried every pass until it succeeds. */
+  async #publish(change: AdjudicationChange): Promise<void> {
+    try {
+      await this.options.publish(change);
+      this.#unpublished.delete(change.gameId);
+    } catch (error) {
+      this.#unpublished.set(change.gameId, change);
+      this.#fail('Publication of an adjudication change failed; it is retried every pass', error, { gameId: change.gameId });
+    }
+  }
+
+  /** Retry every outstanding publication; returns how many still failed. */
+  async #flushPublications(): Promise<number> {
+    let failed = 0;
+    for (const change of [...this.#unpublished.values()]) {
+      if (this.#halting) break;
+      try {
+        await this.options.publish(change);
+        if (this.#unpublished.get(change.gameId) === change) this.#unpublished.delete(change.gameId);
+      } catch (error) {
+        failed += 1;
+        this.#fail('Publication of an adjudication change failed again; it is retried next pass', error, { gameId: change.gameId });
+      }
+    }
+    return failed;
   }
 
   /** Claim with one intent, reusing it once when the reply is uncertain. A conflict means skip. */
@@ -251,7 +335,7 @@ export class AdjudicationWorker {
       gameId, releaseRequestId: stopReleaseRequestId(stopOperationId), at: this.#now(),
     });
     this.options.releasedCounter?.inc();
-    await this.options.publish({ kind: 'released', gameId, receipt });
+    await this.#publish({ kind: 'released', gameId, receipt });
   }
 
   #fail(message: string, error: unknown, context: object): void {
@@ -283,6 +367,11 @@ export class AdjudicationWorker {
     const progressed = pass.settled + pass.released > 0;
     this.#schedule(pass.more && progressed ? 0 : this.#pollMs);
   }
+}
+
+function nonnegative(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`${name} must be a non-negative safe integer`);
+  return value;
 }
 
 function positive(value: number, name: string): number {

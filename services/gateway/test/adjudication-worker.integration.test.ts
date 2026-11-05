@@ -73,7 +73,7 @@ async function events(pool: Pool, gameId: string): Promise<GameEvent[]> {
 
 function worker(store: PgAdjudicationStore, clock: { now: number }, published: AdjudicationChange[], extra: object = {}): AdjudicationWorker {
   return new AdjudicationWorker({
-    store, executorId: randomUUID(), leaseMs: 5_000, sliceBudget: 200,
+    store, executorId: randomUUID(), leaseMs: 5_000, sliceBudget: 200, releaseGraceMs: 0,
     publish: async (change) => {
       published.push(change);
     },
@@ -177,5 +177,89 @@ pgTest('an exhausted proof settles as unresolved: the move applies and no draw i
     const game = Game.fromEvents(logged);
     assert.equal(game.status.over, false);
     assert.equal(game.ply, 1, 'the move applied');
+  });
+});
+
+/** A pool whose COMMIT of an event-writing transaction fails (after rolling back) while `failures` is positive. */
+function failingCommits(pool: Pool, state: { failures: number }): Pool {
+  return new Proxy(pool, {
+    get(target, prop, receiver) {
+      if (prop === 'query') return target.query.bind(target);
+      if (prop !== 'connect') return Reflect.get(target, prop, receiver);
+      return async () => {
+        const client = await target.connect();
+        let wroteEvents = false;
+        return new Proxy(client, {
+          get(c, p, r) {
+            if (p !== 'query') return Reflect.get(c, p, r);
+            return async (sql: unknown, ...rest: unknown[]) => {
+              if (sql === 'BEGIN') wroteEvents = false;
+              if (typeof sql === 'string' && /INSERT INTO\s+game_events/i.test(sql)) wroteEvents = true;
+              if (sql === 'COMMIT' && wroteEvents && state.failures > 0) {
+                state.failures -= 1;
+                await c.query('ROLLBACK');
+                throw new Error('connection lost at COMMIT');
+              }
+              return (c.query as (...a: unknown[]) => unknown).call(c, sql, ...rest);
+            };
+          },
+        });
+      };
+    },
+  }) as Pool;
+}
+
+pgTest('a settlement whose writes fail is settled later as evaluated, without proving again', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const players = await setup(pool);
+    const gameId = await createGame(pool, players, FEN_MATE1);
+    await startMove(new PgAdjudicationStore(pool), gameId, 'e7e4', 'w', 1100);
+    // One store (one process): claim succeeds, then every settlement write fails for this pass.
+    const faults = { failures: 0 };
+    const store = new PgAdjudicationStore(failingCommits(pool, faults));
+    const clock = { now: 1200 };
+    const published: AdjudicationChange[] = [];
+    const w = worker(store, clock, published, { leaseMs: 1_000 });
+    const settle = store.settleAdjudication.bind(store);
+    store.settleAdjudication = async (params) => {
+      faults.failures = 1;
+      return settle(params);
+    };
+    const failed = await w.runPass();
+    assert.equal(failed.failed, 1);
+    const evaluatedAt = store.retainedResolutionAt(gameId, (await pool.query('SELECT operation_id FROM game_adjudications WHERE game_id = $1', [gameId])).rows[0].operation_id);
+    assert.equal(evaluatedAt, 1200, 'the evaluation is retained');
+    store.settleAdjudication = settle;
+    // Wait out the database-time lease, then the same process settles with the retained instant.
+    for (let i = 0; i < 50; i++) {
+      const rows = await pool.query(`SELECT 1 FROM game_adjudications WHERE game_id = $1 AND lease_until <= clock_timestamp()`, [gameId]);
+      if (rows.rowCount) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    clock.now = 5000;
+    const later = await w.runPass();
+    assert.equal(later.settled, 1);
+    const row = (await pool.query(`SELECT completed_generation::text AS g, settlement_receipt FROM game_adjudications WHERE game_id = $1`, [gameId])).rows[0];
+    assert.equal(row.g, '2');
+    assert.equal(row.settlement_receipt.resolvedEvent.at, 1200, 'settled at the instant first evaluated');
+  });
+});
+
+pgTest('a stop waits out the grace period, and a new process republishes recent changes', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const players = await setup(pool);
+    const store = new PgAdjudicationStore(pool);
+    const gameId = await createGame(pool, players, FEN_MATE1);
+    await startMove(store, gameId, 'e7e4', 'w', 1100);
+    const clock = { now: 1200 };
+    const published: AdjudicationChange[] = [];
+    const pass = await worker(store, clock, published, { releaseGraceMs: 60_000 }).runPass();
+    assert.deepEqual({ settled: pass.settled, released: pass.released }, { settled: 1, released: 0 });
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM game_adjudications WHERE game_id = $1 AND is_current_stop', [gameId])).rows[0].n, 1);
+
+    // A fresh process (as after a restart) republishes the recent settlement first.
+    const fresh: AdjudicationChange[] = [];
+    await worker(new PgAdjudicationStore(pool), clock, fresh, { releaseGraceMs: 60_000 }).runPass();
+    assert.deepEqual(fresh, [{ kind: 'recovered', gameId }]);
   });
 });
