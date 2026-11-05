@@ -21,7 +21,8 @@
 
 export * from './protocol';
 export * from './latency';
-export { GameAuthority, AuthorityError, AuthorityCommitError, CommandOutcomeUnknownError, FLAG_ACTOR, NO_SHOW_ACTOR, fenHash, DEFAULT_CREATE_TIMEOUT_MS } from './authority';
+export { GameAuthority, AuthorityError, AuthorityCommitError, CommandOutcomeUnknownError, ADJUDICATION_ACTOR, FLAG_ACTOR, NO_SHOW_ACTOR, fenHash, DEFAULT_CREATE_TIMEOUT_MS } from './authority';
+export type { AdjudicationAdmission } from './authority';
 export type { Command, AuthorityErrorCode, ApplyResult, ApplyOptions, GameAuthorityOptions } from './authority';
 export { InMemoryPubSub, RedisPubSub, SubscriptionCancelledError, gameChannel, gamesEndedChannel, gamesProjectedEndedChannel, tournamentChannel } from './pubsub';
 export type { PubSub, Unsubscribe, RedisLike } from './pubsub';
