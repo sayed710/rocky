@@ -153,6 +153,19 @@ forever. Three measures keep that rare and never let exhaustion alone decide a r
   a draw only on proven impossibility), matching FIDE 6.9, under which a fallen flag loses unless it
   is established that the opponent cannot mate. Replay accepts exactly that recorded shape.
 
+Playout work counts toward the session's total, never toward a depth-first attempt's own budget, so
+unsuccessful playouts cannot cut short the attempts that follow them.
+
+**Scope authorization.** This section changes live timeout and successor settlement (the
+`unresolved` branches of `deriveTimeoutOutcomeEnding` and `resolveSuccessorEvidenceEnding`) and
+broadens the bare-king lemma beyond the frozen king-and-pawns subclass. Both go beyond the frozen
+stage AUD-03a. The repository owner authorized them explicitly for this stack on 2026-11-05
+(decision on PR #151): change the isolated branches as needed to finish the correct solution,
+because an exhausted proof alone proves neither a loss nor a draw. Both remain behind
+`ADJUDICATION_ENABLED`, off by default, and enabling it still needs the owner's separate approval.
+The lemma is sound for every position: a side with only its king cannot give check, so it can never
+mate, whatever the other side has.
+
 ## Consequences
 
 - Rollout remains on HOLD (Issue #124): nothing constructs the store, no worker or client is wired,
