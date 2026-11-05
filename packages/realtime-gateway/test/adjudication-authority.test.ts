@@ -178,3 +178,61 @@ test('without an admission the authority applies commands exactly as before', as
   assert.equal(res.state.adjudication, undefined);
   assert.equal('adjudication' in res.state, false);
 });
+
+/** A sourced game whose seats must both be ready, with its own fake admission. */
+async function setupSourced(clock: { now: number }) {
+  const log = new InMemoryEventLog();
+  const admission = new FakeAdmission(log);
+  const created = Game.create({
+    gameId: 'g1', players: { white: 'w', black: 'b' }, timeControl: TC, rated: false, at: 1000,
+    source: 'seek', noShowAfterMs: 60_000,
+  });
+  await log.append('g1', -1, created.events);
+  const authority = new GameAuthority(new InMemoryPubSub(), () => clock.now, log, { adjudication: admission });
+  await authority.ensureLoaded('g1');
+  return { log, admission, authority };
+}
+
+test('a move before both seats are ready is refused not_ready, as without adjudication', async () => {
+  const clock = { now: 2000 };
+  const { admission, authority } = await setupSourced(clock);
+  await assert.rejects(authority.apply('g1', 'w', { kind: 'move', uci: 'e2e4' }), (e: unknown) => e instanceof AuthorityError && e.code === 'not_ready');
+  assert.equal(admission.requests.length, 0);
+});
+
+test('a flag claim with the no-show already due records the no-show', async () => {
+  const clock = { now: 1000 + 60_000 + 5 };
+  const { admission, authority } = await setupSourced(clock);
+  const res = await authority.apply('g1', 'w', { kind: 'claimFlag' });
+  assert.deepEqual(res.events.map((e) => e.type), ['AdjudicationStarted']);
+  const req = admission.requests[0]!;
+  assert.ok('prepared' in req);
+  assert.equal(req.prepared.intent.kind, 'expireNoShow');
+});
+
+test('a command after a release folded from a replica whose clock runs ahead is admitted at the release floor', async () => {
+  const clock = { now: 2000 };
+  const { log, admission, authority } = await setup(clock);
+  await authority.apply('g1', 'w', { kind: 'move', uci: 'e7e4' });
+  // The worker released at 2500 by its own clock; this owner's clock still reads 2400.
+  await settleAndRelease(log, 2100, 2500);
+  clock.now = 2400;
+  const res = await authority.apply('g1', 'b', { kind: 'move', uci: 'h8g8' });
+  assert.deepEqual(res.events.map((e) => e.type), ['AdjudicationStarted']);
+  const req = admission.requests.at(-1)!;
+  assert.ok('command' in req);
+  assert.equal(req.context.at, 2500);
+});
+
+test('the owner reads only the log suffix after its copy when the store supports it', async () => {
+  const clock = { now: 2000 };
+  const { log, authority } = await setup(clock);
+  const reads: string[] = [];
+  const load = log.load.bind(log);
+  const loadSince = log.loadSince?.bind(log);
+  log.load = async (gameId, signal) => { reads.push('load'); return load(gameId, signal); };
+  if (loadSince) log.loadSince = async (gameId, after, signal) => { reads.push(`since:${after}`); return loadSince(gameId, after, signal); };
+  await authority.apply('g1', ADJUDICATION_ACTOR, { kind: 'adjudicationChanged' });
+  assert.ok(loadSince, 'the in-memory log offers suffix reads');
+  assert.deepEqual(reads, ['since:0']);
+});

@@ -219,6 +219,13 @@ interface CommitContext {
   rejectCaller(err: unknown): void;
 }
 
+/** The earliest instant the domain admits a command at: the current stop's, or the release's. */
+function causalFloor(game: Game): number {
+  const stopped = game.stoppedClock;
+  if (stopped !== null) return stopped.basis.stoppedAt ?? 0;
+  return game.releasedClock?.releasedAt ?? 0;
+}
+
 /**
  * Fold one durable event. A clock release is never appended live; it is re-derived from the stop the
  * game records by its one producer and must equal the logged event exactly (Issue #124).
@@ -1143,6 +1150,9 @@ export class GameAuthority {
     // proving or stopped after the log has moved on, and the room sees it before the new command.
     await this.absorbDurable(gameId, rec);
     if (rec.game.isBlocked) throw new AuthorityError('invalid_command', 'an adjudication is pending for this game');
+    // The instant is taken after folding, and never before the stop or release just folded: that may
+    // have been committed on another replica whose clock runs slightly ahead of this one.
+    at = Math.max(at, this.now(), causalFloor(rec.game));
     const operationId = randomUUID();
     const meta = { operationId, at, rulesVersion: admission.rulesVersion, clockPolicy: admission.clockPolicy };
     let request: Parameters<AdjudicationAdmission['start']>[0];
@@ -1188,13 +1198,18 @@ export class GameAuthority {
     const color = players.white === userId ? 'w' : players.black === userId ? 'b' : null;
     if (color === null) throw new AuthorityError('not_a_player', 'only players may issue commands');
     if (cmd.kind === 'claimFlag') {
+      // A due no-show takes precedence, exactly as without adjudication.
+      if (rec.game.noShowVerdict(meta.at).kind === 'expire') return { gameId, prepared: prepareNoShowExpiry(rec.game, meta) };
       if (!rec.game.timeoutDue(meta.at)) throw new AuthorityError('invalid_command', 'Flag claim refused: not due');
       return { gameId, prepared: prepareFlagExpiry(rec.game, { ...meta, flagged: rec.game.turn }) };
     }
     if (cmd.kind === 'adjudicationChanged') throw new AuthorityError('invalid_command', 'not a player command');
     // A due no-show or flag is recorded instead of the command, exactly as without adjudication.
     const due = rec.game.noShowVerdict(meta.at).kind === 'expire' || rec.game.timeoutDue(meta.at);
-    if (!due && cmd.kind === 'move' && rec.game.turn !== color) throw new AuthorityError('not_your_turn', 'it is not your turn');
+    if (!due && cmd.kind === 'move') {
+      if (rec.game.turn !== color) throw new AuthorityError('not_your_turn', 'it is not your turn');
+      if (rec.game.awaitingReadiness) throw new AuthorityError('not_ready', 'both players must be ready before the first move');
+    }
     return { gameId, command: cmd, context: { ...meta, color } };
   }
 
@@ -1203,8 +1218,10 @@ export class GameAuthority {
    * and ending broadcasts and the new state, so players see a proving, stopped or released game.
    */
   private async absorbDurable(gameId: string, rec: GameRecord): Promise<ApplyResult> {
-    const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) => this.store.load(gameId, s));
-    const suffix = logged.filter((entry) => entry.seq > rec.persistedSeq);
+    const after = rec.persistedSeq;
+    const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) =>
+      this.store.loadSince ? this.store.loadSince(gameId, after, s) : this.store.load(gameId, s));
+    const suffix = logged.filter((entry) => entry.seq > after);
     if (suffix.length === 0) return { events: [], broadcasts: [], state: this.viewOf(rec.game, rec.persistedSeq) };
     const extended = this.extendRecord(gameId, rec, suffix);
     const fresh = extended.broadcasts.slice(rec.broadcasts.length);
