@@ -2,7 +2,7 @@
 
 - **Status**: Proposed / Bounded Scope (Issue #124). Behind `ADJUDICATION_ENABLED`, off by default; no rollout authority.
 - **Date**: 2026-11-05
-- **References**: Issue #124, [ADR 0174](0174-durable-adjudication-persistence.md), [ADR 0175](0175-adjudication-worker.md), [ADR 0149](0149-autonomous-flag-expiry.md), `packages/realtime-gateway/src/authority.ts`, `packages/realtime-gateway/src/protocol.ts`, `services/gateway/src/adjudication-worker.ts`, `services/gateway/src/serve.ts`, `packages/realtime-gateway/test/adjudication-authority.test.ts`, `services/gateway/test/adjudication-gateway.integration.test.ts`.
+- **References**: Issue #124, [ADR 0174](0174-durable-adjudication-persistence.md), [ADR 0175](0175-adjudication-worker.md), [ADR 0149](0149-autonomous-flag-expiry.md), `packages/realtime-gateway/src/authority.ts`, `packages/realtime-gateway/src/protocol.ts`, `services/gateway/src/adjudication-worker.ts`, `services/gateway/src/serve.ts`, `services/gateway/src/adjudication-resync.ts`, `packages/realtime-gateway/test/adjudication-authority.test.ts`, `services/gateway/test/adjudication-gateway.integration.test.ts`.
 
 ## Context
 
@@ -27,6 +27,10 @@ and when it is on, the owner of a game must remain the only writer of its hot co
    broadcasts and a `state` (`stopped` while the clocks are stopped, the field absent once released).
    Before deciding any command the owner also folds whatever the log holds beyond its copy, so a lost
    or late notice cannot leave a game looking proving or stopped once the next command arrives.
+   Delivery does not rest on notices at all: only a game that is proving or stopped can be changed
+   by the worker, so every second (`AdjudicationResync`) the owner folds the log into each such game
+   it holds and owns. A worker that dies between its commit and its notice is therefore covered with
+   no publication table, cursor or time-window scan.
 4. **Recorded releases.** `AdjudicationClocksStarted` is never appended live, so a hot copy or a cold
    rebuild re-derives it with `Game.prepareClockRelease` and refuses a logged release that differs from
    the stop it records.

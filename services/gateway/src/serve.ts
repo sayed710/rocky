@@ -713,6 +713,7 @@ async function main(): Promise<void> {
   // --- Adjudication worker (Issue #124, ADR-0175/0176) ---
   // Every replica with adjudication enabled: correctness comes from the database leases and permits.
   let adjudicationWorker: { stop(): Promise<void> } | undefined;
+  let adjudicationResync: { stop(): Promise<void> } | undefined;
   if (adjudicationStore) {
     const { AdjudicationWorker, routedAdjudicationChange } = await import('./adjudication-worker.js');
     const worker = new AdjudicationWorker({
@@ -731,6 +732,18 @@ async function main(): Promise<void> {
     });
     worker.start();
     adjudicationWorker = worker;
+    // Delivery does not rest on the worker's notices: the owner re-reads every game it shows
+    // proving or stopped (ADR-0176).
+    const { AdjudicationResync } = await import('./adjudication-resync.js');
+    const resync = new AdjudicationResync({
+      authority,
+      router: commandRouter,
+      ...(ownershipRegistry ? { ownership: ownershipRegistry } : {}),
+      logger,
+      failuresCounter: metrics.counter('gateway_adjudication_resync_failures_total'),
+    });
+    resync.start();
+    adjudicationResync = resync;
     logger.info('Adjudication worker is enabled');
   }
 
@@ -908,6 +921,7 @@ async function main(): Promise<void> {
     const noShowStopped = noShowWorker?.stop();
     const flagStopped = flagWorker?.stop();
     const adjudicationStopped = adjudicationWorker?.stop();
+    const resyncStopped = adjudicationResync?.stop();
     // No new projection batch starts from here. The in-flight one is awaited before the wake consumers
     // unsubscribe and before pub/sub and the pool close, so a wake it publishes still has listeners.
     const projectionStopped = gamesProjection?.stop();
@@ -928,6 +942,7 @@ async function main(): Promise<void> {
         await noShowStopped;
         await flagStopped;
         await adjudicationStopped;
+        await resyncStopped;
         await arenaDeadlinesStopped;
         if (commandConsumer) commandConsumer.stop();
         if (ownershipRegistry) {

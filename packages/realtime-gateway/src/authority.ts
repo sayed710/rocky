@@ -819,6 +819,19 @@ export class GameAuthority {
     };
   }
 
+  /**
+   * Resident games whose copy shows an adjudication in progress or stopped clocks: the only games a
+   * worker can change behind this authority's back, so the ones an owner re-reads (ADR-0176).
+   */
+  adjudicatingGames(): string[] {
+    const ids: string[] = [];
+    for (const [gameId, slot] of this.games) {
+      const game = slot.record?.game;
+      if (!slot.dispose && game && !game.status.over && (game.isBlocked || game.stoppedClock !== null)) ids.push(gameId);
+    }
+    return ids;
+  }
+
   /** Current authoritative state view. Throws if the game is unknown. */
   getState(gameId: string): StateView {
     const record = this.require(gameId);

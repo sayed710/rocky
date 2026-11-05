@@ -22,6 +22,7 @@ import {
 import { PgAdjudicationStore, PostgresEventStore, migrate, migrationsDir } from '@chess-platform/persistence/pg';
 import { withTestDatabase, type TestDatabase } from '@chess-platform/persistence/test-support';
 import { AdjudicationWorker, routedAdjudicationChange } from '../src/adjudication-worker.js';
+import { AdjudicationResync } from '../src/adjudication-resync.js';
 
 type Pool = TestDatabase['pool'];
 
@@ -149,5 +150,49 @@ pgTest('a cold owner rebuilds an adjudicated game, its release included, from th
     assert.equal(state.stateRevision, first.authority.getState(gameId).stateRevision);
     assert.equal(state.adjudication, undefined);
     assert.deepEqual(cold.getMissedSince(gameId, 0).map((m) => m.t), ['move']);
+  });
+});
+
+pgTest('with every worker notice lost, the owner still publishes the settlement and the release', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const { gameId, white } = await seed(pool, FEN_MATE1);
+    const clock = { now: 2000 };
+    const pubsub = new InMemoryPubSub();
+    const adjudicationStore = new PgAdjudicationStore(pool);
+    const authority = new GameAuthority(pubsub, () => clock.now, new PostgresEventStore(pool), {
+      adjudication: { rulesVersion: 'rocky-adjudication@1', clockPolicy: 'observed-release-v1', start: (p) => adjudicationStore.startAdjudication(p) },
+    });
+    const router = new LocalCommandRouter(authority);
+    const room: Broadcast[] = [];
+    pubsub.subscribe(gameChannel(gameId), (msg) => room.push(msg));
+    await authority.ensureLoaded(gameId);
+    await router.route(gameId, white, { kind: 'move', uci: 'e7e4' });
+    assert.deepEqual(authority.adjudicatingGames(), [gameId]);
+
+    // The worker's notices never arrive (its process died after each commit).
+    const worker = new AdjudicationWorker({
+      store: adjudicationStore, executorId: randomUUID(), releaseGraceMs: 0, now: () => clock.now,
+      publish: async () => { throw new Error('owner unreachable'); },
+    });
+    clock.now = 2500;
+    await worker.runPass(); // settles; the notice fails, so the stop is held
+    assert.equal(authority.getState(gameId).adjudication, 'proving', 'the owner has not heard');
+
+    const resync = new AdjudicationResync({ authority, router });
+    assert.equal(await resync.runPass(), 0);
+    assert.equal(authority.getState(gameId).adjudication, 'stopped');
+    assert.deepEqual(room.map((m) => m.t), ['state', 'move', 'state']);
+
+    // A different worker process (no outstanding notice) releases; the owner learns of it the same way.
+    const successor = new AdjudicationWorker({
+      store: new PgAdjudicationStore(pool), executorId: randomUUID(), releaseGraceMs: 0, now: () => clock.now,
+      publish: async () => { throw new Error('owner unreachable'); },
+    });
+    clock.now = 3000;
+    assert.equal((await successor.runPass()).released, 1);
+    await resync.runPass();
+    assert.equal(authority.getState(gameId).adjudication, undefined);
+    assert.deepEqual(authority.adjudicatingGames(), []);
+    assert.deepEqual(room.map((m) => m.t), ['state', 'move', 'state', 'state']);
   });
 });
