@@ -207,8 +207,60 @@ test('unsafe owners are refused and leave the routines untouched', async () => {
     } finally {
       await pool.query(`DROP ROLE ${member}`);
     }
+    // An owner that itself belongs to the event-table owner would inherit ALTER and trigger rights.
+    // The table owner here is a plain NOLOGIN role without CREATE on public, so no other check
+    // can catch it by accident: only the membership check refuses it.
+    const tableOwner = `adj_tables_${randomBytes(4).toString('hex')}`;
+    await pool.query(`CREATE ROLE ${tableOwner} NOLOGIN; ALTER TABLE public.game_events OWNER TO ${tableOwner}`);
+    try {
+      const create = await pool.query("SELECT has_schema_privilege($1::name, 'public', 'CREATE') AS c", [tableOwner]);
+      assert.equal(create.rows[0].c, false);
+      await refuses('NOLOGIN', async (name) => { await pool.query(`GRANT ${tableOwner} TO ${name}`); });
+      // ...also indirectly, through an intermediate role.
+      const middle = `adj_middle_${randomBytes(4).toString('hex')}`;
+      await pool.query(`CREATE ROLE ${middle} NOLOGIN; GRANT ${tableOwner} TO ${middle}`);
+      try {
+        await refuses('NOLOGIN', async (name) => { await pool.query(`GRANT ${middle} TO ${name}`); });
+      } finally {
+        await pool.query(`DROP ROLE ${middle}`);
+      }
+    } finally {
+      await pool.query('ALTER TABLE public.game_events OWNER TO CURRENT_USER');
+      await pool.query(`DROP ROLE ${tableOwner}`);
+    }
     await assert.rejects(prepareAdjudicationGuard(pool, { functionOwner: 'missing_role_xyz' }), PersistenceError);
     await assert.rejects(prepareAdjudicationGuard(pool, { functionOwner: 'Bad-Name;' }), PersistenceError);
     assert.deepEqual(await routineOwners(pool), before);
+  });
+});
+
+test('a non-superuser installer is refused up front, before anything changes', async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await setup(pool);
+    const before = await routineOwners(pool);
+    await withRole(pool, 'NOLOGIN', async (owner) => {
+      const installer = `adj_installer_${randomBytes(4).toString('hex')}`;
+      const password = randomBytes(12).toString('hex');
+      // A capable but non-superuser installer: it owns the database objects' privileges it needs
+      // to grant, yet PostgreSQL would still refuse the ownership transfer to a safe owner.
+      await pool.query(`CREATE ROLE ${installer} LOGIN PASSWORD '${password}' CREATEROLE`);
+      const { Pool: PgPool } = await import('pg');
+      const url = new URL(connectionString);
+      url.username = installer;
+      url.password = password;
+      const installerPool = new PgPool({ connectionString: url.toString(), max: 1 });
+      try {
+        await assert.rejects(
+          prepareAdjudicationGuard(installerPool, { functionOwner: owner }),
+          (err: unknown) => err instanceof PersistenceError && /superuser installer/.test(err.message),
+        );
+        assert.deepEqual(await routineOwners(pool), before);
+        const grants = await pool.query("SELECT 1 FROM information_schema.role_table_grants WHERE grantee = $1", [owner]);
+        assert.equal(grants.rowCount, 0, 'no privilege was granted');
+      } finally {
+        await installerPool.end();
+        await pool.query(`DROP ROLE ${installer}`);
+      }
+    });
   });
 });

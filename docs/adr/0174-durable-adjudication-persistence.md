@@ -48,11 +48,15 @@ are immutable except for clearing a current stop.
 - Least privilege: the migration leaves the SECURITY DEFINER routines owned by the migration role,
   which owns the event tables. A trusted installer then runs `prepareAdjudicationGuard` (in
   `packages/persistence/src/pg/adjudication-preparation.ts`, mirroring PG-F1's `prepareGameFencing`)
-  to transfer them to a dedicated NOLOGIN role that has no role attributes, no members and no owned
-  objects, and holds only SELECT on `game_events`, SELECT/UPDATE on `game_adjudications`, and
+  to transfer them to a dedicated NOLOGIN role that has no role attributes, no members, no
+  membership in any other role (direct or indirect, so it cannot inherit the table owner's rights)
+  and no owned objects, and holds only SELECT on `game_events`, SELECT/UPDATE on `game_adjudications`, and
   SELECT/INSERT/DELETE on the queue and mark tables. As that role, DDL, trigger disabling,
   TRUNCATE, event writes, unrelated reads and CREATE in `public` are all refused (tested).
-  Preparation is atomic and idempotent and refuses unsafe owners without changing anything.
+  Preparation is atomic and idempotent and refuses unsafe owners without changing anything. It
+  requires a superuser installer, as PG-F1's does: PostgreSQL lets anyone else transfer a function
+  only to an owner the installer can SET ROLE to and that has CREATE on the schema, both of which
+  the owner rules forbid; a non-superuser installer is refused before anything changes.
 - `xact_id` is never rewritten, the 0042 queue trigger is not redefined (legacy creation queues with
   `pregame_deadlines.seq` at its default 0), and an append at an occupied position is left to the
   primary key so stale writers still receive `23505`. Legacy appends take no new advisory lock.

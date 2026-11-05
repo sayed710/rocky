@@ -57,6 +57,27 @@ async function assertSafeRole(client: PoolClient, owner: string): Promise<void> 
     [owner],
   );
   if (members.rowCount) throw new PersistenceError('adjudication guard owner must have no members');
+  // Nor may it hold any membership itself: belonging to the table owner (even indirectly or
+  // NOINHERIT, since SET ROLE suffices) would hand it the very rights this preparation removes.
+  const memberships = await client.query(
+    `SELECT 1 FROM pg_catalog.pg_roles r
+     WHERE r.rolname <> $1 AND pg_catalog.pg_has_role($1::name, r.oid, 'MEMBER')`,
+    [owner],
+  );
+  if (memberships.rowCount) throw new PersistenceError('adjudication guard owner must belong to no other role');
+}
+
+/**
+ * Only a superuser installer can transfer the routines to an owner that has neither CREATE on
+ * `public` nor any member: PostgreSQL otherwise requires both of the new owner. Refuse up front.
+ */
+async function assertSuperuserInstaller(client: PoolClient): Promise<void> {
+  const installer = await client.query<{ rolsuper: boolean }>(
+    'SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = CURRENT_USER',
+  );
+  if (!installer.rows[0]?.rolsuper) {
+    throw new PersistenceError('adjudication guard preparation requires a superuser installer');
+  }
 }
 
 /** Refuse an owner that already owns or can create objects: owning a table would undo the point. */
@@ -98,7 +119,7 @@ async function transferRoutine(client: PoolClient, signature: string, owner: str
 
 /**
  * Transfer the 0053 SECURITY DEFINER routines to `functionOwner` with only the privileges they use.
- * Atomic and idempotent; run with trusted installer credentials (able to ALTER ... OWNER and GRANT).
+ * Atomic and idempotent; requires a superuser installer and changes nothing when it refuses.
  */
 export async function prepareAdjudicationGuard(pool: Pool, config: AdjudicationGuardPreparation): Promise<void> {
   const owner = quotedRole(config.functionOwner);
@@ -107,6 +128,7 @@ export async function prepareAdjudicationGuard(pool: Pool, config: AdjudicationG
   try {
     await client.query('BEGIN');
     await client.query('SET LOCAL search_path = pg_catalog, pg_temp');
+    await assertSuperuserInstaller(client);
     await assertSafeRole(client, config.functionOwner);
     await assertOwnsNothing(client, config.functionOwner);
     await client.query(GUARD_GRANTS(owner));
