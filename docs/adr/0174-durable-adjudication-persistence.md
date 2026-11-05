@@ -51,6 +51,13 @@ Started and settlement payloads and versions, permit consumption, receipt fields
 lifecycle event counts, stop rules and queue suppression. Queue tables carry a deferred check so no
 writer can commit a deadline for a proving or stopped game.
 
+The whole-game validation runs once per (transaction, game): the first deferred firing at COMMIT
+already sees the final state and sets a transaction-local marker, which every immediate guard clears
+on any later change (so `SET CONSTRAINTS ... IMMEDIATE` cannot be used to skip it). Event-by-event
+suffix verification runs only for operations settled in the current transaction; earlier completed
+rows were verified at their own COMMIT and are immutable, so they are re-checked only for ordering,
+lifecycle counts and stop rules.
+
 ### 4. Queue restoration
 
 When an operation completes and leaves the game running (no stop, no ending), a trigger replaces the
@@ -71,9 +78,12 @@ Recovery after an uncertain outcome:
   greater generation.
 - Renew: bounded to `extensionMs` past database now and never shortened, so retries do not stack.
 - Settle: a completed operation answers from the database when the grant is the one that completed
-  it, including after a restart that lost the retained evaluation. A retained evaluation is bound to
-  the operation and resolution instant, not to a claim, so a successor claim settles without
-  re-running a consumed proof job.
+  it, including after a restart that lost the retained evaluation. Before any evaluation, a short
+  fenced read confirms the grant is the current live claim, so an expired or superseded claimant
+  cannot consume the proof job or fix the resolution instant. A retained evaluation is bound to the
+  operation and resolution instant, not to a claim: a successor reads the instant with
+  `retainedResolutionAt()` and settles without re-running the consumed job. Observing the operation
+  completed (by any grant) drops the retained evaluation.
 
 `PgFencedNoShowCandidates.reschedule` records the loaded head even when the due time is unchanged, so
 a stale worker cannot dismiss a newer establishment.
@@ -85,6 +95,7 @@ a stale worker cannot dismiss a newer establishment.
   owner to own the new SECURITY DEFINER functions; existing runtime grants are unchanged.
 - `AdjudicationClocksStarted` cannot be appended, so a stopped game stays stopped until the release
   stage is separately designed and authorized.
-- Event inserts for managed games pay for the deferred whole-game validation; legacy games pay one
-  indexed existence check per insert.
+- A transaction touching a managed game pays for one whole-game validation at COMMIT, with
+  event-level checks only for what it settled; legacy games pay one indexed existence check per
+  insert.
 - Broader dead-position classes remain open in Issue #124; this ADR claims no FIDE 5.2.2 coverage.

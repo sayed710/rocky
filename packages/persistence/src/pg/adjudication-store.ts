@@ -296,7 +296,9 @@ export class PgAdjudicationStore {
     const existing = this.#seam.getRetainedSettlement(params.gameId, params.operationId);
     if (existing) {
       if (existing.resolutionAt !== params.resolutionAt) {
-        throw new AdjudicationConflictError('A settlement for this operation was already evaluated at another resolution instant');
+        throw new AdjudicationConflictError(
+          'A settlement for this operation was already evaluated at another resolution instant; use retainedResolutionAt()',
+        );
       }
       return existing;
     }
@@ -331,9 +333,33 @@ export class PgAdjudicationStore {
     }
     if (!row) throw new PersistenceError(`Adjudication operation ${params.operationId} not found`);
     if (row.execution_state !== 'completed') return null;
-    assertIdenticalSettlementRetry(row, params.grant, this.#seam.getRetainedSettlement(params.gameId, params.operationId)?.settlement.batch);
-    this.#seam.clearRetainedSettlement(params.gameId, params.operationId);
+    this.#assertCompletedBy(row, params, this.#seam.getRetainedSettlement(params.gameId, params.operationId)?.settlement.batch);
     return row.settlement_receipt!;
+  }
+
+  /**
+   * A completed operation can never use a retained evaluation again, so it is dropped before the
+   * credentials are compared: a conflict (another grant completed it) must not leak the entry.
+   */
+  #assertCompletedBy(row: AdjudicationDbRow, params: SettleAdjudicationParams, batch: readonly unknown[] | undefined): void {
+    this.#seam.clearRetainedSettlement(params.gameId, params.operationId);
+    assertIdenticalSettlementRetry(row, params.grant, batch);
+  }
+
+  /** The grant is the current live claim. A short fenced read; no proof work runs inside it. */
+  async #assertGrantIsCurrent(params: SettleAdjudicationParams): Promise<void> {
+    await this.#inGameTransaction(params.gameId, async (client) => {
+      const row = await loadProvingRowAtHead(client, params.gameId, params.operationId);
+      assertLiveGrant(row, params.grant, await databaseNow(client));
+    });
+  }
+
+  /**
+   * The resolution instant of an evaluation this store already holds for the operation, if any. A
+   * successor whose predecessor's settlement transaction failed after evaluation settles with it.
+   */
+  retainedResolutionAt(gameId: string, operationId: string): number | undefined {
+    return this.#seam.getRetainedSettlement(gameId, operationId)?.resolutionAt;
   }
 
   /**
@@ -347,12 +373,17 @@ export class PgAdjudicationStore {
     }
     const done = await this.#completedReceipt(params);
     if (done) return done;
+    // Only the current live claim may consume the proof job and fix the resolution instant; the
+    // in-transaction check below still catches a lease lost in between.
+    if (!this.#seam.getRetainedSettlement(params.gameId, params.operationId)) {
+      await this.#assertGrantIsCurrent(params);
+    }
 
     const { settlement } = await this.prepareSettlementOutsideLock(params);
     const receipt = await this.#inGameTransaction(params.gameId, async (client) => {
       const row = await loadAdjudicationRow(client, params.gameId, params.operationId, true);
       if (row?.execution_state === 'completed') {
-        assertIdenticalSettlementRetry(row, params.grant, settlement.batch);
+        this.#assertCompletedBy(row, params, settlement.batch);
         return row.settlement_receipt!;
       }
       const proving = await loadProvingRowAtHead(client, params.gameId, params.operationId);

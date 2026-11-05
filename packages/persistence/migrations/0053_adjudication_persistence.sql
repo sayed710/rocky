@@ -177,6 +177,23 @@ END;
 $$;
 REVOKE ALL ON FUNCTION adjudication_restore_deadlines(UUID, INTEGER) FROM PUBLIC;
 
+-- Deferred validation runs once per (transaction, game): the first deferred firing at COMMIT already
+-- sees the final state. Every immediate guard clears the marker on any change, so a later change
+-- (after SET CONSTRAINTS ... IMMEDIATE, say) is validated again. A transaction-local setting is
+-- reverted with its savepoint, which only ever causes an extra validation.
+CREATE FUNCTION adjudication_validation_marker(game UUID) RETURNS TEXT
+LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT 'rocky.adjudication_validated_' || replace(game::text, '-', '')
+$$;
+
+CREATE FUNCTION adjudication_mark_changed(game UUID) RETURNS void
+LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+BEGIN
+  PERFORM set_config(adjudication_validation_marker(game), '', true);
+END;
+$$;
+REVOKE ALL ON FUNCTION adjudication_mark_changed(UUID) FROM PUBLIC;
+
 -- 4. Row lifecycle guard on game_adjudications.
 CREATE FUNCTION game_adjudications_row_guard() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
@@ -189,6 +206,7 @@ BEGIN
   END IF;
 
   PERFORM pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || NEW.game_id::text, 0));
+  PERFORM adjudication_mark_changed(NEW.game_id);
 
   IF TG_OP = 'INSERT' THEN
     IF NEW.execution_state <> 'proving' OR NEW.generation <> 0 OR NEW.claim_id IS NOT NULL
@@ -324,6 +342,8 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'PMA01', MESSAGE = 'AdjudicationClocksStarted cannot be appended in this release';
   END IF;
 
+  PERFORM adjudication_mark_changed(NEW.game_id);
+
   -- An append at an occupied position is a stale writer: let the primary key reject it with the
   -- same 23505 every existing caller already maps to its version conflict.
   IF EXISTS (SELECT 1 FROM game_events WHERE game_id = NEW.game_id AND seq = NEW.seq) THEN
@@ -440,6 +460,7 @@ DECLARE
   expected_pregame TIMESTAMPTZ;
   expected_flag BIGINT;
   latest_move RECORD;
+  settled_earlier BOOLEAN;
 BEGIN
   SELECT max(seq) INTO head FROM game_events WHERE game_id = game;
   SELECT EXISTS (SELECT 1 FROM game_events WHERE game_id = game AND type = 'GameEnded') INTO terminal;
@@ -448,10 +469,13 @@ BEGIN
     IF adj.started_seq <= prev_final THEN
       RAISE EXCEPTION USING ERRCODE = 'PMD17', MESSAGE = 'Adjudication operations overlap in the stream';
     END IF;
-    IF NOT adj.start_permit_consumed OR NOT EXISTS (
+    -- A completed row from an earlier transaction was fully verified at its own COMMIT and is
+    -- immutable since (row guard); only ordering, counts and stop rules are re-checked for it.
+    settled_earlier := adj.execution_state = 'completed' AND adj.settlement_permit_xact_id <> cur;
+    IF NOT settled_earlier AND (NOT adj.start_permit_consumed OR NOT EXISTS (
       SELECT 1 FROM game_events
       WHERE game_id = game AND seq = adj.started_seq AND type = 'AdjudicationStarted'
-        AND event_version = adj.started_version AND payload = adj.started_payload) THEN
+        AND event_version = adj.started_version AND payload = adj.started_payload)) THEN
       RAISE EXCEPTION USING ERRCODE = 'PMD03', MESSAGE = 'Adjudication without its exact Started event';
     END IF;
     expected_lifecycle := expected_lifecycle + 1;
@@ -496,7 +520,10 @@ BEGIN
          OR (adj.settlement_receipt->'resolvedEvent') IS DISTINCT FROM first_resolved THEN
         RAISE EXCEPTION USING ERRCODE = 'PMD15', MESSAGE = 'Completed adjudication receipt mismatch';
       END IF;
-      FOR i IN 0..(n - 1) LOOP
+      SELECT count(*) INTO i FROM jsonb_array_elements(adj.settlement_batch) AS e
+        WHERE e->>'type' IN ('AdjudicationStarted', 'AdjudicationResolved');
+      expected_lifecycle := expected_lifecycle + i;
+      FOR i IN 0..(CASE WHEN settled_earlier THEN -1 ELSE n - 1 END) LOOP
         env := adj.settlement_permit_envelopes->i;
         IF (env->'payload') IS DISTINCT FROM (adj.settlement_batch->i) OR NOT EXISTS (
           SELECT 1 FROM game_events
@@ -506,9 +533,6 @@ BEGIN
             AND payload = adj.settlement_batch->i) THEN
           RAISE EXCEPTION USING ERRCODE = 'PMD14',
             MESSAGE = 'Completed adjudication suffix differs at seq ' || (adj.started_seq + 1 + i);
-        END IF;
-        IF adj.settlement_batch->i->>'type' IN ('AdjudicationStarted', 'AdjudicationResolved') THEN
-          expected_lifecycle := expected_lifecycle + 1;
         END IF;
       END LOOP;
       IF adj.is_current_stop AND (adj.clock_policy IS DISTINCT FROM 'observed-release-v1'
@@ -586,8 +610,12 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM game_adjudications WHERE game_id = NEW.game_id) THEN
     RETURN NULL;
   END IF;
+  IF current_setting(adjudication_validation_marker(NEW.game_id), true) = 'validated' THEN
+    RETURN NULL;
+  END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || NEW.game_id::text, 0));
   PERFORM adjudication_validate_game(NEW.game_id);
+  PERFORM set_config(adjudication_validation_marker(NEW.game_id), 'validated', true);
   RETURN NULL;
 END;
 $$;

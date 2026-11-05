@@ -167,15 +167,19 @@ async function adjudication(pool: Pool, gameId: string, operationId: string) {
   return (await pool.query('SELECT * FROM game_adjudications WHERE game_id = $1 AND operation_id = $2', [gameId, operationId])).rows[0];
 }
 
-/** A pool whose clients fail the next COMMIT reply *after* the server committed it. */
-function lossyCommitPool(base: Pool): { pool: Pool; armCommitLoss(): void; armFailOn(fragment: string): void } {
-  let loseNextCommit = false;
+/** A pool whose clients can fail a chosen COMMIT reply *after* the server committed it. */
+function lossyCommitPool(base: Pool): { pool: Pool; armCommitLoss(skip?: number): void; armFailOn(fragment: string): void } {
+  let commitsUntilLoss = -1;
   let failOn: string | null = null;
+  // pg reuses pooled client objects: wrap each one once, or wrappers would stack.
+  const wrapped = new WeakSet<PoolClient>();
   const pool = new Proxy(base, {
     get(target, prop, receiver) {
       if (prop === 'connect') {
         return async (): Promise<PoolClient> => {
           const client = await target.connect();
+          if (wrapped.has(client)) return client;
+          wrapped.add(client);
           const original = client.query.bind(client) as (...a: unknown[]) => Promise<unknown>;
           client.query = (async (text: unknown, ...rest: unknown[]) => {
             const sql = typeof text === 'string' ? text : '';
@@ -184,9 +188,9 @@ function lossyCommitPool(base: Pool): { pool: Pool; armCommitLoss(): void; armFa
               throw new Error('injected failure before commit');
             }
             const result = await original(text, ...rest);
-            if (sql === 'COMMIT' && loseNextCommit) {
-              loseNextCommit = false;
-              throw new Error('Connection terminated unexpectedly');
+            if (sql === 'COMMIT' && commitsUntilLoss >= 0) {
+              commitsUntilLoss -= 1;
+              if (commitsUntilLoss < 0) throw new Error('Connection terminated unexpectedly');
             }
             return result;
           }) as typeof client.query;
@@ -198,7 +202,8 @@ function lossyCommitPool(base: Pool): { pool: Pool; armCommitLoss(): void; armFa
   });
   return {
     pool,
-    armCommitLoss: () => { loseNextCommit = true; },
+    /** Lose the reply of the COMMIT after `skip` further commits (0: the next one). */
+    armCommitLoss: (skip = 0) => { commitsUntilLoss = skip; },
     armFailOn: (fragment: string) => { failOn = fragment; },
   };
 }
@@ -465,7 +470,8 @@ test('lost replies: a claim is recovered by its intent; a settle is recovered af
     );
 
     await prove(store, gameId, operationId);
-    lossy.armCommitLoss();
+    // Skip the read-only grant pre-check; lose the reply of the settlement transaction itself.
+    lossy.armCommitLoss(1);
     await assert.rejects(store.settleAdjudication({ gameId, operationId, grant: recovered, resolutionAt: 1200 }), /Connection terminated/);
     const committedHead = await head(pool, gameId);
     assert.equal(committedHead, 3);
@@ -528,8 +534,13 @@ test('rollback: an expired lease and an injected pre-COMMIT failure leave nothin
     );
     await untouched();
 
-    // The proof job was consumed by the first evaluation; the successor settles from the retained one.
-    const receipt = await store.settleAdjudication({ gameId, operationId, grant: successor, resolutionAt: 1200 });
+    // The proof job was consumed by the first evaluation; the successor learns the retained instant
+    // and settles from the retained evaluation.
+    assert.equal(store.retainedResolutionAt(gameId, operationId), 1200);
+    const receipt = await store.settleAdjudication({
+      gameId, operationId, grant: successor, resolutionAt: store.retainedResolutionAt(gameId, operationId)!,
+    });
+    assert.equal(store.retainedResolutionAt(gameId, operationId), undefined);
     assert.equal(receipt.finalSeq, 3);
     const row = await adjudication(pool, gameId, operationId);
     assert.equal(row.completed_generation, '2');
@@ -690,5 +701,74 @@ test('direct SQL tampering is rejected immediately or at COMMIT', async () => {
       pool.query(`INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 4, 'AdjudicationResolved', 1, '{}'::jsonb)`, [gameId]),
       hasCode('PMA12'),
     );
+  });
+});
+
+test('an expired or superseded claimant cannot consume the proof job or pin the resolution instant', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await setup(pool);
+    const lossy = lossyCommitPool(pool);
+    const storeA = new PgAdjudicationStore(lossy.pool);
+    const storeB = new PgAdjudicationStore(pool);
+    const { gameId } = await createGame(pool, { fen: FEN_MATE1 });
+    const operationId = await startMove(storeA, gameId, 'e7e4');
+
+    // An expired claimant is refused before any evaluation: nothing is retained or consumed.
+    const expired = await claim(storeA, gameId, operationId, '0', 1);
+    await prove(storeA, gameId, operationId);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await assert.rejects(storeA.settleAdjudication({ gameId, operationId, grant: expired, resolutionAt: 1200 }), AdjudicationClaimExpiredError);
+    assert.equal(storeA.retainedResolutionAt(gameId, operationId), undefined);
+    assert.equal(storeA.getProofJob(operationId)?.status, 'ready');
+
+    // A live claimant evaluates at its instant, then fails before COMMIT: the evaluation is retained.
+    const live = await claim(storeA, gameId, operationId, '1', 400);
+    lossy.armFailOn("execution_state = 'completed'");
+    await assert.rejects(storeA.settleAdjudication({ gameId, operationId, grant: live, resolutionAt: 1300 }), /injected/);
+    assert.equal(storeA.retainedResolutionAt(gameId, operationId), 1300);
+
+    // Its lease lapses and another executor completes the operation with its own proof job.
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const successor = await claim(storeB, gameId, operationId, '2', 60_000, EXECUTOR_2);
+    await prove(storeB, gameId, operationId);
+    const receipt = await storeB.settleAdjudication({ gameId, operationId, grant: successor, resolutionAt: 1250 });
+    assert.equal(receipt.resolvedEvent.at, 1250);
+
+    // The superseded grant is refused, and its retained evaluation is dropped rather than leaked.
+    await assert.rejects(storeA.settleAdjudication({ gameId, operationId, grant: live, resolutionAt: 1300 }), AdjudicationConflictError);
+    assert.equal(storeA.retainedResolutionAt(gameId, operationId), undefined);
+  });
+});
+
+test('deferred validation runs once per transaction but re-runs after any later change', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await setup(pool);
+    const store = new PgAdjudicationStore(pool);
+    const { gameId } = await createGame(pool, { fen: FEN_MATE1 });
+    const operationId = await startMove(store, gameId, 'e7e4');
+    const grant = await claim(store, gameId, operationId);
+    await prove(store, gameId, operationId);
+    await store.settleAdjudication({ gameId, operationId, grant, resolutionAt: 1200 });
+    const row = await adjudication(pool, gameId, operationId);
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // A no-op managed change, validated early: the marker is now set for this game.
+      await client.query('UPDATE game_adjudications SET is_current_stop = false WHERE game_id = $1', [gameId]);
+      await client.query('SET CONSTRAINTS ALL IMMEDIATE');
+      await client.query('SET CONSTRAINTS ALL DEFERRED');
+      // A later obligation row without its Started event must still be caught at COMMIT.
+      await client.query(
+        `INSERT INTO game_adjudications (game_id, operation_id, base_revision, started_seq, started_type, started_version,
+           started_payload, prepared, accepted_at, rules_version, original_clock, thinking_elapsed_at_a, execution_state)
+         VALUES ($1, $2, 3, 4, 'AdjudicationStarted', 1, $3::jsonb, $4::jsonb, 1300, $5, '{}'::jsonb, 0, 'proving')`,
+        [gameId, uuid(), JSON.stringify(row.started_payload), JSON.stringify(row.prepared), RULES],
+      );
+      await assert.rejects(client.query('COMMIT'), hasCode('PMD03'));
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined);
+      client.release();
+    }
   });
 });
