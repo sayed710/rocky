@@ -159,9 +159,10 @@ unsuccessful playouts cannot cut short the attempts that follow them.
 **Scope authorization.** This section changes live timeout and successor settlement (the
 `unresolved` branches of `deriveTimeoutOutcomeEnding` and `resolveSuccessorEvidenceEnding`) and
 broadens the bare-king lemma beyond the frozen king-and-pawns subclass. Both go beyond the frozen
-stage AUD-03a. The repository owner authorized them explicitly for this stack on 2026-11-05
-(decision on PR #151): change the isolated branches as needed to finish the correct solution,
-because an exhausted proof alone proves neither a loss nor a draw. Both remain behind
+stage AUD-03a. The repository owner approved them explicitly for this stack on 2026-11-05, on PR
+#151: https://github.com/sayed710/rocky/pull/151#issuecomment-6655724172 ("I approve the scope
+exceptions in ADR 0174 §7 for this stack: settling unresolved timeouts by the flag rule (FIDE 6.9)
+and the general bare-king lemma."). An exhausted proof alone proves neither a loss nor a draw. Both remain behind
 `ADJUDICATION_ENABLED`, off by default, and enabling it still needs the owner's separate approval.
 The lemma is sound for every position: a side with only its king cannot give check, so it can never
 mate, whatever the other side has.
