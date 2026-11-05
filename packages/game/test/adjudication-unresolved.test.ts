@@ -16,6 +16,8 @@ import {
   type PreparedOperation,
 } from '../src';
 import { AdjudicationJobController } from '../src/adjudication-controller';
+import { verifyUciWitnessReplay } from '../src/adjudication-lifecycle';
+import { Position } from '@chess-platform/core';
 
 const PLAYERS = { white: 'alice', black: 'bob' };
 const TC = { kind: 'increment', initialMs: 60_000, incrementMs: 0, delayMs: 0 } as const;
@@ -194,4 +196,18 @@ test('an unresolved flag falls back to the unmanaged rule: a lone-king winner dr
   const draw = Game.fromEvents([...prefixW, unresolvedB, { type: 'GameEnded', result: '1/2-1/2', termination: 'insufficient_material', winner: null, at: whiteFlagAt + 5 } as GameEvent]);
   assert.deepEqual(draw.status, { over: true, result: '1/2-1/2', termination: 'insufficient_material', winner: null });
   assert.throws(() => Game.fromEvents([...prefixW, unresolvedB, { type: 'GameEnded', result: '0-1', termination: 'timeout', winner: 'b', at: whiteFlagAt + 5 } as GameEvent]), GameError);
+});
+
+test('a verified witness is remembered; a forged one is refused every time', () => {
+  const pos = Position.fromFen('7k/8/5K2/8/8/8/8/1Q6 w - - 0 1');
+  const witness = ['b1b7', 'h8g8', 'b7g7'];
+  verifyUciWitnessReplay(pos, 'w', witness);
+  // The same evidence again is accepted (from the memo), and stays exact: one move different,
+  // another winner or another position is replayed afresh and refused.
+  verifyUciWitnessReplay(pos, 'w', witness);
+  for (let i = 0; i < 2; i++) {
+    assert.throws(() => verifyUciWitnessReplay(pos, 'w', ['b1b7', 'h8g8', 'b7b8']), /checkmate verification/);
+    assert.throws(() => verifyUciWitnessReplay(pos, 'b', witness), /checkmate verification/);
+    assert.throws(() => verifyUciWitnessReplay(Position.fromFen('7k/8/5K2/8/8/8/8/1Q6 w - - 1 1'), 'w', ['b1b7', 'h8h7', 'b7g7']), /checkmate verification|legal replay/);
+  }
 });
