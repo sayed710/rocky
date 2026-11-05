@@ -55,8 +55,19 @@ class FakeStore implements AdjudicationWorkStore {
     this.claimable = [];
     return page;
   }
-  async listReleasableStops(): Promise<Array<{ gameId: string; stopOperationId: string }>> {
+  readonly releaseQueries: number[] = [];
+  recent: string[] = [];
+  async listReleasableStops(_limit: number, minAgeMs: number): Promise<Array<{ gameId: string; stopOperationId: string }>> {
+    this.releaseQueries.push(minAgeMs);
     return this.stops;
+  }
+  async listRecentAdjudicationChanges(): Promise<string[]> {
+    const recent = this.recent;
+    this.recent = [];
+    return recent;
+  }
+  cancelProofJob(): void {
+    this.calls.push('cancel');
   }
   #grant(leaseUntil: number): AdjudicationClaimGrant {
     return new AdjudicationClaimGrant({
@@ -114,11 +125,12 @@ class FakeStore implements AdjudicationWorkStore {
   }
 }
 
-function harness(configure?: (store: FakeStore) => void) {
+function harness(configure?: (store: FakeStore) => void, failPublishes: Array<AdjudicationChange['kind']> = []) {
   const clock = { now: 1_000_000 };
   const store = new FakeStore(clock);
   configure?.(store);
   const published: AdjudicationChange[] = [];
+  const attempts: AdjudicationChange[] = [];
   const intents: ClaimIntent[] = [];
   let n = 0;
   const worker = new AdjudicationWorker({
@@ -127,10 +139,15 @@ function harness(configure?: (store: FakeStore) => void) {
     leaseMs: 30_000,
     sliceBudget: 500,
     publish: async (change) => {
+      attempts.push(change);
+      const fail = failPublishes.indexOf(change.kind);
+      if (fail >= 0) {
+        failPublishes.splice(fail, 1);
+        throw new Error('owner unreachable');
+      }
       published.push(change);
       // Publication of a stopped settlement makes its stop releasable on the same pass.
-      if (change.kind === 'settled') store.stops = [{ gameId: GAME, stopOperationId: OP }];
-      else store.stops = [];
+      if (change.kind === 'released') store.stops = [];
     },
     newIntent: () => {
       const intent = { claimId: `018f2780-0000-7000-8000-${String(++n).padStart(12, '0')}`, capability: Buffer.alloc(32, n) };
@@ -139,14 +156,22 @@ function harness(configure?: (store: FakeStore) => void) {
     },
     now: () => clock.now,
   });
-  return { clock, store, published, intents, worker };
+  // A settlement makes its stop current in the database whether or not it is published.
+  const settle = store.settleAdjudication.bind(store);
+  store.settleAdjudication = async (params) => {
+    const receipt = await settle(params);
+    store.stops = [{ gameId: GAME, stopOperationId: OP }];
+    return receipt;
+  };
+  return { clock, store, published, attempts, intents, worker };
 }
 
 test('claims, proves in slices, settles at now, publishes, then releases the published stop', async () => {
   const { store, published, worker, clock } = harness();
   const pass = await worker.runPass();
   assert.deepEqual(pass, { settled: 1, released: 1, skipped: 0, failed: 0, more: false });
-  assert.deepEqual(store.calls, ['create', 'step:0', 'step:500', 'step:500', 'step:500', 'evict']);
+  assert.deepEqual(store.calls, ['create', 'step:0', 'step:500', 'step:500', 'step:500', 'cancel', 'evict']);
+  assert.deepEqual(store.releaseQueries, [1_000], 'stops are released only after the grace period');
   assert.equal(store.claims.length, 1);
   assert.equal(store.claims[0]!.expectedGeneration, '0');
   assert.equal(store.claims[0]!.executorId, EXECUTOR);
@@ -197,12 +222,62 @@ test('an uncertain claim reply is retried with the same intent, recovering the c
   assert.equal(store.claims[0]!.intent, store.claims[1]!.intent);
 });
 
-test('a retained evaluation fixes the resolution instant', async () => {
+test('a retained evaluation is settled as it was, without proving again', async () => {
   const { store, worker } = harness((s) => {
     s.retained = 1_000_123;
   });
-  await worker.runPass();
+  assert.equal((await worker.runPass()).settled, 1);
   assert.equal(store.settles[0]!.resolutionAt, 1_000_123);
+  assert.deepEqual(store.calls.filter((c) => c === 'create' || c.startsWith('step')), [], 'the consumed job is not stepped');
+});
+
+test('a failed settlement publication is retried, and the stop waits for it', async () => {
+  const { store, published, attempts, worker } = harness(undefined, ['settled']);
+  const first = await worker.runPass();
+  assert.equal(first.settled, 1);
+  assert.equal(first.released, 0, 'not released over an unpublished settlement');
+  assert.equal(worker.unpublishedCount, 1);
+  assert.equal(published.length, 0);
+  const second = await worker.runPass();
+  assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
+  assert.equal(second.released, 1);
+  assert.equal(worker.unpublishedCount, 0);
+  assert.equal(attempts.length, 3);
+  assert.equal(store.releases.length, 1);
+});
+
+test('a failed release publication is retried on the next pass', async () => {
+  const { published, worker } = harness(undefined, ['released']);
+  await worker.runPass();
+  assert.deepEqual(published.map((c) => c.kind), ['settled']);
+  assert.equal(worker.unpublishedCount, 1);
+  await worker.runPass();
+  assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
+  assert.equal(worker.unpublishedCount, 0);
+});
+
+test('a new process republishes recent changes before anything else', async () => {
+  const { published, worker } = harness((s) => {
+    s.claimable = [];
+    s.recent = [GAME];
+  });
+  await worker.runPass();
+  assert.deepEqual(published, [{ kind: 'recovered', gameId: GAME }]);
+  await worker.runPass();
+  assert.equal(published.length, 1, 'only on the first pass');
+});
+
+test('a claim lost during the proof cancels and drops the local job', async () => {
+  const { store, worker } = harness((s) => {
+    s.steps = ['active', 'active', 'active', 'active', 'ready'];
+  });
+  store.renewAdjudication = async () => {
+    throw new AdjudicationConflictError('lease taken over');
+  };
+  const pass = await worker.runPass();
+  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 1, failed: 0, more: false });
+  assert.deepEqual(store.calls.slice(-2), ['cancel', 'evict']);
+  assert.equal(store.settles.length, 0);
 });
 
 test('an uncertain settlement is retried with the same grant; a superseded one is skipped', async () => {
@@ -262,7 +337,7 @@ test('stop() halts a proof at its next slice and waits for the pass', async () =
 
 test('invalid options are refused', () => {
   const store = new FakeStore({ now: 0 });
-  for (const bad of [{ leaseMs: 0 }, { sliceBudget: -1 }, { pollMs: 1.5 }, { pageSize: Number.NaN }]) {
+  for (const bad of [{ leaseMs: 0 }, { sliceBudget: -1 }, { pollMs: 1.5 }, { pageSize: Number.NaN }, { releaseGraceMs: -1 }, { recoveryWindowMs: 0.5 }]) {
     assert.throws(() => new AdjudicationWorker({ store, executorId: EXECUTOR, publish: async () => {}, ...bad }), RangeError);
   }
 });
