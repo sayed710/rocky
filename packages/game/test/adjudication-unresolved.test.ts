@@ -27,13 +27,20 @@ function startedFor(game: Game, op: PreparedOperation): AdjudicationStartedEvent
   };
 }
 
-/** Step to a final state, concluding each exhausted question as unresolved; returns how many were. */
+/** Tiny escalation tiers, so a test that exhausts a timeout question stays fast. */
+const QUICK_TIERS = [{ count: 1, maxPlies: 1 }, { count: 1, maxPlies: 1 }];
+
+/**
+ * Step to a final state as the worker does: escalate an exhausted question while a tier remains,
+ * then conclude it unresolved. Returns how many questions were concluded.
+ */
 function proveOrConclude(ctrl: AdjudicationJobController, operationId: string): number {
   let concluded = 0;
   for (let i = 0; i < 200_000; i++) {
     const status = ctrl.getJob(operationId)!.status;
     if (status === 'ready') return concluded;
     if (status === 'resource_limit') {
+      if (ctrl.escalate(operationId)) continue;
       ctrl.concludeUnresolved(operationId);
       concluded += 1;
       continue;
@@ -44,12 +51,17 @@ function proveOrConclude(ctrl: AdjudicationJobController, operationId: string): 
 }
 
 test('an exhausted move proof settles as an ordinary move and replays', () => {
-  const created = Game.create({ gameId: 'g-unresolved', players: PLAYERS, timeControl: TC, rated: false, at: 1000 });
-  const op = prepareMove(created.game, { uci: 'e2e4', at: 2000, operationId: 'op-e4', rulesVersion: '1.0.0' });
-  const ctrl = new AdjudicationJobController();
+  // Bishop, knight and a blocked pawn against a king and a blocked pawn: no mate within the search's
+  // reach for either side, and too large a state space to close.
+  const created = Game.create({
+    gameId: 'g-unresolved', players: PLAYERS, timeControl: TC, rated: false, at: 1000,
+    initialFen: '8/2K4k/8/3B4/7p/7P/8/N7 w - - 7 77',
+  });
+  const op = prepareMove(created.game, { uci: 'd5c4', at: 2000, operationId: 'op-e4', rulesVersion: '1.0.0' });
+  const ctrl = new AdjudicationJobController({ escalationPlayouts: QUICK_TIERS });
   ctrl.createJob(op, created.game);
   const concluded = proveOrConclude(ctrl, op.operationId);
-  assert.ok(concluded >= 1, 'the opening position exhausts the bounded search');
+  assert.ok(concluded >= 1, 'the position exhausts the bounded search');
 
   const proving = created.game.withEvents([startedFor(created.game, op)]);
   const settlement = ctrl.settleJob(proving, op.operationId, 2100);
@@ -69,14 +81,50 @@ test('an exhausted move proof settles as an ordinary move and replays', () => {
   assert.throws(() => Game.fromEvents(tamper({ status: 'unresolved', reason: 'resource_limit', extra: 1 })), GameError);
 });
 
-test('an exhausted flag proof settles as an ordinary loss on time', () => {
-  const created = Game.create({ gameId: 'g-flag', players: PLAYERS, timeControl: TC, rated: false, at: 1000 });
-  const afterW = created.game.move('e2e4', 2000);
-  const afterB = afterW.game.move('e7e5', 3000);
+/** White flags with two rooks against a knight: a helpmate Black's knight can reach, but hard to find. */
+function hardFlag() {
+  const created = Game.create({
+    gameId: 'g-flag', players: PLAYERS, timeControl: TC, rated: false, at: 1000, initialFen: '3k4/R7/2n5/8/8/6R1/6K1/8 w - - 3 45',
+  });
+  const afterW = created.game.move('g3g4', 2000);
+  const afterB = afterW.game.move('c6b8', 3000);
   const flagAt = 3000 + 60_000 + 10;
   assert.equal(afterB.game.timeoutDue(flagAt), true);
   const op = prepareFlagExpiry(afterB.game, { flagged: 'w', at: flagAt, operationId: 'op-flag', rulesVersion: '1.0.0' });
-  const ctrl = new AdjudicationJobController();
+  return { created, afterW, afterB, flagAt, op };
+}
+
+test('an exhausted timeout question is escalated through every tier before it may be concluded', () => {
+  const { afterB, op } = hardFlag();
+  const ctrl = new AdjudicationJobController({ escalationPlayouts: QUICK_TIERS });
+  ctrl.createJob(op, afterB.game);
+  assert.equal(ctrl.escalate(op.operationId), false, 'an active job is not escalated');
+  const steps: string[] = [];
+  for (let i = 0; i < 200_000; i++) {
+    const status = ctrl.getJob(op.operationId)!.status;
+    if (status === 'ready') break;
+    if (status === 'resource_limit') {
+      if (ctrl.escalate(op.operationId)) {
+        steps.push('escalated');
+        continue;
+      }
+      steps.push('concluded');
+      ctrl.concludeUnresolved(op.operationId);
+      continue;
+    }
+    // Exhaustion alone never decides a timeout while a tier remains.
+    ctrl.stepJob(op.operationId, 2000);
+    if (ctrl.getJob(op.operationId)!.status === 'resource_limit' && steps.length < QUICK_TIERS.length) {
+      assert.throws(() => ctrl.concludeUnresolved(op.operationId), GameError);
+    }
+  }
+  assert.deepEqual(steps, ['escalated', 'escalated', 'concluded']);
+  assert.equal(ctrl.getJob(op.operationId)!.status, 'ready');
+});
+
+test('an exhausted flag proof settles as an ordinary loss on time', () => {
+  const { created, afterW, afterB, flagAt, op } = hardFlag();
+  const ctrl = new AdjudicationJobController({ escalationPlayouts: QUICK_TIERS });
   ctrl.createJob(op, afterB.game);
   assert.ok(proveOrConclude(ctrl, op.operationId) >= 1);
   const proving = afterB.game.withEvents([startedFor(afterB.game, op)]);

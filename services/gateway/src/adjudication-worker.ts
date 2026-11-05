@@ -47,6 +47,7 @@ export interface AdjudicationWorkStore {
   renewAdjudication(params: RenewAdjudicationParams): Promise<AdjudicationClaimGrant>;
   createProofJob(gameId: string, operationId: string): Promise<string>;
   stepProofJob(operationId: string, totalWorkBudget: number): JobStepResult;
+  escalateProofJob(operationId: string): boolean;
   concludeUnresolvedProofJob(operationId: string): JobStepResult;
   retainedResolutionAt(gameId: string, operationId: string): number | undefined;
   settleAdjudication(params: SettleAdjudicationParams): Promise<AdjudicationSettlementReceipt>;
@@ -75,6 +76,14 @@ export interface AdjudicationWorkerOptions {
   readonly leaseMs?: number;
   /** Proof work per slice; the loop yields to other work between slices (default 2 000). */
   readonly sliceBudget?: number;
+  /**
+   * Proof time one operation gets per pass (default 200 ms). An unfinished proof keeps its claim and
+   * resumes on the next pass after every other operation's turn, so one long proof cannot hold up
+   * the other games.
+   */
+  readonly proofSliceMs?: number;
+  /** Monotonic milliseconds for proof time slices (default `performance.now`). */
+  readonly monotonic?: () => number;
   /** Delay between passes once nothing more is waiting (default 250 ms). */
   readonly pollMs?: number;
   /** Operations and stops read per pass (default 20). */
@@ -100,7 +109,9 @@ export interface AdjudicationPass {
   readonly released: number;
   readonly skipped: number;
   readonly failed: number;
-  /** A page was full, so more work is probably waiting. */
+  /** Proofs claimed by this worker that need more time; they resume next pass. */
+  readonly pending: number;
+  /** A page was full, or a proof is pending, so more work is waiting. */
   readonly more: boolean;
 }
 
@@ -125,6 +136,10 @@ export class AdjudicationWorker {
   #running: Promise<void> | undefined;
   #consecutiveErrors = 0;
   readonly #releaseGraceMs: number;
+  readonly #proofSliceMs: number;
+  readonly #monotonic: () => number;
+  /** Operations this worker holds a claim on whose proof needs more time, in claim order. */
+  readonly #inFlight = new Map<string, { gameId: string; grant: AdjudicationClaimGrant }>();
   /** Publications that failed, by game; retried every pass. Only the latest per game matters. */
   readonly #unpublished = new Map<string, AdjudicationChange>();
 
@@ -138,6 +153,8 @@ export class AdjudicationWorker {
     this.#newIntent = options.newIntent ?? (() => PgAdjudicationStore.newClaimIntent());
     this.#now = options.now ?? (() => Date.now());
     this.#releaseGraceMs = nonnegative(options.releaseGraceMs ?? 1_000, 'releaseGraceMs');
+    this.#proofSliceMs = positive(options.proofSliceMs ?? 200, 'proofSliceMs');
+    this.#monotonic = options.monotonic ?? (() => performance.now());
   }
 
   /** Games with a publication still outstanding (for observability and tests). */
@@ -169,13 +186,25 @@ export class AdjudicationWorker {
     let skipped = 0;
     let failed = 0;
     failed += await this.#flushPublications();
+    const tally = (outcome: 'settled' | 'skipped' | 'pending'): void => {
+      if (outcome === 'settled') settled += 1;
+      else if (outcome === 'skipped') skipped += 1;
+    };
+    // Proofs this worker already holds go first, each for one more slice, in claim order.
+    for (const [operationId, held] of [...this.#inFlight]) {
+      if (this.#halting) break;
+      try {
+        tally(await this.#continue(held.gameId, operationId, held.grant));
+      } catch (error) {
+        failed += 1;
+        this.#fail('Adjudication failed for an operation; it is retried once its lease lapses', error, { gameId: held.gameId, operationId });
+      }
+    }
     const claimable = await this.#store.listClaimableAdjudications(this.#pageSize);
     for (const op of claimable) {
       if (this.#halting) break;
       try {
-        const outcome = await this.#adjudicate(op.gameId, op.operationId, op.generation);
-        if (outcome === 'settled') settled += 1;
-        else skipped += 1;
+        tally(await this.#adjudicate(op.gameId, op.operationId, op.generation));
       } catch (error) {
         failed += 1;
         this.#fail('Adjudication failed for an operation; it is retried once its lease lapses', error, op);
@@ -193,19 +222,39 @@ export class AdjudicationWorker {
         this.#fail('Clock release failed for a stop; it is retried on a later pass', error, stop);
       }
     }
-    const more = claimable.length === this.#pageSize || stops.length === this.#pageSize;
-    return { settled, released, skipped, failed, more };
+    const pending = this.#inFlight.size;
+    const more = claimable.length === this.#pageSize || stops.length === this.#pageSize || pending > 0;
+    return { settled, released, skipped, failed, pending, more };
   }
 
-  async #adjudicate(gameId: string, operationId: string, generation: string): Promise<'settled' | 'skipped'> {
+  async #adjudicate(gameId: string, operationId: string, generation: string): Promise<'settled' | 'skipped' | 'pending'> {
     const claimed = await this.#claim(gameId, operationId, generation);
     if (claimed === null) return 'skipped';
+    return this.#continue(gameId, operationId, claimed);
+  }
+
+  /**
+   * Prove for one time slice and settle when ready. An unfinished proof keeps its claim and its local
+   * job and is resumed next pass; any other outcome drops the local job.
+   */
+  async #continue(gameId: string, operationId: string, held: AdjudicationClaimGrant): Promise<'settled' | 'skipped' | 'pending'> {
+    let keep = false;
     try {
       // A settlement this process already evaluated (its write failed) is retried as it was,
       // without proving again: the proof job it consumed cannot be stepped any more.
       const retained = this.#store.retainedResolutionAt(gameId, operationId);
-      const grant = retained === undefined ? await this.#prove(gameId, operationId, claimed) : claimed;
-      if (grant === null) return 'skipped';
+      let grant = held;
+      if (retained === undefined) {
+        const proved = await this.#prove(gameId, operationId, held);
+        if (proved === null) return 'skipped';
+        if (proved.status === 'pending') {
+          this.#inFlight.set(operationId, { gameId, grant: proved.grant });
+          keep = true;
+          return 'pending';
+        }
+        grant = proved.grant;
+      }
+      this.#inFlight.delete(operationId);
       const resolutionAt = retained ?? this.#now();
       const receipt = await this.#settle({ gameId, operationId, grant, resolutionAt });
       this.options.settledCounter?.inc();
@@ -216,31 +265,46 @@ export class AdjudicationWorker {
       if (error instanceof AdjudicationConflictError) return 'skipped';
       throw error;
     } finally {
-      // Never keep a local job past its claim: it would hold controller capacity indefinitely.
-      this.#dropJob(operationId);
+      if (!keep) {
+        this.#inFlight.delete(operationId);
+        // Never keep a local job past its claim: it would hold controller capacity indefinitely.
+        this.#dropJob(operationId);
+      }
     }
   }
 
-  /** Run the proof to ready, renewing the lease; returns the current grant, or null when halted. */
-  async #prove(gameId: string, operationId: string, claimed: AdjudicationClaimGrant): Promise<AdjudicationClaimGrant | null> {
+  /**
+   * Run the proof for at most one time slice, renewing the lease. An exhausted timeout question is
+   * escalated while a tier remains; only then is a question concluded unresolved. Returns null when
+   * halted, `pending` when the slice ran out, `ready` when the job can settle.
+   */
+  async #prove(
+    gameId: string,
+    operationId: string,
+    claimed: AdjudicationClaimGrant,
+  ): Promise<{ status: 'ready' | 'pending'; grant: AdjudicationClaimGrant } | null> {
     let grant = claimed;
+    const started = this.#monotonic();
     await this.#store.createProofJob(gameId, operationId);
     let step = this.#store.stepProofJob(operationId, 0);
     while (step.status === 'active' || step.status === 'resource_limit') {
       if (this.#halting) return null;
       grant = await this.#renewIfDue(grant);
       if (step.status === 'resource_limit') {
-        // An exhausted question settles as unresolved (never a dead position); the rest go on.
-        step = this.#store.concludeUnresolvedProofJob(operationId);
+        step = this.#store.escalateProofJob(operationId)
+          ? this.#store.stepProofJob(operationId, 0)
+          // An exhausted question settles as unresolved (never a dead position); the rest go on.
+          : this.#store.concludeUnresolvedProofJob(operationId);
         continue;
       }
+      if (this.#monotonic() - started >= this.#proofSliceMs) return { status: 'pending', grant };
       await yieldToLoop();
       step = this.#store.stepProofJob(operationId, this.#sliceBudget);
     }
     if (step.status !== 'ready') {
       throw new Error(`proof job ended ${step.status}, not ready`);
     }
-    return grant;
+    return { status: 'ready', grant };
   }
 
   #dropJob(operationId: string): void {
