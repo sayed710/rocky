@@ -27,6 +27,7 @@ function setup(locale: 'en' | 'ar' = 'en') {
   const statuses: string[] = [];
   const colors: Array<WsColor | null> = [];
   const metadatas: Array<any> = [];
+  const actions: Array<{ readonly proving?: boolean }> = [];
   const controller = new GameController({
     gameSync: sync,
     i18n: createI18nManager({ initialLocale: locale }),
@@ -37,9 +38,10 @@ function setup(locale: 'en' | 'ar' = 'en') {
       onStatus: (text) => statuses.push(text),
       onColor: (color) => colors.push(color),
       onMetadata: (metadata) => metadatas.push(metadata),
+      onActionState: (state) => actions.push(state),
     },
   });
-  return { factory, scheduler, client, sync, controller, positions, turns, clocks, statuses, colors, metadatas };
+  return { factory, scheduler, client, sync, controller, positions, turns, clocks, statuses, colors, metadatas, actions };
 }
 
 test('account reauthorization clears the old board color and publishes the new server seat', () => {
@@ -1200,6 +1202,41 @@ test('a stopped phase arriving at the revision of its move (equal-revision snaps
   factory.last.emit({ t: 'state', gameId: 'g1', state: at(2, { adjudication: 'stopped' }) });
   assert.equal(sync.getState().adjudication, 'stopped');
   assert.equal(statuses.at(-1), 'Clocks paused. Play resumes in a moment.');
+  controller.stop();
+  sync.stop();
+});
+
+test('while proving every action is refused, and the actions return once the phase clears', () => {
+  const { factory, sync, controller, actions } = setup();
+  controller.start();
+  sync.start();
+  factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(4, 'w', 'startpos') });
+  assert.equal(actions.at(-1)?.proving, false);
+  factory.last.emit({ t: 'state', gameId: 'g1', state: { ...stateView(4, 'w', 'startpos'), adjudication: 'proving' } });
+  assert.equal(actions.at(-1)?.proving, true);
+  const sent = factory.last.sent.length;
+  assert.equal(controller.resign(), false);
+  assert.equal(controller.offerDraw(), false);
+  assert.equal(controller.claimFlag(), false);
+  assert.equal(factory.last.sent.length, sent, 'nothing is sent while proving');
+  factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(4, 'w', 'startpos') });
+  assert.equal(actions.at(-1)?.proving, false);
+  assert.equal(controller.resign(), true);
+  controller.stop();
+  sync.stop();
+});
+
+test('a proving readiness shows the proof status, not the readiness text', () => {
+  const { factory, sync, controller, statuses } = setup();
+  controller.start();
+  sync.start();
+  factory.last.open();
+  const pregame = { ...stateView(0, 'w', 'startpos'), ready: { w: false, b: false } } as StateView;
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: pregame });
+  assert.notEqual(statuses.at(-1), 'Checking the position…');
+  factory.last.emit({ t: 'state', gameId: 'g1', state: { ...pregame, adjudication: 'proving' } });
+  assert.equal(statuses.at(-1), 'Checking the position…');
   controller.stop();
   sync.stop();
 });
