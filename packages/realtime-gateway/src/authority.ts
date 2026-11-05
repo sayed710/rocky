@@ -17,7 +17,18 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { Game, type GameEvent } from '@chess-platform/game';
+import { isDeepStrictEqual } from 'node:util';
+import {
+  Game,
+  GameError,
+  type AdjudicationClockPolicy,
+  type AuthoritativeCommandContext,
+  type AuthoritativePlayerCommand,
+  type GameEvent,
+  type PreparedOperation,
+  prepareFlagExpiry,
+  prepareNoShowExpiry,
+} from '@chess-platform/game';
 import type { Color, Position } from '@chess-platform/core';
 import type { CreateGameParams } from '@chess-platform/game';
 import { InMemoryEventLog, isStateRevision, nextEventHead, type EventLog, type LoggedEvent } from './event-log';
@@ -41,7 +52,8 @@ export type Command =
   | { readonly kind: 'abort' }
   | { readonly kind: 'ready' }
   | { readonly kind: 'expireNoShow' }
-  | { readonly kind: 'expireFlag' };
+  | { readonly kind: 'expireFlag' }
+  | { readonly kind: 'adjudicationChanged' };
 
 /**
  * The actor that issues `expireNoShow`. Not an account id: player identities come only from verified
@@ -51,6 +63,27 @@ export const NO_SHOW_ACTOR = 'system:no-show';
 
 /** The actor that issues `expireFlag`; like {@link NO_SHOW_ACTOR}, no client can act as it. */
 export const FLAG_ACTOR = 'system:flag';
+
+/**
+ * The actor that issues `adjudicationChanged`: the adjudication worker telling the game's owner that
+ * a settlement or release it committed is in the durable log (Issue #124, ADR-0176).
+ */
+export const ADJUDICATION_ACTOR = 'system:adjudication';
+
+/**
+ * Durable admission of adjudicated commands (Issue #124, ADR-0176). When configured, every command
+ * is accepted as an adjudication obligation instead of being applied directly; a worker settles it
+ * and the owner publishes the outcome. `PgAdjudicationStore` satisfies `start`.
+ */
+export interface AdjudicationAdmission {
+  readonly rulesVersion: string;
+  readonly clockPolicy: AdjudicationClockPolicy;
+  start(
+    params:
+      | { readonly gameId: string; readonly command: AuthoritativePlayerCommand; readonly context: AuthoritativeCommandContext }
+      | { readonly gameId: string; readonly prepared: PreparedOperation },
+  ): Promise<{ readonly status: 'noop' | 'started' | 'proving' | 'completed' }>;
+}
 
 /** Reasons a command can be refused, aligned with the protocol reject codes. */
 export type AuthorityErrorCode =
@@ -186,6 +219,24 @@ interface CommitContext {
   rejectCaller(err: unknown): void;
 }
 
+/** The earliest instant the domain admits a command at: the current stop's, or the release's. */
+function causalFloor(game: Game): number {
+  const stopped = game.stoppedClock;
+  if (stopped !== null) return stopped.basis.stoppedAt ?? 0;
+  return game.releasedClock?.releasedAt ?? 0;
+}
+
+/**
+ * Fold one durable event. A clock release is never appended live; it is re-derived from the stop the
+ * game records by its one producer and must equal the logged event exactly (Issue #124).
+ */
+function foldLogged(game: Game, ev: GameEvent): Game {
+  if (ev.type !== 'AdjudicationClocksStarted') return game.withEvents([ev]);
+  const released = game.prepareClockRelease({ releaseRequestId: ev.releaseRequestId, at: ev.at });
+  if (!isDeepStrictEqual(released.event, ev)) throw new Error('logged clock release differs from the recorded stop');
+  return released.game;
+}
+
 function validateTimeout(val: number | undefined, name: string): void {
   if (val === undefined) return;
   if (!Number.isInteger(val) || val < 1 || val > 600000) {
@@ -208,6 +259,8 @@ export interface GameAuthorityOptions {
   durableCreateTimeoutMs?: number;
   onDurableWriteStalled?: (gameId: string, op: 'append' | 'create') => void;
   onDurableWriteSettled?: (gameId: string, op: 'append' | 'create', outcome: 'committed' | 'failed') => void;
+  /** Adjudicate every command durably instead of applying it (Issue #124). Absent: unchanged behavior. */
+  adjudication?: AdjudicationAdmission;
 }
 
 export class GameAuthority {
@@ -219,6 +272,7 @@ export class GameAuthority {
   private readonly _schedule: (fn: () => void, ms: number) => () => void;
   private readonly onDurableWriteStalled?: (gameId: string, op: 'append' | 'create') => void;
   private readonly onDurableWriteSettled?: (gameId: string, op: 'append' | 'create', outcome: 'committed' | 'failed') => void;
+  private readonly adjudication?: AdjudicationAdmission;
   private _abandonedReadCount = 0;
 
   constructor(
@@ -243,6 +297,7 @@ export class GameAuthority {
     this._schedule = options.schedule ?? defaultSchedule;
     this.onDurableWriteStalled = options.onDurableWriteStalled;
     this.onDurableWriteSettled = options.onDurableWriteSettled;
+    this.adjudication = options.adjudication;
   }
 
   get durableReadTimeoutMs(): number | undefined {
@@ -726,7 +781,7 @@ export class GameAuthority {
     let broadcastSeq = base.broadcastSeq;
     for (const entry of suffix) {
       const ev = entry.event;
-      game = game.withEvents([ev]);
+      game = foldLogged(game, ev);
       if (ev.type !== 'MovePlayed' && ev.type !== 'GameEnded' && ev.type !== 'PlayerReady') continue;
       const msg = this.toBroadcast(gameId, ev, game, entry.seq);
       if (!msg) continue;
@@ -769,6 +824,19 @@ export class GameAuthority {
       ...record,
       events: logged.map((e) => e.event),
     };
+  }
+
+  /**
+   * Resident games whose copy shows an adjudication in progress or stopped clocks: the only games a
+   * worker can change behind this authority's back, so the ones an owner re-reads (ADR-0176).
+   */
+  adjudicatingGames(): string[] {
+    const ids: string[] = [];
+    for (const [gameId, slot] of this.games) {
+      const game = slot.record?.game;
+      if (!slot.dispose && game && !game.status.over && (game.isBlocked || game.stoppedClock !== null)) ids.push(gameId);
+    }
+    return ids;
   }
 
   /** Current authoritative state view. Throws if the game is unknown. */
@@ -985,6 +1053,11 @@ export class GameAuthority {
 
   private async applyNow(gameId: string, rec: GameRecord, userId: string, cmd: Command, ctx?: CommitContext): Promise<ApplyResult> {
     const at = this.now();
+    if (cmd.kind === 'adjudicationChanged') {
+      if (userId !== ADJUDICATION_ACTOR) throw new AuthorityError('not_a_player', 'only the server may report an adjudication');
+      return this.absorbDurable(gameId, rec);
+    }
+    if (this.adjudication) return this.applyAdjudicated(gameId, rec, userId, cmd, at, this.adjudication);
     if (cmd.kind === 'expireNoShow') {
       // Checked before anything else so a player can never issue it, and the worker never as a seat.
       // The deadline is the game's own durable one; the caller supplies none.
@@ -1058,6 +1131,114 @@ export class GameAuthority {
       }
     }
     return this.commit(gameId, rec, result, ctx);
+  }
+
+  /**
+   * Accept a command as a durable adjudication obligation (Issue #124). The store arbitrates exactly
+   * as the domain does (a due no-show or flag is recorded instead of the command) and appends only
+   * `AdjudicationStarted`; the worker settles it and reports back with `adjudicationChanged`.
+   */
+  private async applyAdjudicated(
+    gameId: string,
+    rec: GameRecord,
+    userId: string,
+    cmd: Command,
+    at: number,
+    admission: AdjudicationAdmission,
+  ): Promise<ApplyResult> {
+    // Fold anything the worker committed first: a lost or late notice can never leave this copy
+    // proving or stopped after the log has moved on, and the room sees it before the new command.
+    await this.absorbDurable(gameId, rec);
+    if (rec.game.isBlocked) throw new AuthorityError('invalid_command', 'an adjudication is pending for this game');
+    // The instant is taken after folding, and never before the stop or release just folded: that may
+    // have been committed on another replica whose clock runs slightly ahead of this one.
+    at = Math.max(at, this.now(), causalFloor(rec.game));
+    const operationId = randomUUID();
+    const meta = { operationId, at, rulesVersion: admission.rulesVersion, clockPolicy: admission.clockPolicy };
+    let request: Parameters<AdjudicationAdmission['start']>[0];
+    try {
+      request = this.adjudicationRequest(gameId, rec, userId, cmd, meta);
+    } catch (err) {
+      if (err instanceof GameError) throw new AuthorityError('invalid_command', err.message);
+      throw err;
+    }
+    let started: { readonly status: string };
+    try {
+      started = await admission.start(request);
+    } catch (err) {
+      if (err instanceof GameError) {
+        throw new AuthorityError(cmd.kind === 'move' ? 'illegal_move' : 'invalid_command', err.message);
+      }
+      // The admission may have committed: reload before any later command uses this copy.
+      rec.stale = true;
+      throw new AuthorityCommitError('invalid_command', `failed to admit command for ${gameId}: ${(err as Error).message}`);
+    }
+    if (started.status === 'noop') return { events: [], broadcasts: [], state: this.viewOf(rec.game, rec.persistedSeq) };
+    return this.absorbDurable(gameId, rec);
+  }
+
+  /** What to admit: a server expiry as its prepared operation, a player command for the store to arbitrate. */
+  private adjudicationRequest(
+    gameId: string,
+    rec: GameRecord,
+    userId: string,
+    cmd: Command,
+    meta: { operationId: string; at: number; rulesVersion: string; clockPolicy: AdjudicationClockPolicy },
+  ): Parameters<AdjudicationAdmission['start']>[0] {
+    if (cmd.kind === 'expireNoShow') {
+      if (userId !== NO_SHOW_ACTOR) throw new AuthorityError('not_a_player', 'only the server may expire a no-show');
+      return { gameId, prepared: prepareNoShowExpiry(rec.game, meta) };
+    }
+    if (cmd.kind === 'expireFlag') {
+      if (userId !== FLAG_ACTOR) throw new AuthorityError('not_a_player', 'only the server may expire a clock');
+      if (!rec.game.timeoutDue(meta.at)) throw new AuthorityError('invalid_command', 'Flag expiry refused: not due');
+      return { gameId, prepared: prepareFlagExpiry(rec.game, { ...meta, flagged: rec.game.turn }) };
+    }
+    const players = rec.game.snapshot().players;
+    const color = players.white === userId ? 'w' : players.black === userId ? 'b' : null;
+    if (color === null) throw new AuthorityError('not_a_player', 'only players may issue commands');
+    if (cmd.kind === 'claimFlag') {
+      // A due no-show takes precedence, exactly as without adjudication.
+      if (rec.game.noShowVerdict(meta.at).kind === 'expire') return { gameId, prepared: prepareNoShowExpiry(rec.game, meta) };
+      if (!rec.game.timeoutDue(meta.at)) throw new AuthorityError('invalid_command', 'Flag claim refused: not due');
+      return { gameId, prepared: prepareFlagExpiry(rec.game, { ...meta, flagged: rec.game.turn }) };
+    }
+    if (cmd.kind === 'adjudicationChanged') throw new AuthorityError('invalid_command', 'not a player command');
+    // A due no-show or flag is recorded instead of the command, exactly as without adjudication.
+    const due = rec.game.noShowVerdict(meta.at).kind === 'expire' || rec.game.timeoutDue(meta.at);
+    if (!due && cmd.kind === 'move') {
+      if (rec.game.turn !== color) throw new AuthorityError('not_your_turn', 'it is not your turn');
+      if (rec.game.awaitingReadiness) throw new AuthorityError('not_ready', 'both players must be ready before the first move');
+    }
+    return { gameId, command: cmd, context: { ...meta, color } };
+  }
+
+  /**
+   * Fold the durable suffix after this copy's head into it and publish what it shows: its move, ready
+   * and ending broadcasts and the new state, so players see a proving, stopped or released game.
+   */
+  private async absorbDurable(gameId: string, rec: GameRecord): Promise<ApplyResult> {
+    const after = rec.persistedSeq;
+    const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) =>
+      this.store.loadSince ? this.store.loadSince(gameId, after, s) : this.store.load(gameId, s));
+    const suffix = logged.filter((entry) => entry.seq > after);
+    if (suffix.length === 0) return { events: [], broadcasts: [], state: this.viewOf(rec.game, rec.persistedSeq) };
+    const extended = this.extendRecord(gameId, rec, suffix);
+    const fresh = extended.broadcasts.slice(rec.broadcasts.length);
+    rec.game = extended.game;
+    rec.events.push(...suffix.map((entry) => entry.event));
+    rec.broadcasts.push(...fresh);
+    rec.broadcastSeq = extended.broadcastSeq;
+    rec.persistedSeq = extended.persistedSeq;
+    rec.stale = false;
+    const broadcasts = fresh.map((entry) => entry.msg);
+    for (const msg of broadcasts) {
+      this.pubsub.publish(gameChannel(gameId), msg);
+      if (msg.t === 'ended') this.pubsub.publish(gamesEndedChannel(), msg);
+    }
+    const state = this.viewOf(rec.game, rec.persistedSeq);
+    this.pubsub.publish(gameChannel(gameId), { t: 'state', gameId, state });
+    return { events: suffix.map((entry) => entry.event), broadcasts, state };
   }
 
   /** Persist a command's events, then commit them to the hot record and publish their broadcasts. */
@@ -1247,6 +1428,7 @@ export class GameAuthority {
       legalMoves: snap.status.over || game.isBlocked ? {} : legalMovesOf(snap.position),
       chess960StartId: snap.chess960StartId,
       ready: snap.source === null ? null : { ...snap.ready },
+      ...(game.isBlocked ? { adjudication: 'proving' as const } : game.stoppedClock !== null ? { adjudication: 'stopped' as const } : {}),
     };
   }
 

@@ -24,6 +24,7 @@
 
 import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import type { JobStepResult } from '@chess-platform/game';
+import { ADJUDICATION_ACTOR } from '@chess-platform/realtime-gateway';
 import type { Counter, Logger } from '@chess-platform/api';
 import {
   AdjudicationConflictError,
@@ -36,6 +37,7 @@ import {
   type RenewAdjudicationParams,
   type SettleAdjudicationParams,
 } from '@chess-platform/persistence/pg';
+import { routedExpiry, type RoutedExpiryOptions } from './deadline-expiry.js';
 
 /** Exactly what the worker uses of `PgAdjudicationStore`. */
 export interface AdjudicationWorkStore {
@@ -448,4 +450,13 @@ function positive(value: number, name: string): number {
 
 function describe(error: unknown): string {
   return error instanceof Error ? (error.stack ?? error.message) : String(error);
+}
+
+/**
+ * Publish a durable adjudication change through the game's owner, exactly like a server expiry
+ * (ADR-0176): the owner folds the new durable suffix into its copy and broadcasts it to the room.
+ */
+export function routedAdjudicationChange(options: RoutedExpiryOptions): (change: AdjudicationChange) => Promise<void> {
+  const notify = routedExpiry(options, ADJUDICATION_ACTOR, { kind: 'adjudicationChanged' });
+  return (change) => notify(change.gameId);
 }
