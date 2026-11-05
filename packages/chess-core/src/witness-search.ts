@@ -75,7 +75,28 @@ export interface WitnessSearchOptions {
   readonly attempts?: readonly WitnessAttemptConfig[];
   readonly maxRetainedFrames?: number;
   readonly maxWitnessLength?: number;
+  /**
+   * Guided cooperative playouts run before the depth-first attempts (default
+   * {@link DEFAULT_PLAYOUTS}); `false` disables them. They only ever propose a witness, which the
+   * same independent replay verifies, so they can make the finder faster but never less sound.
+   */
+  readonly playouts?: PlayoutConfig | false;
 }
+
+/**
+ * Guided cooperative playouts: whole games in which the winner heads for the loser's king (and
+ * checks every move of its own for mate) while the loser runs its king to a corner, crowds it with
+ * its own pieces and never takes the winner's material. Seeded from the root position, so a given
+ * position always explores the same playouts.
+ */
+export interface PlayoutConfig {
+  /** Playouts to try before falling back to the depth-first attempts. */
+  readonly count: number;
+  /** Plies per playout; a witness is at most this long. */
+  readonly maxPlies: number;
+}
+
+export const DEFAULT_PLAYOUTS: PlayoutConfig = Object.freeze({ count: 40, maxPlies: 120 });
 
 export interface WitnessVerificationResult {
   readonly valid: boolean;
@@ -121,6 +142,41 @@ export function verifyWitnessPath(
     return { valid: false, reason: 'Terminal position has legal replies (not mate)' };
   }
   return { valid: true, terminalState: current };
+}
+
+const PLAYOUT_VALUE: Readonly<Record<string, number>> = Object.freeze({ p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 });
+
+function chebyshevDist(a: number, b: number): number {
+  return Math.max(Math.abs((a >> 4) - (b >> 4)), Math.abs((a & 7) - (b & 7)));
+}
+
+function cornerDist(sq: number): number {
+  const r = sq >> 4;
+  const f = sq & 7;
+  return Math.min(Math.max(r, f), Math.max(r, 7 - f), Math.max(7 - r, f), Math.max(7 - r, 7 - f));
+}
+
+/** FNV-1a over the root key: a stable seed per position. */
+function seedFromKey(key: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h & 0x7fffffff || 1;
+}
+
+interface PlayoutCursor {
+  index: number;
+  ply: number;
+  state: PositionState;
+  path: Move[];
+  rng: number;
+  /** Legal moves of the current ply while they are being evaluated, one per work unit. */
+  moves: Move[] | null;
+  next: number;
+  best: Move | null;
+  bestScore: number;
 }
 
 function manhattanDist(sq1: number, sq2: number): number {
@@ -265,6 +321,7 @@ function validateWitnessSearchOptions(options?: WitnessSearchOptions): {
   attempts: readonly WitnessAttemptConfig[];
   maxFrames: number;
   maxWitness: number;
+  playouts: PlayoutConfig | null;
 } {
   const attempts = validateAndFreezeAttempts(options?.attempts);
   let maxFrames = DEFAULT_MAX_RETAINED_FRAMES;
@@ -281,7 +338,18 @@ function validateWitnessSearchOptions(options?: WitnessSearchOptions): {
     }
     maxWitness = val;
   }
-  return { attempts, maxFrames, maxWitness };
+  let playouts: PlayoutConfig | null = DEFAULT_PLAYOUTS;
+  if (options?.playouts !== undefined) {
+    if (options.playouts === false) {
+      playouts = null;
+    } else {
+      playouts = Object.freeze({
+        count: validatePositiveInt(options.playouts.count, 'playouts.count'),
+        maxPlies: validatePositiveInt(options.playouts.maxPlies, 'playouts.maxPlies'),
+      });
+    }
+  }
+  return { attempts, maxFrames, maxWitness, playouts };
 }
 
 export class CooperativeWitnessSession {
@@ -304,6 +372,8 @@ export class CooperativeWitnessSession {
   private reconstructionCursor: ReconstructionCursor | null = null;
   private resourceLimitEncountered = false;
   private lastPendingReason: WitnessPendingReason | null = null;
+  private readonly playoutConfig: PlayoutConfig | null;
+  private playout: PlayoutCursor | null = null;
 
   private countersInternal: WitnessCounters = {
     workUnits: 0,
@@ -345,6 +415,7 @@ export class CooperativeWitnessSession {
     this.attempts = validated.attempts;
     this.maxFrames = validated.maxFrames;
     this.maxWitness = validated.maxWitness;
+    this.playoutConfig = validated.playouts;
 
     if (!this.admissionPending) {
       this.initImmediateOrStack();
@@ -362,6 +433,110 @@ export class CooperativeWitnessSession {
       return;
     }
     this.initStackForAttempt();
+    if (this.playoutConfig) {
+      this.playout = {
+        index: 0,
+        ply: 0,
+        state: cloneState(this.rootState),
+        path: [],
+        rng: seedFromKey(canonicalStateKey(this.rootState)),
+        moves: null,
+        next: 0,
+        best: null,
+        bestScore: -Infinity,
+      };
+    }
+  }
+
+  private nextRandom(cursor: PlayoutCursor): number {
+    cursor.rng = (Math.imul(cursor.rng, 1103515245) + 12345) & 0x7fffffff;
+    return cursor.rng / 0x7fffffff;
+  }
+
+  /** Start the next playout from the root, or leave the playout phase for the depth-first attempts. */
+  private nextPlayout(cursor: PlayoutCursor): void {
+    const config = this.playoutConfig!;
+    cursor.index++;
+    if (cursor.index >= config.count) {
+      this.playout = null;
+      return;
+    }
+    cursor.ply = 0;
+    cursor.state = cloneState(this.rootState);
+    cursor.path = [];
+    cursor.moves = null;
+  }
+
+  /**
+   * One unit of playout work: generate the current ply's moves, evaluate one of them, or play the
+   * best. The winner tries every move for mate; the loser chooses a move that heads its king for a
+   * corner and crowds it, never taking the winner's material or giving check. A mate found ends the
+   * phase by handing its path to the independent replay verification.
+   */
+  private stepPlayout(cursor: PlayoutCursor): void {
+    const config = this.playoutConfig!;
+    this.debit(1);
+    if (cursor.moves === null) {
+      if (cursor.ply >= config.maxPlies || cursor.ply >= this.maxWitness) {
+        this.nextPlayout(cursor);
+        return;
+      }
+      this.countersInternal.legalGenerations++;
+      const moves = generateLegalMoves(cursor.state);
+      if (moves.length === 0) {
+        this.nextPlayout(cursor);
+        return;
+      }
+      cursor.moves = moves;
+      cursor.next = 0;
+      cursor.best = null;
+      cursor.bestScore = -Infinity;
+      return;
+    }
+    if (cursor.next < cursor.moves.length) {
+      this.evaluatePlayoutMove(cursor, cursor.moves[cursor.next++]!);
+      return;
+    }
+    cursor.path.push(cursor.best!);
+    cursor.state = applyMove(cursor.state, cursor.best!);
+    cursor.ply++;
+    cursor.moves = null;
+  }
+
+  private evaluatePlayoutMove(cursor: PlayoutCursor, move: Move): void {
+    this.countersInternal.candidateEvaluations++;
+    const state = cursor.state;
+    const winnerToMove = state.turn === this.intendedWinner;
+    const next = applyMove(state, move);
+    // Later playouts weigh chance more, so they explore further from the greedy line.
+    let score = this.nextRandom(cursor) * (30 + 60 * (cursor.index % 5));
+    if (winnerToMove) {
+      if (this.isTerminalCheckmate(next)) {
+        const witness = Object.freeze([...cursor.path, move].map((m) => Object.freeze(cloneMove(m))));
+        this.playout = null;
+        this.startVerification(witness);
+        return;
+      }
+      const loserKing = findKing(state, opposite(this.intendedWinner));
+      if (move.promotion) score += move.promotion === 'q' ? 400 : 50;
+      if (move.captured) score += 60 + 10 * (PLAYOUT_VALUE[typeOf(move.captured)] ?? 0);
+      if (loserKing >= 0) score += (chebyshevDist(move.from, loserKing) - chebyshevDist(move.to, loserKing)) * 25;
+      if (typeOf(move.piece) === 'k') score -= 10;
+    } else {
+      if (move.captured) score -= 300 + 30 * (PLAYOUT_VALUE[typeOf(move.captured)] ?? 0);
+      if (inCheck(next, this.intendedWinner)) score -= 200;
+      if (typeOf(move.piece) === 'k') {
+        score += (cornerDist(move.from) - cornerDist(move.to)) * 30;
+      } else {
+        const ownKing = findKing(state, state.turn);
+        if (ownKing >= 0) score += (chebyshevDist(move.from, ownKing) - chebyshevDist(move.to, ownKing)) * 15;
+        if (move.promotion) score -= 100;
+      }
+    }
+    if (score > cursor.bestScore) {
+      cursor.bestScore = score;
+      cursor.best = move;
+    }
   }
 
   private initStackForAttempt(): void {
@@ -665,6 +840,11 @@ export class CooperativeWitnessSession {
     if (this.activeVerification) {
       this.stepVerification();
       if (this.finalizedResult) return this.finalizedResult;
+      return null;
+    }
+
+    if (this.playout) {
+      this.stepPlayout(this.playout);
       return null;
     }
 
