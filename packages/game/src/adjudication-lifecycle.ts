@@ -697,7 +697,8 @@ const VERIFIED_WITNESS_CAPACITY = 4096;
 const verifiedWitnesses = new Set<string>();
 
 function witnessKey(pos: Position, winner: Color, witness: readonly string[]): string {
-  return `${pos.variant}|${pos.fen()}|${winner}|${witness.join(' ')}`;
+  // A JSON tuple keeps element boundaries: ['a b'] and ['a', 'b'] can never share a key.
+  return JSON.stringify([pos.variant, pos.fen(), winner, witness]);
 }
 
 /** Replays a candidate mate witness move sequence and verifies checkmate for the claimed winner. */
