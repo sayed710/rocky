@@ -295,7 +295,7 @@ test(`PG-F1 prepared 0050 upgrade fails closed for migration login and succeeds 
             await assert.rejects(migrationLogin.query(`SET ROLE ${role}`),hasCode('42501'));
         };
         await assertUnprivileged();
-        assert.deepEqual(await missingMigrations(migrationLogin,migrationsDir()),[51,52]);
+        assert.deepEqual(await missingMigrations(migrationLogin,migrationsDir()),[51,52,53]);
         await assert.rejects(migrate(migrationLogin,migrationsDir()),error=>{
           assert.ok(error instanceof Error);
           assert.match(error.message,/must be owner of function/);
@@ -303,13 +303,13 @@ test(`PG-F1 prepared 0050 upgrade fails closed for migration login and succeeds 
           return true;
         });
         assert.equal((await admin.query('SELECT * FROM schema_migrations WHERE version=51')).rowCount,0);
-        assert.deepEqual(await missingMigrations(migrationLogin,migrationsDir()),[51,52]);
+        assert.deepEqual(await missingMigrations(migrationLogin,migrationsDir()),[51,52,53]);
         assert.deepEqual(await functionRights(admin),before,'failure preserves all modes, owners, ACLs and paths');
         assert.deepEqual(await tables(),tableRights);
         assert.deepEqual((await admin.query('SELECT * FROM game_fencing.control')).rows,control);
         assert.deepEqual((await admin.query('SELECT * FROM game_fencing.grants')).rows,grants);
 
-        assert.equal(await migrate(admin,migrationsDir()),2,'same trusted installer credentials apply pending migrations (0051 and 0052)');
+        assert.equal(await migrate(admin,migrationsDir()),3,'same trusted installer credentials apply pending migrations (0051, 0052 and 0053)');
         const checksum=migrationChecksum(readMigrationSql(migrationsDir(),'0051_non_escalating_fencing_helpers.sql'));
         assert.equal(checksum,'1827a4ceb64ba8a10600693e2780eac132637608120b10cbde31c66148338b83');
         assert.deepEqual((await admin.query('SELECT version,name,checksum,state FROM schema_migrations WHERE version=51')).rows,
@@ -722,7 +722,7 @@ test('PG-F1 upgrade from 0049 preserves every old checksum and populated event/p
       const events=(await pool.query('SELECT * FROM public.game_events WHERE game_id=$1 ORDER BY seq',[game])).rows;
       const projections=(await pool.query('SELECT * FROM public.games WHERE id=$1',[game])).rows;
       const checksums=(await pool.query('SELECT version,checksum FROM public.schema_migrations ORDER BY version')).rows;
-      assert.equal(await migrate(pool,dir),3);
+      assert.equal(await migrate(pool,dir),4);
       assert.deepEqual((await pool.query('SELECT * FROM public.game_events WHERE game_id=$1 ORDER BY seq',[game])).rows,events);
       assert.deepEqual((await pool.query('SELECT * FROM public.games WHERE id=$1',[game])).rows,projections);
       assert.deepEqual((await pool.query('SELECT version,checksum FROM public.schema_migrations WHERE version<50 ORDER BY version')).rows,checksums);
