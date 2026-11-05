@@ -47,9 +47,12 @@ Recovery and ordering:
   outcome, so lost or superseded claims cannot fill the controller's bounded capacity.
 - **Notices.** A failed notice to the owner is kept per game and retried at the start of every pass
   while the process runs; a stop is never released while its game has one outstanding, and those
-  games are excluded before the page limit so they cannot starve other stops. A stop is also
-  released only once its settlement is `releaseGraceMs` old (database time, default 1 s), so the
-  replica that settled it notifies first. Notices are a latency optimization, not the delivery
+  games are excluded before the page limit so they cannot starve other stops. The worker that
+  settled a stop releases it as soon as its notice is delivered, with the same release request id,
+  so a move that keeps the game going costs no extra clock pause. The release sweep, which picks up
+  stops whose settler died or failed to release, takes a stop only once its settlement is
+  `releaseGraceMs` old (database time, default 1 s), so the replica that settled it notifies
+  first. Notices are a latency optimization, not the delivery
   guarantee: the owner publishes from the durable log, and an owner whose copy shows a game proving
   or stopped re-reads the log on its own (ADR 0176), which covers a process that died between
   commit and notice without any time-window scan.

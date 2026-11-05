@@ -45,6 +45,8 @@ class FakeStore implements AdjudicationWorkStore {
   claimFailures: Array<'conflict' | 'network'> = [];
   settleFailures: Array<'conflict' | 'network'> = [];
   releaseFailures = 0;
+  /** The clock completion the settlement records: `stopped` when the game goes on. */
+  completion: 'stopped' | 'terminal' | undefined;
   retained: number | undefined;
   leaseUntil = 1_000_000 + 30_000;
   stopWhenStepping: (() => void) | undefined;
@@ -112,7 +114,9 @@ class FakeStore implements AdjudicationWorkStore {
     const failure = this.settleFailures.shift();
     if (failure === 'conflict') throw new AdjudicationConflictError('superseded');
     if (failure === 'network') throw new Error('connection reset');
-    return { gameId: GAME, operationId: OP, startedSeq: 3, finalSeq: 5, eventCount: 2, completedAt: params.resolutionAt } as AdjudicationSettlementReceipt;
+    return { gameId: GAME, operationId: OP, startedSeq: 3, finalSeq: 5, eventCount: 2, completedAt: params.resolutionAt,
+      resolvedEvent: { clockCompletion: this.completion === undefined ? undefined : { kind: this.completion } },
+    } as unknown as AdjudicationSettlementReceipt;
   }
   evictProofJob(): boolean {
     this.calls.push('evict');
@@ -394,4 +398,48 @@ test('one long proof yields to other operations and resumes on the next pass wit
   assert.deepEqual(settled, [OTHER_OP, OP], 'the long proof finishes on later passes');
   assert.equal(store.claims.filter((c) => c.operationId === OP).length, 1, 'resumed with its claim, never re-claimed');
   assert.equal((await worker.runPass()).pending, 0);
+});
+
+test('a settlement that stops the clocks is released right after its notice, without the grace wait', async () => {
+  const { store, published, worker } = harness((s) => { s.completion = 'stopped'; });
+  // The sweep would not see a settlement this young yet.
+  store.listReleasableStops = async () => [];
+  const pass = await worker.runPass();
+  assert.deepEqual(pass, { settled: 1, released: 1, skipped: 0, failed: 0, pending: 0, more: false });
+  assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
+  assert.equal(store.releases.length, 1);
+  assert.equal(store.releases[0]!.releaseRequestId, stopReleaseRequestId(OP), 'same request id the sweep would use');
+});
+
+test('a terminal settlement is not released', async () => {
+  const { store, published, worker } = harness((s) => { s.completion = 'terminal'; s.stops = []; });
+  store.settleAdjudication = (async (params: SettleAdjudicationParams) => {
+    store.settles.push(params);
+    return { gameId: GAME, operationId: OP, startedSeq: 3, finalSeq: 5, eventCount: 2, completedAt: params.resolutionAt,
+      resolvedEvent: { clockCompletion: { kind: 'terminal' } } } as unknown as AdjudicationSettlementReceipt;
+  });
+  const pass = await worker.runPass();
+  assert.equal(pass.released, 0);
+  assert.deepEqual(store.releases, []);
+  assert.deepEqual(published.map((c) => c.kind), ['settled']);
+});
+
+test('no immediate release over an undelivered notice; the sweep releases after it is delivered', async () => {
+  const { store, published, worker } = harness((s) => { s.completion = 'stopped'; }, ['settled']);
+  const first = await worker.runPass();
+  assert.equal(first.released, 0);
+  assert.deepEqual(store.releases, [], 'players must hear of the settlement first');
+  const second = await worker.runPass();
+  assert.equal(second.released, 1);
+  assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
+});
+
+test('a failed immediate release is left to the sweep', async () => {
+  const { store, published, worker } = harness((s) => { s.completion = 'stopped'; s.releaseFailures = 1; });
+  const first = await worker.runPass();
+  assert.equal(first.settled, 1);
+  // The same pass's sweep retries it with the same request id.
+  assert.equal(first.released, 1);
+  assert.deepEqual(store.releases.map((r) => r.releaseRequestId), [stopReleaseRequestId(OP), stopReleaseRequestId(OP)]);
+  assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
 });
