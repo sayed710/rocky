@@ -110,13 +110,25 @@ Recovery after an uncertain outcome:
 `PgFencedNoShowCandidates.reschedule` records the loaded head even when the due time is unchanged, so
 a stale worker cannot dismiss a newer establishment.
 
+### 6. Release of a managed stop (migration 0054)
+
+`Game.prepareClockRelease` is the one authoritative producer of `AdjudicationClocksStarted`: it
+derives the event from the stop the game records and folds it through the replay reducer, so a live
+release and its replay cannot disagree. `PgAdjudicationStore.releaseClocks` writes, in one fenced
+transaction, a RELEASE permit (`game_adjudication_releases`: current stop, exact event, next
+position, and the flag and no-show deadlines the released domain computes), the event, and exactly
+those queue rows. The event guard admits that event alone and ends the stop; afterwards a managed
+observed-release game refuses every unpermitted event until it ends, so each later command is an
+adjudication again. The deferred validator checks every release against its permit and stop and,
+in the releasing transaction, the queues against the recorded deadlines. Release is idempotent by
+request id, including after a lost COMMIT reply. Migrations run before `prepareAdjudicationGuard`
+(or it is re-run), because `CREATE OR REPLACE` needs the routines owned by the migration role.
+
 ## Consequences
 
 - Rollout remains on HOLD (Issue #124): nothing constructs the store, no worker or client is wired,
   and no migration is applied to production by this change. Applying 0053 requires the migration
   owner to own the new SECURITY DEFINER functions; existing runtime grants are unchanged.
-- `AdjudicationClocksStarted` cannot be appended, so a stopped game stays stopped until the release
-  stage is separately designed and authorized.
 - A transaction touching a managed game pays for one whole-game validation at COMMIT, with
   event-level checks only for what it settled; legacy games pay one indexed existence check per
   insert.
