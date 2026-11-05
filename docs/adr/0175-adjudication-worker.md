@@ -42,14 +42,14 @@ Recovery and ordering:
   the same process settles that evaluation at its fixed instant without stepping the consumed job.
 - **Job cleanup.** The local proof job is cancelled and evicted after every claim, whatever the
   outcome, so lost or superseded claims cannot fill the controller's bounded capacity.
-- **Publication obligations.** A failed publication is kept per game and retried at the start of
-  every pass; a stop is never released while its game has one outstanding. A stop is also released
-  only once its settlement is `releaseGraceMs` old (database time, default 1 s), so the replica that
-  settled it publishes first. The owner publishes from the durable log, not from the notice, so a
-  late or repeated notice still shows the settlement before the release.
-- **Restart.** The first pass of a process republishes every game with a settlement or release
-  committed within `recoveryWindowMs` (default 5 min), covering a process that died between commit
-  and publication.
+- **Notices.** A failed notice to the owner is kept per game and retried at the start of every pass
+  while the process runs; a stop is never released while its game has one outstanding, and those
+  games are excluded before the page limit so they cannot starve other stops. A stop is also
+  released only once its settlement is `releaseGraceMs` old (database time, default 1 s), so the
+  replica that settled it notifies first. Notices are a latency optimization, not the delivery
+  guarantee: the owner publishes from the durable log, and an owner whose copy shows a game proving
+  or stopped re-reads the log on its own (ADR 0176), which covers a process that died between
+  commit and notice without any time-window scan.
 
 Privileges: the worker's role needs what every `PgAdjudicationStore` call needs, SELECT, INSERT and
 UPDATE on `game_adjudications` and `game_adjudication_releases` (and the event and queue tables it

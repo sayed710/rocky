@@ -207,32 +207,22 @@ export class PgAdjudicationStore {
    * Current stops with no adjudication proving, settled at least `minAgeMs` ago by database time:
    * ready to release once their settlement had time to be published.
    */
-  async listReleasableStops(limit: number, minAgeMs = 0): Promise<Array<{ gameId: string; stopOperationId: string }>> {
+  async listReleasableStops(
+    limit: number,
+    minAgeMs = 0,
+    excludeGameIds: readonly string[] = [],
+  ): Promise<Array<{ gameId: string; stopOperationId: string }>> {
     const rows = await this.pool.query<{ game_id: string; operation_id: string }>(
       `SELECT a.game_id, a.operation_id FROM game_adjudications a
        WHERE a.is_current_stop
+         AND a.game_id <> ALL($3::uuid[])
          AND a.completed_at <= clock_timestamp() - make_interval(secs => $2::double precision / 1000)
          AND NOT EXISTS (
            SELECT 1 FROM game_adjudications p WHERE p.game_id = a.game_id AND p.execution_state = 'proving')
        ORDER BY a.completed_at, a.game_id LIMIT $1`,
-      [limit, minAgeMs],
+      [limit, minAgeMs, excludeGameIds],
     );
     return rows.rows.map((r) => ({ gameId: r.game_id, stopOperationId: r.operation_id }));
-  }
-
-  /** Games with a settlement or release committed within `withinMs` (database time), most recent first. */
-  async listRecentAdjudicationChanges(withinMs: number, limit: number): Promise<string[]> {
-    const rows = await this.pool.query<{ game_id: string }>(
-      `SELECT game_id FROM (
-         SELECT game_id, completed_at AS at FROM game_adjudications WHERE completed_at IS NOT NULL
-         UNION ALL
-         SELECT game_id, created_at AS at FROM game_adjudication_releases
-       ) changes
-       WHERE at >= clock_timestamp() - make_interval(secs => $1::double precision / 1000)
-       GROUP BY game_id ORDER BY max(at) DESC LIMIT $2`,
-      [withinMs, limit],
-    );
-    return rows.rows.map((r) => r.game_id);
   }
 
   stepJob(operationId: string, totalWorkBudget: number): JobStepResult {

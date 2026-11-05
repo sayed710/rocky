@@ -245,21 +245,23 @@ pgTest('a settlement whose writes fail is settled later as evaluated, without pr
   });
 });
 
-pgTest('a stop waits out the grace period, and a new process republishes recent changes', async () => {
+pgTest('a stop waits out the grace period; a blocked game never starves the stops behind it', async () => {
   await withTestDatabase(async ({ pool }) => {
     const players = await setup(pool);
     const store = new PgAdjudicationStore(pool);
-    const gameId = await createGame(pool, players, FEN_MATE1);
-    await startMove(store, gameId, 'e7e4', 'w', 1100);
+    const first = await createGame(pool, players, FEN_MATE1);
+    const second = await createGame(pool, players, FEN_MATE1);
+    await startMove(store, first, 'e7e4', 'w', 1100);
+    await startMove(store, second, 'e7e4', 'w', 1100);
     const clock = { now: 1200 };
     const published: AdjudicationChange[] = [];
     const pass = await worker(store, clock, published, { releaseGraceMs: 60_000 }).runPass();
-    assert.deepEqual({ settled: pass.settled, released: pass.released }, { settled: 1, released: 0 });
-    assert.equal((await pool.query('SELECT count(*)::int AS n FROM game_adjudications WHERE game_id = $1 AND is_current_stop', [gameId])).rows[0].n, 1);
+    assert.deepEqual({ settled: pass.settled, released: pass.released }, { settled: 2, released: 0 });
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM game_adjudications WHERE is_current_stop')).rows[0].n, 2);
 
-    // A fresh process (as after a restart) republishes the recent settlement first.
-    const fresh: AdjudicationChange[] = [];
-    await worker(new PgAdjudicationStore(pool), clock, fresh, { releaseGraceMs: 60_000 }).runPass();
-    assert.deepEqual(fresh, [{ kind: 'recovered', gameId }]);
+    // With a one-stop page, the older stop's game excluded, the newer one is still released.
+    const stops = await store.listReleasableStops(1, 0, [first]);
+    assert.deepEqual(stops.map((s) => s.gameId), [second]);
+    assert.deepEqual((await store.listReleasableStops(1, 0, [])).map((s) => s.gameId), [first]);
   });
 });
