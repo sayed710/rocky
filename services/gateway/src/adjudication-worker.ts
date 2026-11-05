@@ -82,6 +82,12 @@ export interface AdjudicationWorkerOptions {
    * the other games.
    */
   readonly proofSliceMs?: number;
+  /**
+   * Operations worked on at once within a pass (default 4). Proof work still runs on one thread;
+   * this overlaps database round trips, so a move's latency does not grow with the number of
+   * other games adjudicating at the same time.
+   */
+  readonly concurrency?: number;
   /** Monotonic milliseconds for proof time slices (default `performance.now`). */
   readonly monotonic?: () => number;
   /** Delay between passes once nothing more is waiting (default 250 ms). */
@@ -138,6 +144,7 @@ export class AdjudicationWorker {
   #consecutiveErrors = 0;
   readonly #releaseGraceMs: number;
   readonly #proofSliceMs: number;
+  readonly #concurrency: number;
   readonly #monotonic: () => number;
   /** Operations this worker holds a claim on whose proof needs more time, in claim order. */
   readonly #inFlight = new Map<string, { gameId: string; grant: AdjudicationClaimGrant }>();
@@ -157,6 +164,7 @@ export class AdjudicationWorker {
     this.#now = options.now ?? (() => Date.now());
     this.#releaseGraceMs = nonnegative(options.releaseGraceMs ?? 1_000, 'releaseGraceMs');
     this.#proofSliceMs = positive(options.proofSliceMs ?? 200, 'proofSliceMs');
+    this.#concurrency = positive(options.concurrency ?? 4, 'concurrency');
     this.#monotonic = options.monotonic ?? (() => performance.now());
   }
 
@@ -194,26 +202,20 @@ export class AdjudicationWorker {
       if (outcome === 'settled') settled += 1;
       else if (outcome === 'skipped') skipped += 1;
     };
-    // Proofs this worker already holds go first, each for one more slice, in claim order.
-    for (const [operationId, held] of [...this.#inFlight]) {
-      if (this.#halting) break;
-      try {
-        tally(await this.#continue(held.gameId, operationId, held.grant));
-      } catch (error) {
-        failed += 1;
-        this.#fail('Adjudication failed for an operation; it is retried once its lease lapses', error, { gameId: held.gameId, operationId });
-      }
-    }
+    // Proofs this worker already holds go first, each for one more slice, in claim order; then the
+    // newly claimable operations. Up to `concurrency` run at once, so one game's database round
+    // trips never queue another game's move behind them; proof slices interleave on the loop.
+    const held = [...this.#inFlight].map(([operationId, h]) => ({ gameId: h.gameId, operationId, run: () => this.#continue(h.gameId, operationId, h.grant) }));
     const claimable = await this.#store.listClaimableAdjudications(this.#pageSize);
-    for (const op of claimable) {
-      if (this.#halting) break;
+    const fresh = claimable.map((op) => ({ gameId: op.gameId, operationId: op.operationId, run: () => this.#adjudicate(op.gameId, op.operationId, op.generation) }));
+    await this.#eachBounded([...held, ...fresh], async (item) => {
       try {
-        tally(await this.#adjudicate(op.gameId, op.operationId, op.generation));
+        tally(await item.run());
       } catch (error) {
         failed += 1;
-        this.#fail('Adjudication failed for an operation; it is retried once its lease lapses', error, op);
+        this.#fail('Adjudication failed for an operation; it is retried once its lease lapses', error, { gameId: item.gameId, operationId: item.operationId });
       }
-    }
+    });
     // Players must see the settlement first: never release over an outstanding notice. Those games
     // are excluded before the page limit, so they cannot starve the stops behind them.
     const stops = await this.#store.listReleasableStops(this.#pageSize, this.#releaseGraceMs, [...this.#unpublished.keys()]);
@@ -230,6 +232,18 @@ export class AdjudicationWorker {
     const pending = this.#inFlight.size;
     const more = claimable.length === this.#pageSize || stops.length === this.#pageSize || pending > 0;
     return { settled, released, skipped, failed, pending, more };
+  }
+
+  /** Run `fn` over `items` in order, at most `concurrency` at a time, until halted. */
+  async #eachBounded<T>(items: readonly T[], fn: (item: T) => Promise<void>): Promise<void> {
+    let next = 0;
+    const lane = async (): Promise<void> => {
+      while (next < items.length && !this.#halting) {
+        const item = items[next++]!;
+        await fn(item);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(this.#concurrency, items.length) }, lane));
   }
 
   async #adjudicate(gameId: string, operationId: string, generation: string): Promise<'settled' | 'skipped' | 'pending'> {
