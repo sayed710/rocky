@@ -33,10 +33,19 @@ are immutable except for clearing a current stop.
 - Games with no obligation row keep their exact pre-0053 append and commit behavior. The only new
   refusal for them is appending a lifecycle event (`AdjudicationStarted`, `AdjudicationResolved`,
   `AdjudicationClocksStarted`) without a permit; no released code emits those.
-- Every trigger function is `SECURITY DEFINER` with `search_path = pg_catalog, public, pg_temp`, so a
-  role holding only its existing `game_events` privileges (including column-level INSERT) keeps
-  working, needs no grant on the new table, and cannot skip a check by lacking one. Behavior never
-  branches on the caller's privileges.
+- Every trigger function is `SECURITY DEFINER`, so a role holding only its existing `game_events`
+  privileges (including column-level INSERT) keeps working, needs no grant on the new table, and
+  cannot skip a check by lacking one. Behavior never branches on the caller's privileges.
+- Every new routine sets `search_path = pg_catalog, pg_temp` and schema-qualifies every object it
+  uses. With `public` on the path, a role holding CREATE on `public` (the default before
+  PostgreSQL 15) could plant a better-matching overload, for example `hashtextextended(text,
+  integer)`, and have it run as the function owner; a real-PostgreSQL test plants such overloads and
+  a shadowing temp table and checks that none runs. For the same reason the flag-deadline arithmetic
+  of 0043 is restated as `adjudication_flag_due` rather than calling `flag_deadline_ms`, which
+  resolves its objects through the caller's path; tests compare the two and the domain. The store's
+  own fence query is schema-qualified with exact argument types. The functions are owned by the
+  migration role, which must own the event tables; `TRUNCATE` of the obligation table is refused
+  like `DELETE`.
 - `xact_id` is never rewritten, the 0042 queue trigger is not redefined (legacy creation queues with
   `pregame_deadlines.seq` at its default 0), and an append at an occupied position is left to the
   primary key so stale writers still receive `23505`. Legacy appends take no new advisory lock.

@@ -44,13 +44,14 @@ import {
 
 export async function acquireGameLockAndCheckIsolation(client: PoolClient, gameId: string): Promise<void> {
   const isoRes = await client.query<{ transaction_isolation: string }>(
-    "SELECT current_setting('transaction_isolation') AS transaction_isolation",
+    "SELECT pg_catalog.current_setting('transaction_isolation') AS transaction_isolation",
   );
   if (isoRes.rows[0]?.transaction_isolation !== 'read committed') {
     throw new AdjudicationFenceError('READ COMMITTED transaction isolation required');
   }
   await client.query(
-    `SELECT pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || $1::text, 0))`,
+    // Schema-qualified with exact argument types, so no overload planted in `public` can be chosen.
+    `SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(pg_catalog.concat('rocky:game-adjudication:', $1::text), 0::bigint))`,
     [gameId],
   );
 }

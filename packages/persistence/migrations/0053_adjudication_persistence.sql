@@ -1,27 +1,29 @@
 -- Migration 0053 — durable adjudication persistence (Issue #124, Stage M candidate; unwired).
 --
 -- Adds the obligation table for managed adjudication operations and the database-side fence that
--- keeps game_events consistent with it. Nothing in the running application writes these rows yet.
+-- keeps public.game_events consistent with it. Nothing in the running application writes these rows yet.
 --
 -- Compatibility rules this migration keeps:
---  * Games with no game_adjudications row ("legacy" games) keep their exact existing append
+--  * Games with no public.game_adjudications row ("legacy" games) keep their exact existing append
 --    semantics. The only new restriction for them is that the adjudication lifecycle event types
 --    (AdjudicationStarted / AdjudicationResolved / AdjudicationClocksStarted) cannot be appended
 --    without the permits below, since no production code emits them before this feature.
---  * Every trigger function is SECURITY DEFINER with a fixed search_path, so an existing role that
---    holds only its current game_events privileges (including column-level INSERT) keeps working:
---    it needs no privilege on game_adjudications and cannot skip a check by lacking one.
---  * game_events.xact_id is never rewritten (logical-restore detection depends on stored values),
+--  * Every trigger function is SECURITY DEFINER with search_path = pg_catalog, pg_temp and every
+--    object schema-qualified, so a role with CREATE on `public` cannot plant an overload that runs
+--    as the function owner. Every trigger function being SECURITY DEFINER means an existing role that
+--    holds only its current public.game_events privileges (including column-level INSERT) keeps working:
+--    it needs no privilege on public.game_adjudications and cannot skip a check by lacking one.
+--  * public.game_events.xact_id is never rewritten (logical-restore detection depends on stored values),
 --    and pregame_deadlines_track (0042) is not redefined: legacy creation still queues with the
 --    new seq column at its default 0.
 --
 -- Identifiers: SQLSTATE PMAxx for immediate rejections, PMDxx for deferred commit validation.
 
 -- 1. Queue identity for head-fenced stale dismissal (PgFencedNoShowCandidates).
-ALTER TABLE pregame_deadlines ADD COLUMN seq INTEGER NOT NULL DEFAULT 0 CHECK (seq >= 0);
+ALTER TABLE public.pregame_deadlines ADD COLUMN seq INTEGER NOT NULL DEFAULT 0 CHECK (seq >= 0);
 
 -- 2. Obligation table.
-CREATE TABLE game_adjudications (
+CREATE TABLE public.game_adjudications (
   game_id                   UUID        NOT NULL,
   operation_id              UUID        NOT NULL,
   base_revision             INTEGER     NOT NULL CHECK (base_revision >= 0),
@@ -113,16 +115,16 @@ CREATE TABLE game_adjudications (
       AND (NOT is_current_stop OR stopped_clock IS NOT NULL))
   )
 );
-REVOKE ALL ON game_adjudications FROM PUBLIC;
+REVOKE ALL ON public.game_adjudications FROM PUBLIC;
 
-CREATE UNIQUE INDEX game_adjudications_one_active_idx ON game_adjudications (game_id) WHERE execution_state = 'proving';
-CREATE UNIQUE INDEX game_adjudications_one_current_stop_idx ON game_adjudications (game_id) WHERE is_current_stop;
+CREATE UNIQUE INDEX game_adjudications_one_active_idx ON public.game_adjudications (game_id) WHERE execution_state = 'proving';
+CREATE UNIQUE INDEX game_adjudications_one_current_stop_idx ON public.game_adjudications (game_id) WHERE is_current_stop;
 
 -- 3. Pure helpers that recompute the legacy queues exactly as 0042/0043 would from the log.
 
 -- The pregame deadline 0042 queues for a creation payload, or NULL. Same nested checks, same float8.
-CREATE FUNCTION adjudication_pregame_due(created JSONB) RETURNS TIMESTAMPTZ
-LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION public.adjudication_pregame_due(created JSONB) RETURNS TIMESTAMPTZ
+LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   after_ms DOUBLE PRECISION;
   at_ms DOUBLE PRECISION;
@@ -143,39 +145,93 @@ BEGIN
 END;
 $$;
 
+-- The flag deadline 0043's flag_deadline_ms computes for a stored move, restated here with every
+-- object schema-qualified: the SECURITY DEFINER functions below must not search `public`, where a
+-- role with CREATE could plant a better-matching overload and run code as the function owner.
+-- Same float8 operations in the same order; tests compare it with flag_deadline_ms and the domain.
+CREATE FUNCTION public.adjudication_json_number(value JSONB) RETURNS DOUBLE PRECISION
+LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  IF jsonb_typeof(value) IS DISTINCT FROM 'number' THEN
+    RETURN NULL;
+  END IF;
+  IF abs((value #>> '{}')::numeric) >= 1e300 THEN
+    RETURN NULL;
+  END IF;
+  RETURN (value #>> '{}')::numeric::double precision;
+END;
+$$;
+
+CREATE FUNCTION public.adjudication_flag_due(game UUID, move JSONB) RETURNS BIGINT
+LANGUAGE plpgsql STABLE SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+  tc JSONB;
+  side TEXT;
+  at_ms DOUBLE PRECISION;
+  rem_ms DOUBLE PRECISION;
+  delay_ms DOUBLE PRECISION := 0;
+  due DOUBLE PRECISION;
+BEGIN
+  SELECT payload->'timeControl' INTO tc FROM public.game_events WHERE game_id = game AND seq = 0;
+  IF tc IS NULL OR tc->>'kind' = 'unlimited' THEN
+    RETURN NULL;
+  END IF;
+  at_ms := public.adjudication_json_number(move->'at');
+  IF at_ms IS NULL THEN
+    RETURN NULL;
+  END IF;
+  due := at_ms;
+  side := CASE move->>'by' WHEN 'w' THEN 'b' WHEN 'b' THEN 'w' END;
+  IF side IS NOT NULL THEN
+    rem_ms := public.adjudication_json_number(move->'remaining'->side);
+    IF tc->>'kind' = 'delay' THEN
+      delay_ms := public.adjudication_json_number(tc->'delayMs');
+    END IF;
+    IF rem_ms IS NOT NULL AND delay_ms IS NOT NULL AND rem_ms > 0 THEN
+      due := at_ms + delay_ms + rem_ms;
+    END IF;
+  END IF;
+  due := ceil(due);
+  IF due = 'NaN'::double precision OR abs(due) > 8640000000000000 THEN
+    RETURN NULL;
+  END IF;
+  RETURN due::bigint;
+END;
+$$;
+
 -- Replace both queue rows of a game with what its committed log implies: the pregame deadline only
 -- while no move and no ending exist, the flag deadline from the latest move while no ending exists.
 -- `establishing_seq` becomes the pregame row's identity so an older fenced worker cannot touch it.
-CREATE FUNCTION adjudication_restore_deadlines(game UUID, establishing_seq INTEGER) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION public.adjudication_restore_deadlines(game UUID, establishing_seq INTEGER) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   created JSONB;
   latest RECORD;
   due_pregame TIMESTAMPTZ;
   due_flag BIGINT;
 BEGIN
-  DELETE FROM pregame_deadlines WHERE game_id = game;
-  DELETE FROM flag_deadlines WHERE game_id = game;
-  IF EXISTS (SELECT 1 FROM game_events WHERE game_id = game AND type = 'GameEnded') THEN
+  DELETE FROM public.pregame_deadlines WHERE game_id = game;
+  DELETE FROM public.flag_deadlines WHERE game_id = game;
+  IF EXISTS (SELECT 1 FROM public.game_events WHERE game_id = game AND type = 'GameEnded') THEN
     RETURN;
   END IF;
-  SELECT seq, payload INTO latest FROM game_events
+  SELECT seq, payload INTO latest FROM public.game_events
     WHERE game_id = game AND type = 'MovePlayed' ORDER BY seq DESC LIMIT 1;
   IF FOUND THEN
-    due_flag := flag_deadline_ms(game, latest.payload);
+    due_flag := public.adjudication_flag_due(game, latest.payload);
     IF due_flag IS NOT NULL THEN
-      INSERT INTO flag_deadlines (game_id, seq, due_ms) VALUES (game, latest.seq, due_flag);
+      INSERT INTO public.flag_deadlines (game_id, seq, due_ms) VALUES (game, latest.seq, due_flag);
     END IF;
   ELSE
-    SELECT payload INTO created FROM game_events WHERE game_id = game AND seq = 0;
-    due_pregame := adjudication_pregame_due(created);
+    SELECT payload INTO created FROM public.game_events WHERE game_id = game AND seq = 0;
+    due_pregame := public.adjudication_pregame_due(created);
     IF due_pregame IS NOT NULL THEN
-      INSERT INTO pregame_deadlines (game_id, due_at, seq) VALUES (game, due_pregame, establishing_seq);
+      INSERT INTO public.pregame_deadlines (game_id, due_at, seq) VALUES (game, due_pregame, establishing_seq);
     END IF;
   END IF;
 END;
 $$;
-REVOKE ALL ON FUNCTION adjudication_restore_deadlines(UUID, INTEGER) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.adjudication_restore_deadlines(UUID, INTEGER) FROM PUBLIC;
 
 -- Deferred validation runs once per (transaction, game): the first deferred firing at COMMIT already
 -- sees the final state. The "validated" mark lives in a table no writer role can touch (no PUBLIC
@@ -184,41 +240,41 @@ REVOKE ALL ON FUNCTION adjudication_restore_deadlines(UUID, INTEGER) FROM PUBLIC
 -- IMMEDIATE, say) is validated again. Marks are rolled back with their (sub)transaction, which only
 -- ever causes an extra validation. The game's advisory lock admits one validating transaction at a
 -- time, so a mark from any other transaction id is stale and is removed when a new one is written.
-CREATE UNLOGGED TABLE adjudication_validation_marks (
+CREATE UNLOGGED TABLE public.adjudication_validation_marks (
   xact_id xid8 NOT NULL,
   game_id UUID NOT NULL,
   PRIMARY KEY (game_id, xact_id)
 );
-REVOKE ALL ON adjudication_validation_marks FROM PUBLIC;
+REVOKE ALL ON public.adjudication_validation_marks FROM PUBLIC;
 
-CREATE FUNCTION adjudication_mark_changed(game UUID) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION public.adjudication_mark_changed(game UUID) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-  DELETE FROM adjudication_validation_marks WHERE game_id = game AND xact_id = pg_current_xact_id();
+  DELETE FROM public.adjudication_validation_marks WHERE game_id = game AND xact_id = pg_current_xact_id();
 END;
 $$;
-REVOKE ALL ON FUNCTION adjudication_mark_changed(UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.adjudication_mark_changed(UUID) FROM PUBLIC;
 
--- 4. Row lifecycle guard on game_adjudications.
+-- 4. Row lifecycle guard on public.game_adjudications.
 CREATE FUNCTION game_adjudications_row_guard() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   cur xid8 := pg_current_xact_id();
   head INTEGER;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    RAISE EXCEPTION USING ERRCODE = 'PMA30', MESSAGE = 'game_adjudications rows cannot be deleted';
+    RAISE EXCEPTION USING ERRCODE = 'PMA30', MESSAGE = 'public.game_adjudications rows cannot be deleted';
   END IF;
 
   PERFORM pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || NEW.game_id::text, 0));
-  PERFORM adjudication_mark_changed(NEW.game_id);
+  PERFORM public.adjudication_mark_changed(NEW.game_id);
 
   IF TG_OP = 'INSERT' THEN
     IF NEW.execution_state <> 'proving' OR NEW.generation <> 0 OR NEW.claim_id IS NOT NULL
        OR NEW.start_permit_consumed OR NEW.settlement_permit_xact_id IS NOT NULL OR NEW.is_current_stop THEN
       RAISE EXCEPTION USING ERRCODE = 'PMA31', MESSAGE = 'A new adjudication must start proving, unclaimed and unpermitted';
     END IF;
-    SELECT max(seq) INTO head FROM game_events WHERE game_id = NEW.game_id;
+    SELECT max(seq) INTO head FROM public.game_events WHERE game_id = NEW.game_id;
     IF head IS DISTINCT FROM NEW.base_revision THEN
       RAISE EXCEPTION USING ERRCODE = 'PMA32',
         MESSAGE = 'Adjudication base revision ' || NEW.base_revision || ' is not the stream head ' || coalesce(head::text, 'none');
@@ -315,32 +371,44 @@ END;
 $$;
 
 CREATE TRIGGER game_adjudications_row_guard
-  BEFORE INSERT OR UPDATE OR DELETE ON game_adjudications
+  BEFORE INSERT OR UPDATE OR DELETE ON public.game_adjudications
   FOR EACH ROW EXECUTE FUNCTION game_adjudications_row_guard();
+
+-- DELETE is refused row by row above; TRUNCATE bypasses row triggers, so refuse it too.
+CREATE FUNCTION public.game_adjudications_no_truncate() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+  RAISE EXCEPTION USING ERRCODE = 'PMA30', MESSAGE = 'game_adjudications rows cannot be deleted';
+END;
+$$;
+
+CREATE TRIGGER game_adjudications_no_truncate
+  BEFORE TRUNCATE ON public.game_adjudications
+  FOR EACH STATEMENT EXECUTE FUNCTION public.game_adjudications_no_truncate();
 
 -- After a completion that leaves the game running (no stop, no ending), put back the queue rows the
 -- proving window suppressed, exactly as the log implies.
 CREATE FUNCTION game_adjudications_restore_queues() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
   IF OLD.execution_state = 'proving' AND NEW.execution_state = 'completed' AND NOT NEW.is_current_stop THEN
-    PERFORM adjudication_restore_deadlines(NEW.game_id, NEW.final_seq);
+    PERFORM public.adjudication_restore_deadlines(NEW.game_id, NEW.final_seq);
   END IF;
   RETURN NULL;
 END;
 $$;
 
 CREATE TRIGGER game_adjudications_restore_queues
-  AFTER UPDATE ON game_adjudications
+  AFTER UPDATE ON public.game_adjudications
   FOR EACH ROW EXECUTE FUNCTION game_adjudications_restore_queues();
 
--- 5. Immediate guard on game_events. Lifecycle events only through permits; nothing else while a
+-- 5. Immediate guard on public.game_events. Lifecycle events only through permits; nothing else while a
 -- game is proving or stopped; nothing piggybacked after a settlement in its own transaction.
 CREATE FUNCTION game_events_adjudication_guard() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   cur xid8 := pg_current_xact_id();
-  adj game_adjudications;
+  adj public.game_adjudications;
   expected JSONB;
 BEGIN
   IF NEW.type = 'AdjudicationClocksStarted' THEN
@@ -349,18 +417,18 @@ BEGIN
 
   -- An append at an occupied position is a stale writer: let the primary key reject it with the
   -- same 23505 every existing caller already maps to its version conflict.
-  IF EXISTS (SELECT 1 FROM game_events WHERE game_id = NEW.game_id AND seq = NEW.seq) THEN
+  IF EXISTS (SELECT 1 FROM public.game_events WHERE game_id = NEW.game_id AND seq = NEW.seq) THEN
     RETURN NEW;
   END IF;
 
   -- Legacy games take no new lock: the (game_id, seq) key already orders them against a concurrent
   -- Start, and the proving-row lock below waits for an in-flight settlement.
-  IF EXISTS (SELECT 1 FROM game_adjudications WHERE game_id = NEW.game_id) THEN
+  IF EXISTS (SELECT 1 FROM public.game_adjudications WHERE game_id = NEW.game_id) THEN
     PERFORM pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || NEW.game_id::text, 0));
-    PERFORM adjudication_mark_changed(NEW.game_id);
+    PERFORM public.adjudication_mark_changed(NEW.game_id);
   END IF;
 
-  SELECT * INTO adj FROM game_adjudications
+  SELECT * INTO adj FROM public.game_adjudications
     WHERE game_id = NEW.game_id AND execution_state = 'proving' FOR UPDATE;
   IF FOUND THEN
     IF NEW.type = 'AdjudicationStarted' THEN
@@ -374,7 +442,7 @@ BEGIN
          OR adj.started_payload <> NEW.payload THEN
         RAISE EXCEPTION USING ERRCODE = 'PMA05', MESSAGE = 'Started envelope differs from its START permit';
       END IF;
-      UPDATE game_adjudications SET start_permit_consumed = true
+      UPDATE public.game_adjudications SET start_permit_consumed = true
         WHERE game_id = adj.game_id AND operation_id = adj.operation_id;
       RETURN NEW;
     END IF;
@@ -393,7 +461,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = 'PMA08',
           MESSAGE = 'SETTLEMENT permit envelope mismatch at position ' || adj.settlement_permit_cursor;
       END IF;
-      UPDATE game_adjudications SET settlement_permit_cursor = settlement_permit_cursor + 1
+      UPDATE public.game_adjudications SET settlement_permit_cursor = settlement_permit_cursor + 1
         WHERE game_id = adj.game_id AND operation_id = adj.operation_id;
       RETURN NEW;
     END IF;
@@ -407,10 +475,10 @@ BEGIN
   IF NEW.type = 'AdjudicationResolved' THEN
     RAISE EXCEPTION USING ERRCODE = 'PMA12', MESSAGE = 'AdjudicationResolved requires a SETTLEMENT permit';
   END IF;
-  IF EXISTS (SELECT 1 FROM game_adjudications WHERE game_id = NEW.game_id AND is_current_stop) THEN
+  IF EXISTS (SELECT 1 FROM public.game_adjudications WHERE game_id = NEW.game_id AND is_current_stop) THEN
     RAISE EXCEPTION USING ERRCODE = 'PMA10', MESSAGE = 'Unpermitted event while the game is in a managed stop';
   END IF;
-  IF EXISTS (SELECT 1 FROM game_adjudications
+  IF EXISTS (SELECT 1 FROM public.game_adjudications
              WHERE game_id = NEW.game_id AND execution_state = 'completed' AND settlement_permit_xact_id = cur) THEN
     RAISE EXCEPTION USING ERRCODE = 'PMA13', MESSAGE = 'No event may follow a settlement in its own transaction';
   END IF;
@@ -419,37 +487,37 @@ END;
 $$;
 
 CREATE TRIGGER game_events_adjudication_guard
-  BEFORE INSERT ON game_events
+  BEFORE INSERT ON public.game_events
   FOR EACH ROW EXECUTE FUNCTION game_events_adjudication_guard();
 
 -- 6. Keep queues empty while a managed game is proving or stopped. Named z_ so it runs after the
 -- 0042/0043 AFTER triggers, which may have just (re)queued the game. Legacy games are untouched.
 CREATE FUNCTION z_adjudication_queue_reconcile() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM game_adjudications
+  IF EXISTS (SELECT 1 FROM public.game_adjudications
              WHERE game_id = NEW.game_id AND (execution_state = 'proving' OR is_current_stop)) THEN
-    DELETE FROM pregame_deadlines WHERE game_id = NEW.game_id;
-    DELETE FROM flag_deadlines WHERE game_id = NEW.game_id;
+    DELETE FROM public.pregame_deadlines WHERE game_id = NEW.game_id;
+    DELETE FROM public.flag_deadlines WHERE game_id = NEW.game_id;
   END IF;
   RETURN NULL;
 END;
 $$;
 
 CREATE TRIGGER z_adjudication_queue_reconcile
-  AFTER INSERT ON game_events
+  AFTER INSERT ON public.game_events
   FOR EACH ROW EXECUTE FUNCTION z_adjudication_queue_reconcile();
 
 -- 7. Deferred whole-game validation at COMMIT for every managed game a transaction touched. It reads
 -- the committed-to-be state from the tables (never the queued NEW snapshot beyond its game id).
-CREATE FUNCTION adjudication_validate_game(game UUID) RETURNS void
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+CREATE FUNCTION public.adjudication_validate_game(game UUID) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   cur xid8 := pg_current_xact_id();
-  adj game_adjudications;
-  latest game_adjudications;
+  adj public.game_adjudications;
+  latest public.game_adjudications;
   has_latest BOOLEAN := false;
-  proving_row game_adjudications;
+  proving_row public.game_adjudications;
   has_proving BOOLEAN := false;
   prev_final INTEGER := -1;
   head INTEGER;
@@ -466,10 +534,10 @@ DECLARE
   latest_move RECORD;
   settled_earlier BOOLEAN;
 BEGIN
-  SELECT max(seq) INTO head FROM game_events WHERE game_id = game;
-  SELECT EXISTS (SELECT 1 FROM game_events WHERE game_id = game AND type = 'GameEnded') INTO terminal;
+  SELECT max(seq) INTO head FROM public.game_events WHERE game_id = game;
+  SELECT EXISTS (SELECT 1 FROM public.game_events WHERE game_id = game AND type = 'GameEnded') INTO terminal;
 
-  FOR adj IN SELECT * FROM game_adjudications WHERE game_id = game ORDER BY started_seq LOOP
+  FOR adj IN SELECT * FROM public.game_adjudications WHERE game_id = game ORDER BY started_seq LOOP
     IF adj.started_seq <= prev_final THEN
       RAISE EXCEPTION USING ERRCODE = 'PMD17', MESSAGE = 'Adjudication operations overlap in the stream';
     END IF;
@@ -477,7 +545,7 @@ BEGIN
     -- immutable since (row guard); only ordering, counts and stop rules are re-checked for it.
     settled_earlier := adj.execution_state = 'completed' AND adj.settlement_permit_xact_id <> cur;
     IF NOT settled_earlier AND (NOT adj.start_permit_consumed OR NOT EXISTS (
-      SELECT 1 FROM game_events
+      SELECT 1 FROM public.game_events
       WHERE game_id = game AND seq = adj.started_seq AND type = 'AdjudicationStarted'
         AND event_version = adj.started_version AND payload = adj.started_payload)) THEN
       RAISE EXCEPTION USING ERRCODE = 'PMD03', MESSAGE = 'Adjudication without its exact Started event';
@@ -493,8 +561,8 @@ BEGIN
       IF head <> adj.started_seq THEN
         RAISE EXCEPTION USING ERRCODE = 'PMD04', MESSAGE = 'Events follow a proving Started event';
       END IF;
-      IF EXISTS (SELECT 1 FROM pregame_deadlines WHERE game_id = game)
-         OR EXISTS (SELECT 1 FROM flag_deadlines WHERE game_id = game) THEN
+      IF EXISTS (SELECT 1 FROM public.pregame_deadlines WHERE game_id = game)
+         OR EXISTS (SELECT 1 FROM public.flag_deadlines WHERE game_id = game) THEN
         RAISE EXCEPTION USING ERRCODE = 'PMD05', MESSAGE = 'Deadlines must be suppressed while proving';
       END IF;
       prev_final := adj.started_seq;
@@ -530,7 +598,7 @@ BEGIN
       FOR i IN 0..(CASE WHEN settled_earlier THEN -1 ELSE n - 1 END) LOOP
         env := adj.settlement_permit_envelopes->i;
         IF (env->'payload') IS DISTINCT FROM (adj.settlement_batch->i) OR NOT EXISTS (
-          SELECT 1 FROM game_events
+          SELECT 1 FROM public.game_events
           WHERE game_id = game AND seq = adj.started_seq + 1 + i
             AND type = adj.settlement_batch->i->>'type'
             AND event_version = (env->>'event_version')::smallint
@@ -553,13 +621,13 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'PMD17', MESSAGE = 'A proving operation precedes a completed one';
   END IF;
 
-  SELECT count(*) INTO lifecycle_events FROM game_events
+  SELECT count(*) INTO lifecycle_events FROM public.game_events
     WHERE game_id = game AND type IN ('AdjudicationStarted', 'AdjudicationResolved');
   IF lifecycle_events <> expected_lifecycle THEN
     RAISE EXCEPTION USING ERRCODE = 'PMD20', MESSAGE = 'Adjudication lifecycle events without matching obligations';
   END IF;
 
-  SELECT count(*) INTO stops FROM game_adjudications WHERE game_id = game AND is_current_stop;
+  SELECT count(*) INTO stops FROM public.game_adjudications WHERE game_id = game AND is_current_stop;
   IF terminal THEN
     IF stops > 0 THEN
       RAISE EXCEPTION USING ERRCODE = 'PMD09', MESSAGE = 'A terminal game cannot retain a current stop';
@@ -575,8 +643,8 @@ BEGIN
     IF NOT has_proving AND head <> latest.final_seq THEN
       RAISE EXCEPTION USING ERRCODE = 'PMD21', MESSAGE = 'Events follow a managed stop without an adjudication';
     END IF;
-    IF EXISTS (SELECT 1 FROM pregame_deadlines WHERE game_id = game)
-       OR EXISTS (SELECT 1 FROM flag_deadlines WHERE game_id = game) THEN
+    IF EXISTS (SELECT 1 FROM public.pregame_deadlines WHERE game_id = game)
+       OR EXISTS (SELECT 1 FROM public.flag_deadlines WHERE game_id = game) THEN
       RAISE EXCEPTION USING ERRCODE = 'PMD12', MESSAGE = 'Deadlines must be suppressed while stopped';
     END IF;
   ELSIF stops <> 0 THEN
@@ -586,65 +654,65 @@ BEGIN
   -- A running completion settled in this transaction must leave exactly the queues the log implies.
   IF has_latest AND NOT has_proving AND NOT latest.is_current_stop
      AND latest.settlement_permit_xact_id = cur AND head = latest.final_seq THEN
-    SELECT seq, payload INTO latest_move FROM game_events
+    SELECT seq, payload INTO latest_move FROM public.game_events
       WHERE game_id = game AND type = 'MovePlayed' ORDER BY seq DESC LIMIT 1;
     IF FOUND THEN
-      expected_flag := flag_deadline_ms(game, latest_move.payload);
-      IF EXISTS (SELECT 1 FROM pregame_deadlines WHERE game_id = game)
-         OR (SELECT row(seq, due_ms) FROM flag_deadlines WHERE game_id = game)
+      expected_flag := public.adjudication_flag_due(game, latest_move.payload);
+      IF EXISTS (SELECT 1 FROM public.pregame_deadlines WHERE game_id = game)
+         OR (SELECT row(seq, due_ms) FROM public.flag_deadlines WHERE game_id = game)
             IS DISTINCT FROM (CASE WHEN expected_flag IS NULL THEN NULL ELSE row(latest_move.seq, expected_flag) END) THEN
         RAISE EXCEPTION USING ERRCODE = 'PMD22', MESSAGE = 'Flag queue not restored after a running completion';
       END IF;
     ELSE
-      expected_pregame := adjudication_pregame_due((SELECT payload FROM game_events WHERE game_id = game AND seq = 0));
-      IF EXISTS (SELECT 1 FROM flag_deadlines WHERE game_id = game)
-         OR (SELECT due_at FROM pregame_deadlines WHERE game_id = game) IS DISTINCT FROM expected_pregame THEN
+      expected_pregame := public.adjudication_pregame_due((SELECT payload FROM public.game_events WHERE game_id = game AND seq = 0));
+      IF EXISTS (SELECT 1 FROM public.flag_deadlines WHERE game_id = game)
+         OR (SELECT due_at FROM public.pregame_deadlines WHERE game_id = game) IS DISTINCT FROM expected_pregame THEN
         RAISE EXCEPTION USING ERRCODE = 'PMD22', MESSAGE = 'No-show queue not restored after a running completion';
       END IF;
     END IF;
   END IF;
 END;
 $$;
-REVOKE ALL ON FUNCTION adjudication_validate_game(UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.adjudication_validate_game(UUID) FROM PUBLIC;
 
 CREATE FUNCTION adjudication_deferred_validator() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
   -- Legacy games (no obligation row) keep their exact pre-0053 commit behavior.
-  IF NOT EXISTS (SELECT 1 FROM game_adjudications WHERE game_id = NEW.game_id) THEN
+  IF NOT EXISTS (SELECT 1 FROM public.game_adjudications WHERE game_id = NEW.game_id) THEN
     RETURN NULL;
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || NEW.game_id::text, 0));
-  IF EXISTS (SELECT 1 FROM adjudication_validation_marks
+  IF EXISTS (SELECT 1 FROM public.adjudication_validation_marks
              WHERE game_id = NEW.game_id AND xact_id = pg_current_xact_id()) THEN
     RETURN NULL;
   END IF;
-  PERFORM adjudication_validate_game(NEW.game_id);
-  DELETE FROM adjudication_validation_marks WHERE game_id = NEW.game_id;
-  INSERT INTO adjudication_validation_marks (xact_id, game_id) VALUES (pg_current_xact_id(), NEW.game_id);
+  PERFORM public.adjudication_validate_game(NEW.game_id);
+  DELETE FROM public.adjudication_validation_marks WHERE game_id = NEW.game_id;
+  INSERT INTO public.adjudication_validation_marks (xact_id, game_id) VALUES (pg_current_xact_id(), NEW.game_id);
   RETURN NULL;
 END;
 $$;
 
 CREATE CONSTRAINT TRIGGER adjudication_deferred_validator_events
-  AFTER INSERT ON game_events
+  AFTER INSERT ON public.game_events
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION adjudication_deferred_validator();
 
 CREATE CONSTRAINT TRIGGER adjudication_deferred_validator_adjudications
-  AFTER INSERT OR UPDATE ON game_adjudications
+  AFTER INSERT OR UPDATE ON public.game_adjudications
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION adjudication_deferred_validator();
 
 -- Deferred validation covers queue writes too, so nothing (a worker, a manual repair) can commit a
 -- deadline for a managed game that is proving or stopped.
 CREATE FUNCTION adjudication_queue_validator() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM game_adjudications
+  IF EXISTS (SELECT 1 FROM public.game_adjudications
              WHERE game_id = NEW.game_id AND (execution_state = 'proving' OR is_current_stop))
-     AND (EXISTS (SELECT 1 FROM pregame_deadlines WHERE game_id = NEW.game_id)
-          OR EXISTS (SELECT 1 FROM flag_deadlines WHERE game_id = NEW.game_id)) THEN
+     AND (EXISTS (SELECT 1 FROM public.pregame_deadlines WHERE game_id = NEW.game_id)
+          OR EXISTS (SELECT 1 FROM public.flag_deadlines WHERE game_id = NEW.game_id)) THEN
     RAISE EXCEPTION USING ERRCODE = 'PMD05', MESSAGE = 'Deadlines must be suppressed while proving or stopped';
   END IF;
   RETURN NULL;
@@ -652,16 +720,17 @@ END;
 $$;
 
 CREATE CONSTRAINT TRIGGER adjudication_queue_validator_pregame
-  AFTER INSERT OR UPDATE ON pregame_deadlines
+  AFTER INSERT OR UPDATE ON public.pregame_deadlines
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION adjudication_queue_validator();
 
 CREATE CONSTRAINT TRIGGER adjudication_queue_validator_flag
-  AFTER INSERT OR UPDATE ON flag_deadlines
+  AFTER INSERT OR UPDATE ON public.flag_deadlines
   DEFERRABLE INITIALLY DEFERRED
   FOR EACH ROW EXECUTE FUNCTION adjudication_queue_validator();
 
 -- Trigger functions cannot be called directly, but keep EXECUTE off PUBLIC for every new routine.
+REVOKE ALL ON FUNCTION public.game_adjudications_no_truncate() FROM PUBLIC;
 REVOKE ALL ON FUNCTION game_adjudications_row_guard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION game_adjudications_restore_queues() FROM PUBLIC;
 REVOKE ALL ON FUNCTION game_events_adjudication_guard() FROM PUBLIC;

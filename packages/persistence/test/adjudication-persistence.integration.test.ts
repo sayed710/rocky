@@ -25,7 +25,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { Pool, type PoolClient } from 'pg';
-import { Game, type GameEvent } from '@chess-platform/game';
+import { AdjudicationJobController, Game, type GameEvent } from '@chess-platform/game';
 import {
   AdjudicationClaimExpiredError,
   AdjudicationConflictError,
@@ -168,9 +168,24 @@ async function adjudication(pool: Pool, gameId: string, operationId: string) {
 }
 
 /** A pool whose clients can fail a chosen COMMIT reply *after* the server committed it. */
-function lossyCommitPool(base: Pool): { pool: Pool; armCommitLoss(skip?: number): void; armFailOn(fragment: string): void } {
+type Rewrite = (sql: string, params: unknown[]) => { sql: string; params: unknown[] } | 'skip' | null;
+
+interface LossyPool {
+  pool: Pool;
+  armCommitLoss(skip?: number): void;
+  armFailOn(fragment: string): void;
+  /** Rewrite (or skip) statements on the wire, to tamper with what the real store sends. */
+  setRewrite(rewrite: Rewrite | null): void;
+  /** Clients checked out of the pool, and those inside an open transaction, right now. */
+  usage(): { checkedOut: number; inTransaction: number };
+}
+
+function lossyCommitPool(base: Pool): LossyPool {
   let commitsUntilLoss = -1;
   let failOn: string | null = null;
+  let rewrite: Rewrite | null = null;
+  let checkedOut = 0;
+  const open = new Set<PoolClient>();
   // pg reuses pooled client objects: wrap each one once, or wrappers would stack.
   const wrapped = new WeakSet<PoolClient>();
   const pool = new Proxy(base, {
@@ -178,15 +193,34 @@ function lossyCommitPool(base: Pool): { pool: Pool; armCommitLoss(skip?: number)
       if (prop === 'connect') {
         return async (): Promise<PoolClient> => {
           const client = await target.connect();
+          checkedOut += 1;
+          // pg installs a fresh release() on every checkout, so wrap it every time.
+          const release = client.release.bind(client);
+          client.release = ((err?: Error | boolean) => {
+            checkedOut -= 1;
+            open.delete(client);
+            return release(err);
+          }) as typeof client.release;
           if (wrapped.has(client)) return client;
           wrapped.add(client);
           const original = client.query.bind(client) as (...a: unknown[]) => Promise<unknown>;
           client.query = (async (text: unknown, ...rest: unknown[]) => {
-            const sql = typeof text === 'string' ? text : '';
+            let sql = typeof text === 'string' ? text : '';
             if (failOn !== null && sql.includes(failOn)) {
               failOn = null;
               throw new Error('injected failure before commit');
             }
+            if (rewrite && typeof text === 'string') {
+              const out = rewrite(sql, Array.isArray(rest[0]) ? rest[0] : []);
+              if (out === 'skip') return { rows: [], rowCount: 0 };
+              if (out) {
+                sql = out.sql;
+                text = out.sql;
+                rest = [out.params, ...rest.slice(1)];
+              }
+            }
+            if (sql === 'BEGIN') open.add(client);
+            if (sql === 'COMMIT' || sql === 'ROLLBACK') open.delete(client);
             const result = await original(text, ...rest);
             if (sql === 'COMMIT' && commitsUntilLoss >= 0) {
               commitsUntilLoss -= 1;
@@ -205,6 +239,8 @@ function lossyCommitPool(base: Pool): { pool: Pool; armCommitLoss(skip?: number)
     /** Lose the reply of the COMMIT after `skip` further commits (0: the next one). */
     armCommitLoss: (skip = 0) => { commitsUntilLoss = skip; },
     armFailOn: (fragment: string) => { failOn = fragment; },
+    setRewrite: (next: Rewrite | null) => { rewrite = next; },
+    usage: () => ({ checkedOut, inTransaction: open.size }),
   };
 }
 
@@ -823,6 +859,191 @@ test('a writer cannot forge the validated mark to skip COMMIT validation', async
       await writer?.end();
       await pool.query(`DROP OWNED BY ${role}`);
       await pool.query(`DROP ROLE ${role}`);
+    }
+  });
+});
+
+const DEFINER_ROUTINES = [
+  'adjudication_deferred_validator', 'adjudication_mark_changed', 'adjudication_queue_validator',
+  'adjudication_restore_deadlines', 'adjudication_validate_game', 'game_adjudications_restore_queues',
+  'game_adjudications_row_guard', 'game_events_adjudication_guard', 'z_adjudication_queue_reconcile',
+];
+const INVOKER_ROUTINES = ['adjudication_flag_due', 'adjudication_json_number', 'adjudication_pregame_due', 'game_adjudications_no_truncate'];
+
+test('every 0053 routine is owned by the table owner, pins search_path off public, and gives PUBLIC nothing it should not have', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await setup(pool);
+    const owner = (await pool.query<{ o: string }>("SELECT tableowner AS o FROM pg_tables WHERE schemaname = 'public' AND tablename = 'game_events'")).rows[0]!.o;
+    const rows = (await pool.query<{ name: string; owner: string; definer: boolean; config: string[] | null; public_exec: boolean }>(
+      `SELECT p.proname AS name, pg_get_userbyid(p.proowner) AS owner, p.prosecdef AS definer, p.proconfig AS config,
+              EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                      WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE') AS public_exec
+       FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname = ANY($1::text[])`,
+      [[...DEFINER_ROUTINES, ...INVOKER_ROUTINES]],
+    )).rows;
+    assert.equal(rows.length, DEFINER_ROUTINES.length + INVOKER_ROUTINES.length);
+    for (const r of rows) {
+      assert.equal(r.owner, owner, `${r.name} is owned by the table owner`);
+      assert.deepEqual(r.config, ['search_path=pg_catalog, pg_temp'], `${r.name} never searches public`);
+      assert.equal(r.definer, DEFINER_ROUTINES.includes(r.name), `${r.name} definer flag`);
+      if (r.definer) assert.equal(r.public_exec, false, `${r.name} is not executable by PUBLIC`);
+    }
+    // The marks table and the obligation table grant PUBLIC nothing.
+    const acl = (await pool.query<{ rel: string; public_priv: boolean }>(
+      `SELECT c.relname AS rel, EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a WHERE a.grantee = 0) AS public_priv
+       FROM pg_class c WHERE c.oid IN ('public.adjudication_validation_marks'::regclass, 'public.game_adjudications'::regclass)`,
+    )).rows;
+    assert.deepEqual(acl.map((a) => a.public_priv), [false, false]);
+    // TRUNCATE cannot sidestep the row-level DELETE refusal.
+    await assert.rejects(pool.query('TRUNCATE game_adjudications'), hasCode('PMA30'));
+  });
+});
+
+test('a role with CREATE on public cannot hijack the SECURITY DEFINER functions with planted overloads or temp tables', async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await setup(pool);
+    await pool.query('CREATE TABLE public.planted_calls (who name, fn text); GRANT INSERT ON public.planted_calls TO PUBLIC');
+    const role = `planter_${randomBytes(4).toString('hex')}`;
+    const password = randomBytes(12).toString('hex');
+    await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`);
+    let attacker: Pool | null = null;
+    try {
+      await pool.query(`GRANT USAGE, CREATE ON SCHEMA public TO ${role}; GRANT SELECT, INSERT ON game_events TO ${role};`);
+      const url = new URL(connectionString);
+      url.username = role;
+      url.password = password;
+      attacker = new Pool({ connectionString: url.toString(), max: 1 });
+      // Better matches than pg_catalog's own signatures for the calls the triggers and the store make.
+      await attacker.query(`
+        CREATE FUNCTION public.hashtextextended(t text, s integer) RETURNS bigint LANGUAGE plpgsql AS $f$
+          BEGIN INSERT INTO public.planted_calls VALUES (current_user, 'hashtextextended'); RETURN 1; END $f$;
+        CREATE FUNCTION public.to_jsonb(v integer) RETURNS jsonb LANGUAGE plpgsql AS $f$
+          BEGIN INSERT INTO public.planted_calls VALUES (current_user, 'to_jsonb'); RETURN pg_catalog.to_jsonb(v::numeric); END $f$;
+        CREATE FUNCTION public.ceil(v double precision) RETURNS double precision LANGUAGE plpgsql AS $f$
+          BEGIN INSERT INTO public.planted_calls VALUES (current_user, 'ceil'); RETURN pg_catalog.ceil(v); END $f$;`);
+
+      // The full lifecycle, through the real store, with the overloads in place.
+      const store = new PgAdjudicationStore(pool);
+      const { gameId } = await createGame(pool, { fen: FEN_MATE1 });
+      const operationId = await startMove(store, gameId, 'e7e4');
+      // The attacker appends from its own session, shadowing the obligation table with a temp table.
+      const client = await attacker.connect();
+      try {
+        await client.query('CREATE TEMP TABLE game_adjudications (game_id uuid)');
+        await assert.rejects(
+          client.query(`INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 2, 'DrawOffered', 1, '{"type":"DrawOffered","by":"b","at":1}')`, [gameId]),
+          hasCode('PMA09'),
+        );
+      } finally {
+        client.release();
+      }
+      const grant = await claim(store, gameId, operationId);
+      await prove(store, gameId, operationId);
+      const receipt = await store.settleAdjudication({ gameId, operationId, grant, resolutionAt: 1200 });
+      assert.equal(receipt.finalSeq, 3);
+      assert.equal((await queues(pool, gameId)).flag.length, 1, 'restoration still works');
+
+      assert.deepEqual((await pool.query('SELECT who, fn FROM public.planted_calls')).rows, [], 'no planted code ran');
+    } finally {
+      await attacker?.end();
+      await pool.query(`DROP OWNED BY ${role}`);
+      await pool.query(`DROP ROLE ${role}`);
+    }
+  });
+});
+
+test('settlement events must match the permit exactly: altered payload, shifted sequence, extra event, unfinished permit', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await setup(pool);
+    const lossy = lossyCommitPool(pool);
+    const store = new PgAdjudicationStore(lossy.pool);
+    const { gameId } = await createGame(pool, { fen: FEN_MATE1 });
+    const operationId = await startMove(store, gameId, 'e7e4');
+    const grant = await claim(store, gameId, operationId);
+    await prove(store, gameId, operationId);
+    const settle = () => store.settleAdjudication({ gameId, operationId, grant, resolutionAt: 1200 });
+    const untouched = async () => {
+      const row = await adjudication(pool, gameId, operationId);
+      assert.equal(row.execution_state, 'proving');
+      assert.equal(row.settlement_permit_xact_id, null);
+      assert.equal(await head(pool, gameId), 1);
+    };
+    const once = (rewrite: Rewrite): Rewrite => {
+      let used = false;
+      return (sql, params) => {
+        if (used) return null;
+        const out = rewrite(sql, params);
+        if (out !== null) used = true;
+        return out;
+      };
+    };
+    const isEventInsert = (sql: string, params: unknown[], seq: number) =>
+      sql.startsWith('INSERT INTO game_events') && params[1] === seq;
+
+    // The second event (the settled move) is sent with an altered payload.
+    lossy.setRewrite(once((sql, params) => {
+      if (!isEventInsert(sql, params, 3)) return null;
+      const payload = JSON.parse(params[4] as string);
+      return { sql, params: [...params.slice(0, 4), JSON.stringify({ ...payload, at: payload.at + 1 })] };
+    }));
+    await assert.rejects(settle(), hasCode('PMA08'));
+    await untouched();
+
+    // The first event is sent one position late.
+    lossy.setRewrite(once((sql, params) => (isEventInsert(sql, params, 2) ? { sql, params: [params[0], 3, ...params.slice(2)] } : null)));
+    await assert.rejects(settle(), hasCode('PMA07'));
+    await untouched();
+
+    // An event beyond the batch is appended where the completion would be.
+    lossy.setRewrite(once((sql) => (sql.includes("execution_state = 'completed'")
+      ? { sql: "INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, 4, 'DrawOffered', 1, '{\"type\":\"DrawOffered\",\"by\":\"b\",\"at\":1300}')", params: [gameId] }
+      : null)));
+    await assert.rejects(settle(), hasCode('PMA06'));
+    await untouched();
+
+    // The batch is appended but the operation is never completed: COMMIT refuses the open permit.
+    lossy.setRewrite(once((sql) => (sql.includes("execution_state = 'completed'") ? 'skip' : null)));
+    await assert.rejects(settle(), hasCode('PMD16'));
+    await untouched();
+
+    // Untampered, the retained evaluation settles exactly as evaluated.
+    lossy.setRewrite(null);
+    const receipt = await settle();
+    const stored = (await pool.query('SELECT seq, type, payload FROM game_events WHERE game_id = $1 AND seq > 1 ORDER BY seq', [gameId])).rows;
+    const row = await adjudication(pool, gameId, operationId);
+    assert.deepEqual(stored.map((e) => e.payload), row.settlement_batch);
+    assert.deepEqual(stored[0]!.payload, receipt.resolvedEvent);
+  });
+});
+
+test('proof work never runs while the store holds a connection or an open transaction', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await setup(pool);
+    const lossy = lossyCommitPool(pool);
+    const store = new PgAdjudicationStore(lossy.pool);
+    const samples: Array<{ method: string; checkedOut: number; inTransaction: number }> = [];
+    const proto = AdjudicationJobController.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+    const methods = ['createJob', 'stepJob', 'stepAll', 'settleJob'] as const;
+    const originals = methods.map((m) => proto[m]!);
+    methods.forEach((m, i) => {
+      proto[m] = function (this: unknown, ...args: unknown[]) {
+        samples.push({ method: m, ...lossy.usage() });
+        return originals[i]!.apply(this, args);
+      };
+    });
+    try {
+      const { gameId } = await createGame(pool, { fen: FEN_MATE1 });
+      const operationId = await startMove(store, gameId, 'e7e4');
+      const grant = await claim(store, gameId, operationId);
+      await prove(store, gameId, operationId);
+      await store.settleAdjudication({ gameId, operationId, grant, resolutionAt: 1200 });
+    } finally {
+      methods.forEach((m, i) => { proto[m] = originals[i]!; });
+    }
+    assert.ok(samples.some((x) => x.method === 'settleJob'), 'settlement evaluation was observed');
+    assert.ok(samples.some((x) => x.method === 'stepJob'), 'proof stepping was observed');
+    for (const x of samples) {
+      assert.deepEqual({ checkedOut: x.checkedOut, inTransaction: x.inTransaction }, { checkedOut: 0, inTransaction: 0 }, x.method);
     }
   });
 });
