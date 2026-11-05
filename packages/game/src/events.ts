@@ -7,6 +7,7 @@
 
 import type { Color, Variant } from '@chess-platform/core';
 import type { TimeControl } from './clock';
+import type { PreparedOperation } from './prepared-command';
 
 /** How a game terminated. */
 export type Termination =
@@ -138,6 +139,139 @@ export interface GameEndedEvent {
   readonly at: number;
 }
 
+export type RecordedImpossible = {
+  readonly status: 'impossible';
+  readonly provenance:
+    | 'static_certificate'
+    | 'closed_graph'
+    | 'closed_graph_material_pruned';
+};
+
+export type RecordedReachable = {
+  readonly status: 'reachable';
+  readonly winner: Color;
+  readonly witness: readonly string[];
+};
+
+export type RecordedGlobalOutcome =
+  | {
+      readonly status: 'dead';
+      readonly white: RecordedImpossible;
+      readonly black: RecordedImpossible;
+    }
+  | RecordedReachable;
+
+export interface RecordedResolutionEvidence {
+  readonly base?: RecordedGlobalOutcome;
+  readonly successor?: {
+    readonly fen: string;
+    readonly outcome: RecordedGlobalOutcome;
+  };
+  readonly timeout?: {
+    readonly winner: Color;
+    readonly outcome: RecordedImpossible | RecordedReachable;
+  };
+}
+
+export type AdjudicationEffect =
+  | MovePlayedEvent
+  | GameEndedEvent
+  | DrawOfferedEvent
+  | DrawDeclinedEvent
+  | PlayerReadyEvent;
+
+/** Supported clock management policies for adjudication (Issue #124, Stage R1). */
+export type AdjudicationClockPolicy = 'observed-release-v1';
+
+/** Nonterminal stopped-turn clock completion descriptor (Issue #124, Stage R1). */
+export interface AdjudicationClockStoppedDescriptor {
+  readonly policy: 'observed-release-v1';
+  readonly kind: 'stopped';
+  readonly stopId: string;
+  readonly originatingOperationId: string;
+  readonly startedSeq: number;
+  readonly resolvedSeq: number;
+  readonly completionHead: number;
+  readonly resultingSideToMove: Color;
+  readonly resultingPly: number;
+  readonly turnLineageId: string;
+  readonly parentStopId: string | null;
+  readonly runningSince: null;
+}
+
+/** Terminal clock completion descriptor (Issue #124, Stage R1). */
+export interface AdjudicationClockTerminalDescriptor {
+  readonly policy: 'observed-release-v1';
+  readonly kind: 'terminal';
+  readonly originatingOperationId: string;
+  readonly startedSeq: number;
+  readonly resolvedSeq: number;
+  readonly completionHead: number;
+  readonly runningSince: null;
+}
+
+/** Discriminated union of clock completion descriptors for observed-release-v1. */
+export type AdjudicationClockCompletionDescriptor =
+  | AdjudicationClockStoppedDescriptor
+  | AdjudicationClockTerminalDescriptor;
+
+/**
+ * Adjudication began for an admitted operation (Issue #124, Stage 1).
+ * Records immutable prepared operation, suspension instant A, and rules version.
+ * Transitions game into a blocked `proving` state.
+ */
+export interface AdjudicationStartedEvent {
+  readonly type: 'AdjudicationStarted';
+  readonly gameId: string;
+  readonly operationId: string;
+  readonly baseRevision: number;
+  readonly at: number;
+  readonly rulesVersion: string;
+  readonly prepared: PreparedOperation;
+  readonly clockPolicy?: AdjudicationClockPolicy;
+}
+
+/**
+ * Adjudication resolved for an operation (Issue #124, Stage 1).
+ * Binds operation identity, start sequence in event log, resolution instant R,
+ * provenance metadata, structured evidence, and the exact declared effect plan.
+ */
+export interface AdjudicationResolvedEvent {
+  readonly type: 'AdjudicationResolved';
+  readonly gameId: string;
+  readonly operationId: string;
+  readonly baseRevision?: number;
+  readonly startedSeq: number;
+  readonly at: number;
+  readonly rulesVersion: string;
+  readonly provenance?: string;
+  readonly witness?: readonly string[];
+  readonly evidence?: RecordedResolutionEvidence;
+  readonly effects: readonly AdjudicationEffect[];
+  readonly clockCompletion?: AdjudicationClockCompletionDescriptor;
+}
+
+/**
+ * Adjudication clocks started (released) after stopped completion (Issue #124, Stage K).
+ * Replays deterministic release instant S, resuming applicable countdowns.
+ */
+export interface AdjudicationClocksStartedEvent {
+  readonly type: 'AdjudicationClocksStarted';
+  readonly gameId: string;
+  readonly clockPolicy: AdjudicationClockPolicy;
+  readonly rulesVersion: string;
+  readonly releaseRequestId: string;
+  readonly stopId: string;
+  readonly originatingOperationId: string;
+  readonly originatingResolvedSeq: number;
+  readonly completionHead: number;
+  readonly expectedHead: number;
+  readonly turnLineageId: string;
+  readonly side: Color;
+  readonly ply: number;
+  readonly at: number;
+}
+
 /** The discriminated union of all persisted game events. */
 export type GameEvent =
   | GameCreatedEvent
@@ -145,4 +279,7 @@ export type GameEvent =
   | MovePlayedEvent
   | DrawOfferedEvent
   | DrawDeclinedEvent
-  | GameEndedEvent;
+  | GameEndedEvent
+  | AdjudicationStartedEvent
+  | AdjudicationResolvedEvent
+  | AdjudicationClocksStartedEvent;

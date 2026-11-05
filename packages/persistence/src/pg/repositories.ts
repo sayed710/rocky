@@ -10,7 +10,9 @@ import { isDeepStrictEqual } from 'node:util';
 import { abortableQuery, borrowClient } from './abortable-client';
 import type { ArenaSnapshot } from '@chess-platform/tournament';
 import type { Variant } from '@chess-platform/core';
-import type { ResultString, Termination, TimeControl, GameEvent } from '@chess-platform/game';
+import type { ResultString, Termination, TimeControl, GameEvent, AdjudicationStartedEvent } from '@chess-platform/game';
+import { composeCreationAdjudication } from './adjudication-store';
+import { acquireGameLockAndCheckIsolation } from './adjudication-helpers';
 import type {
   GameStart,
   GameSummaryRow,
@@ -51,7 +53,7 @@ import type {
 import { SEEK_TTL_MS, SPEEDS } from '../repositories';
 import { CURRENT_EVENT_VERSION } from '../event-store.js';
 import { lockGameCreationPlayers, retryPlayerLockContention } from './event-store.js';
-import { ArenaFormatMismatchError, DuplicateUserError, VersionConflictError } from '../errors';
+import { AdjudicationConflictError, ArenaFormatMismatchError, DuplicateUserError, VersionConflictError } from '../errors';
 
 const SEEK_TTL_INTERVAL = `${Math.floor(SEEK_TTL_MS / 1000)} seconds`;
 
@@ -743,6 +745,30 @@ export class PgSeeksRepository implements SeeksRepository {
 /**
  * PostgreSQL transaction coordinator for atomically accepting seeks.
  */
+function partitionCreationEvents(events: readonly GameEvent[]): {
+  readonly preEvents: readonly GameEvent[];
+  readonly started?: AdjudicationStartedEvent;
+} {
+  const startedEvents = events.filter(
+    (e): e is AdjudicationStartedEvent => e.type === 'AdjudicationStarted',
+  );
+  if (startedEvents.length === 0) {
+    return { preEvents: events };
+  }
+  if (startedEvents.length > 1) {
+    throw new AdjudicationConflictError('Multiple AdjudicationStarted events in creation batch');
+  }
+  const started = startedEvents[0]!;
+  if (events[events.length - 1] !== started) {
+    throw new AdjudicationConflictError('AdjudicationStarted must be terminal in creation batch');
+  }
+  const preEvents = events.slice(0, events.length - 1);
+  if (preEvents.length === 0) {
+    throw new AdjudicationConflictError('Creation events missing pre-Started prefix');
+  }
+  return { preEvents, started };
+}
+
 export class PgSeekAcceptor implements SeekAcceptor {
   /** Bind atomic seek claims and game creation to transactions from the supplied pool. */
   constructor(private readonly pool: Pool) {}
@@ -782,22 +808,43 @@ export class PgSeekAcceptor implements SeekAcceptor {
       }
 
       await lockGameCreationPlayers(client, events);
-      
+      await acquireGameLockAndCheckIsolation(client, gameId);
+
+      const existing = await client.query(
+        'SELECT 1 FROM games WHERE id = $1 UNION ALL SELECT 1 FROM game_events WHERE game_id = $1 LIMIT 1',
+        [gameId],
+      );
+      if (existing.rows.length > 0) {
+        await rollback(client);
+        return null;
+      }
+
+      const { preEvents, started } = partitionCreationEvents(events);
+
       let seq = -1;
-      for (const event of events) {
+      for (const event of preEvents) {
         seq += 1;
         await client.query(
           `INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, $2, $3, $4, $5::jsonb)`,
-          [gameId, seq, event.type, CURRENT_EVENT_VERSION, JSON.stringify(event)]
+          [gameId, seq, event.type, CURRENT_EVENT_VERSION, JSON.stringify(event)],
         );
       }
-      
+
+      if (started) {
+        await composeCreationAdjudication(client, gameId, started, preEvents);
+      }
+
       await client.query(
         `INSERT INTO games (id, variant, rated, speed, white_id, black_id, started_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [gameId, gameStart.variant, gameStart.rated, gameStart.speed, gameStart.whiteId, gameStart.blackId, gameStart.startedAt]
+        [gameId, gameStart.variant, gameStart.rated, gameStart.speed, gameStart.whiteId, gameStart.blackId, gameStart.startedAt],
       );
-      
+
+      if (started) {
+        await client.query('DELETE FROM pregame_deadlines WHERE game_id = $1', [gameId]);
+        await client.query('DELETE FROM flag_deadlines WHERE game_id = $1', [gameId]);
+      }
+
       await client.query('COMMIT');
       return toSeek(seekRes.rows[0]!);
     } catch (err) {
@@ -825,21 +872,42 @@ export class PgGameStarter implements GameStarter {
       await client.query('BEGIN');
 
       await lockGameCreationPlayers(client, events);
+      await acquireGameLockAndCheckIsolation(client, gameId);
+
+      const existing = await client.query(
+        'SELECT 1 FROM games WHERE id = $1 UNION ALL SELECT 1 FROM game_events WHERE game_id = $1 LIMIT 1',
+        [gameId],
+      );
+      if (existing.rows.length > 0) {
+        await rollback(client);
+        return false;
+      }
+
+      const { preEvents, started } = partitionCreationEvents(events);
 
       let seq = -1;
-      for (const event of events) {
+      for (const event of preEvents) {
         seq += 1;
         await client.query(
           `INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, $2, $3, $4, $5::jsonb)`,
-          [gameId, seq, event.type, CURRENT_EVENT_VERSION, JSON.stringify(event)]
+          [gameId, seq, event.type, CURRENT_EVENT_VERSION, JSON.stringify(event)],
         );
+      }
+
+      if (started) {
+        await composeCreationAdjudication(client, gameId, started, preEvents);
       }
 
       await client.query(
         `INSERT INTO games (id, variant, rated, speed, white_id, black_id, started_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        [gameId, gameStart.variant, gameStart.rated, gameStart.speed, gameStart.whiteId, gameStart.blackId, gameStart.startedAt]
+        [gameId, gameStart.variant, gameStart.rated, gameStart.speed, gameStart.whiteId, gameStart.blackId, gameStart.startedAt],
       );
+
+      if (started) {
+        await client.query('DELETE FROM pregame_deadlines WHERE game_id = $1', [gameId]);
+        await client.query('DELETE FROM flag_deadlines WHERE game_id = $1', [gameId]);
+      }
 
       await client.query('COMMIT');
       return true;
