@@ -20,20 +20,7 @@ import {
   type SettlementResult,
 } from '@chess-platform/game';
 import { AdjudicationConflictError } from '../errors';
-import type {
-  AdjudicationClaimGrant,
-  RetainedSettlement,
-} from './adjudication-types';
-
-export function assertMatchingRetainedGrant(retained: RetainedSettlement, grant: AdjudicationClaimGrant): void {
-  if (
-    retained.claimId !== grant.claimId ||
-    retained.executorId !== grant.executorId ||
-    retained.generation !== grant.generation
-  ) {
-    throw new AdjudicationConflictError('Retained settlement credentials mismatch with current claim grant');
-  }
-}
+import type { RetainedSettlement } from './adjudication-types';
 
 export class AdjudicationCompletionSeam {
   readonly #controller: AdjudicationJobController;
@@ -82,33 +69,21 @@ export class AdjudicationCompletionSeam {
     this.#retained.delete(`${gameId}:${operationId}`);
   }
 
-  assertMatchingRetainedGrant(retained: RetainedSettlement, grant: AdjudicationClaimGrant): void {
-    assertMatchingRetainedGrant(retained, grant);
-  }
-
-  evaluateSettlement(
-    game: Game,
-    operationId: string,
-    resolutionAt: number,
-    grant: AdjudicationClaimGrant,
-  ): RetainedSettlement {
-    const key = `${grant.gameId}:${operationId}`;
+  /**
+   * Evaluate (once) the settlement of a finished proof job. A later call for the same operation
+   * returns the retained result when it asks for the same resolution instant and refuses otherwise.
+   */
+  evaluateSettlement(game: Game, gameId: string, operationId: string, resolutionAt: number): RetainedSettlement {
+    const key = `${gameId}:${operationId}`;
     const existing = this.#retained.get(key);
     if (existing) {
-      assertMatchingRetainedGrant(existing, grant);
+      if (existing.resolutionAt !== resolutionAt) {
+        throw new AdjudicationConflictError('A settlement for this operation was already evaluated at another resolution instant');
+      }
       return existing;
     }
-
     const settlement: SettlementResult = this.#controller.settleJob(game, operationId, resolutionAt);
-    const retained: RetainedSettlement = Object.freeze({
-      gameId: grant.gameId,
-      operationId,
-      claimId: grant.claimId,
-      executorId: grant.executorId,
-      generation: grant.generation,
-      settlement,
-      resolutionAt,
-    });
+    const retained: RetainedSettlement = Object.freeze({ gameId, operationId, settlement, resolutionAt });
     this.#retained.set(key, retained);
     return retained;
   }

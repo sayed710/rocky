@@ -307,20 +307,18 @@ test('creation coordinator PgSeekAcceptor: pre-Started prefix first, finite acco
     );
     assert.equal(secondResult, null);
 
-    // Exercise new PgSeekAcceptor existing-game branch with a DIFFERENT OPEN seek targeting existing gameId
+    // A DIFFERENT OPEN seek targeting an existing gameId keeps the legacy contract: the duplicate
+    // key surfaces (it is a caller bug, not an unavailable seek) and the seek claim rolls back.
     const diffOpenSeekId = '018f2780-0000-7000-8000-000000000204';
     await pool.query(
       `INSERT INTO seeks (id, creator_id, variant, time_control, rated, color, created_at)
        VALUES ($1, $2, 'standard', '{"kind":"increment","initialMs":180000,"incrementMs":2000,"delayMs":0}'::jsonb, false, 'white', NOW())`,
       [diffOpenSeekId, USER_W],
     );
-    const diffSeekResult = await seekAcceptor.accept(
-      diffOpenSeekId,
-      gameId,
-      [createdEvent, startedEvent],
-      gameStart,
+    await assert.rejects(
+      seekAcceptor.accept(diffOpenSeekId, gameId, [createdEvent, startedEvent], gameStart),
+      (err: unknown) => (err as { code?: string }).code === '23505',
     );
-    assert.equal(diffSeekResult, null);
     // Seek remains unclaimed and open, events for gameId remain unchanged
     const diffSeekCheck = await pool.query<{ game_id: string | null }>('SELECT game_id FROM seeks WHERE id = $1', [diffOpenSeekId]);
     assert.equal(diffSeekCheck.rows[0]?.game_id, null);
@@ -693,6 +691,7 @@ test('identical Start retries: proving command retry, proving prepared retry, co
       executorId: EXECUTOR_ID,
       expectedGeneration: '0',
       leaseMs: 60_000,
+      intent: PgAdjudicationStore.newClaimIntent(),
     });
     await store.createProofJob(gameId, opId);
     const jobBefore = store.getProofJob(opId);
@@ -767,6 +766,7 @@ test('identical Start retries: proving command retry, proving prepared retry, co
       executorId: EXECUTOR_ID,
       expectedGeneration: '0',
       leaseMs: 60_000,
+      intent: PgAdjudicationStore.newClaimIntent(),
     });
     await store.createProofJob(termGameId, termOpId);
     const termJobView = store.getProofJob(termOpId);

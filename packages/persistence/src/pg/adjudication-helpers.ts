@@ -275,7 +275,7 @@ export function assertIdenticalStartRetry(
 export function assertIdenticalSettlementRetry(
   row: AdjudicationDbRow,
   grant: AdjudicationClaimGrant,
-  expectedBatch: readonly unknown[],
+  expectedBatch?: readonly unknown[],
 ): void {
   const hash = sha256(grant.capabilityForQuery());
   if (
@@ -290,7 +290,7 @@ export function assertIdenticalSettlementRetry(
   if (!row.settlement_receipt) {
     throw new AdjudicationConflictError('Completed adjudication missing receipt');
   }
-  if (!isDeepStrictEqual(row.settlement_batch, expectedBatch)) {
+  if (expectedBatch !== undefined && !isDeepStrictEqual(row.settlement_batch, normalizeJson(expectedBatch))) {
     throw new AdjudicationConflictError('Settlement batch conflicts with completed adjudication');
   }
 }

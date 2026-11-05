@@ -52,7 +52,7 @@ export class PgFencedNoShowCandidates {
       throw new RangeError(`loadedHead must be a non-negative safe integer, got ${String(loadedHead)}`);
     }
     await this.pool.query(
-      'UPDATE pregame_deadlines SET due_at = $3, seq = $2 WHERE game_id = $1 AND seq <= $2 AND due_at <> $3',
+      'UPDATE pregame_deadlines SET due_at = $3, seq = $2 WHERE game_id = $1 AND seq <= $2',
       [gameId, loadedHead, dueAt],
     );
   }

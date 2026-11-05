@@ -808,18 +808,10 @@ export class PgSeekAcceptor implements SeekAcceptor {
       }
 
       await lockGameCreationPlayers(client, events);
-      await acquireGameLockAndCheckIsolation(client, gameId);
-
-      const existing = await client.query(
-        'SELECT 1 FROM games WHERE id = $1 UNION ALL SELECT 1 FROM game_events WHERE game_id = $1 LIMIT 1',
-        [gameId],
-      );
-      if (existing.rows.length > 0) {
-        await rollback(client);
-        return null;
-      }
-
+      // Only a creation that carries an adjudication takes the adjudication fence; the legacy path
+      // keeps its exact statements, errors and return values.
       const { preEvents, started } = partitionCreationEvents(events);
+      if (started) await acquireGameLockAndCheckIsolation(client, gameId);
 
       let seq = -1;
       for (const event of preEvents) {
@@ -839,11 +831,6 @@ export class PgSeekAcceptor implements SeekAcceptor {
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [gameId, gameStart.variant, gameStart.rated, gameStart.speed, gameStart.whiteId, gameStart.blackId, gameStart.startedAt],
       );
-
-      if (started) {
-        await client.query('DELETE FROM pregame_deadlines WHERE game_id = $1', [gameId]);
-        await client.query('DELETE FROM flag_deadlines WHERE game_id = $1', [gameId]);
-      }
 
       await client.query('COMMIT');
       return toSeek(seekRes.rows[0]!);
@@ -872,18 +859,10 @@ export class PgGameStarter implements GameStarter {
       await client.query('BEGIN');
 
       await lockGameCreationPlayers(client, events);
-      await acquireGameLockAndCheckIsolation(client, gameId);
-
-      const existing = await client.query(
-        'SELECT 1 FROM games WHERE id = $1 UNION ALL SELECT 1 FROM game_events WHERE game_id = $1 LIMIT 1',
-        [gameId],
-      );
-      if (existing.rows.length > 0) {
-        await rollback(client);
-        return false;
-      }
-
+      // Only a creation that carries an adjudication takes the adjudication fence; the legacy path
+      // keeps its exact statements, errors and return values.
       const { preEvents, started } = partitionCreationEvents(events);
+      if (started) await acquireGameLockAndCheckIsolation(client, gameId);
 
       let seq = -1;
       for (const event of preEvents) {
@@ -903,11 +882,6 @@ export class PgGameStarter implements GameStarter {
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [gameId, gameStart.variant, gameStart.rated, gameStart.speed, gameStart.whiteId, gameStart.blackId, gameStart.startedAt],
       );
-
-      if (started) {
-        await client.query('DELETE FROM pregame_deadlines WHERE game_id = $1', [gameId]);
-        await client.query('DELETE FROM flag_deadlines WHERE game_id = $1', [gameId]);
-      }
 
       await client.query('COMMIT');
       return true;

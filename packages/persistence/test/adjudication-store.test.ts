@@ -269,30 +269,25 @@ test('genuine private proof job produces and retains fixed verified result for r
   assert.ok(stepResult.totalDeltaWork >= 0);
 
   // Evaluate settlement produces genuine settlement result
-  const retained1 = seam.evaluateSettlement(gameAfterStarted, VALID_UUID_2, 1200, grant);
+  const retained1 = seam.evaluateSettlement(gameAfterStarted, VALID_UUID_1, VALID_UUID_2, 1200);
   assert.ok(retained1.settlement);
   assert.equal(retained1.operationId, VALID_UUID_2);
   assert.equal(retained1.settlement.batch.length > 0, true);
   assert.equal(retained1.settlement.batch[0]?.type, 'AdjudicationResolved');
 
   // Same-process retry returns exact same retained instance without re-executing settleJob
-  const retained2 = seam.evaluateSettlement(gameAfterStarted, VALID_UUID_2, 1200, grant);
+  const retained2 = seam.evaluateSettlement(gameAfterStarted, VALID_UUID_1, VALID_UUID_2, 1200);
   assert.strictEqual(retained1, retained2);
 
-  // Retained settlement credentials mismatch with current claim grant rejects
-  const mismatchedGrant = new AdjudicationClaimGrant({
-    gameId: VALID_UUID_1,
-    operationId: VALID_UUID_2,
-    claimId: VALID_UUID_4,
-    executorId: VALID_UUID_3,
-    generation: '2',
-    leaseUntil: new Date(Date.now() + 60_000),
-    capability: cap,
-  });
+  // The retained evaluation is bound to the operation and resolution instant, not to a claim: a
+  // successor claim reuses it (authority is checked in the database), and another instant is refused.
+  assert.strictEqual(seam.getRetainedSettlement(VALID_UUID_1, VALID_UUID_2), retained1);
   assert.throws(
-    () => seam.evaluateSettlement(gameAfterStarted, VALID_UUID_2, 1200, mismatchedGrant),
+    () => seam.evaluateSettlement(gameAfterStarted, VALID_UUID_1, VALID_UUID_2, 1300),
     AdjudicationConflictError,
   );
+  seam.clearRetainedSettlement(VALID_UUID_1, VALID_UUID_2);
+  assert.equal(seam.getRetainedSettlement(VALID_UUID_1, VALID_UUID_2), undefined);
 });
 
 test('creating proof work strictly requires matching store-owned durable accepted pending context', () => {

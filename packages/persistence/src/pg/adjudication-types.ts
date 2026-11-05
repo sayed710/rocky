@@ -170,9 +170,8 @@ export interface ClaimAdjudicationParams {
   readonly executorId: string;
   readonly expectedGeneration: string;
   readonly leaseMs: number;
-  readonly claimId?: string;
-  readonly capability?: Buffer;
-  readonly existingGrant?: AdjudicationClaimGrant;
+  /** From `PgAdjudicationStore.newClaimIntent()`; reuse it to recover a claim whose reply was lost. */
+  readonly intent: ClaimIntent;
 }
 
 export interface RenewAdjudicationParams {
@@ -239,12 +238,14 @@ export interface AdjudicationDbRow {
   completed_capability_hash: Buffer | null;
 }
 
+/**
+ * A settlement evaluated outside every transaction, kept so a retry (rolled back, expired claim
+ * replaced by a successor, or lost COMMIT reply) never re-runs a consumed proof job. It is bound to
+ * the operation and resolution instant, not to a claim: claim authority is checked in the database.
+ */
 export interface RetainedSettlement {
   readonly gameId: string;
   readonly operationId: string;
-  readonly claimId: string;
-  readonly executorId: string;
-  readonly generation: string;
   readonly settlement: SettlementResult;
   readonly resolutionAt: number;
 }
