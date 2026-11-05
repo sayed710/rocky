@@ -209,5 +209,7 @@ test('a verified witness is remembered; a forged one is refused every time', () 
     assert.throws(() => verifyUciWitnessReplay(pos, 'w', ['b1b7', 'h8g8', 'b7b8']), /checkmate verification/);
     assert.throws(() => verifyUciWitnessReplay(pos, 'b', witness), /checkmate verification/);
     assert.throws(() => verifyUciWitnessReplay(Position.fromFen('7k/8/5K2/8/8/8/8/1Q6 w - - 1 1'), 'w', ['b1b7', 'h8h7', 'b7g7']), /checkmate verification|legal replay/);
+    // A single malformed element spelling the verified moves joined by spaces is not the same witness.
+    assert.throws(() => verifyUciWitnessReplay(pos, 'w', [witness.join(' ')]), /Invalid UCI move format/);
   }
 });
