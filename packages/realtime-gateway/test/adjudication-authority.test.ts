@@ -135,6 +135,19 @@ test('the owner folds a settlement and its release and publishes them in order',
   assert.equal(room.length, 3);
 });
 
+test('a lost notice heals on the next command: the owner folds the log before deciding', async () => {
+  const clock = { now: 2000 };
+  const { log, admission, authority, room } = await setup(clock);
+  await authority.apply('g1', 'w', { kind: 'move', uci: 'e7e4' });
+  await settleAndRelease(log, 2100, 2200);
+  // No adjudicationChanged arrives. Black's command still sees the released game and is admitted.
+  clock.now = 3000;
+  const res = await authority.apply('g1', 'b', { kind: 'move', uci: 'h8g8' });
+  assert.deepEqual(res.events.map((e) => e.type), ['AdjudicationStarted']);
+  assert.equal(admission.requests.length, 2);
+  assert.deepEqual(room.map((m) => m.t), ['state', 'move', 'state', 'state'], 'settlement published before the new proof');
+});
+
 test('a logged release that differs from the recorded stop is refused on rebuild', async () => {
   const clock = { now: 2000 };
   const { log, authority } = await setup(clock);

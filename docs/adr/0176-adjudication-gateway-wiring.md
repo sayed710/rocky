@@ -25,6 +25,8 @@ and when it is on, the owner of a game must remain the only writer of its hot co
    `adjudicationChanged` (actor `system:adjudication`), routed to the owner exactly like a server expiry
    (ADR 0149). The owner folds the durable suffix into its copy and publishes its move, ready and ending
    broadcasts and a `state` (`stopped` while the clocks are stopped, the field absent once released).
+   Before deciding any command the owner also folds whatever the log holds beyond its copy, so a lost
+   or late notice cannot leave a game looking proving or stopped once the next command arrives.
 4. **Recorded releases.** `AdjudicationClocksStarted` is never appended live, so a hot copy or a cold
    rebuild re-derives it with `Game.prepareClockRelease` and refuses a logged release that differs from
    the stop it records.

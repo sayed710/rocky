@@ -1126,6 +1126,9 @@ export class GameAuthority {
     at: number,
     admission: AdjudicationAdmission,
   ): Promise<ApplyResult> {
+    // Fold anything the worker committed first: a lost or late notice can never leave this copy
+    // proving or stopped after the log has moved on, and the room sees it before the new command.
+    await this.absorbDurable(gameId, rec);
     if (rec.game.isBlocked) throw new AuthorityError('invalid_command', 'an adjudication is pending for this game');
     const operationId = randomUUID();
     const meta = { operationId, at, rulesVersion: admission.rulesVersion, clockPolicy: admission.clockPolicy };

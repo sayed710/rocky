@@ -72,6 +72,7 @@ function stack(pool: Pool, clock: { now: number }) {
     store: adjudicationStore,
     executorId: randomUUID(),
     sliceBudget: 5_000,
+    releaseGraceMs: 0,
     now: () => clock.now,
     publish: routedAdjudicationChange({ authority, router, hasLocalSessions: () => true }),
   });
