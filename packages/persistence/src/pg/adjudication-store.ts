@@ -187,6 +187,11 @@ export class PgAdjudicationStore {
     return this.#seam.evictProofJob(operationId);
   }
 
+  /** Continue an exhausted timeout question at its next effort tier; false when none remains. */
+  escalateProofJob(operationId: string): boolean {
+    return this.#seam.escalateProofJob(operationId);
+  }
+
   /** Conclude an exhausted proof question as unresolved: it never declares a dead position. */
   concludeUnresolvedProofJob(operationId: string): JobStepResult {
     return this.#seam.concludeUnresolvedProofJob(operationId);

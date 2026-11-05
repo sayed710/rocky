@@ -91,6 +91,15 @@ class FakeStore implements AdjudicationWorkStore {
     this.clock.now += 10_000;
     return step(budget === 0 ? 'active' : (this.steps.shift() ?? 'ready'));
   }
+  escalations = 0;
+  /** How many tiers the fake controller offers; each escalation re-runs `steps` from where it is. */
+  tiers = 0;
+  escalateProofJob(): boolean {
+    this.calls.push('escalate');
+    if (this.escalations >= this.tiers) return false;
+    this.escalations++;
+    return true;
+  }
   concludeUnresolvedProofJob(): JobStepResult {
     this.calls.push('unresolved');
     return step('ready');
@@ -143,6 +152,7 @@ function harness(configure?: (store: FakeStore) => void, failPublishes: Array<Ad
       // Publication of a stopped settlement makes its stop releasable on the same pass.
       if (change.kind === 'released') store.stops = [];
     },
+    monotonic: () => 0,
     newIntent: () => {
       const intent = { claimId: `018f2780-0000-7000-8000-${String(++n).padStart(12, '0')}`, capability: Buffer.alloc(32, n) };
       intents.push(intent);
@@ -163,7 +173,7 @@ function harness(configure?: (store: FakeStore) => void, failPublishes: Array<Ad
 test('claims, proves in slices, settles at now, publishes, then releases the published stop', async () => {
   const { store, published, worker, clock } = harness();
   const pass = await worker.runPass();
-  assert.deepEqual(pass, { settled: 1, released: 1, skipped: 0, failed: 0, more: false });
+  assert.deepEqual(pass, { settled: 1, released: 1, skipped: 0, failed: 0, pending: 0, more: false });
   assert.deepEqual(store.calls, ['create', 'step:0', 'step:500', 'step:500', 'step:500', 'cancel', 'evict']);
   assert.deepEqual(store.releaseQueries, [{ minAgeMs: 1_000, exclude: [] }], 'stops are released only after the grace period');
   assert.equal(store.claims.length, 1);
@@ -200,7 +210,7 @@ test('an operation claimed elsewhere is skipped without proving', async () => {
     s.claimFailures = ['conflict'];
   });
   const pass = await worker.runPass();
-  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 1, failed: 0, more: false });
+  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 1, failed: 0, pending: 0, more: false });
   assert.deepEqual(store.calls, []);
   assert.deepEqual(published, []);
 });
@@ -259,7 +269,7 @@ test('a claim lost during the proof cancels and drops the local job', async () =
     throw new AdjudicationConflictError('lease taken over');
   };
   const pass = await worker.runPass();
-  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 1, failed: 0, more: false });
+  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 1, failed: 0, pending: 0, more: false });
   assert.deepEqual(store.calls.slice(-2), ['cancel', 'evict']);
   assert.equal(store.settles.length, 0);
 });
@@ -277,7 +287,7 @@ test('an uncertain settlement is retried with the same grant; a superseded one i
     s.settleFailures = ['conflict'];
   });
   const pass = await superseded.worker.runPass();
-  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 1, failed: 0, more: false });
+  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 1, failed: 0, pending: 0, more: false });
   assert.ok(superseded.store.calls.includes('evict'), 'the superseded job is dropped');
   assert.deepEqual(superseded.published, []);
 });
@@ -288,8 +298,8 @@ test('a failed release is counted and retried on a later pass with the same requ
     s.stops = [{ gameId: GAME, stopOperationId: OP }];
     s.releaseFailures = 1;
   });
-  assert.deepEqual(await worker.runPass(), { settled: 0, released: 0, skipped: 0, failed: 1, more: false });
-  assert.deepEqual(await worker.runPass(), { settled: 0, released: 1, skipped: 0, failed: 0, more: false });
+  assert.deepEqual(await worker.runPass(), { settled: 0, released: 0, skipped: 0, failed: 1, pending: 0, more: false });
+  assert.deepEqual(await worker.runPass(), { settled: 0, released: 1, skipped: 0, failed: 0, pending: 0, more: false });
   assert.equal(store.releases.length, 2);
   assert.equal(store.releases[0]!.releaseRequestId, store.releases[1]!.releaseRequestId);
 });
@@ -299,7 +309,7 @@ test('a failed proof is counted and left for its lease to lapse', async () => {
     s.steps = ['cancelled'];
   });
   const pass = await worker.runPass();
-  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 0, failed: 1, more: false });
+  assert.deepEqual(pass, { settled: 0, released: 0, skipped: 0, failed: 1, pending: 0, more: false });
   assert.equal(store.settles.length, 0);
 });
 
@@ -324,4 +334,64 @@ test('invalid options are refused', () => {
   for (const bad of [{ leaseMs: 0 }, { sliceBudget: -1 }, { pollMs: 1.5 }, { pageSize: Number.NaN }, { releaseGraceMs: -1 }, { releaseGraceMs: 0.5 }]) {
     assert.throws(() => new AdjudicationWorker({ store, executorId: EXECUTOR, publish: async () => {}, ...bad }), RangeError);
   }
+});
+
+test('an exhausted proof is escalated while a tier remains, and only then concluded', async () => {
+  const { store, worker } = harness((s) => {
+    s.tiers = 2;
+    s.steps = ['resource_limit', 'resource_limit', 'resource_limit'];
+  });
+  const pass = await worker.runPass();
+  assert.equal(pass.settled, 1);
+  const order = store.calls.filter((c) => c === 'escalate' || c === 'unresolved');
+  assert.deepEqual(order, ['escalate', 'escalate', 'escalate', 'unresolved']);
+});
+
+test('one long proof yields to other operations and resumes on the next pass with its claim', async () => {
+  const OTHER_GAME = '018f2780-0000-7000-8000-0000000000a1';
+  const OTHER_OP = '018f2780-0000-7000-8000-0000000000a2';
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  let mono = 0;
+  // The first operation's proof needs many slices; the second's is immediate.
+  const remaining = new Map<string, number>([[OP, 6], [OTHER_OP, 0]]);
+  store.claimable = [
+    { gameId: GAME, operationId: OP, generation: '0' },
+    { gameId: OTHER_GAME, operationId: OTHER_OP, generation: '0' },
+  ];
+  store.stepProofJob = (operationId: string, budget: number) => {
+    store.calls.push(`step:${operationId === OP ? 'long' : 'short'}:${budget}`);
+    mono += 100;
+    if (budget === 0) return step('active');
+    const left = remaining.get(operationId)!;
+    remaining.set(operationId, Math.max(0, left - 1));
+    return step(left > 0 ? 'active' : 'ready');
+  };
+  const claimFor = store.claimAdjudication.bind(store);
+  store.claimAdjudication = async (params) => {
+    const grant = await claimFor(params);
+    return params.operationId === OP ? grant : new AdjudicationClaimGrant({
+      gameId: OTHER_GAME, operationId: OTHER_OP, claimId: CLAIM, executorId: EXECUTOR, generation: '1',
+      leaseUntil: grant.leaseUntil, capability: Buffer.alloc(32, 9),
+    });
+  };
+  const settled: string[] = [];
+  const settle = store.settleAdjudication.bind(store);
+  store.settleAdjudication = async (params) => {
+    settled.push(params.operationId);
+    return settle(params);
+  };
+  const worker = new AdjudicationWorker({
+    store, executorId: EXECUTOR, leaseMs: 30_000, sliceBudget: 500, proofSliceMs: 250,
+    publish: async () => {}, now: () => clock.now, monotonic: () => mono,
+  });
+  const first = await worker.runPass();
+  assert.deepEqual(settled, [OTHER_OP], 'the short proof settles while the long one waits');
+  assert.equal(first.pending, 1);
+  assert.equal(first.more, true);
+  assert.equal(store.claims.filter((c) => c.operationId === OP).length, 1);
+  for (let i = 0; i < 10 && settled.length < 2; i++) await worker.runPass();
+  assert.deepEqual(settled, [OTHER_OP, OP], 'the long proof finishes on later passes');
+  assert.equal(store.claims.filter((c) => c.operationId === OP).length, 1, 'resumed with its claim, never re-claimed');
+  assert.equal((await worker.runPass()).pending, 0);
 });
