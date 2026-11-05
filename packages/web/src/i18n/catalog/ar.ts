@@ -616,6 +616,8 @@ export const arMessages = {
   "game.status.waitingPlayer": "بانتظار انضمام {color}",
   "game.status.joining": "جارٍ الانضمام…",
   "game.status.waitingOpponent": "بانتظار انضمام منافسك",
+  "game.status.adjudicating": "جارٍ التحقق من الوضع…",
+  "game.status.clocksPaused": "الساعتان متوقفتان. يُستأنف اللعب بعد لحظات.",
   "game.review.classification.brilliant": "لامعة",
   "game.review.classification.great": "رائعة",
   "game.review.classification.best": "الأفضل",

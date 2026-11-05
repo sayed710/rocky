@@ -1360,7 +1360,8 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
     }
     if (!state.isPlayer) return;
 
-    const disabled = !state.connected || state.isOver || state.pendingAction !== null || state.recovering === true;
+    const disabled = !state.connected || state.isOver || state.pendingAction !== null || state.recovering === true
+      || state.proving === true;
 
     if (btnOfferDraw) {
       if (state.drawOffer === 'sent') {

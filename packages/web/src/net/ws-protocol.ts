@@ -124,6 +124,12 @@ export interface StateView {
    * a rolling deploy makes normal; `GameSync` reads absence as `null`.
    */
   readonly ready?: ReadyView | null;
+  /**
+   * Present only while an adjudicated game is not running normally (Issue #124, ADR-0176): `proving`
+   * while a command awaits its proof, `stopped` while both clocks are stopped before the server
+   * releases them. Absent from every other state and from gateways without adjudication.
+   */
+  readonly adjudication?: 'proving' | 'stopped';
 }
 
 /** Durable readiness of both seats. */
@@ -469,7 +475,8 @@ function validState(value: Record<string, unknown>): boolean {
     legalMoves(value.legalMoves) && (value.chess960StartId === null ||
       (typeof value.chess960StartId === 'number' && Number.isInteger(value.chess960StartId) &&
        value.chess960StartId >= 0 && value.chess960StartId <= 959)) &&
-    (value.ready === null || ready(value.ready));
+    (value.ready === null || ready(value.ready)) &&
+    (value.adjudication === undefined || value.adjudication === 'proving' || value.adjudication === 'stopped');
 }
 
 function validEvent(value: Record<string, unknown>): boolean {
