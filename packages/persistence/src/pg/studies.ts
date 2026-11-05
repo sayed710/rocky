@@ -125,7 +125,7 @@ function mapTreeNode(row: TreeNodeRow): TreeNode {
 
 async function lockStudy(client: PoolClient, studyId: string): Promise<void> {
   await client.query(
-    `SELECT pg_advisory_xact_lock(hashtextextended('study:' || $1::text, 0))`,
+    `SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('study:' || $1::text, 0::bigint))`,
     [studyId]
   );
 }

@@ -68,7 +68,7 @@ async function rollback(client: PoolClient): Promise<void> {
  */
 async function lockTeam(client: PoolClient, teamId: string): Promise<void> {
   await client.query(
-    `SELECT pg_advisory_xact_lock(hashtextextended('team:' || $1::text, 0))`,
+    `SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('team:' || $1::text, 0::bigint))`,
     [teamId]
   );
 }

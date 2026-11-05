@@ -407,7 +407,7 @@ export class PgSessionsRepository implements SessionsRepository {
         await client.query('COMMIT');
         return { status: 'missing' };
       }
-      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [owner.rows[0].user_id]);
+      await client.query('SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1::text, 0::bigint))', [owner.rows[0].user_id]);
       const found = await client.query<SessionDbRow>(
         `SELECT ${SESSION_COLS} FROM sessions
          WHERE refresh_hash = $1 FOR UPDATE`,
@@ -474,7 +474,7 @@ export class PgSessionsRepository implements SessionsRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [userId]);
+      await client.query('SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1::text, 0::bigint))', [userId]);
       const result = await client.query<{ found: boolean; revoked: number }>(
         `WITH RECURSIVE chain(id) AS (
            SELECT id FROM sessions WHERE id = $2 AND user_id = $1
@@ -509,7 +509,7 @@ export class PgSessionsRepository implements SessionsRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [userId]);
+      await client.query('SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1::text, 0::bigint))', [userId]);
       const res = await client.query(
         'UPDATE sessions SET revoked_at = $2 WHERE user_id = $1 AND revoked_at IS NULL',
         [userId, at],
