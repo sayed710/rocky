@@ -42,10 +42,8 @@ Invariants passed in every run.
 ## Open Qodo findings (verify each against the code before acting)
 #151 (latest review):
 - FIXED in 9818237: witness memo key joined moves with spaces (collision with a malformed single element).
-- "Records unverified approval": ADR 0174 §7 cites the owner's authorization given in the Claude session
-  (2026-11-05), which is not visible on GitHub. The owner should confirm it on PR #151 (a comment from
-  sayed710), then link that comment from the ADR; or the ADR wording must say "pending approval".
-- "Lone-king lemma beyond the frozen subclass": same authorization question; the lemma itself is sound.
+- RESOLVED: owner approved the scope exceptions on PR #151 (comment 6655724172); ADR 0174 §7 links it.
+  Reply on #151 to the two Qodo findings ("Records unverified approval", "Lone-king lemma") citing it.
 #152 (worker), all still open:
 - HIGH "Long proofs can restart every pass": a pending proof waits pollMs between passes; if pollMs >= lease,
   the lease lapses and the proof restarts. Fix: schedule the next pass by the earliest held lease
