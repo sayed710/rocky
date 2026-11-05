@@ -163,12 +163,16 @@ pgTest('an exhausted proof settles as unresolved: the move applies and no draw i
   await withTestDatabase(async ({ pool }) => {
     const players = await setup(pool);
     const store = new PgAdjudicationStore(pool);
-    const gameId = await createGame(pool, players);
-    await startMove(store, gameId, 'e2e4', 'w', 1100);
+    // Bishop, knight and a blocked pawn against a king and a blocked pawn: too large to close.
+    const gameId = await createGame(pool, players, '8/2K4k/8/3B4/7p/7P/8/N7 w - - 7 77');
+    await startMove(store, gameId, 'd5c4', 'w', 1100);
     const clock = { now: 1200 };
     const published: AdjudicationChange[] = [];
-    const pass = await worker(store, clock, published, { sliceBudget: 50_000 }).runPass();
-    assert.equal(pass.settled, 1);
+    // The proof outlasts one time slice, so it takes several passes, keeping its claim between them.
+    const w = worker(store, clock, published, { sliceBudget: 50_000 });
+    let settled = 0;
+    for (let i = 0; i < 200 && settled === 0; i++) settled += (await w.runPass()).settled;
+    assert.equal(settled, 1);
     const logged = await events(pool, gameId);
     const resolved = logged.find((e) => e.type === 'AdjudicationResolved') as Extract<GameEvent, { type: 'AdjudicationResolved' }>;
     assert.ok(resolved);
@@ -176,7 +180,7 @@ pgTest('an exhausted proof settles as unresolved: the move applies and no draw i
     assert.equal(logged.some((e) => e.type === 'GameEnded'), false);
     const game = Game.fromEvents(logged);
     assert.equal(game.status.over, false);
-    assert.equal(game.ply, 1, 'the move applied');
+    assert.equal(game.fen.startsWith('8/2K4k/8/8/2B4p/7P/8/N7 b'), true, 'the move applied');
   });
 });
 

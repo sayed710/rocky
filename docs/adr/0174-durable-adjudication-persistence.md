@@ -124,16 +124,34 @@ in the releasing transaction, the queues against the recorded deadlines. Release
 request id, including after a lost COMMIT reply. Migrations run before `prepareAdjudicationGuard`
 (or it is re-run), because `CREATE OR REPLACE` needs the routines owned by the migration role.
 
-### 7. Exhausted proofs settle as unresolved
+### 7. Exhausted proofs: fewer, continued, then the flag rule
 
-A proof question that exhausts its resource limit (`resource_limit`) would otherwise leave the game
-proving forever. `AdjudicationJobController.concludeUnresolved` records the first blocking question
-as `{ status: 'unresolved', reason: 'resource_limit' }` and settles conservatively: an unresolved
-dead-position question is treated as not dead (the command applies and play continues), and an
-unresolved timeout question falls back to exactly the unmanaged flag rule (`Game.claimFlag`): a loss
-on time unless the winner's material cannot mate at all (`canMate`), then a draw. It therefore never
-decides a game differently from how the platform decides it without proofs, and never declares a
-dead position; replay accepts exactly that recorded shape.
+A proof question that exhausts its search (`resource_limit`) would otherwise leave the game proving
+forever. Three measures keep that rare and never let exhaustion alone decide a result:
+
+- **A finder that finds.** Before its depth-first attempts, the witness finder runs guided
+  cooperative playouts (the winner tries every move for mate and heads for the loser's king; the loser
+  runs its king to a corner, crowds it and never takes the winner's material). They only propose a
+  witness: the same independent legal replay verifies it, so soundness is unchanged. They are sliced
+  per work unit and seeded from the position, so a position always explores the same playouts. And a
+  side with nothing but its king and no pawns of its own can never mate, whatever pawns the other side
+  has (the bare-king lemma no longer needs a pawn-free board), so the exact search closes those at
+  the root. On positions from 30 seeded games (measured, see the PR), the share of move proofs that
+  exhausted fell from 52% to 0.2% and their median time from 1.4 s to 14 ms; flag proofs from 43% to
+  1.5%.
+- **Continuation.** An exhausted timeout question is escalated before anything else
+  (`AdjudicationJobController.escalate`): a fresh finder with more and longer playouts (400 x 200
+  plies, then 2000 x 300), while the exact search keeps what it explored at its default capacity, so
+  an escalated job needs no more memory than a fresh one (the gateway runs in 512 MiB).
+  `concludeUnresolved` refuses a timeout question while a tier remains. With escalation, 0.4% of flag
+  proofs stayed unresolved in the same sample, and each of those positions is in fact winnable.
+- **The flag rule.** A question still unresolved after every tier is recorded as
+  `{ status: 'unresolved', reason: 'resource_limit' }`. An unresolved dead-position question is
+  treated as not dead (the command applies and play continues; no result is declared). An
+  unresolved timeout question settles by exactly the rule the platform applies without proofs
+  (`Game.claimFlag`): a loss on time unless the winner cannot mate (`canMate`, which already declares
+  a draw only on proven impossibility), matching FIDE 6.9, under which a fallen flag loses unless it
+  is established that the opponent cannot mate. Replay accepts exactly that recorded shape.
 
 ## Consequences
 

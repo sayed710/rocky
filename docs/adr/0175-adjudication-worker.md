@@ -22,9 +22,12 @@ holds no state correctness depends on. Each pass:
    retried once with the same intent, which recovers the committed lease. A conflict (another
    executor won) skips the operation.
 2. **Prove.** The proof runs in bounded slices (`sliceBudget`) outside every transaction, yielding
-   to the event loop between slices and renewing the lease once half of it has elapsed. A question
-   that exhausts its resource limit is concluded as unresolved (ADR 0174 section 7), which never
-   declares a dead position.
+   to the event loop between slices and renewing the lease once half of it has elapsed. An exhausted
+   timeout question is escalated while an effort tier remains, and only then is a question concluded
+   unresolved (ADR 0174 section 7). Each operation gets at most `proofSliceMs` (default 200 ms) of
+   proof per pass: an unfinished proof keeps its claim and its local job, and the next pass resumes it
+   before claiming new work, so one long proof (an escalated timeout can take seconds) never holds up
+   the other games.
 3. **Settle.** The resolution instant is the one a retained evaluation already fixed, otherwise
    now. An uncertain settlement is retried once with the same grant; a completed operation then
    answers from the database. A conflict (superseded claim) drops the local proof job.
