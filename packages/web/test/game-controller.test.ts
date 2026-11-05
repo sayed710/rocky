@@ -1146,3 +1146,60 @@ test('a snapshot with no clock anchor renders the authoritative time, never NaN'
   controller.stop();
   sync.stop();
 });
+
+// ── Adjudication (Issue #124, ADR-0176) ─────────────────────────────────────
+
+test('a proving game is nobody\'s turn and says so; a stopped one says the clocks are paused', () => {
+  for (const locale of ['en', 'ar'] as const) {
+    const { factory, sync, controller, turns, statuses } = setup(locale);
+    controller.start();
+    sync.start();
+    factory.last.open();
+    factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w', 'startpos') });
+    assert.equal(turns.at(-1), true);
+    factory.last.emit({ t: 'state', gameId: 'g1', state: { ...stateView(0, 'w', 'startpos'), adjudication: 'proving' } });
+    assert.equal(sync.getState().adjudication, 'proving');
+    assert.equal(turns.at(-1), false, 'nothing may be played while proving');
+    assert.equal(statuses.at(-1), locale === 'en' ? 'Checking the position…' : 'جارٍ التحقق من الوضع…');
+
+    factory.last.emit({ t: 'state', gameId: 'g1', state: { ...stateView(1, 'b', 'after'), adjudication: 'stopped' } });
+    assert.equal(sync.getState().adjudication, 'stopped');
+    assert.equal(statuses.at(-1), locale === 'en' ? 'Clocks paused. Play resumes in a moment.' : 'الساعتان متوقفتان. يُستأنف اللعب بعد لحظات.');
+
+    // The release clears the phase; the ordinary status returns.
+    factory.last.emit({ t: 'state', gameId: 'g1', state: stateView(1, 'b', 'after') });
+    assert.equal(sync.getState().adjudication, null);
+    assert.notEqual(statuses.at(-1), locale === 'en' ? 'Clocks paused. Play resumes in a moment.' : 'الساعتان متوقفتان. يُستأنف اللعب بعد لحظات.');
+    controller.stop();
+    sync.stop();
+  }
+});
+
+test('a game without adjudication never shows its statuses', () => {
+  const { factory, sync, controller, statuses } = setup();
+  controller.start();
+  sync.start();
+  factory.last.open();
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: stateView(0, 'w', 'startpos') });
+  assert.equal(sync.getState().adjudication, null);
+  assert.ok(!statuses.some((s) => s === 'Checking the position…' || s.startsWith('Clocks paused')));
+  controller.stop();
+  sync.stop();
+});
+
+test('a stopped phase arriving at the revision of its move (equal-revision snapshot) is shown', () => {
+  const { factory, sync, controller, statuses } = setup();
+  controller.start();
+  sync.start();
+  factory.last.open();
+  const at = (stateRevision: number, extra: Partial<StateView> = {}) =>
+    ({ ...stateView(0, 'w', 'startpos'), ready: null, stateRevision, ...extra }) as StateView;
+  factory.last.emit({ t: 'joined', gameId: 'g1', role: 'white', state: at(2, { adjudication: 'proving' }) });
+  assert.equal(sync.getState().adjudication, 'proving');
+  // The settlement's state is published at the same revision as the snapshot already held.
+  factory.last.emit({ t: 'state', gameId: 'g1', state: at(2, { adjudication: 'stopped' }) });
+  assert.equal(sync.getState().adjudication, 'stopped');
+  assert.equal(statuses.at(-1), 'Clocks paused. Play resumes in a moment.');
+  controller.stop();
+  sync.stop();
+});

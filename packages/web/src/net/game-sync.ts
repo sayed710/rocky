@@ -104,6 +104,11 @@ export interface GameSyncState {
    */
   readonly ready: ReadyView | null;
   /**
+   * The server's adjudication phase from the latest snapshot (Issue #124): `proving` while a command
+   * awaits its proof (nothing may be played), `stopped` while the clocks are stopped, else `null`.
+   */
+  readonly adjudication: 'proving' | 'stopped' | null;
+  /**
    * Authoritative legal-move map for the side to move (origin square → legal
    * destination squares), from the latest server snapshot or move broadcast.
    * Refreshed on every MoveBroadcast via the push-based `legalMoves` field;
@@ -181,6 +186,7 @@ function initialState(gameId: string): GameSyncState {
     fenHash: null,
     presence: null,
     ready: null,
+    adjudication: null,
     legalMoves: {},
     pending: null,
     lastReject: null,
@@ -862,6 +868,7 @@ export class GameSync {
       // A snapshot from a gateway older than ADR-0148 has no field at all: keep what is known rather
       // than reopening the board. An explicit `null` means the game has no readiness.
       ready,
+      adjudication: view.adjudication ?? null,
       legalMoves: view.legalMoves,
       // Reconcile the displayed position and release the optimistic input gate.
       // An unchanged snapshot cannot prove cancellation: retain the uncertainty
@@ -930,6 +937,7 @@ export class GameSync {
       drawOffer: view.drawOffer,
       fenHash: view.fenHash,
       ready,
+      adjudication: view.adjudication ?? null,
       legalMoves: view.legalMoves,
       pending: null,
       pendingAction: null,

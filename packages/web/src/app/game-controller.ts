@@ -424,6 +424,8 @@ export class GameController {
       && state.turn === state.myColor
       && state.pending === null
       && !awaitingReadiness(state)
+      // While a command awaits its proof the server refuses every other command.
+      && state.adjudication !== 'proving'
       && !state.recovering
       // `ended` empties the legal-move map but keeps `turn`: a finished game is nobody's turn.
       && state.status?.over !== true;
@@ -559,6 +561,8 @@ export class GameController {
     if (!state.status.over) {
       if (state.turn === null) return t('game.status.waiting');
       if (awaitingReadiness(state)) return this.readinessText(state);
+      if (state.adjudication === 'proving') return t('game.status.adjudicating');
+      if (state.adjudication === 'stopped') return t('game.status.clocksPaused');
       const turnLabel = state.turn === 'w' ? t('game.player.white') : t('game.player.black');
       const turnText = state.turn === state.myColor
         ? t('game.status.yourTurn')
