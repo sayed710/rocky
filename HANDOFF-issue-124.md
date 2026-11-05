@@ -3,10 +3,10 @@
 ## Branch / PR stack (merge in this order; nothing merged, nothing deployed)
 1. #145 `claude/funny-lamport-hy7jyc` - durable persistence (migration 0053)
 2. #149 - least-privilege owner for SECURITY DEFINER functions
-3. #151 `claude/adjudication-clock-release` - release (0054), playouts, escalation, flag rule, witness memo (head d5fa8ca)
-4. #152 `claude/adjudication-worker` - worker; immediate release after notice (head a4cf02e)
-5. #153 `claude/adjudication-gateway` - authority + resync behind ADJUDICATION_ENABLED (head 0e74a34)
-6. #154 `claude/adjudication-web` - client UI (head cdd272b)
+3. #151 `claude/adjudication-clock-release` - release (0054), playouts, escalation, flag rule, witness memo (head 9818237)
+4. #152 `claude/adjudication-worker` - worker; immediate release after notice (head bd053c6)
+5. #153 `claude/adjudication-gateway` - authority + resync behind ADJUDICATION_ENABLED (head d7f928b)
+6. #154 `claude/adjudication-web` - client UI (head 2e62d1b)
 7. `claude/adjudication-soak` (this branch, no PR yet) - soak test + worker concurrency (WIP)
 Independent on main: #150 (Docker probe + hashtextextended), #155 (ENOTEMPTY orphan reap).
 Always forward-merge (no force push): 151 -> 152 -> 153 -> 154 -> soak.
@@ -38,6 +38,25 @@ Always forward-merge (no force push): 151 -> 152 -> 153 -> 154 -> soak.
 | clocks stopped p50 / max | 123 / 450 ms | 20 / 207 ms |
 | event-loop delay p99 | 84 ms | 49 ms |
 Invariants passed in every run.
+
+## Open Qodo findings (verify each against the code before acting)
+#151 (latest review):
+- FIXED in 9818237: witness memo key joined moves with spaces (collision with a malformed single element).
+- "Records unverified approval": ADR 0174 §7 cites the owner's authorization given in the Claude session
+  (2026-11-05), which is not visible on GitHub. The owner should confirm it on PR #151 (a comment from
+  sayed710), then link that comment from the ADR; or the ADR wording must say "pending approval".
+- "Lone-king lemma beyond the frozen subclass": same authorization question; the lemma itself is sound.
+#152 (worker), all still open:
+- HIGH "Long proofs can restart every pass": a pending proof waits pollMs between passes; if pollMs >= lease,
+  the lease lapses and the proof restarts. Fix: schedule the next pass by the earliest held lease
+  (e.g. min(pollMs, leaseMs/3)) when #inFlight is non-empty, renew before awaiting; test pollMs >= leaseMs.
+- "Later settlements erase failed notices": #unpublished is keyed by gameId, so a successful later
+  notice deletes an earlier failed one (and allows an immediate release). Fix: per-game ordered queue of
+  changes; deliver in order; immediate release only when the game's queue is empty.
+- "Busy workers lease jobs they cannot run": claims ignore controller capacity (100 jobs) used by
+  #inFlight. Fix: claim at most (capacity - held) per pass.
+- "Long proofs repeatedly reload game history": #prove calls createProofJob for a held job each slice
+  (full replay from the DB). Fix: skip createProofJob when the controller already holds the job.
 
 ## Open items
 1. p99 ~6 s: one long proof (escalated timeout or exhausted move proof). Investigate which question,
