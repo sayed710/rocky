@@ -130,6 +130,7 @@ interface ColorMaterialCounts {
 
 interface MaterialInventory {
   totalPawns: number;
+  winnerPawns: number;
   winner: ColorMaterialCounts;
   loser: ColorMaterialCounts;
 }
@@ -158,6 +159,7 @@ function collectMaterialInventory(
   winner: Color,
 ): MaterialInventory {
   let totalPawns = 0;
+  let winnerPawns = 0;
   const winnerCounts = createEmptyColorCounts();
   const loserCounts = createEmptyColorCounts();
 
@@ -168,13 +170,14 @@ function collectMaterialInventory(
     const t = typeOf(p);
     if (t === 'p') {
       totalPawns++;
+      if (colorOf(p) === winner) winnerPawns++;
       continue;
     }
     const target = colorOf(p) === winner ? winnerCounts : loserCounts;
     updatePieceCounts(target, t, sq);
   }
 
-  return { totalPawns, winner: winnerCounts, loser: loserCounts };
+  return { totalPawns, winnerPawns, winner: winnerCounts, loser: loserCounts };
 }
 
 function isBareKing(inv: MaterialInventory): boolean {
@@ -217,6 +220,10 @@ function isLemma6Unwinnable(inv: MaterialInventory): boolean {
 
 export function isPawnFreeMaterialUnwinnable(state: PositionState, winner: Color): boolean {
   const inv = collectMaterialInventory(state.board, winner);
+  // A side with nothing but its king can never give check, so it can never mate, whatever the other
+  // side has: the opponent's pawns only ever promote to the opponent's own pieces. It needs no pawn of
+  // its own (one could promote), and holds in every variant this search admits (no drops).
+  if (inv.winnerPawns === 0 && isBareKing(inv)) return true;
   if (inv.totalPawns > 0) return false;
   return isBareKing(inv) || isLemma5Unwinnable(inv) || isLemma6Unwinnable(inv);
 }
