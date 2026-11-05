@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { waitForHealth } from './lib/wait-for-health.mjs';
+import { probeDocker } from './lib/docker-probe.mjs';
 
 import {
   createApiServer,
@@ -26,21 +27,6 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, '..');
-
-/**
- * Probes whether the Docker daemon is reachable and responding.
- * Used to conditionally execute or skip real-container Nginx acceptance tests.
- *
- * @returns True if Docker CLI successfully reports daemon availability, false otherwise.
- */
-function isDockerAvailable() {
-  try {
-    execSync('docker info', { stdio: 'ignore', timeout: 4000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Allocates an available ephemeral TCP port on loopback (127.0.0.1).
@@ -62,9 +48,14 @@ async function getFreePort() {
   });
 }
 
-const dockerAvailable = isDockerAvailable();
-if (!dockerAvailable && process.env['REQUIRE_DOCKER'] === '1') {
-  throw new Error('Docker is required for the trusted-edge acceptance gate but is unavailable');
+// A busy CI daemon can take several seconds to answer, so the probe retries within a budget and
+// reports why it failed instead of collapsing every failure into "unavailable".
+const dockerProbe = await probeDocker({ log: (message) => console.error(message) });
+const dockerAvailable = dockerProbe.available;
+if (!dockerProbe.available && process.env['REQUIRE_DOCKER'] === '1') {
+  throw new Error(
+    `Docker is required for the trusted-edge acceptance gate but is unavailable after ${dockerProbe.attempts} attempt(s): ${dockerProbe.reason}`,
+  );
 }
 
 /** Resolve a WebSocket close event, failing the test if the peer remains open. */

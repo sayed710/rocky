@@ -318,11 +318,11 @@ function concurrentIndexName(statement: string): string {
  */
 export async function migrate(pool: Pool, dir: string): Promise<number> {
   const lockClient = await pool.connect();
-  await lockClient.query('SELECT pg_advisory_lock($1)', [MIGRATION_ADVISORY_LOCK_KEY]);
+  await lockClient.query('SELECT pg_catalog.pg_advisory_lock($1::bigint)', [MIGRATION_ADVISORY_LOCK_KEY]);
   try {
     return await runMigrations(pool, dir);
   } finally {
-    await lockClient.query('SELECT pg_advisory_unlock($1)', [MIGRATION_ADVISORY_LOCK_KEY]);
+    await lockClient.query('SELECT pg_catalog.pg_advisory_unlock($1::bigint)', [MIGRATION_ADVISORY_LOCK_KEY]);
     lockClient.release();
   }
 }
