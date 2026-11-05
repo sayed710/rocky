@@ -458,7 +458,7 @@ export class CooperativeWitnessSession {
     const config = this.playoutConfig!;
     cursor.index++;
     if (cursor.index >= config.count) {
-      this.playout = null;
+      this.endPlayouts();
       return;
     }
     cursor.ply = 0;
@@ -475,7 +475,8 @@ export class CooperativeWitnessSession {
    */
   private stepPlayout(cursor: PlayoutCursor): void {
     const config = this.playoutConfig!;
-    this.debit(1);
+    // Session work only: the depth-first attempts keep their whole budgets after the playouts.
+    this.countersInternal.workUnits += 1;
     if (cursor.moves === null) {
       if (cursor.ply >= config.maxPlies || cursor.ply >= this.maxWitness) {
         this.nextPlayout(cursor);
@@ -513,7 +514,7 @@ export class CooperativeWitnessSession {
     if (winnerToMove) {
       if (this.isTerminalCheckmate(next)) {
         const witness = Object.freeze([...cursor.path, move].map((m) => Object.freeze(cloneMove(m))));
-        this.playout = null;
+        this.endPlayouts();
         this.startVerification(witness);
         return;
       }
@@ -537,6 +538,12 @@ export class CooperativeWitnessSession {
       cursor.bestScore = score;
       cursor.best = move;
     }
+  }
+
+  /** Leave the playout phase; the first depth-first attempt starts with its full budget. */
+  private endPlayouts(): void {
+    this.playout = null;
+    this.attemptWork = 0;
   }
 
   private initStackForAttempt(): void {

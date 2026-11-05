@@ -508,3 +508,16 @@ test('playouts: options are validated', () => {
     assert.throws(() => new CooperativeWitnessSession(pos.snapshot(), 'w', { playouts: bad }), /playouts\./);
   }
 });
+
+test('playouts: unsuccessful playouts leave the first depth-first attempt its whole budget', () => {
+  // A cooperative mate exists, but not in one move, so one-ply playouts cannot find it.
+  const pos = Position.fromFen('7k/8/5K2/8/8/8/8/1Q6 w - - 0 1');
+  const attempt = { maxDepth: 4, maxBranching: 40, attemptWorkLimit: 1_000_000 };
+  const alone = runToEnd(new CooperativeWitnessSession(pos.snapshot(), 'w', { playouts: false, attempts: [attempt] }));
+  assert.equal(alone.status, 'reachable');
+  // Exactly the work that attempt needs: any of it charged to the playouts would exhaust it.
+  const exact = { ...attempt, attemptWorkLimit: alone.counters.workUnits };
+  const res = runToEnd(new CooperativeWitnessSession(pos.snapshot(), 'w', { playouts: { count: 50, maxPlies: 1 }, attempts: [exact] }));
+  assert.equal(res.status, 'reachable', 'the single attempt still ran in full after the playouts');
+  assert.ok(res.counters.workUnits > alone.counters.workUnits, 'the playouts did run and count toward the session');
+});

@@ -91,8 +91,9 @@ export interface AdjudicationWorkerOptions {
   /** Ceiling for the delay after consecutive failed passes (default 30 s). */
   readonly maxBackoffMs?: number;
   /**
-   * A stop is released only once its settlement is this old (default 1 s), so the replica that
-   * settled it publishes first even when another replica's worker sees it.
+   * The release sweep takes a stop only once its settlement is this old (default 1 s), so the replica
+   * that settled it publishes first even when another replica's worker sees it. The settling worker
+   * itself does not wait: it releases right after its notice is delivered.
    */
   readonly releaseGraceMs?: number;
 
@@ -142,6 +143,8 @@ export class AdjudicationWorker {
   readonly #inFlight = new Map<string, { gameId: string; grant: AdjudicationClaimGrant }>();
   /** Publications that failed, by game; retried every pass. Only the latest per game matters. */
   readonly #unpublished = new Map<string, AdjudicationChange>();
+  /** Stops released right after their own settlement during the current pass. */
+  #releasedNow = 0;
 
   constructor(private readonly options: AdjudicationWorkerOptions) {
     this.#store = options.store;
@@ -185,6 +188,7 @@ export class AdjudicationWorker {
     let released = 0;
     let skipped = 0;
     let failed = 0;
+    this.#releasedNow = 0;
     failed += await this.#flushPublications();
     const tally = (outcome: 'settled' | 'skipped' | 'pending'): void => {
       if (outcome === 'settled') settled += 1;
@@ -222,6 +226,7 @@ export class AdjudicationWorker {
         this.#fail('Clock release failed for a stop; it is retried on a later pass', error, stop);
       }
     }
+    released += this.#releasedNow;
     const pending = this.#inFlight.size;
     const more = claimable.length === this.#pageSize || stops.length === this.#pageSize || pending > 0;
     return { settled, released, skipped, failed, pending, more };
@@ -258,7 +263,18 @@ export class AdjudicationWorker {
       const resolutionAt = retained ?? this.#now();
       const receipt = await this.#settle({ gameId, operationId, grant, resolutionAt });
       this.options.settledCounter?.inc();
-      await this.#publish({ kind: 'settled', gameId, receipt });
+      const published = await this.#publish({ kind: 'settled', gameId, receipt });
+      // A move that leaves the game running stopped its clocks. Once players have been told,
+      // release them now instead of waiting for the grace period and the next pass; that wait
+      // would be free thinking time. A failed release falls back to the release sweep.
+      if (published && receipt.resolvedEvent.clockCompletion?.kind === 'stopped' && !this.#halting) {
+        try {
+          await this.#release(gameId, operationId);
+          this.#releasedNow += 1;
+        } catch (error) {
+          this.#fail('Immediate clock release failed; the release sweep retries it', error, { gameId, operationId });
+        }
+      }
       return 'settled';
     } catch (error) {
       // Superseded: another executor holds or completed the operation.
@@ -320,14 +336,16 @@ export class AdjudicationWorker {
     }
   }
 
-  /** Publish once; a failure is kept and retried every pass until it succeeds. */
-  async #publish(change: AdjudicationChange): Promise<void> {
+  /** Publish once; a failure is kept and retried every pass until it succeeds. Returns whether it was delivered. */
+  async #publish(change: AdjudicationChange): Promise<boolean> {
     try {
       await this.options.publish(change);
       this.#unpublished.delete(change.gameId);
+      return true;
     } catch (error) {
       this.#unpublished.set(change.gameId, change);
       this.#fail('Publication of an adjudication change failed; it is retried every pass', error, { gameId: change.gameId });
+      return false;
     }
   }
 

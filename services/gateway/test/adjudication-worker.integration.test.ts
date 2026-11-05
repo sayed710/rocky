@@ -249,6 +249,23 @@ pgTest('a settlement whose writes fail is settled later as evaluated, without pr
   });
 });
 
+pgTest('the settling worker releases at once; another replica waits out the grace period', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const players = await setup(pool);
+    const store = new PgAdjudicationStore(pool);
+    const gameId = await createGame(pool, players, FEN_MATE1);
+    await startMove(store, gameId, 'e7e4', 'w', 1100);
+    const clock = { now: 1200 };
+    const published: AdjudicationChange[] = [];
+    // A grace period far longer than the test: only the immediate release can free the clocks.
+    const pass = await worker(store, clock, published, { releaseGraceMs: 60_000 }).runPass();
+    assert.deepEqual({ settled: pass.settled, released: pass.released, failed: pass.failed }, { settled: 1, released: 1, failed: 0 });
+    assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM game_adjudications WHERE is_current_stop')).rows[0].n, 0);
+    assert.deepEqual((await events(pool, gameId)).map((e) => e.type).slice(-3), ['AdjudicationResolved', 'MovePlayed', 'AdjudicationClocksStarted']);
+  });
+});
+
 pgTest('a stop waits out the grace period; a blocked game never starves the stops behind it', async () => {
   await withTestDatabase(async ({ pool }) => {
     const players = await setup(pool);
@@ -258,9 +275,18 @@ pgTest('a stop waits out the grace period; a blocked game never starves the stop
     await startMove(store, first, 'e7e4', 'w', 1100);
     await startMove(store, second, 'e7e4', 'w', 1100);
     const clock = { now: 1200 };
-    const published: AdjudicationChange[] = [];
-    const pass = await worker(store, clock, published, { releaseGraceMs: 60_000 }).runPass();
+    // The settling replica cannot reach the owners, so it does not release its stops.
+    const unreachable = new AdjudicationWorker({
+      store, executorId: randomUUID(), leaseMs: 5_000, sliceBudget: 200, releaseGraceMs: 60_000,
+      publish: async () => { throw new Error('owner unreachable'); },
+      now: () => clock.now,
+    });
+    const pass = await unreachable.runPass();
     assert.deepEqual({ settled: pass.settled, released: pass.released }, { settled: 2, released: 0 });
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM game_adjudications WHERE is_current_stop')).rows[0].n, 2);
+    // Another replica's sweep leaves them alone until their settlements are old enough.
+    const other = await worker(store, clock, [], { releaseGraceMs: 60_000 }).runPass();
+    assert.equal(other.released, 0);
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM game_adjudications WHERE is_current_stop')).rows[0].n, 2);
 
     // With a one-stop page, the older stop's game excluded, the newer one is still released.
