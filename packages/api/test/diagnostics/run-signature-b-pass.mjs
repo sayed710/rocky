@@ -296,6 +296,12 @@ function runOnce(tapPath, logDir, reportDir, budgetMs) {
     child.on('close', (status, signal) => {
       clearTimeout(deadline);
       activeChild = null;
+      // The runner can exit before its per-file child does (it fails fast when it cannot write its
+      // report), and that child, in the same process group, keeps writing logs into the output
+      // directory. Reap the group so nothing from this run outlives it: a caller that removes the
+      // directory next would otherwise race those writes (ENOTEMPTY), and the next run's logs could
+      // be mixed with this one's.
+      killTree(child);
       resolve({ status, signal, timedOut, error: null, stderr });
     });
   });
