@@ -81,7 +81,8 @@ export type VerifiedEvidenceOutcome =
   | VerifiedDeadOutcome
   | { readonly kind: 'winnable'; readonly winner: Color; readonly witnessUci: readonly string[] }
   | { readonly kind: 'impossible'; readonly winner: Color; readonly provenance: ProofProvenance }
-  | { readonly kind: 'terminal_authorization'; readonly termination: string };
+  | { readonly kind: 'terminal_authorization'; readonly termination: string }
+  | { readonly kind: 'unresolved'; readonly reason: 'resource_limit' };
 
 /** Verified evidence outcome held securely in the private WeakMap. */
 export interface VerifiedEvidenceRecord {
@@ -177,6 +178,9 @@ function deepFreezeOutcome(outcome: VerifiedEvidenceRecord['outcome']): Verified
       winner: outcome.winner,
       provenance: outcome.provenance,
     });
+  }
+  if (outcome.kind === 'unresolved') {
+    return Object.freeze({ kind: 'unresolved', reason: outcome.reason });
   }
   return Object.freeze({
     kind: 'terminal_authorization',
@@ -1372,6 +1376,35 @@ export class AdjudicationJobController {
       ...(job.terminalHandle ? { terminal: job.terminalHandle } : {}),
     });
     this.#jobHandles.set(job.operationId, bundle);
+  }
+
+  /**
+   * Conclude the question a job ran out of resources on as unresolved (Issue #124). The job then
+   * resumes any remaining question, or becomes ready. An unresolved outcome never declares a dead
+   * position, so settlement applies the ordinary rules, as without proofs. Only a job whose search
+   * is exhausted (`resource_limit`) can be concluded this way.
+   */
+  concludeUnresolved(operationId: string): JobStepResult {
+    const job = this.#jobs.get(operationId);
+    if (!job) throw new GameError(`Job not found: ${operationId}`);
+    if (job.status !== 'resource_limit') {
+      throw new GameError(`Only an exhausted job can be concluded unresolved: ${job.status}`);
+    }
+    const unresolved = { kind: 'unresolved', reason: 'resource_limit' } as const;
+    if (!job.baseHandle) {
+      job.baseHandle = mintHandle(job.prepared, { kind: 'global_deadness' }, unresolved);
+      job.baseOutcome = 'not_dead';
+    } else if (job.requiredRoles.some(r => r.role === 'successor') && !job.succHandle) {
+      const successorFen = (job.prepared.intent as { successorFen: string }).successorFen;
+      job.succHandle = mintHandle(job.prepared, { kind: 'successor_deadness', successorFen }, unresolved);
+    } else {
+      const timeout = job.requiredRoles.find(r => r.role === 'timeout');
+      if (!timeout || job.timeoutHandle) throw new GameError('Exhausted job has no unresolved question');
+      job.timeoutHandle = mintHandle(job.prepared, timeout.question, unresolved);
+    }
+    job.status = 'active';
+    this.#checkReadiness(job);
+    return this.#buildStepResult(job, 0);
   }
 
   settleJob(game: Game, operationId: string, at: number): SettlementResult {

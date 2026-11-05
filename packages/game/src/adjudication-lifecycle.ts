@@ -30,6 +30,7 @@ import type {
   RecordedGlobalOutcome,
   RecordedImpossible,
   RecordedReachable,
+  RecordedUnresolved,
   RecordedResolutionEvidence,
 } from './events';
 import { charge, resumeClockSameTurn, validateDeadline, validateTimestamp, type ClockState, type TimeControl } from './clock';
@@ -273,7 +274,7 @@ function resolveSuccessorEvidenceEnding(
   if (succEvidence.outcome.status === 'dead') {
     return { type: 'GameEnded', result: '1/2-1/2', termination: 'dead_position', winner: null, at };
   }
-  if (succEvidence.outcome.status === 'reachable') {
+  if (succEvidence.outcome.status === 'reachable' || succEvidence.outcome.status === 'unresolved') {
     return null;
   }
   throw new GameError('Successor evidence is inconclusive');
@@ -387,7 +388,7 @@ function deriveTimeoutOutcomeEnding(
   if (timeout.outcome.status === 'impossible') {
     return { type: 'GameEnded', result: '1/2-1/2', termination: 'insufficient_material', winner: null, at };
   }
-  if (timeout.outcome.status === 'reachable') {
+  if (timeout.outcome.status === 'reachable' || timeout.outcome.status === 'unresolved') {
     return {
       type: 'GameEnded',
       result: timeout.winner === 'w' ? '1-0' : '0-1',
@@ -719,6 +720,14 @@ function validateRecordedDeadOutcome(rec: Record<string, unknown>): void {
   validateSideImpossible(rec.black, 'black');
 }
 
+/** An unresolved outcome carries exactly its status and the one supported reason. */
+function validateRecordedUnresolved(rec: Record<string, unknown>): void {
+  const keys = Object.keys(rec).sort();
+  if (rec.reason !== 'resource_limit' || keys.length !== 2 || keys[0] !== 'reason' || keys[1] !== 'status') {
+    throw new GameError('Invalid recorded unresolved outcome');
+  }
+}
+
 function validateRecordedGlobalOutcome(outcome: unknown, pos: Position): void {
   if (typeof outcome !== 'object' || outcome === null) {
     throw new GameError('Missing recorded global outcome');
@@ -728,6 +737,8 @@ function validateRecordedGlobalOutcome(outcome: unknown, pos: Position): void {
     validateRecordedDeadOutcome(rec);
   } else if (rec.status === 'reachable') {
     verifyUciWitnessReplay(pos, rec.winner as Color, rec.witness as readonly string[]);
+  } else if (rec.status === 'unresolved') {
+    validateRecordedUnresolved(rec);
   } else {
     throw new GameError(`Invalid recorded outcome status "${rec.status}"`);
   }
@@ -745,6 +756,8 @@ function validateRecordedTimeoutDetails(outcome: unknown, expectedWinner: Color,
       throw new GameError('Timeout reachable winner mismatch');
     }
     verifyUciWitnessReplay(basePos, expectedWinner, o.witness as readonly string[]);
+  } else if (o.status === 'unresolved') {
+    validateRecordedUnresolved(o);
   } else {
     throw new GameError(`Invalid timeout outcome status "${o.status}"`);
   }
@@ -980,6 +993,9 @@ function extractGlobalOutcome(rec: ReturnType<typeof getRegisteredEvidence>): Re
       witness: rec.outcome.witnessUci,
     };
   }
+  if (rec.outcome.kind === 'unresolved') {
+    return { status: 'unresolved', reason: rec.outcome.reason };
+  }
   throw new GameError('Pending global deadness evidence cannot settle');
 }
 
@@ -1001,7 +1017,7 @@ function extractSuccessorOutcome(
 function extractTimeoutOutcome(
   dirHandle: AdjudicationEvidenceHandle,
   pending: PendingAdjudicationState,
-): { winner: Color; outcome: RecordedImpossible | RecordedReachable } {
+): { winner: Color; outcome: RecordedImpossible | RecordedReachable | RecordedUnresolved } {
   const intent = pending.prepared.intent as { kind: 'expireFlag'; flagged: Color };
   const prospectiveWinner = opposite(intent.flagged);
   const dirRec = getRegisteredEvidence(dirHandle, pending.prepared, {
@@ -1020,6 +1036,9 @@ function extractTimeoutOutcome(
       outcome: { status: 'reachable', winner: prospectiveWinner, witness: dirRec.outcome.witnessUci },
     };
   }
+  if (dirRec.outcome.kind === 'unresolved') {
+    return { winner: prospectiveWinner, outcome: { status: 'unresolved', reason: dirRec.outcome.reason } };
+  }
   throw new GameError('Pending directional evidence cannot settle');
 }
 
@@ -1030,7 +1049,7 @@ function extractRecordedEvidence(
   const result: {
     base?: RecordedGlobalOutcome;
     successor?: { fen: string; outcome: RecordedGlobalOutcome };
-    timeout?: { winner: Color; outcome: RecordedImpossible | RecordedReachable };
+    timeout?: { winner: Color; outcome: RecordedImpossible | RecordedReachable | RecordedUnresolved };
   } = {};
 
   const termHandle = findEvidenceHandle(evidence, 'terminal_authorization');

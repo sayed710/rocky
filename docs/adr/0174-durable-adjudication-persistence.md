@@ -124,6 +124,15 @@ in the releasing transaction, the queues against the recorded deadlines. Release
 request id, including after a lost COMMIT reply. Migrations run before `prepareAdjudicationGuard`
 (or it is re-run), because `CREATE OR REPLACE` needs the routines owned by the migration role.
 
+### 7. Exhausted proofs settle as unresolved
+
+A proof question that exhausts its resource limit (`resource_limit`) would otherwise leave the game
+proving forever. `AdjudicationJobController.concludeUnresolved` records the first blocking question
+as `{ status: 'unresolved', reason: 'resource_limit' }` and settles conservatively: an unresolved
+dead-position question is treated as not dead (the command applies and play continues), and an
+unresolved timeout question is an ordinary timeout loss. It never declares a dead position, so it
+cannot award a draw the rules do not support; replay accepts exactly that recorded shape.
+
 ## Consequences
 
 - Rollout remains on HOLD (Issue #124): nothing constructs the store, no worker or client is wired,
