@@ -61,6 +61,10 @@ export class AdjudicationCompletionSeam {
     return this.#controller.evictJob(operationId);
   }
 
+  concludeUnresolvedProofJob(operationId: string): JobStepResult {
+    return this.#controller.concludeUnresolved(operationId);
+  }
+
   getRetainedSettlement(gameId: string, operationId: string): RetainedSettlement | undefined {
     return this.#retained.get(`${gameId}:${operationId}`);
   }
