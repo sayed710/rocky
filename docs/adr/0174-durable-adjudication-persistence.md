@@ -43,9 +43,16 @@ are immutable except for clearing a current stop.
   a shadowing temp table and checks that none runs. For the same reason the flag-deadline arithmetic
   of 0043 is restated as `adjudication_flag_due` rather than calling `flag_deadline_ms`, which
   resolves its objects through the caller's path; tests compare the two and the domain. The store's
-  own fence query is schema-qualified with exact argument types. The functions are owned by the
-  migration role, which must own the event tables; `TRUNCATE` of the obligation table is refused
-  like `DELETE`.
+  own fence query is schema-qualified with exact argument types. `TRUNCATE` of the obligation table
+  is refused like `DELETE`.
+- Least privilege: the migration leaves the SECURITY DEFINER routines owned by the migration role,
+  which owns the event tables. A trusted installer then runs `prepareAdjudicationGuard` (in
+  `packages/persistence/src/pg/adjudication-preparation.ts`, mirroring PG-F1's `prepareGameFencing`)
+  to transfer them to a dedicated NOLOGIN role that has no role attributes, no members and no owned
+  objects, and holds only SELECT on `game_events`, SELECT/UPDATE on `game_adjudications`, and
+  SELECT/INSERT/DELETE on the queue and mark tables. As that role, DDL, trigger disabling,
+  TRUNCATE, event writes, unrelated reads and CREATE in `public` are all refused (tested).
+  Preparation is atomic and idempotent and refuses unsafe owners without changing anything.
 - `xact_id` is never rewritten, the 0042 queue trigger is not redefined (legacy creation queues with
   `pregame_deadlines.seq` at its default 0), and an append at an occupied position is left to the
   primary key so stale writers still receive `23505`. Legacy appends take no new advisory lock.
