@@ -55,16 +55,10 @@ class FakeStore implements AdjudicationWorkStore {
     this.claimable = [];
     return page;
   }
-  readonly releaseQueries: number[] = [];
-  recent: string[] = [];
-  async listReleasableStops(_limit: number, minAgeMs: number): Promise<Array<{ gameId: string; stopOperationId: string }>> {
-    this.releaseQueries.push(minAgeMs);
-    return this.stops;
-  }
-  async listRecentAdjudicationChanges(): Promise<string[]> {
-    const recent = this.recent;
-    this.recent = [];
-    return recent;
+  readonly releaseQueries: Array<{ minAgeMs: number; exclude: readonly string[] }> = [];
+  async listReleasableStops(_limit: number, minAgeMs: number, exclude: readonly string[]): Promise<Array<{ gameId: string; stopOperationId: string }>> {
+    this.releaseQueries.push({ minAgeMs, exclude: [...exclude] });
+    return this.stops.filter((s) => !exclude.includes(s.gameId));
   }
   cancelProofJob(): void {
     this.calls.push('cancel');
@@ -171,7 +165,7 @@ test('claims, proves in slices, settles at now, publishes, then releases the pub
   const pass = await worker.runPass();
   assert.deepEqual(pass, { settled: 1, released: 1, skipped: 0, failed: 0, more: false });
   assert.deepEqual(store.calls, ['create', 'step:0', 'step:500', 'step:500', 'step:500', 'cancel', 'evict']);
-  assert.deepEqual(store.releaseQueries, [1_000], 'stops are released only after the grace period');
+  assert.deepEqual(store.releaseQueries, [{ minAgeMs: 1_000, exclude: [] }], 'stops are released only after the grace period');
   assert.equal(store.claims.length, 1);
   assert.equal(store.claims[0]!.expectedGeneration, '0');
   assert.equal(store.claims[0]!.executorId, EXECUTOR);
@@ -236,6 +230,7 @@ test('a failed settlement publication is retried, and the stop waits for it', as
   const first = await worker.runPass();
   assert.equal(first.settled, 1);
   assert.equal(first.released, 0, 'not released over an unpublished settlement');
+  assert.deepEqual(store.releaseQueries.at(-1)!.exclude, [GAME], 'the blocked game is excluded before the page limit');
   assert.equal(worker.unpublishedCount, 1);
   assert.equal(published.length, 0);
   const second = await worker.runPass();
@@ -254,17 +249,6 @@ test('a failed release publication is retried on the next pass', async () => {
   await worker.runPass();
   assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
   assert.equal(worker.unpublishedCount, 0);
-});
-
-test('a new process republishes recent changes before anything else', async () => {
-  const { published, worker } = harness((s) => {
-    s.claimable = [];
-    s.recent = [GAME];
-  });
-  await worker.runPass();
-  assert.deepEqual(published, [{ kind: 'recovered', gameId: GAME }]);
-  await worker.runPass();
-  assert.equal(published.length, 1, 'only on the first pass');
 });
 
 test('a claim lost during the proof cancels and drops the local job', async () => {
@@ -337,7 +321,7 @@ test('stop() halts a proof at its next slice and waits for the pass', async () =
 
 test('invalid options are refused', () => {
   const store = new FakeStore({ now: 0 });
-  for (const bad of [{ leaseMs: 0 }, { sliceBudget: -1 }, { pollMs: 1.5 }, { pageSize: Number.NaN }, { releaseGraceMs: -1 }, { recoveryWindowMs: 0.5 }]) {
+  for (const bad of [{ leaseMs: 0 }, { sliceBudget: -1 }, { pollMs: 1.5 }, { pageSize: Number.NaN }, { releaseGraceMs: -1 }, { releaseGraceMs: 0.5 }]) {
     assert.throws(() => new AdjudicationWorker({ store, executorId: EXECUTOR, publish: async () => {}, ...bad }), RangeError);
   }
 });

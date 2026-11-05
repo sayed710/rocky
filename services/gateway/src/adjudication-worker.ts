@@ -40,8 +40,7 @@ import {
 /** Exactly what the worker uses of `PgAdjudicationStore`. */
 export interface AdjudicationWorkStore {
   listClaimableAdjudications(limit: number): Promise<Array<{ gameId: string; operationId: string; generation: string }>>;
-  listReleasableStops(limit: number, minAgeMs: number): Promise<Array<{ gameId: string; stopOperationId: string }>>;
-  listRecentAdjudicationChanges(withinMs: number, limit: number): Promise<string[]>;
+  listReleasableStops(limit: number, minAgeMs: number, excludeGameIds: readonly string[]): Promise<Array<{ gameId: string; stopOperationId: string }>>;
   claimAdjudication(params: ClaimAdjudicationParams): Promise<AdjudicationClaimGrant>;
   renewAdjudication(params: RenewAdjudicationParams): Promise<AdjudicationClaimGrant>;
   createProofJob(gameId: string, operationId: string): Promise<string>;
@@ -57,18 +56,17 @@ export interface AdjudicationWorkStore {
 /** What changed in a game's durable log, so the owner can reload and publish it. */
 export type AdjudicationChange =
   | { readonly kind: 'settled'; readonly gameId: string; readonly receipt: AdjudicationSettlementReceipt }
-  | { readonly kind: 'released'; readonly gameId: string; readonly receipt: AdjudicationReleaseReceipt }
-  /** A change committed while no publication is known to have reached the owner (after a restart). */
-  | { readonly kind: 'recovered'; readonly gameId: string };
+  | { readonly kind: 'released'; readonly gameId: string; readonly receipt: AdjudicationReleaseReceipt };
 
 export interface AdjudicationWorkerOptions {
   readonly store: AdjudicationWorkStore;
   /** This process's executor identity (a UUID), recorded with every claim it takes. */
   readonly executorId: string;
   /**
-   * Publish a durable change to the game's players: the owner folds the durable log into its copy
-   * and broadcasts. A failed publication is retried every pass until it succeeds, and a stop is not
-   * released while its game has one outstanding, so players observe the stop first.
+   * Notify the game's owner of a durable change, so it folds the log into its copy and broadcasts
+   * promptly. A failed notice is retried every pass while this process runs, and a stop is not
+   * released while its game has one outstanding. Delivery does not depend on it: an owner whose copy
+   * shows a game proving or stopped re-reads the log on its own (ADR-0176).
    */
   readonly publish: (change: AdjudicationChange) => Promise<void>;
   /** Lease length per claim and renewal (default 30 s). */
@@ -86,8 +84,7 @@ export interface AdjudicationWorkerOptions {
    * settled it publishes first even when another replica's worker sees it.
    */
   readonly releaseGraceMs?: number;
-  /** On start, changes this recent are republished, in case a stopped process lost them (default 5 min). */
-  readonly recoveryWindowMs?: number;
+
   readonly newIntent?: () => ClaimIntent;
   readonly now?: () => number;
   readonly logger?: Logger;
@@ -126,11 +123,8 @@ export class AdjudicationWorker {
   #running: Promise<void> | undefined;
   #consecutiveErrors = 0;
   readonly #releaseGraceMs: number;
-  readonly #recoveryWindowMs: number;
   /** Publications that failed, by game; retried every pass. Only the latest per game matters. */
   readonly #unpublished = new Map<string, AdjudicationChange>();
-  /** The first pass republishes recent changes a previous process may not have published. */
-  #recovered = false;
 
   constructor(private readonly options: AdjudicationWorkerOptions) {
     this.#store = options.store;
@@ -142,7 +136,6 @@ export class AdjudicationWorker {
     this.#newIntent = options.newIntent ?? (() => PgAdjudicationStore.newClaimIntent());
     this.#now = options.now ?? (() => Date.now());
     this.#releaseGraceMs = nonnegative(options.releaseGraceMs ?? 1_000, 'releaseGraceMs');
-    this.#recoveryWindowMs = nonnegative(options.recoveryWindowMs ?? 300_000, 'recoveryWindowMs');
   }
 
   /** Games with a publication still outstanding (for observability and tests). */
@@ -173,12 +166,6 @@ export class AdjudicationWorker {
     let released = 0;
     let skipped = 0;
     let failed = 0;
-    if (!this.#recovered) {
-      for (const gameId of await this.#store.listRecentAdjudicationChanges(this.#recoveryWindowMs, this.#pageSize * 10)) {
-        this.#unpublished.set(gameId, { kind: 'recovered', gameId });
-      }
-      this.#recovered = true;
-    }
     failed += await this.#flushPublications();
     const claimable = await this.#store.listClaimableAdjudications(this.#pageSize);
     for (const op of claimable) {
@@ -192,10 +179,10 @@ export class AdjudicationWorker {
         this.#fail('Adjudication failed for an operation; it is retried once its lease lapses', error, op);
       }
     }
-    const stops = await this.#store.listReleasableStops(this.#pageSize, this.#releaseGraceMs);
+    // Players must see the settlement first: never release over an outstanding notice. Those games
+    // are excluded before the page limit, so they cannot starve the stops behind them.
+    const stops = await this.#store.listReleasableStops(this.#pageSize, this.#releaseGraceMs, [...this.#unpublished.keys()]);
     for (const stop of stops) {
-      // Players must see the settlement first: never release over an outstanding publication.
-      if (this.#unpublished.has(stop.gameId)) continue;
       try {
         await this.#release(stop.gameId, stop.stopOperationId);
         released += 1;
