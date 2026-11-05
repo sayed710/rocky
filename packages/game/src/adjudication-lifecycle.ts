@@ -684,6 +684,22 @@ function replaySingleWitnessMove(pos: Position, uci: string): Position {
   return pos.play(matched);
 }
 
+/**
+ * Witnesses this process has already verified, keyed by everything the verdict depends on: the
+ * variant, the full FEN (which names every castling rook and the check counters), the winner and the
+ * moves. Legal moves and checkmate do not depend on move history, so a witness verified once is
+ * valid for every later replay of the same recorded evidence. Without this, every replay of a game
+ * re-verified every earlier witness move by move, a cost that grew with the square of the game's
+ * length and dominated each admission, settlement and release (Issue #124 soak). Bounded; the
+ * oldest entry is dropped first. Only successes are kept, so a forged witness is always rejected.
+ */
+const VERIFIED_WITNESS_CAPACITY = 4096;
+const verifiedWitnesses = new Set<string>();
+
+function witnessKey(pos: Position, winner: Color, witness: readonly string[]): string {
+  return `${pos.variant}|${pos.fen()}|${winner}|${witness.join(' ')}`;
+}
+
 /** Replays a candidate mate witness move sequence and verifies checkmate for the claimed winner. */
 export function verifyUciWitnessReplay(pos: Position, winner: Color, witness: readonly string[]): void {
   if (!Array.isArray(witness)) throw new GameError('Witness move sequence must be an array');
@@ -692,6 +708,16 @@ export function verifyUciWitnessReplay(pos: Position, winner: Color, witness: re
     if (checkEmptyWitnessValid(pos, winner)) return;
     throw new GameError('Witness move sequence cannot be empty for a non-checkmated root');
   }
+  const key = witnessKey(pos, winner, witness);
+  if (verifiedWitnesses.has(key)) return;
+  replayWitness(pos, winner, witness);
+  if (verifiedWitnesses.size >= VERIFIED_WITNESS_CAPACITY) {
+    verifiedWitnesses.delete(verifiedWitnesses.values().next().value as string);
+  }
+  verifiedWitnesses.add(key);
+}
+
+function replayWitness(pos: Position, winner: Color, witness: readonly string[]): void {
   let cur = pos;
   for (const uci of witness) {
     cur = replaySingleWitnessMove(cur, uci);
