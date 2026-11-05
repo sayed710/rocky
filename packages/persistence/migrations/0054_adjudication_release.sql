@@ -352,11 +352,16 @@ BEGIN
       IF NOT has_proving AND head <> rel.release_seq THEN
         RAISE EXCEPTION USING ERRCODE = 'PMD21', MESSAGE = 'Events follow a release without an adjudication';
       END IF;
+      -- Each queue row must carry the release as its fence (seq) as well as the recorded deadline:
+      -- deadline workers use seq to refuse stale work, so a right deadline under a wrong fence is wrong.
       IF rel.permit_xact_id = cur AND NOT has_proving
-         AND ((SELECT due_ms FROM public.flag_deadlines WHERE game_id = game) IS DISTINCT FROM rel.flag_due_ms
-              OR (SELECT due_at FROM public.pregame_deadlines WHERE game_id = game)
-                 IS DISTINCT FROM (CASE WHEN rel.pregame_due_ms IS NULL THEN NULL
-                                        ELSE to_timestamp(rel.pregame_due_ms::double precision / 1000) END)) THEN
+         AND ((SELECT ROW(f.seq::bigint, f.due_ms::bigint) FROM public.flag_deadlines f WHERE f.game_id = game)
+                IS DISTINCT FROM (CASE WHEN rel.flag_due_ms IS NULL THEN NULL
+                                       ELSE ROW(rel.release_seq::bigint, rel.flag_due_ms::bigint) END)
+              OR (SELECT ROW(d.seq::bigint, d.due_at) FROM public.pregame_deadlines d WHERE d.game_id = game)
+                IS DISTINCT FROM (CASE WHEN rel.pregame_due_ms IS NULL THEN NULL
+                                       ELSE ROW(rel.release_seq::bigint,
+                                                pg_catalog.to_timestamp(rel.pregame_due_ms::double precision / 1000)) END)) THEN
         RAISE EXCEPTION USING ERRCODE = 'PMD25', MESSAGE = 'Queues differ from the deadlines recorded at release';
       END IF;
     ELSE

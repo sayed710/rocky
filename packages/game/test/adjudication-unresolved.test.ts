@@ -100,3 +100,50 @@ test('only an exhausted job can be concluded unresolved', () => {
   assert.throws(() => ctrl.concludeUnresolved(op.operationId), GameError);
   assert.throws(() => ctrl.concludeUnresolved('missing'), GameError);
 });
+
+test('an unresolved flag falls back to the unmanaged rule: a lone-king winner draws, never wins', () => {
+  // Black flags on move with only a king against White's rook: White can mate, Black cannot.
+  const fen = '4k3/8/8/8/8/8/8/4K2R w - - 0 1';
+  const created = Game.create({ gameId: 'g-lone', players: PLAYERS, timeControl: TC, rated: false, at: 1000, initialFen: fen });
+  const afterW = created.game.move('h1h2', 2000);
+  const afterB = afterW.game.move('e8e7', 3000);
+  const afterW2 = afterB.game.move('h2h3', 4000);
+  // Black to move flags; the winner would be White, who can mate: an unresolved proof is a loss.
+  const flagAt = 4000 + 60_000 - 1000 + 10;
+  assert.equal(afterW2.game.timeoutDue(flagAt), true);
+  const op = prepareFlagExpiry(afterW2.game, { flagged: 'b', at: flagAt, operationId: 'op-lone', rulesVersion: '1.0.0' });
+  const ctrl = new AdjudicationJobController();
+  ctrl.createJob(op, afterW2.game);
+  proveOrConclude(ctrl, op.operationId);
+  const proving = afterW2.game.withEvents([startedFor(afterW2.game, op)]);
+  const settlement = ctrl.settleJob(proving, op.operationId, flagAt + 5);
+  const prefix: GameEvent[] = [...created.events, ...afterW.events, ...afterB.events, ...afterW2.events, startedFor(afterW2.game, op)];
+  const resolved = settlement.resolved;
+  const asUnresolved = (winner: 'w' | 'b') => ({
+    ...resolved,
+    evidence: { ...resolved.evidence, timeout: { winner, outcome: { status: 'unresolved', reason: 'resource_limit' } } },
+  }) as GameEvent;
+  const ended = (result: string, termination: string, winner: 'w' | 'b' | null) =>
+    ({ type: 'GameEnded', result, termination, winner, at: flagAt + 5 }) as GameEvent;
+
+  // White can mate: unresolved settles as White's win on time, and only that.
+  assert.equal(Game.fromEvents([...prefix, asUnresolved('w'), ended('1-0', 'timeout', 'w')]).status.over, true);
+  assert.throws(() => Game.fromEvents([...prefix, asUnresolved('w'), ended('1/2-1/2', 'insufficient_material', null)]), GameError);
+
+  // White flags instead, so the winner would be Black's lone king: unresolved is a draw, never a win.
+  const whiteFlagAt = 3000 + 60_000 + 10;
+  assert.equal(afterB.game.timeoutDue(whiteFlagAt), true);
+  const opW = prepareFlagExpiry(afterB.game, { flagged: 'w', at: whiteFlagAt, operationId: 'op-lone-w', rulesVersion: '1.0.0' });
+  const ctrlW = new AdjudicationJobController();
+  ctrlW.createJob(opW, afterB.game);
+  proveOrConclude(ctrlW, opW.operationId);
+  const settledW = ctrlW.settleJob(afterB.game.withEvents([startedFor(afterB.game, opW)]), opW.operationId, whiteFlagAt + 5);
+  const prefixW: GameEvent[] = [...created.events, ...afterW.events, ...afterB.events, startedFor(afterB.game, opW)];
+  const unresolvedB = {
+    ...settledW.resolved,
+    evidence: { ...settledW.resolved.evidence, timeout: { winner: 'b', outcome: { status: 'unresolved', reason: 'resource_limit' } } },
+  } as GameEvent;
+  const draw = Game.fromEvents([...prefixW, unresolvedB, { type: 'GameEnded', result: '1/2-1/2', termination: 'insufficient_material', winner: null, at: whiteFlagAt + 5 } as GameEvent]);
+  assert.deepEqual(draw.status, { over: true, result: '1/2-1/2', termination: 'insufficient_material', winner: null });
+  assert.throws(() => Game.fromEvents([...prefixW, unresolvedB, { type: 'GameEnded', result: '0-1', termination: 'timeout', winner: 'b', at: whiteFlagAt + 5 } as GameEvent]), GameError);
+});

@@ -260,6 +260,21 @@ test('forged, misplaced and tampered releases are refused immediately or at COMM
       await client.query(`INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, $2, 'AdjudicationClocksStarted', 1, $3::jsonb)`,
         [gameId, seq, JSON.stringify(event)]);
       await assert.rejects(client.query('COMMIT'), hasCode('PMD25'));
+      // The right deadline under a wrong fence (queue seq) cannot commit either.
+      const released = stoppedGame.prepareClockRelease({ releaseRequestId: 'manual', at: 1500 }).game;
+      const flagDue = Math.ceil(released.flagDeadline!);
+      for (const fence of [seq - 1, seq + 7]) {
+        await client.query('BEGIN');
+        await client.query(
+          `INSERT INTO game_adjudication_releases (game_id, release_request_id, stop_operation_id, release_seq, event_payload, flag_due_ms)
+           VALUES ($1, 'manual', $2, $3, $4::jsonb, $5)`,
+          [gameId, stopOp, seq, JSON.stringify(event), flagDue],
+        );
+        await client.query(`INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, $2, 'AdjudicationClocksStarted', 1, $3::jsonb)`,
+          [gameId, seq, JSON.stringify(event)]);
+        await client.query('INSERT INTO flag_deadlines (game_id, seq, due_ms) VALUES ($1, $2, $3)', [gameId, fence, flagDue]);
+        await assert.rejects(client.query('COMMIT'), hasCode('PMD25'));
+      }
     } finally {
       await client.query('ROLLBACK').catch(() => undefined);
       client.release();

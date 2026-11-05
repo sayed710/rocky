@@ -130,8 +130,10 @@ A proof question that exhausts its resource limit (`resource_limit`) would other
 proving forever. `AdjudicationJobController.concludeUnresolved` records the first blocking question
 as `{ status: 'unresolved', reason: 'resource_limit' }` and settles conservatively: an unresolved
 dead-position question is treated as not dead (the command applies and play continues), and an
-unresolved timeout question is an ordinary timeout loss. It never declares a dead position, so it
-cannot award a draw the rules do not support; replay accepts exactly that recorded shape.
+unresolved timeout question falls back to exactly the unmanaged flag rule (`Game.claimFlag`): a loss
+on time unless the winner's material cannot mate at all (`canMate`), then a draw. It therefore never
+decides a game differently from how the platform decides it without proofs, and never declares a
+dead position; replay accepts exactly that recorded shape.
 
 ## Consequences
 

@@ -35,7 +35,7 @@ import type {
 } from './events';
 import { charge, resumeClockSameTurn, validateDeadline, validateTimestamp, type ClockState, type TimeControl } from './clock';
 import { GameError } from './clock';
-import type { Game, RepetitionHistory } from './game';
+import { canMate, type Game, type RepetitionHistory } from './game';
 import { resolveLegalMove, type PreparedIntent, type PreparedOperation } from './prepared-command';
 import {
   getRegisteredEvidence,
@@ -383,9 +383,13 @@ function deriveNegotiationEffects(
 
 function deriveTimeoutOutcomeEnding(
   timeout: NonNullable<RecordedResolutionEvidence['timeout']>,
+  prepared: PreparedOperation,
   at: number,
 ): GameEndedEvent {
-  if (timeout.outcome.status === 'impossible') {
+  // An exhausted proof falls back to exactly the unmanaged flag rule: a loss on time unless the
+  // winner's material cannot mate at all. It never decides more than that rule would.
+  const unresolvedDraw = timeout.outcome.status === 'unresolved' && !canMate(prepared.baseFen, timeout.winner, prepared.variant);
+  if (timeout.outcome.status === 'impossible' || unresolvedDraw) {
     return { type: 'GameEnded', result: '1/2-1/2', termination: 'insufficient_material', winner: null, at };
   }
   if (timeout.outcome.status === 'reachable' || timeout.outcome.status === 'unresolved') {
@@ -413,7 +417,7 @@ function deriveTimeoutEffects(
   if (evidence.timeout.winner !== prospectiveWinner) {
     throw new GameError('Timeout evidence winner mismatch');
   }
-  return [deriveTimeoutOutcomeEnding(evidence.timeout, resolutionAt)];
+  return [deriveTimeoutOutcomeEnding(evidence.timeout, context.pending.prepared, resolutionAt)];
 }
 
 function deriveLifecycleEffects(
