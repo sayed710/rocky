@@ -30,11 +30,12 @@ import type {
   RecordedGlobalOutcome,
   RecordedImpossible,
   RecordedReachable,
+  RecordedUnresolved,
   RecordedResolutionEvidence,
 } from './events';
 import { charge, resumeClockSameTurn, validateDeadline, validateTimestamp, type ClockState, type TimeControl } from './clock';
 import { GameError } from './clock';
-import type { Game, RepetitionHistory } from './game';
+import { canMate, type Game, type RepetitionHistory } from './game';
 import { resolveLegalMove, type PreparedIntent, type PreparedOperation } from './prepared-command';
 import {
   getRegisteredEvidence,
@@ -273,7 +274,7 @@ function resolveSuccessorEvidenceEnding(
   if (succEvidence.outcome.status === 'dead') {
     return { type: 'GameEnded', result: '1/2-1/2', termination: 'dead_position', winner: null, at };
   }
-  if (succEvidence.outcome.status === 'reachable') {
+  if (succEvidence.outcome.status === 'reachable' || succEvidence.outcome.status === 'unresolved') {
     return null;
   }
   throw new GameError('Successor evidence is inconclusive');
@@ -382,12 +383,16 @@ function deriveNegotiationEffects(
 
 function deriveTimeoutOutcomeEnding(
   timeout: NonNullable<RecordedResolutionEvidence['timeout']>,
+  prepared: PreparedOperation,
   at: number,
 ): GameEndedEvent {
-  if (timeout.outcome.status === 'impossible') {
+  // An exhausted proof falls back to exactly the unmanaged flag rule: a loss on time unless the
+  // winner's material cannot mate at all. It never decides more than that rule would.
+  const unresolvedDraw = timeout.outcome.status === 'unresolved' && !canMate(prepared.baseFen, timeout.winner, prepared.variant);
+  if (timeout.outcome.status === 'impossible' || unresolvedDraw) {
     return { type: 'GameEnded', result: '1/2-1/2', termination: 'insufficient_material', winner: null, at };
   }
-  if (timeout.outcome.status === 'reachable') {
+  if (timeout.outcome.status === 'reachable' || timeout.outcome.status === 'unresolved') {
     return {
       type: 'GameEnded',
       result: timeout.winner === 'w' ? '1-0' : '0-1',
@@ -412,7 +417,7 @@ function deriveTimeoutEffects(
   if (evidence.timeout.winner !== prospectiveWinner) {
     throw new GameError('Timeout evidence winner mismatch');
   }
-  return [deriveTimeoutOutcomeEnding(evidence.timeout, resolutionAt)];
+  return [deriveTimeoutOutcomeEnding(evidence.timeout, context.pending.prepared, resolutionAt)];
 }
 
 function deriveLifecycleEffects(
@@ -679,6 +684,23 @@ function replaySingleWitnessMove(pos: Position, uci: string): Position {
   return pos.play(matched);
 }
 
+/**
+ * Witnesses this process has already verified, keyed by everything the verdict depends on: the
+ * variant, the full FEN (which names every castling rook and the check counters), the winner and the
+ * moves. Legal moves and checkmate do not depend on move history, so a witness verified once is
+ * valid for every later replay of the same recorded evidence. Without this, every replay of a game
+ * re-verified every earlier witness move by move, a cost that grew with the square of the game's
+ * length and dominated each admission, settlement and release (Issue #124 soak). Bounded; the
+ * oldest entry is dropped first. Only successes are kept, so a forged witness is always rejected.
+ */
+const VERIFIED_WITNESS_CAPACITY = 4096;
+const verifiedWitnesses = new Set<string>();
+
+function witnessKey(pos: Position, winner: Color, witness: readonly string[]): string {
+  // A JSON tuple keeps element boundaries: ['a b'] and ['a', 'b'] can never share a key.
+  return JSON.stringify([pos.variant, pos.fen(), winner, witness]);
+}
+
 /** Replays a candidate mate witness move sequence and verifies checkmate for the claimed winner. */
 export function verifyUciWitnessReplay(pos: Position, winner: Color, witness: readonly string[]): void {
   if (!Array.isArray(witness)) throw new GameError('Witness move sequence must be an array');
@@ -687,6 +709,16 @@ export function verifyUciWitnessReplay(pos: Position, winner: Color, witness: re
     if (checkEmptyWitnessValid(pos, winner)) return;
     throw new GameError('Witness move sequence cannot be empty for a non-checkmated root');
   }
+  const key = witnessKey(pos, winner, witness);
+  if (verifiedWitnesses.has(key)) return;
+  replayWitness(pos, winner, witness);
+  if (verifiedWitnesses.size >= VERIFIED_WITNESS_CAPACITY) {
+    verifiedWitnesses.delete(verifiedWitnesses.values().next().value as string);
+  }
+  verifiedWitnesses.add(key);
+}
+
+function replayWitness(pos: Position, winner: Color, witness: readonly string[]): void {
   let cur = pos;
   for (const uci of witness) {
     cur = replaySingleWitnessMove(cur, uci);
@@ -719,6 +751,14 @@ function validateRecordedDeadOutcome(rec: Record<string, unknown>): void {
   validateSideImpossible(rec.black, 'black');
 }
 
+/** An unresolved outcome carries exactly its status and the one supported reason. */
+function validateRecordedUnresolved(rec: Record<string, unknown>): void {
+  const keys = Object.keys(rec).sort();
+  if (rec.reason !== 'resource_limit' || keys.length !== 2 || keys[0] !== 'reason' || keys[1] !== 'status') {
+    throw new GameError('Invalid recorded unresolved outcome');
+  }
+}
+
 function validateRecordedGlobalOutcome(outcome: unknown, pos: Position): void {
   if (typeof outcome !== 'object' || outcome === null) {
     throw new GameError('Missing recorded global outcome');
@@ -728,6 +768,8 @@ function validateRecordedGlobalOutcome(outcome: unknown, pos: Position): void {
     validateRecordedDeadOutcome(rec);
   } else if (rec.status === 'reachable') {
     verifyUciWitnessReplay(pos, rec.winner as Color, rec.witness as readonly string[]);
+  } else if (rec.status === 'unresolved') {
+    validateRecordedUnresolved(rec);
   } else {
     throw new GameError(`Invalid recorded outcome status "${rec.status}"`);
   }
@@ -745,6 +787,8 @@ function validateRecordedTimeoutDetails(outcome: unknown, expectedWinner: Color,
       throw new GameError('Timeout reachable winner mismatch');
     }
     verifyUciWitnessReplay(basePos, expectedWinner, o.witness as readonly string[]);
+  } else if (o.status === 'unresolved') {
+    validateRecordedUnresolved(o);
   } else {
     throw new GameError(`Invalid timeout outcome status "${o.status}"`);
   }
@@ -980,6 +1024,9 @@ function extractGlobalOutcome(rec: ReturnType<typeof getRegisteredEvidence>): Re
       witness: rec.outcome.witnessUci,
     };
   }
+  if (rec.outcome.kind === 'unresolved') {
+    return { status: 'unresolved', reason: rec.outcome.reason };
+  }
   throw new GameError('Pending global deadness evidence cannot settle');
 }
 
@@ -1001,7 +1048,7 @@ function extractSuccessorOutcome(
 function extractTimeoutOutcome(
   dirHandle: AdjudicationEvidenceHandle,
   pending: PendingAdjudicationState,
-): { winner: Color; outcome: RecordedImpossible | RecordedReachable } {
+): { winner: Color; outcome: RecordedImpossible | RecordedReachable | RecordedUnresolved } {
   const intent = pending.prepared.intent as { kind: 'expireFlag'; flagged: Color };
   const prospectiveWinner = opposite(intent.flagged);
   const dirRec = getRegisteredEvidence(dirHandle, pending.prepared, {
@@ -1020,6 +1067,9 @@ function extractTimeoutOutcome(
       outcome: { status: 'reachable', winner: prospectiveWinner, witness: dirRec.outcome.witnessUci },
     };
   }
+  if (dirRec.outcome.kind === 'unresolved') {
+    return { winner: prospectiveWinner, outcome: { status: 'unresolved', reason: dirRec.outcome.reason } };
+  }
   throw new GameError('Pending directional evidence cannot settle');
 }
 
@@ -1030,7 +1080,7 @@ function extractRecordedEvidence(
   const result: {
     base?: RecordedGlobalOutcome;
     successor?: { fen: string; outcome: RecordedGlobalOutcome };
-    timeout?: { winner: Color; outcome: RecordedImpossible | RecordedReachable };
+    timeout?: { winner: Color; outcome: RecordedImpossible | RecordedReachable | RecordedUnresolved };
   } = {};
 
   const termHandle = findEvidenceHandle(evidence, 'terminal_authorization');
