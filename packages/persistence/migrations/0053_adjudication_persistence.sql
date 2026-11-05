@@ -178,18 +178,23 @@ $$;
 REVOKE ALL ON FUNCTION adjudication_restore_deadlines(UUID, INTEGER) FROM PUBLIC;
 
 -- Deferred validation runs once per (transaction, game): the first deferred firing at COMMIT already
--- sees the final state. Every immediate guard clears the marker on any change, so a later change
--- (after SET CONSTRAINTS ... IMMEDIATE, say) is validated again. A transaction-local setting is
--- reverted with its savepoint, which only ever causes an extra validation.
-CREATE FUNCTION adjudication_validation_marker(game UUID) RETURNS TEXT
-LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, public, pg_temp AS $$
-  SELECT 'rocky.adjudication_validated_' || replace(game::text, '-', '')
-$$;
+-- sees the final state. The "validated" mark lives in a table no writer role can touch (no PUBLIC
+-- privileges; only these SECURITY DEFINER functions write it), never in a client-settable setting.
+-- Every immediate guard removes the mark on any change, so a later change (after SET CONSTRAINTS ...
+-- IMMEDIATE, say) is validated again. Marks are rolled back with their (sub)transaction, which only
+-- ever causes an extra validation. The game's advisory lock admits one validating transaction at a
+-- time, so a mark from any other transaction id is stale and is removed when a new one is written.
+CREATE UNLOGGED TABLE adjudication_validation_marks (
+  xact_id xid8 NOT NULL,
+  game_id UUID NOT NULL,
+  PRIMARY KEY (game_id, xact_id)
+);
+REVOKE ALL ON adjudication_validation_marks FROM PUBLIC;
 
 CREATE FUNCTION adjudication_mark_changed(game UUID) RETURNS void
-LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
 BEGIN
-  PERFORM set_config(adjudication_validation_marker(game), '', true);
+  DELETE FROM adjudication_validation_marks WHERE game_id = game AND xact_id = pg_current_xact_id();
 END;
 $$;
 REVOKE ALL ON FUNCTION adjudication_mark_changed(UUID) FROM PUBLIC;
@@ -342,8 +347,6 @@ BEGIN
     RAISE EXCEPTION USING ERRCODE = 'PMA01', MESSAGE = 'AdjudicationClocksStarted cannot be appended in this release';
   END IF;
 
-  PERFORM adjudication_mark_changed(NEW.game_id);
-
   -- An append at an occupied position is a stale writer: let the primary key reject it with the
   -- same 23505 every existing caller already maps to its version conflict.
   IF EXISTS (SELECT 1 FROM game_events WHERE game_id = NEW.game_id AND seq = NEW.seq) THEN
@@ -354,6 +357,7 @@ BEGIN
   -- Start, and the proving-row lock below waits for an in-flight settlement.
   IF EXISTS (SELECT 1 FROM game_adjudications WHERE game_id = NEW.game_id) THEN
     PERFORM pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || NEW.game_id::text, 0));
+    PERFORM adjudication_mark_changed(NEW.game_id);
   END IF;
 
   SELECT * INTO adj FROM game_adjudications
@@ -610,12 +614,14 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM game_adjudications WHERE game_id = NEW.game_id) THEN
     RETURN NULL;
   END IF;
-  IF current_setting(adjudication_validation_marker(NEW.game_id), true) = 'validated' THEN
+  PERFORM pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || NEW.game_id::text, 0));
+  IF EXISTS (SELECT 1 FROM adjudication_validation_marks
+             WHERE game_id = NEW.game_id AND xact_id = pg_current_xact_id()) THEN
     RETURN NULL;
   END IF;
-  PERFORM pg_advisory_xact_lock(hashtextextended('rocky:game-adjudication:' || NEW.game_id::text, 0));
   PERFORM adjudication_validate_game(NEW.game_id);
-  PERFORM set_config(adjudication_validation_marker(NEW.game_id), 'validated', true);
+  DELETE FROM adjudication_validation_marks WHERE game_id = NEW.game_id;
+  INSERT INTO adjudication_validation_marks (xact_id, game_id) VALUES (pg_current_xact_id(), NEW.game_id);
   RETURN NULL;
 END;
 $$;

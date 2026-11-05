@@ -772,3 +772,57 @@ test('deferred validation runs once per transaction but re-runs after any later 
     }
   });
 });
+
+test('a writer cannot forge the validated mark to skip COMMIT validation', async () => {
+  await withTestDatabase(async ({ pool, connectionString }) => {
+    await setup(pool);
+    const store = new PgAdjudicationStore(pool);
+    const { gameId } = await createGame(pool, { fen: FEN_MATE1 });
+    const operationId = await startMove(store, gameId, 'e7e4');
+    const grant = await claim(store, gameId, operationId);
+    await prove(store, gameId, operationId);
+    await store.settleAdjudication({ gameId, operationId, grant, resolutionAt: 1200 });
+    const row = await adjudication(pool, gameId, operationId);
+
+    // A writer allowed to write the obligation table and the event log, but nothing else new.
+    const role = `adj_writer_${randomBytes(4).toString('hex')}`;
+    const password = randomBytes(12).toString('hex');
+    await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`);
+    let writer: Pool | null = null;
+    try {
+      await pool.query(`GRANT USAGE ON SCHEMA public TO ${role};
+        GRANT SELECT, INSERT, UPDATE ON game_adjudications TO ${role};
+        GRANT SELECT, INSERT ON game_events TO ${role};`);
+      const url = new URL(connectionString);
+      url.username = role;
+      url.password = password;
+      writer = new Pool({ connectionString: url.toString(), max: 1 });
+      const client = await writer.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `INSERT INTO game_adjudications (game_id, operation_id, base_revision, started_seq, started_type, started_version,
+             started_payload, prepared, accepted_at, rules_version, original_clock, thinking_elapsed_at_a, execution_state)
+           VALUES ($1, $2, 3, 4, 'AdjudicationStarted', 1, $3::jsonb, $4::jsonb, 1300, $5, '{}'::jsonb, 0, 'proving')`,
+          [gameId, uuid(), JSON.stringify(row.started_payload), JSON.stringify(row.prepared), RULES],
+        );
+        // Neither a client-side setting nor the mark table is a way around validation.
+        await client.query("SELECT set_config('rocky.adjudication_validated_' || replace($1::text, '-', ''), 'validated', true)", [gameId]);
+        await client.query('SAVEPOINT s');
+        await assert.rejects(
+          client.query('INSERT INTO adjudication_validation_marks (xact_id, game_id) VALUES (pg_current_xact_id(), $1)', [gameId]),
+          hasCode('42501'),
+        );
+        await client.query('ROLLBACK TO SAVEPOINT s');
+        await assert.rejects(client.query('COMMIT'), hasCode('PMD03'));
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    } finally {
+      await writer?.end();
+      await pool.query(`DROP OWNED BY ${role}`);
+      await pool.query(`DROP ROLE ${role}`);
+    }
+  });
+});

@@ -52,8 +52,10 @@ lifecycle event counts, stop rules and queue suppression. Queue tables carry a d
 writer can commit a deadline for a proving or stopped game.
 
 The whole-game validation runs once per (transaction, game): the first deferred firing at COMMIT
-already sees the final state and sets a transaction-local marker, which every immediate guard clears
-on any later change (so `SET CONSTRAINTS ... IMMEDIATE` cannot be used to skip it). Event-by-event
+already sees the final state and records a mark in `adjudication_validation_marks`, a table with no
+PUBLIC privileges that only the SECURITY DEFINER functions write (a client-settable setting would
+let any writer skip validation). Every immediate guard removes the mark on any later change, so
+`SET CONSTRAINTS ... IMMEDIATE` cannot be used to skip it either. Event-by-event
 suffix verification runs only for operations settled in the current transaction; earlier completed
 rows were verified at their own COMMIT and are immutable, so they are re-checked only for ordering,
 lifecycle counts and stop rules.
