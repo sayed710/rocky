@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-11-05 — Issue #124 adjudication wired through the live gateway behind `ADJUDICATION_ENABLED` (off by default): commands admitted as obligations, owner publishes settlements and releases via `adjudicationChanged`, recorded releases re-derived on rebuild, optional `StateView.adjudication`; ADR 0176; hermetic and real PostgreSQL tests. Enablement and rollout remain on HOLD._
+_Last updated: 2026-11-07 — Issue #124 deterministic fault coverage & bounded timeout budget in services/gateway/test: guaranteed lost COMMIT reply fault injection and assertion, worker 1 death verified against held DB claims, bounded SOAK_TIMEOUT_MS budget, 30s minimal progress telemetry, honest claimGapWallMs, receipt.stopOperationId clock-release correlation, reservoir-bounded metrics and unbiased top-K tail collection; 12/12 unit tests PASS, full gateway test compilation PASS; full benchmark and cluster activation remain UNRUN._
+
+Prior: _Last updated: 2026-11-07 — Issue #124 bounded soak measurement improvements in services/gateway/test: deterministic PRNG derived from SOAK_SEED, basePly-anchored playout moves, honest claimGapWallMs and phase timelines, receipt.stopOperationId clock-release correlation, reservoir-bounded metrics and unbiased top-K tail collection, clean task cancellation and join; 10/10 focused unit tests PASS, full gateway test compilation PASS; full benchmark and cluster activation remain UNRUN._
+
+Prior: _Last updated: 2026-11-05 — Issue #124 adjudication wired through the live gateway behind `ADJUDICATION_ENABLED` (off by default): commands admitted as obligations, owner publishes settlements and releases via `adjudicationChanged`, recorded releases re-derived on rebuild, optional `StateView.adjudication`; ADR 0176; hermetic and real PostgreSQL tests. Enablement and rollout remain on HOLD._
 
 Prior: _Last updated: 2026-11-05 — Issue #124 durable adjudication worker (unconstructed): `AdjudicationWorker` claims proving operations, proves in bounded slices with lease renewal, settles exhausted proofs as unresolved, settles with lost-reply recovery, publishes, then releases stops idempotently; ADR 0175; hermetic and real PostgreSQL race/successor tests. Wiring, enablement and rollout remain on HOLD._
 
@@ -6515,3 +6519,42 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Correctness fixes**: exact payload/version validation of Started and settlement suffixes at COMMIT; permit, receipt, ordering, lifecycle-count and stop invariants; completed-row immutability including permits; strictly increasing claim generations (DB-enforced); Started must commit before claim/settlement (DB-enforced); deferred queue checks; restoration of suppressed no-show/flag queues after a running completion; settle retry answered from the database (survives restart); retained evaluation not pinned to the first claimer; renewal bounded to database now; claims require a reusable intent for lost-reply recovery.
 - **Verification**: see the PR for the exact commands and counts. Mutation checks: 8 of 9 targeted mutants of the fixes are killed by the new tests; the survivor (old generation formula) is equivalent in reachable states and generation reuse is independently refused by the database.
 - **HOLD**: no production migration, wiring, worker or client integration, deployment or activation. Broader dead-position classes remain open.
+
+### Development Slice: Issue #124 Soak Metrics & Bounded Telemetry (2026-11-07)
+
+- **Scope & Context**:
+  - Isolated soak measurement improvements in `services/gateway/test/adjudication-soak.integration.test.ts` and test support `services/gateway/test/support/soak-metrics.ts` for Issue #124 durable adjudication profiling.
+  - Zero modifications to worker production code, gateway routing, controller proof semantics, move proof caps, migrations, or dependencies.
+- **Implemented Capabilities**:
+  - Validated integer config parsing (`SOAK_SEED`, `SOAK_GAMES`, `SOAK_PLIES`, `SOAK_THINK_MS`) with strict non-empty and 32-bit unsigned bounds checks; rejects invalid inputs with `RangeError`.
+  - Deterministic PRNG streams (Mulberry32) derived from `SOAK_SEED`; playout moves anchored to `(gameSeed, basePly, attempt)` so retry loops do not shift future plies; concurrent DB COMMIT draws qualify async interleaving order under declared concurrency.
+  - Resolved harness off-by-one move correlation: `onMovePending` keys by expected broadcast ply (`basePly + 1`), matching `MoveBroadcast.ply`; enforced soak postconditions that matched move latency sample count equals observed successful moves.
+  - Distinguishes attempts from committed completions on `startAdjudication`, `settleAdjudication`, and `releaseClocks`; preserves slice CPU and claim history across retries without duplicate completions.
+  - Correlates clock release with exact `receipt.stopOperationId` (`AdjudicationReleaseReceipt`), protecting same-game next operations from misattribution.
+  - Honest `claimGapWallMs` and monotonic vs epoch timestamp separation; removed arbitrary `derivePrimaryCause` classifier to let root analyze real traces.
+  - Truly bounded telemetry: Algorithm R reservoir sampling (`BoundedReservoir`) for quantile approximations without first-N bias; `TopKCollector` preserving late-tail latency samples.
+  - Owned player and fault task cancellation via running flag and coordinated `Promise.allSettled` join before teardown.
+- **Verification Evidence**:
+  - `tsc -p services/gateway/tsconfig.test.json`: 0 errors.
+  - `node --test services/gateway/test/soak-metrics.test.ts`: 10/10 PASS (0 fail, 0 skip).
+  - Code hygiene: all functions parameters <= 4, cyclomatic decisions <= 10, nesting <= 5, zero `as any`.
+- **HOLD & Remaining Scope**:
+  - Benchmarks (40 games x 80/120 plies under Docker 512Mi/500m limits) and final acceptance remain UNRUN. Production rollout and cluster activation remain on HOLD. No claim of production deployment or full FIDE completeness.
+
+### Development Slice: Issue #124 Deterministic Fault Coverage & Bounded Timeout Budget (2026-11-07)
+
+- **Scope & Context**:
+  - Follow-up harness fault coverage and benchmark configuration improvements in `services/gateway/test/adjudication-soak.integration.test.ts` and `services/gateway/test/support/soak-metrics.ts` following root Docker smoke findings (lostCommitReplies=0 under 0.5 CPU).
+  - Preserves zero production changes, zero `as any`, and <= 4 function parameters.
+- **Implemented Capabilities**:
+  - Deterministic lost COMMIT reply guarantee: replaced probabilistic sleep window with `LossyCommitControl` (`targetMinLost = 1`), keeping the fault window open until at least 1 real committed transaction drops its reply; postcondition verifies `report.faultCoverage.lostCommitReplies >= 1`.
+  - Verified active claim holding at worker 1 death: queries `game_adjudications` for `execution_state = 'proving'` and `executor_id = replicas[1].executorId` with `lease_until > clock_timestamp()`, confirming actual held lease before stopping worker 1; postconditions assert `report.faultCoverage.heldAtDeath >= 1` and `report.faultCoverage.successorTakeovers >= 1`.
+  - Explicit bounded `SOAK_TIMEOUT_MS`: `parseTimeoutMs` validates range 10,000..3,600,000 ms with default 900,000 ms, passed directly to `soakTest({ timeout: config.timeoutMs })` to allow declared long benchmarks without silent hangs.
+  - Periodic minimal 30-second progress logging (`[soak progress] elapsed, moves, activeProofs, lostCommits`) with timer safely cleared in `finally`.
+  - Added `activeOpsCount` and `successorTakeoversCount` getters on `SoakMetricsTracker`.
+- **Verification Evidence**:
+  - `tsc -p services/gateway/tsconfig.test.json`: 0 errors.
+  - `node --test services/gateway/test/soak-metrics.test.ts`: 12/12 PASS (0 fail, 0 skip).
+  - Code hygiene: all functions parameters <= 4, cyclomatic decisions <= 10, nesting <= 5, zero `as any`.
+- **HOLD & Remaining Scope**:
+  - Docker smoke and large-scale benchmarks (40 games x 80/120 plies under 0.5 CPU / 512Mi limits) remain UNRUN for root execution. Production rollout, flag activation, and remote changes remain on HOLD.
