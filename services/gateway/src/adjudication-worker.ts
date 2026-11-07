@@ -70,7 +70,7 @@ export interface AdjudicationWorkerOptions {
    * shows a game proving or stopped re-reads the log on its own (ADR-0176).
    */
   readonly publish: (change: AdjudicationChange) => Promise<void>;
-  /** Lease length per claim and renewal (default 30 s). */
+  /** Lease length per claim and renewal (default 30 s; minimum 2 ms). */
   readonly leaseMs?: number;
   /** Proof work per slice; the loop yields to other work between slices (default 2 000). */
   readonly sliceBudget?: number;
@@ -176,7 +176,7 @@ export class AdjudicationWorker {
   // Revisit trigger: extract an options-resolution record if options exceed 15 or behavioral branching is introduced.
   constructor(private readonly options: AdjudicationWorkerOptions) {
     this.#store = options.store;
-    this.#leaseMs = positive(options.leaseMs ?? 30_000, 'leaseMs');
+    this.#leaseMs = positiveMin(options.leaseMs ?? 30_000, 'leaseMs', 2);
     this.#sliceBudget = positive(options.sliceBudget ?? 2_000, 'sliceBudget');
     this.#pollMs = positive(options.pollMs ?? 250, 'pollMs');
     this.#pageSize = positive(options.pageSize ?? 20, 'pageSize');
@@ -580,21 +580,7 @@ export class AdjudicationWorker {
         }
         return updated;
       } catch (error) {
-        if (error instanceof AdjudicationConflictError) {
-          this.#cleanupHeldJob(held);
-          throw error;
-        }
-        this.#fail('Renewal of an adjudication lease failed', error, {
-          gameId: held.gameId,
-          operationId: held.operationId,
-        });
-        const failureNow = this.#now();
-        if (held.grant.leaseUntil.getTime() <= failureNow) {
-          this.#cleanupHeldJob(held);
-        } else {
-          this.#recordRenewalFailure(held, failureNow);
-        }
-        throw error;
+        return this.#handleRenewalFailure(held, error);
       } finally {
         held.renewing = undefined;
         this.#scheduleRenewal();
@@ -610,10 +596,30 @@ export class AdjudicationWorker {
     return renewal;
   }
 
+  #handleRenewalFailure(held: InFlightJob, error: unknown): AdjudicationClaimGrant {
+    if (error instanceof AdjudicationConflictError) {
+      this.#cleanupHeldJob(held);
+      throw error;
+    }
+    this.#fail('Renewal of an adjudication lease failed', error, {
+      gameId: held.gameId,
+      operationId: held.operationId,
+    });
+    const now = this.#now();
+    if (held.grant.leaseUntil.getTime() <= now) {
+      this.#cleanupHeldJob(held);
+      throw error;
+    }
+    if (this.#inFlight.get(held.operationId) === held) {
+      this.#recordRenewalFailure(held, now);
+    }
+    return held.grant;
+  }
+
   #recordRenewalFailure(held: InFlightJob, now: number): void {
     held.renewalAttempts = (held.renewalAttempts ?? 0) + 1;
-    const baseDelay = Math.max(50, Math.floor(this.#leaseMs / 20));
-    const maxDelay = Math.max(50, Math.floor(this.#leaseMs / 4));
+    const baseDelay = Math.max(1, Math.floor(this.#leaseMs / 20));
+    const maxDelay = Math.max(1, Math.floor(this.#leaseMs / 4));
     const factor = 2 ** Math.min(held.renewalAttempts - 1, 6);
     const retryDelay = Math.min(maxDelay, baseDelay * factor);
     held.nextRenewalAt = now + retryDelay;
@@ -656,8 +662,8 @@ export class AdjudicationWorker {
       this.#renewalTimer = undefined;
       return;
     }
-    const timeUntilDue = Math.max(10, earliestWait);
-    const delay = Math.min(timeUntilDue, Math.max(50, Math.floor(this.#leaseMs / 4)));
+    const maxDelay = Math.max(1, Math.floor(this.#leaseMs / 4));
+    const delay = Math.min(Math.max(1, earliestWait), maxDelay);
     this.#renewalTimer = setTimeout(() => {
       this.#renewalTimer = undefined;
       this.#renewAllDueHeldJobs();
@@ -736,6 +742,13 @@ function nonnegative(value: number, name: string): number {
 
 function positive(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive safe integer`);
+  return value;
+}
+
+function positiveMin(value: number, name: string, min: number): number {
+  if (!Number.isSafeInteger(value) || value < min) {
+    throw new RangeError(`${name} must be a safe integer >= ${min}`);
+  }
   return value;
 }
 

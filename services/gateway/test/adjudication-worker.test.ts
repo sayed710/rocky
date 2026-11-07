@@ -343,6 +343,7 @@ test('invalid options are refused', () => {
   const store = new FakeStore({ now: 0 });
   for (const bad of [
     { leaseMs: 0 },
+    { leaseMs: 1 },
     { sliceBudget: -1 },
     { pollMs: 1.5 },
     { pageSize: Number.NaN },
@@ -1518,6 +1519,206 @@ test('transient outage has bounded attempts across a long mock-time window and n
   } finally {
     try {
       resolveStalledIO?.();
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('foreground continuation retains live proof progress through transient renewal failure and settles after backoff retry before expiry', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const JOB_OP = '018f2780-0000-7000-8000-0000000000a1';
+    store.leaseUntil = Date.now() + 10_000;
+    let mono = 0;
+    let workSteps = 0;
+
+    store.claimable = [{ gameId: GAME, operationId: JOB_OP, generation: '0' }];
+    store.stepProofJob = (_op: string, budget: number) => {
+      if (budget === 0) {
+        return step('active');
+      }
+      mono += 100;
+      workSteps += 1;
+      if (workSteps < 3) {
+        return step('active');
+      }
+      return step('ready');
+    };
+
+    let renewalCalls = 0;
+    const renewalTimes: number[] = [];
+    store.renewAdjudication = async (params) => {
+      renewalCalls += 1;
+      renewalTimes.push(Date.now());
+      if (renewalCalls === 1) {
+        throw new Error('transient database outage');
+      }
+      return store.grant(Date.now() + params.extensionMs, params.grant.gameId, params.grant.operationId, String(renewalCalls + 1));
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      pollMs: 100,
+      concurrency: 1,
+      proofSliceMs: 50,
+      publish: async () => {},
+      monotonic: () => mono,
+      now: () => Date.now(),
+    });
+
+    // Pass 1: Claims JOB_OP (generation '1' grant, leaseUntil = 10_000). Runs slice 1 (budget > 0).
+    const pass1 = await worker.runPass();
+    assert.equal(pass1.settled, 0);
+    assert.equal(pass1.pending, 1, 'held job remains pending after slice 1');
+    assert.equal(store.calls.filter((c) => c === `create:${JOB_OP}`).length, 1, 'proof job created once');
+    assert.equal(workSteps, 1, 'first meaningful work slice executed');
+
+    // Advance clock to 6,000ms: lease remaining is 4,000ms <= 5,000ms, so renewal is due
+    mock.timers.tick(6_000);
+
+    // Pass 2: Foreground continuation executes #sweepHeld -> #continue.
+    // #continue encounters transient renewal failure while grant is still live (remaining 4,000ms > 0).
+    // The held job is NOT evicted or cancelled; progress is retained and slice 2 runs.
+    const pass2 = await worker.runPass();
+    assert.equal(pass2.settled, 0);
+    assert.equal(pass2.pending, 1, 'held job remains pending through recoverable failure');
+    assert.equal(renewalCalls, 1, 'first renewal attempt made in foreground continuation');
+    assert.equal(workSteps, 2, 'second work slice executed during backoff without evicting proof');
+    assert.equal(store.calls.filter((c) => c === `create:${JOB_OP}`).length, 1, 'proof job not reinitialized');
+    assert.equal(store.calls.filter((c) => c === 'cancel').length, 0, 'no cancellation or eviction during live backoff');
+
+    // Advance mock time by 500ms (backoff retry delay): now retry is due at 6,500ms, strictly before 10,000ms expiry
+    mock.timers.tick(500);
+
+    // Pass 3: Renewal retry succeeds, extending lease. Slice 3 returns ready and settles.
+    const pass3 = await worker.runPass();
+    assert.equal(pass3.settled, 1, 'settled successfully after backoff retry');
+    assert.equal(pass3.pending, 0, 'no pending jobs left after settlement');
+    assert.equal(renewalCalls, 2, 'retry attempt was made');
+    assert.equal(renewalTimes[0], 6_000, 'first renewal attempt at half-lease mark');
+    assert.equal(renewalTimes[1], 6_500, 'second renewal retry after bounded backoff');
+    assert.equal(workSteps, 3, 'completed three meaningful work slices');
+    assert.equal(store.settles.length, 1, 'settlement completed');
+    assert.equal(store.calls.filter((c) => c === `create:${JOB_OP}`).length, 1, 'proof job created exactly once across entire lifecycle');
+    assert.equal(store.calls.filter((c) => c === 'cancel').length, 1, 'cancel was only from final settlement cleanup');
+  } finally {
+    try {
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('short 10ms leases renew strictly before expiry across multiple intervals, retain proof progress, and clean up on actual expiry', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  let resolveJobA!: () => void;
+  const jobABarrier = new Promise<void>((resolve) => {
+    resolveJobA = resolve;
+  });
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const JOB_A = '018f2780-0000-7000-8000-0000000000a1';
+    const JOB_B = '018f2780-0000-7000-8000-0000000000a2';
+    store.leaseUntil = Date.now() + 10;
+    let mono = 0;
+    let jobBSlices = 0;
+
+    store.claimable = [
+      { gameId: GAME, operationId: JOB_A, generation: '0' },
+      { gameId: GAME, operationId: JOB_B, generation: '0' },
+    ];
+    store.stepProofJob = (op: string, budget: number) => {
+      if (budget > 0) {
+        mono += 10;
+        if (op === JOB_B) jobBSlices += 1;
+      }
+      return step('active');
+    };
+
+    let jobARenewCalls = 0;
+    let jobBRenewCalls = 0;
+    const jobBRenewTimes: Array<{ at: number; leaseUntil: number }> = [];
+
+    store.renewAdjudication = async (params) => {
+      if (params.grant.operationId === JOB_A) {
+        jobARenewCalls += 1;
+        await jobABarrier;
+        return store.grant(Date.now() + params.extensionMs, params.grant.gameId, params.grant.operationId, '2');
+      }
+      assert.ok(
+        Date.now() < params.grant.leaseUntil.getTime(),
+        `JOB_B background renewal at ${Date.now()} strictly before lease expired (${params.grant.leaseUntil.getTime()})`,
+      );
+      jobBRenewCalls += 1;
+      jobBRenewTimes.push({ at: Date.now(), leaseUntil: params.grant.leaseUntil.getTime() });
+      return store.grant(Date.now() + params.extensionMs, params.grant.gameId, params.grant.operationId, String(jobBRenewCalls + 1));
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10,
+      pollMs: 10,
+      concurrency: 1,
+      proofSliceMs: 2,
+      publish: async () => {},
+      monotonic: () => mono,
+      now: () => Date.now(),
+    });
+
+    worker.start();
+    // Fire pass 1 at delay 0: admits both jobs, leaves both pending in #inFlight
+    mock.timers.tick(0);
+    await pumpUntil(() => store.claims.length >= 2);
+
+    // Advance clock across 25ms (>2 full 10ms lease intervals) in 1ms steps with bounded event-loop pumping.
+    // While the foreground lane remains stalled on JOB_A, JOB_B's renewals must be scheduled and run in the background.
+    for (let elapsed = 0; elapsed < 25; elapsed += 1) {
+      mock.timers.tick(1);
+      await pumpUntil(() => false, 1);
+    }
+
+    // Verify multiple timely background renewals completed strictly before deadlines
+    assert.equal(jobARenewCalls, 1, 'only one renewal initiated for stalled JOB_A');
+    assert.ok(jobBRenewCalls >= 3, `multiple timely background renewals completed for JOB_B (actual: ${jobBRenewCalls})`);
+    assert.ok(jobBRenewTimes.length >= 3, 'recorded multiple timely renewals for JOB_B');
+    for (const record of jobBRenewTimes) {
+      assert.ok(
+        record.at < record.leaseUntil,
+        `renewal at ${record.at} was strictly before lease deadline ${record.leaseUntil}`,
+      );
+    }
+
+    // Proof job for JOB_B was created exactly once across intervals; progress was retained
+    assert.equal(store.calls.filter((c) => c === `create:${JOB_B}`).length, 1, 'proof job for JOB_B created exactly once');
+    assert.equal(store.calls.filter((c) => c === `create:${JOB_A}`).length, 1, 'proof job for JOB_A created exactly once');
+    assert.ok(jobBSlices >= 1, 'proof progress was stepped');
+    assert.equal(store.calls.filter((c) => c === 'cancel').length, 0, 'no cancellation during active intervals');
+
+    // Calling stop() must wait for the in-flight renewal IO of JOB_A
+    let stopResolved = false;
+    const stopPromise = worker.stop().then(() => {
+      stopResolved = true;
+    });
+    await pumpUntil(() => stopResolved, 5);
+    assert.equal(stopResolved, false, 'stop() must not resolve while stalled renewal IO is in flight');
+
+    resolveJobA();
+    await stopPromise;
+    assert.equal(stopResolved, true, 'stop() resolved once renewal IO completed');
+  } finally {
+    try {
+      resolveJobA?.();
       if (worker) await worker.stop();
     } finally {
       mock.timers.reset();
