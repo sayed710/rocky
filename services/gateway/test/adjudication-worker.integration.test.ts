@@ -295,3 +295,24 @@ pgTest('a stop waits out the grace period; a blocked game never starves the stop
     assert.deepEqual((await store.listReleasableStops(1, 0, [])).map((s) => s.gameId), [first]);
   });
 });
+
+pgTest('bounded concurrency settles and releases multiple operations across games without overclaiming', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const players = await setup(pool);
+    const store = new PgAdjudicationStore(pool);
+    const g1 = await createGame(pool, players, FEN_MATE1);
+    const g2 = await createGame(pool, players, FEN_MATE1);
+    const g3 = await createGame(pool, players, FEN_MATE1);
+    await startMove(store, g1, 'e7e4', 'w', 1100);
+    await startMove(store, g2, 'e7e4', 'w', 1100);
+    await startMove(store, g3, 'e7e4', 'w', 1100);
+    const clock = { now: 1200 };
+    const published: AdjudicationChange[] = [];
+    const w = worker(store, clock, published, { concurrency: 2 });
+    const pass = await w.runPass();
+    assert.deepEqual({ settled: pass.settled, released: pass.released, failed: pass.failed }, { settled: 3, released: 3, failed: 0 });
+    assert.equal(published.filter((c) => c.kind === 'settled').length, 3);
+    assert.equal(published.filter((c) => c.kind === 'released').length, 3);
+    assert.equal((await pool.query("SELECT count(*)::int AS n FROM game_adjudications WHERE execution_state = 'proving' OR is_current_stop")).rows[0].n, 0);
+  });
+});
