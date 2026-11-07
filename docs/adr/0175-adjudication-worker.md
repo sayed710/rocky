@@ -82,9 +82,14 @@ Recovery and ordering:
   for removed jobs and across previous cycles. Renewal failure paths (both `AdjudicationConflictError`
   and expired transient failures) are fenced by held-object identity, ensuring a late background renewal
   that outlives a previous cleanup cannot evict or drop a newly admitted replacement proof job for the same
-  operation. When a renewal fails transiently while its lease remains live, retry spacing is bounded and
-  lease-aware (scaling exponentially up to `leaseMs / 4`), eliminating tight 10ms retry loops across all
-  renewal entrypoints while healthy jobs continue renewing on time and eventual loss cleanup is preserved.
+  operation. When a renewal fails transiently while its lease remains live, the failure is logged and
+  lease-aware retry backoff is recorded while retaining the still-live current grant and proof progress across
+  foreground continuation, eliminating tight 10ms retry loops and avoiding unnecessary proof job reinitialization
+  or history replay. Healthy jobs continue renewing on time, and eventual loss or expired failure cleans up promptly.
+  Renewal scheduling honors the earliest supported lease deadline down to 10ms (with minimum schedulable lease
+  `leaseMs >= 2ms` where half-lease renewal can start before expiry) without fixed 10ms or 50ms floors forcing
+  renewals to start at or after expiry; spacing is bounded to avoid 0ms busy loops, and genuinely unschedulable
+  values (`leaseMs < 2`) are refused explicitly with `RangeError`.
 
 Privileges: the worker's role needs what every `PgAdjudicationStore` call needs, SELECT, INSERT and
 UPDATE on `game_adjudications` and `game_adjudication_releases` (and the event and queue tables it
