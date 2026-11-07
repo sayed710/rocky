@@ -1241,3 +1241,286 @@ test('stalled renewal on one held job does not block renewals or subsequent cycl
     }
   }
 });
+
+test('late stale conflict and late stale expired transient failure preserve replacement held job, while current-generation failures clean up', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  let rejectRenewalA: ((err: Error) => void) | undefined;
+  let rejectRenewalB: ((err: Error) => void) | undefined;
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const JOB_OP = '018f2780-0000-7000-8000-0000000000a1';
+    store.leaseUntil = Date.now() + 10_000;
+    let mono = 0;
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      pollMs: 100,
+      concurrency: 1,
+      proofSliceMs: 50,
+      publish: async () => {},
+      monotonic: () => mono,
+      now: () => Date.now(),
+    });
+    worker.start();
+
+    // --- Scenario 1: Late stale conflict does not evict successor replacement ---
+    const renewalBarrierA = new Promise<AdjudicationClaimGrant>((_res, rej) => {
+      rejectRenewalA = rej;
+    });
+
+    let renewalAStarted = false;
+    store.renewAdjudication = async (params) => {
+      if (params.grant.generation === '1') {
+        renewalAStarted = true;
+        return renewalBarrierA;
+      }
+      return store.grant(Date.now() + params.extensionMs, params.grant.gameId, params.grant.operationId, String(Number(params.grant.generation) + 1));
+    };
+
+    store.claimable = [{ gameId: GAME, operationId: JOB_OP, generation: '0' }];
+    store.stepProofJob = (op: string) => {
+      if (op === JOB_OP) {
+        mock.timers.tick(6_000); // advances past half-lease (6s of 10s), renewal timer fires
+        throw new Error('step error during proof');
+      }
+      return step('ready');
+    };
+
+    // Pass 1: Claims JOB_OP (generation '1' grant). Step advances clock, triggering renewalA.
+    // Step throws, causing #continue to catch and clean up held_A.
+    mock.timers.tick(0);
+    await pumpUntil(() => renewalAStarted);
+    assert.equal(renewalAStarted, true, 'renewal for held_A was initiated in background');
+
+    // Wait for pass 1 to complete and cleanup held_A
+    await pumpUntil(() => store.calls.filter((c) => c === 'cancel').length >= 1);
+
+    // Advance clock past held_A's 10s lease so held_A's old grant is genuinely expired
+    mock.timers.tick(5_000);
+
+    // Refresh store.leaseUntil for new claim so replacement held_B is fresh/live
+    store.leaseUntil = Date.now() + 10_000;
+    store.claimable = [{ gameId: GAME, operationId: JOB_OP, generation: '1' }];
+    store.stepProofJob = (_op: string, budget: number) => {
+      if (budget > 0) mono += 100;
+      return step('active');
+    };
+
+    // Tick pollMs to trigger pass 2: re-claims JOB_OP at generation '1' -> grant generation '2' (held_B)
+    mock.timers.tick(100);
+    await pumpUntil(() => store.claims.length >= 2);
+    await pumpUntil(() => store.calls.filter((c) => c.startsWith('create')).length >= 2);
+
+    const dropsBeforeConflict = store.calls.filter((c) => c === 'cancel' || c === 'evict').length;
+
+    // Now late background renewal for held_A rejects with AdjudicationConflictError
+    rejectRenewalA!(new AdjudicationConflictError('lost lease on generation 1'));
+    await yieldToLoop();
+    await yieldToLoop();
+
+    const dropsAfterConflict = store.calls.filter((c) => c === 'cancel' || c === 'evict').length;
+    assert.equal(dropsAfterConflict, dropsBeforeConflict, 'late stale conflict must NOT cancel or evict replacement held_B');
+
+    // Verify replacement held_B can settle successfully on next slice
+    store.stepProofJob = () => step('ready');
+    mock.timers.tick(100);
+    await pumpUntil(() => store.settles.length >= 1);
+    assert.equal(store.settles.length, 1, 'replacement held_B proceeded to settle successfully');
+
+    // --- Scenario 2: Late stale expired transient failure does not evict successor replacement ---
+    const renewalBarrierB = new Promise<AdjudicationClaimGrant>((_res, rej) => {
+      rejectRenewalB = rej;
+    });
+
+    let renewalBStarted = false;
+    store.renewAdjudication = async (params) => {
+      if (params.grant.generation === '3') {
+        renewalBStarted = true;
+        return renewalBarrierB;
+      }
+      return store.grant(Date.now() + params.extensionMs, params.grant.gameId, params.grant.operationId, String(Number(params.grant.generation) + 1));
+    };
+
+    store.leaseUntil = Date.now() + 10_000;
+    store.claimable = [{ gameId: GAME, operationId: JOB_OP, generation: '2' }];
+    store.stepProofJob = (op: string) => {
+      if (op === JOB_OP) {
+        mock.timers.tick(6_000); // past half-lease of 10s, triggers renewalB
+        throw new Error('step error 2');
+      }
+      return step('ready');
+    };
+
+    mock.timers.tick(100);
+    await pumpUntil(() => renewalBStarted);
+    assert.equal(renewalBStarted, true);
+    await pumpUntil(() => store.calls.filter((c) => c === 'cancel').length >= 2);
+
+    // Advance clock past held_C's 10s lease so held_C's old grant is genuinely expired
+    mock.timers.tick(5_000);
+
+    // Re-claim JOB_OP at generation '3' -> grant generation '4' (held_D) with fresh live 10s lease
+    store.leaseUntil = Date.now() + 10_000;
+    store.claimable = [{ gameId: GAME, operationId: JOB_OP, generation: '3' }];
+    store.stepProofJob = (_op: string, budget: number) => {
+      if (budget > 0) mono += 100;
+      return step('active');
+    };
+    mock.timers.tick(100);
+    await pumpUntil(() => store.claims.length >= 4);
+    await pumpUntil(() => store.calls.filter((c) => c.startsWith('create')).length >= 4);
+
+    const dropsBeforeTransient = store.calls.filter((c) => c === 'cancel' || c === 'evict').length;
+
+    // Late renewal for held_C fails with transient error when held_C's lease is expired
+    rejectRenewalB!(new Error('transient network failure'));
+    await yieldToLoop();
+    await yieldToLoop();
+
+    const dropsAfterTransient = store.calls.filter((c) => c === 'cancel' || c === 'evict').length;
+    assert.equal(dropsAfterTransient, dropsBeforeTransient, 'late stale expired failure must NOT cancel or evict replacement held_D');
+
+    // --- Scenario 3: Current-generation failures STILL clean up ---
+    const cancelsBeforeCurrentFailure = store.calls.filter((c) => c === 'cancel').length;
+    store.renewAdjudication = async () => {
+      throw new AdjudicationConflictError('lost lease on current gen');
+    };
+    mock.timers.tick(6_000); // advances past half-lease of held_D's 10s lease, firing renewal
+    await pumpUntil(() => store.calls.filter((c) => c === 'cancel').length > cancelsBeforeCurrentFailure);
+    assert.ok(
+      store.calls.filter((c) => c === 'cancel').length > cancelsBeforeCurrentFailure,
+      'current-generation conflict cleans up held_D',
+    );
+  } finally {
+    try {
+      try { rejectRenewalA?.(new Error('cleanup')); } catch {}
+      try { rejectRenewalB?.(new Error('cleanup')); } catch {}
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('transient outage has bounded attempts across a long mock-time window and no busy retry loop, while healthy job repeatedly renews strictly before deadlines and stop owns in-flight IO', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  let resolveStalledIO!: () => void;
+  const stalledIOBarrier = new Promise<void>((resolve) => {
+    resolveStalledIO = resolve;
+  });
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const JOB_HEALTHY = '018f2780-0000-7000-8000-0000000000a1';
+    const JOB_FAILING = '018f2780-0000-7000-8000-0000000000a2';
+    store.leaseUntil = Date.now() + 10_000;
+    let mono = 0;
+
+    store.claimable = [
+      { gameId: GAME, operationId: JOB_HEALTHY, generation: '0' },
+      { gameId: GAME, operationId: JOB_FAILING, generation: '0' },
+    ];
+    store.stepProofJob = (_op: string, budget: number) => {
+      if (budget > 0) mono += 100;
+      return step('active');
+    };
+
+    let jobBAttempts = 0;
+    let jobAAttempts = 0;
+    const jobATimes: Array<{ at: number; leaseUntil: number }> = [];
+    let pauseFailingIO = false;
+
+    store.renewAdjudication = async (params) => {
+      if (params.grant.operationId === JOB_FAILING) {
+        jobBAttempts += 1;
+        if (pauseFailingIO) {
+          await stalledIOBarrier;
+        }
+        throw new Error('transient database outage');
+      }
+      // JOB_HEALTHY succeeds
+      assert.ok(
+        Date.now() < params.grant.leaseUntil.getTime(),
+        `healthy renewal at ${Date.now()} strictly before deadline ${params.grant.leaseUntil.getTime()}`,
+      );
+      jobAAttempts += 1;
+      jobATimes.push({ at: Date.now(), leaseUntil: params.grant.leaseUntil.getTime() });
+      return store.grant(Date.now() + params.extensionMs, params.grant.gameId, params.grant.operationId, String(jobAAttempts + 1));
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      concurrency: 1,
+      proofSliceMs: 50,
+      publish: async () => {},
+      monotonic: () => mono,
+      now: () => Date.now(),
+    });
+
+    worker.start();
+    mock.timers.tick(0);
+    await pumpUntil(() => store.claims.length >= 2);
+
+    // Advance to 5,000ms: half-lease mark where renewals become due
+    mock.timers.tick(5_000);
+    await pumpUntil(() => jobBAttempts >= 1);
+    assert.equal(jobBAttempts, 1, 'first renewal attempt made for failing job at half-lease');
+
+    // Advance by 100ms in 10ms steps (10 ticks): in baseline 6fa, this triggers a 10ms retry loop
+    // making ~10 additional attempts. Under backoff, delay is >= 500ms so 0 additional attempts happen.
+    for (let i = 0; i < 10; i++) {
+      mock.timers.tick(10);
+      await pumpUntil(() => false, 1);
+    }
+    assert.equal(jobBAttempts, 1, 'no 10ms busy retry loop during backoff window');
+
+    // Advance across long mock-time window (next 20,000 ms) in 500ms steps with event-loop pumping
+    for (let elapsed = 0; elapsed < 20_000; elapsed += 500) {
+      mock.timers.tick(500);
+      await pumpUntil(() => false, 1);
+    }
+
+    // Failing job had bounded attempts (no busy loop), not hundreds
+    assert.ok(jobBAttempts <= 6, `failing job attempts must be bounded by backoff (actual: ${jobBAttempts})`);
+
+    // Healthy job renewed multiple times strictly before its actual deadlines
+    assert.ok(jobAAttempts >= 2, `healthy job renewed multiple times (actual: ${jobAAttempts})`);
+    for (const record of jobATimes) {
+      assert.ok(record.at < record.leaseUntil, 'healthy renewal strictly before deadline');
+    }
+
+    // Now test stop owns in-flight renewal IO:
+    // Re-admit a failing job whose renewal IO pauses on barrier
+    pauseFailingIO = true;
+    store.claimable = [{ gameId: GAME, operationId: JOB_FAILING, generation: '1' }];
+    mock.timers.tick(0);
+    mock.timers.tick(5_000);
+    const attemptsBeforeStop = jobBAttempts;
+    await pumpUntil(() => jobBAttempts > attemptsBeforeStop);
+
+    let stopResolved = false;
+    const stopPromise = worker.stop().then(() => {
+      stopResolved = true;
+    });
+    await pumpUntil(() => stopResolved, 5);
+    assert.equal(stopResolved, false, 'stop() must not resolve while renewal IO is in flight');
+
+    resolveStalledIO();
+    await stopPromise;
+    assert.equal(stopResolved, true, 'stop() resolved once renewal IO completed');
+  } finally {
+    try {
+      resolveStalledIO?.();
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
