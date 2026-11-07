@@ -44,6 +44,7 @@ import {
   deriveGameSeed,
   derivePlyMovePrng,
   parseSoakConfig,
+  type MovePositionContext,
 } from './support/soak-metrics.js';
 
 type Pool = TestDatabase['pool'];
@@ -387,7 +388,15 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
             uci += 'q';
           }
           const user = state.turn === 'w' ? g.white : g.black;
-          tracker.onMovePending(g.id, basePly, performance.now());
+          const positionContext: MovePositionContext = {
+            fen: state.fen,
+            uci,
+            gameIndex: g.index,
+            gameSeed,
+            attempt,
+            basePly,
+          };
+          tracker.onMovePending(g.id, basePly, performance.now(), positionContext);
           try {
             await router.route(g.id, user, { kind: 'move', uci });
             moves++;

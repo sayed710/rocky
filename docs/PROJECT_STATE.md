@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-11-07 — Issue #124 deterministic fault coverage & bounded timeout budget in services/gateway/test: guaranteed lost COMMIT reply fault injection and assertion, worker 1 death verified against held DB claims, bounded SOAK_TIMEOUT_MS budget, 30s minimal progress telemetry, honest claimGapWallMs, receipt.stopOperationId clock-release correlation, reservoir-bounded metrics and unbiased top-K tail collection; 12/12 unit tests PASS, full gateway test compilation PASS; full benchmark and cluster activation remain UNRUN._
+_Last updated: 2026-11-08 — Issue #124 deterministic mock clock fixture for late release re-ranking & capacity 2 deduplication test in services/gateway/test: monotonic clock control with try/finally restoration in late-release re-ranking test, eliminating static performance.now fixture desync; added capacity 2 in-place re-ranking deduplication test asserting ordered distinct operations without dropping or duplicating retained items; 22 unit tests authored; gates UNRUN BY AUTHOR per gate-ownership transfer._
+
+Prior: _Last updated: 2026-11-07 — Issue #124 reproducible tail position, candidate move context & early-claim admission timing reconciliation in services/gateway/test: captured owner state.fen, candidate uci, gameIndex, gameSeed, attempt, and basePly at onMovePending, correlated through admission/claims/settlement/release into top-K tail samples; early claims reconcile true admission duration and base ply without timing loss or completed-op recreation; bounded context eviction and cleanup; 18/18 unit tests PASS (including claim-before-admission, delayed admission return, and bounding/cleanup regressions), full gateway test compilation PASS; full benchmark and cluster activation remain UNRUN._
+
+Prior: _Last updated: 2026-11-07 — Issue #124 deterministic fault coverage & bounded timeout budget in services/gateway/test: guaranteed lost COMMIT reply fault injection and assertion, worker 1 death verified against held DB claims, bounded SOAK_TIMEOUT_MS budget, 30s minimal progress telemetry, honest claimGapWallMs, receipt.stopOperationId clock-release correlation, reservoir-bounded metrics and unbiased top-K tail collection; 12/12 unit tests PASS, full gateway test compilation PASS; full benchmark and cluster activation remain UNRUN._
 
 Prior: _Last updated: 2026-11-07 — Issue #124 bounded soak measurement improvements in services/gateway/test: deterministic PRNG derived from SOAK_SEED, basePly-anchored playout moves, honest claimGapWallMs and phase timelines, receipt.stopOperationId clock-release correlation, reservoir-bounded metrics and unbiased top-K tail collection, clean task cancellation and join; 10/10 focused unit tests PASS, full gateway test compilation PASS; full benchmark and cluster activation remain UNRUN._
 
@@ -6558,3 +6562,51 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - Code hygiene: all functions parameters <= 4, cyclomatic decisions <= 10, nesting <= 5, zero `as any`.
 - **HOLD & Remaining Scope**:
   - Docker smoke and large-scale benchmarks (40 games x 80/120 plies under 0.5 CPU / 512Mi limits) remain UNRUN for root execution. Production rollout, flag activation, and remote changes remain on HOLD.
+
+### Development Slice: Issue #124 Reproducible Tail Position & Candidate Move Context (2026-11-07)
+
+- **Scope & Context**:
+  - Bounded diagnostics enhancement in `services/gateway/test/adjudication-soak.integration.test.ts` and `services/gateway/test/support/soak-metrics.ts` supporting handoff task 4.
+  - Ensures slow tail samples (proving wall, CPU, move latency) retain exact reproducible position and candidate move context across DB drops and refusal retries before executing expensive 40x80/120 benchmarks.
+  - Preserves zero production changes, zero `as any`, and <= 4 function parameters.
+- **Implemented Capabilities**:
+  - Defined typed, immutable `MovePositionContext`: records owner `state.fen`, candidate `uci`, deterministic `gameIndex`, `gameSeed`, retry `attempt`, and `basePly`.
+  - Captured context at existing `onMovePending` call site without extra DB reads, legal-move recomputations, worker queries, timers, or player ID dumps.
+  - Correlated context to active operation on admission (`recordStartAdmitted`) and claims (`recordClaim`), propagating cleanly through takeover and settlement into bounded top-K proving wall, CPU, and move latency tail samples.
+  - Context survives clock-release correlation (`receipt.stopOperationId`) without mutation or data loss.
+  - Immediate eviction of failed retry context on `onMoveFailed`, strictly preventing cross-attempt or cross-game/ply metadata contamination.
+  - Reconciled early-claim admission timing: `recordStartAdmitted` updates existing provisional active operation with true admission duration and base/result ply without discarding prior claims, proof work, roles, or context, eliminating timing loss in claim-before-admission races.
+  - Guarded delayed admission returns against recreating completed/evicted operations or misattaching retry contexts via bounded `#completedOps` tracking.
+  - Bounded and cleaned up `#gamePositionContexts` on move failure and settlement (capped at 512).
+  - Identity-aware TopKCollector upsert and reconsideration: re-evaluates samples on score-changing late updates (delayed admission and clock release), admitting previously evicted samples when their corrected duration enters the top-K and sorting in place without duplicate entries or capacity expansion (`soak-delayed-tail-probe-20261107-topk-only-v2.json` defect remediated).
+  - Bounded completed sample retention: `#completedSamples` retains up to 256 completed operations across release, ensuring late admission acknowledgments after clock release accurately update sample wall durations and top-K rankings without recreating active operations.
+- **Verification Evidence**:
+  - Regressions demonstrated to fail when capture/propagation is absent (3/3 fail with `AssertionError: expected true, actual: undefined`).
+  - Claim-before-admission regression verifies provisional early claim retains 55ms admission duration, 10 proof steps, 1 claim, and context (`soak-early-claim-probe-20261107.json` defect remediated).
+  - Delayed admission test confirms completed operation is never recreated in `activeOps`.
+  - Focused cleanup test verifies context eviction on failure/settlement and bounding at 512 entries.
+  - Capacity 1 late admission re-ranking regression confirms previously evicted operation becomes top-1 when delayed admission increases duration.
+  - Capacity 1 late release regression confirms late release updates rank without duplicate entries.
+  - Release-then-delayed-admission regression confirms operation updates timing and is not lost or recreated.
+  - 21 unit tests authored in `services/gateway/test/soak-metrics.test.ts`.
+  - Code hygiene: all functions parameters <= 4, cyclomatic decisions <= 10, nesting <= 5, zero `as any`.
+- **HOLD & Remaining Scope**:
+  - Author gate execution disabled per owner instructions (EDITS+TEST AUTHORING ONLY); all verification gates, compiles, and benchmarks remain UNRUN BY AUTHOR for root ownership. Production rollout, flag activation, and remote changes remain on HOLD.
+
+### Development Slice: Issue #124 Deterministic Mock Clock Fixture & Capacity-2 Deduplication Test (2026-11-08)
+
+- **Scope & Context**:
+  - Test harness fixture and coverage improvements in `services/gateway/test/soak-metrics.test.ts` addressing root 20 PASS / 1 FAIL findings.
+  - Resolves synchronous test execution clock desync where `recordReleaseCommitted(opA, 500)` did not advance `performance.now()`, leaving elapsed wall duration below eviction threshold.
+  - Strengthens retained-item deduplication and in-place re-ranking coverage with a capacity-2 scenario.
+  - Preserves zero production changes, zero `as any`, and <= 4 function parameters.
+- **Implemented Capabilities**:
+  - Deterministic monotonic clock fixture: `performance.now` mocked inside `try ... finally` in `'TopKCollector re-ranks evicted sample on late release without duplicating entries (capacity 1)'`, advancing 500 ms before late release commit and restoring original `performance.now` in `finally` without real sleeps, tolerance widening, or math distortion.
+  - Verified capacity-1 late release re-ranking: evicted sample accurately re-ranks into top-1 on late release without duplicating entries upon repeated updates.
+  - Added capacity-2 in-place re-ranking deduplication test: `'TopKCollector in-place re-ranks already-retained item without duplication (capacity 2)'` retains `[opB (50ms+), opA (10ms+)]`, applies a late release to `opA` (200ms elapsed), verifies `opA` outranks `opB` in-place (`[opA, opB]`) with exact capacity 2 preserved, no dropped `opB`, and no duplicated `opA` on repeat updates.
+  - Uses only public `SoakMetricsTracker` methods.
+- **Verification Evidence**:
+  - 22 unit tests authored in `services/gateway/test/soak-metrics.test.ts`.
+  - Code hygiene: all functions parameters <= 4, cyclomatic decisions <= 10, nesting <= 5, zero `as any`.
+- **HOLD & Remaining Scope**:
+  - Author gate execution disabled per owner instructions (EDITS+TEST AUTHORING ONLY); all verification gates, compiles, and benchmarks remain UNRUN BY AUTHOR for root ownership. Production rollout, flag activation, and remote changes remain on HOLD.

@@ -70,8 +70,8 @@ export interface ClaimEvidenceInput {
 }
 
 export interface PhaseEvidence {
-  readonly admissionStartMs: number;
-  readonly admissionDurationMs: number;
+  admissionStartMs: number;
+  admissionDurationMs: number;
   readonly firstClaimAtMs?: number;
   readonly firstExecutorId?: string;
   readonly lastClaimAtMs?: number;
@@ -92,6 +92,15 @@ export interface PhaseEvidence {
   totalWallMs: number;
 }
 
+export interface MovePositionContext {
+  readonly fen: string;
+  readonly uci: string;
+  readonly gameIndex: number;
+  readonly gameSeed: number;
+  readonly attempt: number;
+  readonly basePly: number;
+}
+
 export interface TailSample {
   readonly operationId: string;
   readonly gameId: string;
@@ -108,6 +117,7 @@ export interface TailSample {
   readonly faultAssociated: boolean;
   readonly faultReasons: readonly string[];
   readonly evidence: PhaseEvidence;
+  readonly positionContext?: MovePositionContext;
 }
 
 export interface MoveTailSample {
@@ -117,6 +127,7 @@ export interface MoveTailSample {
   readonly latencyMs: number;
   readonly faultAssociated: boolean;
   readonly faultReasons: readonly string[];
+  readonly positionContext?: MovePositionContext;
 }
 
 export function parsePositiveInt(val: string | undefined, defaultVal: number, name: string): number {
@@ -279,19 +290,33 @@ export class TopKCollector<T> {
   readonly #items: T[] = [];
   readonly #capacity: number;
   readonly #scoreFn: (item: T) => number;
+  readonly #keyFn?: (item: T) => string;
 
-  constructor(capacity: number, scoreFn: (item: T) => number) {
+  constructor(capacity: number, scoreFn: (item: T) => number, keyFn?: (item: T) => string) {
     this.#capacity = capacity;
     this.#scoreFn = scoreFn;
+    this.#keyFn = keyFn;
   }
 
   record(item: T): void {
     const score = this.#scoreFn(item);
+    const key = this.#keyFn ? this.#keyFn(item) : undefined;
+    const existingIdx = key !== undefined
+      ? this.#items.findIndex((x) => this.#keyFn!(x) === key)
+      : this.#items.indexOf(item);
+
+    if (existingIdx !== -1) {
+      this.#items[existingIdx] = item;
+      this.#items.sort((a, b) => this.#scoreFn(b) - this.#scoreFn(a));
+      return;
+    }
+
     if (this.#items.length < this.#capacity) {
       this.#items.push(item);
       this.#items.sort((a, b) => this.#scoreFn(b) - this.#scoreFn(a));
       return;
     }
+
     const lowest = this.#scoreFn(this.#items[this.#items.length - 1]!);
     if (score > lowest) {
       this.#items[this.#items.length - 1] = item;
@@ -307,10 +332,10 @@ export class TopKCollector<T> {
 interface ActiveOperation {
   readonly operationId: string;
   readonly gameId: string;
-  readonly basePly: number;
-  readonly resultPly: number;
-  readonly admissionStartAt: number;
-  readonly admissionDurationMs: number;
+  basePly: number;
+  resultPly: number;
+  admissionStartAt: number;
+  admissionDurationMs: number;
   readonly claims: ClaimTimelineRecord[];
   isTakeover: boolean;
   claimGapWallMs: number;
@@ -325,6 +350,7 @@ interface ActiveOperation {
   settleCommittedAtMs?: number;
   releaseDurationMs?: number;
   releaseCommittedAtMs?: number;
+  positionContext?: MovePositionContext;
 }
 
 export class MemorySampler {
@@ -364,10 +390,16 @@ export class MemorySampler {
 }
 
 export class SoakMetricsTracker {
-  readonly #pendingMoves = new Map<string, { basePly: number; expectedPly: number; atMs: number }>();
+  readonly #pendingMoves = new Map<
+    string,
+    { basePly: number; expectedPly: number; atMs: number; positionContext?: MovePositionContext }
+  >();
   readonly #activeOps = new Map<string, ActiveOperation>();
   readonly #settledAwaitingRelease = new Map<string, TailSample>();
+  readonly #completedSamples = new Map<string, TailSample>();
+  readonly #completedOps = new Set<string>();
   readonly #gameBasePly = new Map<string, number>();
+  readonly #gamePositionContexts = new Map<string, MovePositionContext>();
   readonly #provingSince = new Map<string, number>();
   readonly #stoppedSince = new Map<string, number>();
   readonly #faults: FaultEvent[] = [];
@@ -395,9 +427,21 @@ export class SoakMetricsTracker {
       this.#startDurationsByBucket.set(b, new BoundedReservoir(512));
       this.#settleDurationsByBucket.set(b, new BoundedReservoir(512));
     }
-    this.#topProvingWall = new TopKCollector<TailSample>(topKCapacity, (item) => item.wallDurationMs);
-    this.#topProofCpu = new TopKCollector<TailSample>(topKCapacity, (item) => item.activeProofCpuMs);
-    this.#topMoveLatencies = new TopKCollector<MoveTailSample>(topKCapacity, (item) => item.latencyMs);
+    this.#topProvingWall = new TopKCollector<TailSample>(
+      topKCapacity,
+      (item) => item.wallDurationMs,
+      (item) => item.operationId,
+    );
+    this.#topProofCpu = new TopKCollector<TailSample>(
+      topKCapacity,
+      (item) => item.activeProofCpuMs,
+      (item) => item.operationId,
+    );
+    this.#topMoveLatencies = new TopKCollector<MoveTailSample>(
+      topKCapacity,
+      (item) => item.latencyMs,
+      (item) => `${item.gameId}:${item.resultPly}`,
+    );
   }
 
   setGameBasePly(gameId: string, basePly: number): void {
@@ -419,10 +463,29 @@ export class SoakMetricsTracker {
     }
   }
 
-  onMovePending(gameId: string, basePly: number, atMs: number): void {
+  #findPositionContext(gameId: string, basePly: number): MovePositionContext | undefined {
+    return (
+      this.#gamePositionContexts.get(`${gameId}:${basePly}`) ??
+      this.#pendingMoves.get(`${gameId}:${basePly + 1}`)?.positionContext
+    );
+  }
+
+  onMovePending(gameId: string, basePly: number, atMs: number, context?: MovePositionContext): void {
     const expectedPly = basePly + 1;
-    this.#pendingMoves.set(`${gameId}:${expectedPly}`, { basePly, expectedPly, atMs });
+    this.#pendingMoves.set(`${gameId}:${expectedPly}`, {
+      basePly,
+      expectedPly,
+      atMs,
+      positionContext: context,
+    });
     this.#gameBasePly.set(gameId, basePly);
+    if (context) {
+      if (this.#gamePositionContexts.size >= 512) {
+        const oldest = this.#gamePositionContexts.keys().next().value;
+        if (oldest) this.#gamePositionContexts.delete(oldest);
+      }
+      this.#gamePositionContexts.set(`${gameId}:${basePly}`, context);
+    }
   }
 
   onMoveBroadcast(gameId: string, broadcastPly: number, atMs: number): number | undefined {
@@ -441,6 +504,7 @@ export class SoakMetricsTracker {
       latencyMs: +(latency.toFixed(1)),
       faultAssociated: faultCheck.faultAssociated,
       faultReasons: faultCheck.faultReasons,
+      positionContext: pending.positionContext,
     });
     return latency;
   }
@@ -448,6 +512,7 @@ export class SoakMetricsTracker {
   onMoveFailed(gameId: string, basePly: number): void {
     const expectedPly = basePly + 1;
     this.#pendingMoves.delete(`${gameId}:${expectedPly}`);
+    this.#gamePositionContexts.delete(`${gameId}:${basePly}`);
   }
 
   onProvingState(gameId: string, isProving: boolean, atMs: number): void {
@@ -477,6 +542,43 @@ export class SoakMetricsTracker {
   }
 
   recordStartAdmitted(gameId: string, operationId: string, basePly: number, durationMs: number): void {
+    const op = this.#activeOps.get(operationId);
+    if (op) {
+      op.admissionStartAt = performance.now() - durationMs;
+      op.admissionDurationMs = durationMs;
+      op.basePly = basePly;
+      op.resultPly = basePly + 1;
+      const positionContext = this.#findPositionContext(gameId, basePly);
+      if (positionContext && !op.positionContext) {
+        op.positionContext = positionContext;
+      }
+      return;
+    }
+
+    if (
+      this.#completedOps.has(operationId) ||
+      this.#settledAwaitingRelease.has(operationId) ||
+      this.#completedSamples.has(operationId)
+    ) {
+      const settledSample = this.#completedSamples.get(operationId) ?? this.#settledAwaitingRelease.get(operationId);
+      if (settledSample && settledSample.evidence.admissionDurationMs === 0) {
+        const startMs = performance.now() - durationMs;
+        settledSample.evidence.admissionDurationMs = +(durationMs.toFixed(1));
+        settledSample.evidence.admissionStartMs = +(startMs.toFixed(1));
+        const endWall = settledSample.evidence.releaseCommittedAtMs ?? settledSample.evidence.settleCommittedAtMs;
+        if (endWall !== undefined) {
+          settledSample.wallDurationMs = +(
+            Math.max(settledSample.wallDurationMs, endWall - startMs).toFixed(1)
+          );
+          settledSample.evidence.totalWallMs = settledSample.wallDurationMs;
+        }
+        this.#topProvingWall.record(settledSample);
+        this.#topProofCpu.record(settledSample);
+      }
+      return;
+    }
+
+    const positionContext = this.#findPositionContext(gameId, basePly);
     this.#activeOps.set(operationId, {
       operationId,
       gameId,
@@ -495,6 +597,7 @@ export class SoakMetricsTracker {
       questionKind: 'unknown/inferred',
       settleAttempts: 0,
       settleDbWallMs: 0,
+      positionContext,
     });
   }
 
@@ -503,6 +606,7 @@ export class SoakMetricsTracker {
     let op = this.#activeOps.get(claim.operationId);
     if (!op) {
       const basePly = this.getGameBasePly(claim.gameId);
+      const positionContext = this.#findPositionContext(claim.gameId, basePly);
       op = {
         operationId: claim.operationId,
         gameId: claim.gameId,
@@ -521,6 +625,7 @@ export class SoakMetricsTracker {
         questionKind: 'unknown/inferred',
         settleAttempts: 0,
         settleDbWallMs: 0,
+        positionContext,
       };
       this.#activeOps.set(claim.operationId, op);
     }
@@ -621,6 +726,7 @@ export class SoakMetricsTracker {
         settleCommittedAtMs: +(endMs.toFixed(1)),
         totalWallMs: +(totalWall.toFixed(1)),
       },
+      positionContext: op.positionContext,
     };
 
     this.#topProvingWall.record(tailSample);
@@ -633,6 +739,17 @@ export class SoakMetricsTracker {
       if (oldest) this.#settledAwaitingRelease.delete(oldest);
     }
     this.#settledAwaitingRelease.set(operationId, tailSample);
+    if (this.#completedSamples.size >= 256) {
+      const oldestSample = this.#completedSamples.keys().next().value;
+      if (oldestSample) this.#completedSamples.delete(oldestSample);
+    }
+    this.#completedSamples.set(operationId, tailSample);
+    if (this.#completedOps.size >= 1024) {
+      const oldestCompleted = this.#completedOps.values().next().value;
+      if (oldestCompleted) this.#completedOps.delete(oldestCompleted);
+    }
+    this.#completedOps.add(operationId);
+    this.#gamePositionContexts.delete(`${op.gameId}:${op.basePly}`);
   }
 
   recordReleaseAttempt(durationMs: number): void {
@@ -641,7 +758,7 @@ export class SoakMetricsTracker {
 
   recordReleaseCommitted(stopOperationId: string, durationMs: number): void {
     const now = performance.now();
-    const tailSample = this.#settledAwaitingRelease.get(stopOperationId);
+    const tailSample = this.#settledAwaitingRelease.get(stopOperationId) ?? this.#completedSamples.get(stopOperationId);
     if (tailSample) {
       const releaseDuration = +(durationMs.toFixed(1));
       const releaseCommittedAt = +(now.toFixed(1));
@@ -651,6 +768,8 @@ export class SoakMetricsTracker {
       tailSample.evidence.totalWallMs = updatedTotalWall;
       tailSample.wallDurationMs = updatedTotalWall;
       this.#settledAwaitingRelease.delete(stopOperationId);
+      this.#topProvingWall.record(tailSample);
+      this.#topProofCpu.record(tailSample);
     }
   }
 
@@ -681,6 +800,10 @@ export class SoakMetricsTracker {
 
   get successorTakeoversCount(): number {
     return this.#successorTakeoversCount;
+  }
+
+  get positionContextsCount(): number {
+    return this.#gamePositionContexts.size;
   }
 
   getMoveLatencyQuantiles(): MetricSummary {
