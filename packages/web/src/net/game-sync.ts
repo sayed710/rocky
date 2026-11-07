@@ -167,6 +167,29 @@ function mergeReady(current: ReadyView | null, next: ReadyView | null): ReadyVie
   return { w: current.w || next.w, b: current.b || next.b };
 }
 
+function isValidOptionalStateRevision(value: unknown): boolean {
+  return value === undefined || isStateRevision(value);
+}
+
+function isValidTurnStartedAt(value: unknown): boolean {
+  return value === undefined || value === null || clockAnchor(value) !== null;
+}
+
+function isValidOptionalReady(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) return false;
+  return readyView(value) !== null;
+}
+
+function isValidChess960StartId(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 959;
+}
+
+function isValidAdjudication(value: unknown): boolean {
+  return value === undefined || value === 'proving' || value === 'stopped';
+}
+
 function initialState(gameId: string): GameSyncState {
   return {
     gameId,
@@ -472,6 +495,7 @@ export class GameSync {
   private canCommand(): boolean {
     if (!this.state.connected) return false;
     if (this.hasIncompleteRecovery()) return false;
+    if (this.state.adjudication === 'proving') return false;
     if (!this.session) return true;
     this.session.captureGeneration(); // Observe persisted cross-tab logout barriers too.
     return this.session.current?.user.id === this.authorizedUserId;
@@ -1304,24 +1328,11 @@ export class GameSync {
   }
 
   private isValidOptionalFields(v: Record<string, unknown>): boolean {
-    if (v.stateRevision !== undefined && !isStateRevision(v.stateRevision)) return false;
-    if (v.turnStartedAt !== undefined && v.turnStartedAt !== null && (typeof v.turnStartedAt !== 'number' || !Number.isFinite(v.turnStartedAt))) return false;
-    if (v.ready !== undefined && v.ready !== null) {
-      if (typeof v.ready !== 'object' || Array.isArray(v.ready)) return false;
-      const ready = v.ready as Record<string, unknown>;
-      if (typeof ready.w !== 'boolean' || typeof ready.b !== 'boolean') return false;
-    }
-    if (
-      v.chess960StartId !== undefined &&
-      v.chess960StartId !== null &&
-      (typeof v.chess960StartId !== 'number' ||
-        !Number.isInteger(v.chess960StartId) ||
-        v.chess960StartId < 0 ||
-        v.chess960StartId > 959)
-    ) {
-      return false;
-    }
-    return true;
+    if (!isValidOptionalStateRevision(v.stateRevision)) return false;
+    if (!isValidTurnStartedAt(v.turnStartedAt)) return false;
+    if (!isValidOptionalReady(v.ready)) return false;
+    if (!isValidChess960StartId(v.chess960StartId)) return false;
+    return isValidAdjudication(v.adjudication);
   }
 
   private isValidRecoverySnapshot(view: unknown): view is StateView {

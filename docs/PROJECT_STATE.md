@@ -6,7 +6,9 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-11-05 — Issue #124 adjudication wired through the live gateway behind `ADJUDICATION_ENABLED` (off by default): commands admitted as obligations, owner publishes settlements and releases via `adjudicationChanged`, recorded releases re-derived on rebuild, optional `StateView.adjudication`; ADR 0176; hermetic and real PostgreSQL tests. Enablement and rollout remain on HOLD._
+_Last updated: 2026-11-07 — Issue #124 web reconnect & adjudication recovery: GameSync canCommand command-gating while proving, recovery snapshot adjudication phase validation and clean-code decomposition in @chess-platform/web; focused reconnect regression suite (42 cases) verifying proving/stopped phase preservation across disconnect/reconnect/resubscribe, paused clock anchor (turnStartedAt: null), late settlement/release recovery with command unblocking, stale revision rejection, and zero command replay; root full 19 workspaces exit 0 (1,778 web pass); final integration, provider review, push, and deployment remain on HOLD._
+
+Prior: _Last updated: 2026-11-05 — Issue #124 adjudication wired through the live gateway behind `ADJUDICATION_ENABLED` (off by default): commands admitted as obligations, owner publishes settlements and releases via `adjudicationChanged`, recorded releases re-derived on rebuild, optional `StateView.adjudication`; ADR 0176; hermetic and real PostgreSQL tests. Enablement and rollout remain on HOLD._
 
 Prior: _Last updated: 2026-11-05 — Issue #124 durable adjudication worker (unconstructed): `AdjudicationWorker` claims proving operations, proves in bounded slices with lease renewal, settles exhausted proofs as unresolved, settles with lost-reply recovery, publishes, then releases stops idempotently; ADR 0175; hermetic and real PostgreSQL race/successor tests. Wiring, enablement and rollout remain on HOLD._
 
@@ -6515,3 +6517,17 @@ Addresses four blocking review findings identified by ChatGPT independent review
 - **Correctness fixes**: exact payload/version validation of Started and settlement suffixes at COMMIT; permit, receipt, ordering, lifecycle-count and stop invariants; completed-row immutability including permits; strictly increasing claim generations (DB-enforced); Started must commit before claim/settlement (DB-enforced); deferred queue checks; restoration of suppressed no-show/flag queues after a running completion; settle retry answered from the database (survives restart); retained evaluation not pinned to the first claimer; renewal bounded to database now; claims require a reusable intent for lost-reply recovery.
 - **Verification**: see the PR for the exact commands and counts. Mutation checks: 8 of 9 targeted mutants of the fixes are killed by the new tests; the survivor (old generation formula) is equivalent in reachable states and generation reuse is independently refused by the database.
 - **HOLD**: no production migration, wiring, worker or client integration, deployment or activation. Broader dead-position classes remain open.
+
+### Development Slice: Issue #124 Web Reconnect & Adjudication Recovery (2026-11-07)
+
+- **Scope & Implementation**:
+  - Transport-level command gating during active adjudication proofs in `GameSync.canCommand()` (`packages/web/src/net/game-sync.ts`), preventing premature client moves or actions while proving.
+  - Decomposed `GameSync.isValidOptionalFields()` into small, typed boundary predicates (`isValidOptionalStateRevision`, `isValidTurnStartedAt`, `isValidOptionalReady`, `isValidChess960StartId`, `isValidAdjudication`) reusing existing `clockAnchor` and `readyView` helpers; all modified functions satisfy clean code constraints (decision complexity <= 10, parameters <= 4, nesting depth <= 5) with zero `as any`.
+  - Added recovery snapshot adjudication phase validation rejecting malformed phases while accepting valid proving/stopped states.
+  - Authored focused reconnect regression suite in `packages/web/test/reconnect-auth.test.ts` (`ADJ-REC-01` through `ADJ-REC-05`), verifying proving and stopped phase survival across socket disconnect, reconnect, and resubscribe, paused clock anchors (`turnStartedAt: null`), missed settlement/release recovery via authoritative resume, pending/uncertainty clearance with single unblocked action transmission (`offerDraw`), and stale revision/frame rejection.
+- **Verification Evidence**:
+  - Root independently ran full build, lint, full test compile, and verified all 42 reconnect test cases passed; fresh root full test across all 19 workspaces exited 0 with 0 skips (1,778 web tests passing) before the last validator refactor.
+  - Scoped author test compile (`npm exec --workspace @chess-platform/web -- tsc -p tsconfig.test.json`) and targeted test suite execution (`node --test packages/web/dist-test/test/reconnect-auth.test.js`) verified all 42 reconnect test cases passed after the validator refactor.
+- **Remaining Platform Gates (HOLD)**:
+  - Final root gate refresh, integration, and provider review remain pending.
+  - No claims of acceptance, commit, push, merge, or production deployment; enablement and rollout remain on HOLD.
