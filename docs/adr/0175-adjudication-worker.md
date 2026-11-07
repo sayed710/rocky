@@ -79,7 +79,12 @@ Recovery and ordering:
   does not block initiating due renewals for other held jobs or their subsequent renewal cycles while
   the first promise remains pending. Overlapping duplicate renewals for the same grant are prevented,
   and all active renewal IO promises are tracked in an owned set and awaited upon `stop()`, including
-  for removed jobs and across previous cycles.
+  for removed jobs and across previous cycles. Renewal failure paths (both `AdjudicationConflictError`
+  and expired transient failures) are fenced by held-object identity, ensuring a late background renewal
+  that outlives a previous cleanup cannot evict or drop a newly admitted replacement proof job for the same
+  operation. When a renewal fails transiently while its lease remains live, retry spacing is bounded and
+  lease-aware (scaling exponentially up to `leaseMs / 4`), eliminating tight 10ms retry loops across all
+  renewal entrypoints while healthy jobs continue renewing on time and eventual loss cleanup is preserved.
 
 Privileges: the worker's role needs what every `PgAdjudicationStore` call needs, SELECT, INSERT and
 UPDATE on `game_adjudications` and `game_adjudication_releases` (and the event and queue tables it

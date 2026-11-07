@@ -129,6 +129,8 @@ interface InFlightJob {
   grant: AdjudicationClaimGrant;
   jobInitialized: boolean;
   renewing?: Promise<AdjudicationClaimGrant>;
+  renewalAttempts?: number;
+  nextRenewalAt?: number;
 }
 
 interface GameNoticeQueue {
@@ -262,7 +264,7 @@ export class AdjudicationWorker {
     let failed = 0;
     const held = [...this.#inFlight.values()];
     await this.#eachBounded(held, async (item) => {
-      if (!this.#inFlight.has(item.operationId)) {
+      if (this.#inFlight.get(item.operationId) !== item) {
         onOutcome('skipped');
         return;
       }
@@ -393,10 +395,10 @@ export class AdjudicationWorker {
     }
   }
 
-  #cleanupJob(operationId: string): void {
-    const existed = this.#inFlight.delete(operationId);
-    if (existed) {
-      this.#dropJob(operationId);
+  #cleanupHeldJob(held: InFlightJob): void {
+    if (this.#inFlight.get(held.operationId) === held) {
+      this.#inFlight.delete(held.operationId);
+      this.#dropJob(held.operationId);
     }
   }
 
@@ -405,7 +407,7 @@ export class AdjudicationWorker {
    * job and is resumed next pass; any other outcome drops the local job.
    */
   async #continue(heldJob: InFlightJob): Promise<'settled' | 'skipped' | 'pending'> {
-    if (!this.#inFlight.has(heldJob.operationId)) return 'skipped';
+    if (this.#inFlight.get(heldJob.operationId) !== heldJob) return 'skipped';
     const { gameId, operationId } = heldJob;
     let keep = false;
     try {
@@ -430,7 +432,7 @@ export class AdjudicationWorker {
       throw error;
     } finally {
       if (!keep) {
-        this.#cleanupJob(operationId);
+        this.#cleanupHeldJob(heldJob);
       }
     }
   }
@@ -554,12 +556,16 @@ export class AdjudicationWorker {
   }
 
   #renewHeldJob(held: InFlightJob): Promise<AdjudicationClaimGrant> {
-    const remaining = held.grant.leaseUntil.getTime() - this.#now();
+    const now = this.#now();
+    const remaining = held.grant.leaseUntil.getTime() - now;
     if (remaining > this.#leaseMs / 2) {
       return Promise.resolve(held.grant);
     }
     if (held.renewing) {
       return held.renewing;
+    }
+    if (held.nextRenewalAt !== undefined && now < held.nextRenewalAt && remaining > 0) {
+      return Promise.resolve(held.grant);
     }
     const renewal = (async () => {
       try {
@@ -569,21 +575,24 @@ export class AdjudicationWorker {
         });
         if (this.#inFlight.get(held.operationId) === held) {
           held.grant = updated;
+          held.renewalAttempts = 0;
+          held.nextRenewalAt = undefined;
         }
         return updated;
       } catch (error) {
         if (error instanceof AdjudicationConflictError) {
-          this.#inFlight.delete(held.operationId);
-          this.#dropJob(held.operationId);
+          this.#cleanupHeldJob(held);
           throw error;
         }
         this.#fail('Renewal of an adjudication lease failed', error, {
           gameId: held.gameId,
           operationId: held.operationId,
         });
-        if (held.grant.leaseUntil.getTime() <= this.#now()) {
-          this.#inFlight.delete(held.operationId);
-          this.#dropJob(held.operationId);
+        const failureNow = this.#now();
+        if (held.grant.leaseUntil.getTime() <= failureNow) {
+          this.#cleanupHeldJob(held);
+        } else {
+          this.#recordRenewalFailure(held, failureNow);
         }
         throw error;
       } finally {
@@ -601,32 +610,53 @@ export class AdjudicationWorker {
     return renewal;
   }
 
+  #recordRenewalFailure(held: InFlightJob, now: number): void {
+    held.renewalAttempts = (held.renewalAttempts ?? 0) + 1;
+    const baseDelay = Math.max(50, Math.floor(this.#leaseMs / 20));
+    const maxDelay = Math.max(50, Math.floor(this.#leaseMs / 4));
+    const factor = 2 ** Math.min(held.renewalAttempts - 1, 6);
+    const retryDelay = Math.min(maxDelay, baseDelay * factor);
+    held.nextRenewalAt = now + retryDelay;
+  }
+
   #renewAllDueHeldJobs(): void {
     if (this.#halting) return;
+    const now = this.#now();
     for (const held of this.#inFlight.values()) {
       if (held.renewing) continue;
-      const remaining = held.grant.leaseUntil.getTime() - this.#now();
+      if (held.nextRenewalAt !== undefined && now < held.nextRenewalAt && held.grant.leaseUntil.getTime() > now) {
+        continue;
+      }
+      const remaining = held.grant.leaseUntil.getTime() - now;
       if (remaining <= this.#leaseMs / 2) {
         this.#renewHeldJob(held).catch(() => {});
       }
     }
   }
 
+  #renewalWaitForHeld(held: InFlightJob, now: number): number {
+    const remaining = held.grant.leaseUntil.getTime() - now;
+    if (held.nextRenewalAt !== undefined && held.nextRenewalAt > now && remaining > 0) {
+      return Math.min(held.nextRenewalAt - now, remaining);
+    }
+    return Math.floor(remaining - this.#leaseMs / 2);
+  }
+
   #scheduleRenewal(): void {
     if (this.#stopped || this.#inFlight.size === 0) return;
     if (this.#renewalTimer) clearTimeout(this.#renewalTimer);
     const now = this.#now();
-    let earliestRemaining = Number.POSITIVE_INFINITY;
+    let earliestWait = Number.POSITIVE_INFINITY;
     for (const held of this.#inFlight.values()) {
       if (held.renewing) continue;
-      const remaining = held.grant.leaseUntil.getTime() - now;
-      if (remaining < earliestRemaining) earliestRemaining = remaining;
+      const wait = this.#renewalWaitForHeld(held, now);
+      if (wait < earliestWait) earliestWait = wait;
     }
-    if (!Number.isFinite(earliestRemaining)) {
+    if (!Number.isFinite(earliestWait)) {
       this.#renewalTimer = undefined;
       return;
     }
-    const timeUntilDue = Math.max(10, Math.floor(earliestRemaining - this.#leaseMs / 2));
+    const timeUntilDue = Math.max(10, earliestWait);
     const delay = Math.min(timeUntilDue, Math.max(50, Math.floor(this.#leaseMs / 4)));
     this.#renewalTimer = setTimeout(() => {
       this.#renewalTimer = undefined;
