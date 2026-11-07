@@ -276,8 +276,11 @@ pgTest('a stop waits out the grace period; a blocked game never starves the stop
     await startMove(store, second, 'e7e4', 'w', 1100);
     const clock = { now: 1200 };
     // The settling replica cannot reach the owners, so it does not release its stops.
+    // Explicit concurrency 1 enforces serial proving and settlement (first before second)
+    // so the database assigns first an earlier completed_at than second.
     const unreachable = new AdjudicationWorker({
       store, executorId: randomUUID(), leaseMs: 5_000, sliceBudget: 200, releaseGraceMs: 60_000,
+      concurrency: 1,
       publish: async () => { throw new Error('owner unreachable'); },
       now: () => clock.now,
     });
@@ -288,6 +291,18 @@ pgTest('a stop waits out the grace period; a blocked game never starves the stop
     const other = await worker(store, clock, [], { releaseGraceMs: 60_000 }).runPass();
     assert.equal(other.released, 0);
     assert.equal((await pool.query('SELECT count(*)::int AS n FROM game_adjudications WHERE is_current_stop')).rows[0].n, 2);
+
+    // Verify fixture chronology: first was settled before second
+    const stopsChronology = (await pool.query<{ game_id: string; completed_at: Date }>(
+      'SELECT game_id, completed_at FROM game_adjudications WHERE is_current_stop ORDER BY completed_at, game_id',
+    )).rows;
+    assert.equal(stopsChronology.length, 2);
+    assert.equal(stopsChronology[0].game_id, first, 'first stop completed before second stop');
+    assert.equal(stopsChronology[1].game_id, second, 'second stop completed after first stop');
+    assert.ok(
+      stopsChronology[0].completed_at.getTime() <= stopsChronology[1].completed_at.getTime(),
+      'first completed_at must precede or equal second completed_at',
+    );
 
     // With a one-stop page, the older stop's game excluded, the newer one is still released.
     const stops = await store.listReleasableStops(1, 0, [first]);
