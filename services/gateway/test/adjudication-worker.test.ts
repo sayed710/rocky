@@ -1129,3 +1129,115 @@ test('background conflict cleanup drops held job and waiting lane skips without 
     }
   }
 });
+
+test('stalled renewal on one held job does not block renewals or subsequent cycles of other held jobs', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  let resolveJobA!: () => void;
+  const jobABarrier = new Promise<void>((res) => {
+    resolveJobA = res;
+  });
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const JOB_A = '018f2780-0000-7000-8000-0000000000a1';
+    const JOB_B = '018f2780-0000-7000-8000-0000000000a2';
+    store.leaseUntil = Date.now() + 10_000;
+    let mono = 0;
+
+    store.claimable = [
+      { gameId: GAME, operationId: JOB_A, generation: '0' },
+      { gameId: GAME, operationId: JOB_B, generation: '0' },
+    ];
+    store.stepProofJob = (_op: string, budget: number) => {
+      store.calls.push(`step:${budget}`);
+      if (budget > 0) mono += 100;
+      return step('active');
+    };
+
+    let jobARenewCalls = 0;
+    let jobBRenewCalls = 0;
+    const jobBRenewTimes: Array<{ at: number; leaseUntil: number }> = [];
+
+    store.renewAdjudication = async (params) => {
+      if (params.grant.operationId === JOB_A) {
+        jobARenewCalls += 1;
+        await jobABarrier;
+        return store.grant(Date.now() + params.extensionMs, params.grant.gameId, params.grant.operationId, '2');
+      }
+      // Enforce that JOB_B renewal strictly starts before its existing lease expires
+      assert.ok(
+        Date.now() < params.grant.leaseUntil.getTime(),
+        `JOB_B renewed strictly before lease expired (now=${Date.now()} < leaseUntil=${params.grant.leaseUntil.getTime()})`,
+      );
+      jobBRenewCalls += 1;
+      jobBRenewTimes.push({ at: Date.now(), leaseUntil: params.grant.leaseUntil.getTime() });
+      return store.grant(Date.now() + params.extensionMs, params.grant.gameId, params.grant.operationId, String(jobBRenewCalls + 1));
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      concurrency: 1,
+      proofSliceMs: 50,
+      publish: async () => {},
+      monotonic: () => mono,
+      now: () => Date.now(),
+    });
+
+    worker.start();
+    // Fire pass 1 at delay 0: admits both jobs, leaves both pending in #inFlight
+    mock.timers.tick(0);
+    await pumpUntil(() => store.claims.length >= 2);
+
+    // Advance mock clock across 25000ms (>2 full lease intervals of 10000ms) in <=2500ms increments
+    // with bounded real event-loop flushing between each, while JOB_A's single renewal remains deferred.
+    for (let elapsed = 0; elapsed < 25_000; elapsed += 2_500) {
+      mock.timers.tick(2_500);
+      await pumpUntil(() => false, 1);
+    }
+
+    // Assert multiple timely B renewals completed strictly before expiry, while A remained stalled
+    assert.equal(jobARenewCalls, 1, 'only one renewal initiated for stalled JOB_A');
+    assert.ok(jobBRenewCalls >= 3, `multiple timely B renewals completed (actual: ${jobBRenewCalls})`);
+    assert.ok(jobBRenewTimes.length >= 3, 'recorded multiple timely B renewals');
+    for (const record of jobBRenewTimes) {
+      assert.ok(
+        record.at < record.leaseUntil,
+        `renewal at ${record.at} was strictly before lease deadline ${record.leaseUntil}`,
+      );
+    }
+
+    // Calling stop() must wait for the in-flight renewal IO
+    let stopResolved = false;
+    const stopPromise = worker.stop().then(() => {
+      stopResolved = true;
+    });
+    await pumpUntil(() => stopResolved, 5);
+    assert.equal(stopResolved, false, 'stop() must not resolve while stalled renewal IO is in flight');
+
+    // Resolve stalled renewal IO
+    resolveJobA();
+    await stopPromise;
+    assert.equal(stopResolved, true, 'stop() resolved once stalled renewal IO completed');
+
+    // Verify proof job for JOB_B was created exactly once (progress retained, no recreation)
+    const jobBCreates = store.calls.filter((c) => c === `create:${JOB_B}`).length;
+    assert.equal(jobBCreates, 1, 'JOB_B proof job was created exactly once');
+
+    // No further proof steps after stop resolved
+    const stepsBefore = store.calls.filter((c) => c.startsWith('step:')).length;
+    mock.timers.tick(10_000);
+    await pumpUntil(() => store.calls.filter((c) => c.startsWith('step:')).length > stepsBefore, 5);
+    const stepsAfter = store.calls.filter((c) => c.startsWith('step:')).length;
+    assert.equal(stepsAfter, stepsBefore, 'zero proof steps executed after stop resolved');
+  } finally {
+    try {
+      resolveJobA?.();
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});

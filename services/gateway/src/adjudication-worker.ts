@@ -157,7 +157,7 @@ export class AdjudicationWorker {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #renewalTimer: ReturnType<typeof setTimeout> | undefined;
   #running: Promise<void> | undefined;
-  #runningRenewal: Promise<void> | undefined;
+  readonly #activeRenewals = new Set<Promise<unknown>>();
   #consecutiveErrors = 0;
   readonly #releaseGraceMs: number;
   readonly #proofSliceMs: number;
@@ -213,8 +213,7 @@ export class AdjudicationWorker {
     this.#timer = undefined;
     if (this.#renewalTimer) clearTimeout(this.#renewalTimer);
     this.#renewalTimer = undefined;
-    const inFlightRenewals = [...this.#inFlight.values()].map((h) => h.renewing).filter(Boolean);
-    await Promise.allSettled([this.#running, this.#runningRenewal, ...inFlightRenewals]);
+    await Promise.allSettled([this.#running, ...this.#activeRenewals]);
     for (const operationId of this.#inFlight.keys()) {
       this.#dropJob(operationId);
     }
@@ -554,10 +553,10 @@ export class AdjudicationWorker {
     }
   }
 
-  async #renewHeldJob(held: InFlightJob): Promise<AdjudicationClaimGrant> {
+  #renewHeldJob(held: InFlightJob): Promise<AdjudicationClaimGrant> {
     const remaining = held.grant.leaseUntil.getTime() - this.#now();
     if (remaining > this.#leaseMs / 2) {
-      return held.grant;
+      return Promise.resolve(held.grant);
     }
     if (held.renewing) {
       return held.renewing;
@@ -568,7 +567,9 @@ export class AdjudicationWorker {
           grant: held.grant,
           extensionMs: this.#leaseMs,
         });
-        held.grant = updated;
+        if (this.#inFlight.get(held.operationId) === held) {
+          held.grant = updated;
+        }
         return updated;
       } catch (error) {
         if (error instanceof AdjudicationConflictError) {
@@ -587,19 +588,26 @@ export class AdjudicationWorker {
         throw error;
       } finally {
         held.renewing = undefined;
+        this.#scheduleRenewal();
       }
     })();
+    this.#activeRenewals.add(renewal);
+    renewal
+      .catch(() => {})
+      .finally(() => {
+        this.#activeRenewals.delete(renewal);
+      });
     held.renewing = renewal;
     return renewal;
   }
 
-  async #renewAllDueHeldJobs(): Promise<void> {
-    for (const held of [...this.#inFlight.values()]) {
-      if (this.#halting) break;
-      try {
-        await this.#renewHeldJob(held);
-      } catch {
-        // Logged and handled in #renewHeldJob
+  #renewAllDueHeldJobs(): void {
+    if (this.#halting) return;
+    for (const held of this.#inFlight.values()) {
+      if (held.renewing) continue;
+      const remaining = held.grant.leaseUntil.getTime() - this.#now();
+      if (remaining <= this.#leaseMs / 2) {
+        this.#renewHeldJob(held).catch(() => {});
       }
     }
   }
@@ -610,20 +618,20 @@ export class AdjudicationWorker {
     const now = this.#now();
     let earliestRemaining = Number.POSITIVE_INFINITY;
     for (const held of this.#inFlight.values()) {
+      if (held.renewing) continue;
       const remaining = held.grant.leaseUntil.getTime() - now;
       if (remaining < earliestRemaining) earliestRemaining = remaining;
+    }
+    if (!Number.isFinite(earliestRemaining)) {
+      this.#renewalTimer = undefined;
+      return;
     }
     const timeUntilDue = Math.max(10, Math.floor(earliestRemaining - this.#leaseMs / 2));
     const delay = Math.min(timeUntilDue, Math.max(50, Math.floor(this.#leaseMs / 4)));
     this.#renewalTimer = setTimeout(() => {
       this.#renewalTimer = undefined;
-      const renewalTask = this.#renewAllDueHeldJobs().finally(() => {
-        if (this.#runningRenewal === renewalTask) {
-          this.#runningRenewal = undefined;
-        }
-        this.#scheduleRenewal();
-      });
-      this.#runningRenewal = renewalTask;
+      this.#renewAllDueHeldJobs();
+      this.#scheduleRenewal();
     }, delay);
   }
 
@@ -679,7 +687,7 @@ export class AdjudicationWorker {
     } catch (error) {
       this.#consecutiveErrors += 1;
       this.#fail('Adjudication pass failed; retrying with backoff', error, {});
-      await this.#renewAllDueHeldJobs();
+      this.#renewAllDueHeldJobs();
       const rawBackoff = Math.min(this.#maxBackoffMs, this.#pollMs * 2 ** this.#consecutiveErrors);
       this.#schedule(this.#boundDelayForHeld(rawBackoff));
       return;

@@ -6,7 +6,7 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-11-07 — Issue #124 durable adjudication worker correctness and bounded concurrency: `AdjudicationWorker` coordinates background lease renewal of held jobs waiting behind lanes/DB IO, bounds next-pass and error-backoff delays by held lease safe window, flushes per-game FIFO notice queues before immediate clock release, admits fresh work within controller capacity 100 with concurrent admission reservation, initializes proof jobs once per held grant, tracks and awaits in-flight renewal IO on shutdown, and prevents recreation of conflict-cleaned jobs; ADR 0175 updated; 29 hermetic worker tests pass with prompt bounded failure assertions on mutants; real PostgreSQL/gateway integration gates awaiting root._
+_Last updated: 2026-11-07 — Issue #124 durable adjudication worker independent lease maintenance: `AdjudicationWorker` maintains background lease renewal independently per held job so stalled renewal IO on one job cannot block initiating renewals or subsequent cycles of other held jobs; all owned renewal IO tracked in `#activeRenewals` and awaited on `stop()`; ADR 0175 updated; 30 hermetic worker tests pass with prompt bounded failure assertions; review pending root verification._
 
 Prior: _Last updated: 2026-11-05 — Issue #124 durable adjudication worker (unconstructed): `AdjudicationWorker` claims proving operations, proves in bounded slices with lease renewal, settles exhausted proofs as unresolved, settles with lost-reply recovery, publishes, then releases stops idempotently; ADR 0175; hermetic and real PostgreSQL race/successor tests. Wiring, enablement and rollout remain on HOLD._
 
@@ -6532,3 +6532,18 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - Reversible mutation testing killed all targeted mutants promptly without test hangs.
 - **Remaining Platform Gates (HOLD)**:
   - Real PostgreSQL and gateway full test suites await root independent run. Remote push, PR merge, deployment, and cluster activation remain strictly on HOLD.
+
+### Development Slice: Issue #124 — Independent Lease Maintenance Across Stalled Renewals (2026-11-07)
+
+- **Basis & Scope**: Addressed pending Qodo finding (0a09916a-9af9-4c3f-808d-eac7c4ec9098) on PR 152 branch `codex/issue124-worker-fixes-20261107` at verified head `fc8553f6`. Scope strictly confined to `services/gateway/src/adjudication-worker.ts`, hermetic tests in `adjudication-worker.test.ts`, `docs/adr/0175-adjudication-worker.md`, and append-only handover state. No commits, push, merge, migrations, or production changes.
+- **Correctness Fixes**:
+  - *Independent Lease Maintenance*: Replaced sequential await of renewals with independent per-held-job lease maintenance bounded by controller capacity 100. A stalled database renewal on one held job does not block initiating due renewals for other held jobs or their subsequent renewal cycles while the first promise remains pending.
+  - *Overlap & Leak Prevention*: In-flight renewals are tracked per held job (`held.renewing`) and in an owned set (`#activeRenewals`). Overlapping duplicate renewals for the same grant and busy 0ms/10ms timer loops are prevented. Stale grant updates and job recreation after loss are defended.
+  - *Tracked Shutdown IO*: `stop()` halts new scheduling, awaits in-flight pass and all active renewal IO promises (`#activeRenewals`), then cleans up jobs, leaving zero active timers or steps.
+- **Verification Evidence**:
+  - Deterministic regression test reproducing stalled renewal IO (>2 lease intervals) with `concurrency: 1`: verified prompt failure (ERR_ASSERTION in 8ms) on baseline `fc8553f6` and clean pass with the fix.
+  - Scoped production and test compilation (`tsc -p tsconfig.json` and `tsc -p tsconfig.test.json`): exit code 0.
+  - Hermetic worker tests (`node --test dist-test/test/adjudication-worker.test.js`): 30/30 PASS (0 fail, 0 skip).
+  - Clean code metrics verified: all methods parameters <= 4, decision complexity <= 8 (except documented constructor configuration defaulting exception), nesting depth <= 5, zero `as any`, zero suppressions.
+- **Remaining Platform Gates (HOLD)**:
+  - Root full verification, Linux PostgreSQL/Redis gates, remote push, review provider closure, PR merge, and deployment remain strictly on HOLD.

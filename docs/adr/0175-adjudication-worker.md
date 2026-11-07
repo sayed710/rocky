@@ -74,6 +74,12 @@ Recovery and ordering:
   controller's capacity of 100; when capacity is saturated, no durable claims are attempted, and
   pagination reports more work pending until slots free up. Slots are reserved during concurrent
   admission to prevent overclaiming.
+- **Independent lease maintenance.** Background lease renewal is maintained independently per held job
+  across the worker's bounded controller capacity. A slow or stalled database renewal on one held job
+  does not block initiating due renewals for other held jobs or their subsequent renewal cycles while
+  the first promise remains pending. Overlapping duplicate renewals for the same grant are prevented,
+  and all active renewal IO promises are tracked in an owned set and awaited upon `stop()`, including
+  for removed jobs and across previous cycles.
 
 Privileges: the worker's role needs what every `PgAdjudicationStore` call needs, SELECT, INSERT and
 UPDATE on `game_adjudications` and `game_adjudication_releases` (and the event and queue tables it
