@@ -17,17 +17,22 @@ observed-release stop, releases the clocks.
 (`AdjudicationWorkStore`, which `PgAdjudicationStore` satisfies) and a `publish` callback, and
 holds no state correctness depends on. Each pass:
 
-1. **Claim.** `listClaimableAdjudications` reads proving operations with no live lease, oldest
-   first. Each is claimed at the listed generation with a fresh claim intent; an uncertain reply is
-   retried once with the same intent, which recovers the committed lease. A conflict (another
-   executor won) skips the operation.
+1. **Claim.** Proofs already held by this worker (`#inFlight`) go first, each for one more slice,
+   in claim order. Newly claimable operations are read via `listClaimableAdjudications` only up to
+   the controller's remaining free capacity (capacity 100 minus in-flight jobs), reserving slots
+   during concurrent admission. Each is claimed at the listed generation with a fresh claim intent;
+   an uncertain reply is retried once with the same intent, which recovers the committed lease. A
+   conflict (another executor won) skips the operation. Duplicate operation IDs returned in a page
+   are filtered and never claimed twice.
 2. **Prove.** The proof runs in bounded slices (`sliceBudget`) outside every transaction, yielding
    to the event loop between slices and renewing the lease once half of it has elapsed. An exhausted
    timeout question is escalated while an effort tier remains, and only then is a question concluded
    unresolved (ADR 0174 section 7). Each operation gets at most `proofSliceMs` (default 200 ms) of
    proof per pass: an unfinished proof keeps its claim and its local job, and the next pass resumes it
    before claiming new work, so one long proof (an escalated timeout can take seconds) never holds up
-   the other games.
+   the other games. Proof jobs are initialized once for the held grant rather than reloading durable
+   events on every slice. Leases are renewed before await, and next-pass delays and error backoffs
+   are bounded by the earliest held lease safe window so held jobs waiting behind others never lapse.
 3. **Settle.** The resolution instant is the one a retained evaluation already fixed, otherwise
    now. An uncertain settlement is retried once with the same grant; a completed operation then
    answers from the database. A conflict (superseded claim) drops the local proof job.
@@ -37,25 +42,54 @@ holds no state correctness depends on. Each pass:
 
 Failures are logged and counted. A failed proof or settlement is retried once its lease lapses, at
 a higher generation; a failed release is retried on the next pass. `stop()` halts a proof at its
-next slice and waits for the pass.
+next slice, awaits in-flight pass and renewal IO promises, then cancels and evicts remaining local
+jobs from the controller.
 
 Recovery and ordering:
 
 - **Retained settlement.** When a settlement was evaluated but its write failed, the next claim in
   the same process settles that evaluation at its fixed instant without stepping the consumed job.
-- **Job cleanup.** The local proof job is cancelled and evicted after every claim, whatever the
-  outcome, so lost or superseded claims cannot fill the controller's bounded capacity.
-- **Notices.** A failed notice to the owner is kept per game and retried at the start of every pass
-  while the process runs; a stop is never released while its game has one outstanding, and those
-  games are excluded before the page limit so they cannot starve other stops. The worker that
-  settled a stop releases it as soon as its notice is delivered, with the same release request id,
-  so a move that keeps the game going costs no extra clock pause. The release sweep, which picks up
-  stops whose settler died or failed to release, takes a stop only once its settlement is
-  `releaseGraceMs` old (database time, default 1 s), so the replica that settled it notifies
-  first. Notices are a latency optimization, not the delivery
-  guarantee: the owner publishes from the durable log, and an owner whose copy shows a game proving
-  or stopped re-reads the log on its own (ADR 0176), which covers a process that died between
+- **Job cleanup.** The local proof job is retained across time slices while held by this process.
+  When an operation settles, fails, loses its lease to another executor, or when the worker stops,
+  its local proof job is cancelled and evicted, preventing leaks in the controller's 100-job capacity.
+  A waiting lane skips dropped jobs and never recreates them.
+  A subsequent claim at a fresh generation initializes a fresh proof job.
+- **Notices.** A failed notice to the owner is kept in a per-game FIFO queue. Changes for each game
+  are drained in strict sequential order across retries and new notices; an earlier failed notice
+  blocks subsequent notices and immediate clock releases for that game until delivered. Other games
+  continue draining independently when one game's notice fails. Immediate clock release occurs only
+  when that game's notice queue is empty, ensuring no notice debt is overwritten or silently discarded.
+  A stop is never released while its game has an outstanding notice, and those games are excluded
+  before the page limit so they cannot starve other stops. The worker that settled a stop releases
+  it as soon as its notice queue is empty, with the same release request id, so a move that keeps the
+  game going costs no extra clock pause. The release sweep, which picks up stops whose settler died or
+  failed to release, takes a stop only once its settlement is `releaseGraceMs` old (database time,
+  default 1 s), so the replica that settled it notifies first. Notices are a latency optimization, not
+  the delivery guarantee: the owner publishes from the durable log, and an owner whose copy shows a game
+  proving or stopped re-reads the log on its own (ADR 0176), which covers a process that died between
   commit and notice without any time-window scan.
+- **Bounded Concurrency and Controller Capacity.** Operations run concurrently up to `concurrency`
+  (default 4; positive safe integer <= 100). When `concurrency: 1`, held operations followed by fresh
+  operations execute in strict sequential order. Total in-flight jobs in the worker are bounded by the
+  controller's capacity of 100; when capacity is saturated, no durable claims are attempted, and
+  pagination reports more work pending until slots free up. Slots are reserved during concurrent
+  admission to prevent overclaiming.
+- **Independent lease maintenance.** Background lease renewal is maintained independently per held job
+  across the worker's bounded controller capacity. A slow or stalled database renewal on one held job
+  does not block initiating due renewals for other held jobs or their subsequent renewal cycles while
+  the first promise remains pending. Overlapping duplicate renewals for the same grant are prevented,
+  and all active renewal IO promises are tracked in an owned set and awaited upon `stop()`, including
+  for removed jobs and across previous cycles. Renewal failure paths (both `AdjudicationConflictError`
+  and expired transient failures) are fenced by held-object identity, ensuring a late background renewal
+  that outlives a previous cleanup cannot evict or drop a newly admitted replacement proof job for the same
+  operation. When a renewal fails transiently while its lease remains live, the failure is logged and
+  lease-aware retry backoff is recorded while retaining the still-live current grant and proof progress across
+  foreground continuation, eliminating tight 10ms retry loops and avoiding unnecessary proof job reinitialization
+  or history replay. Healthy jobs continue renewing on time, and eventual loss or expired failure cleans up promptly.
+  Renewal scheduling honors the earliest supported lease deadline down to 10ms (with minimum schedulable lease
+  `leaseMs >= 2ms` where half-lease renewal can start before expiry) without fixed 10ms or 50ms floors forcing
+  renewals to start at or after expiry; spacing is bounded to avoid 0ms busy loops, and genuinely unschedulable
+  values (`leaseMs < 2`) are refused explicitly with `RangeError`.
 
 Privileges: the worker's role needs what every `PgAdjudicationStore` call needs, SELECT, INSERT and
 UPDATE on `game_adjudications` and `game_adjudication_releases` (and the event and queue tables it
@@ -70,4 +104,5 @@ granted these explicitly when adjudication is enabled.
 - Rollout remains on HOLD (Issue #124): no service constructs the worker, and no flag enables it.
   Wiring it to the gateway's owner, so that `publish` reloads and broadcasts the game, is separate
   work.
-- A pass runs one proof at a time per process; throughput scales with replicas, not threads.
+- A pass runs up to `concurrency` (default 4) operations concurrently per process to overlap
+  database round trips, while proof slices cooperatively yield to the event loop.
