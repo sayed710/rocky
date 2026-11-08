@@ -368,9 +368,18 @@ export class RedisCommandRouter implements CommandRouter {
     // Redis ownership under the slot after all hydration/command waits.
     if (this.registry.holdsValidLease(gameId)) {
       this.fastPathCommandsCounter?.inc();
+      const ticket = this.registry.captureTicket(gameId);
       return withCommandSpan(this.tracer, cmd.kind, { traceId: generateTraceId() }, () =>
-        this.applyLocal(gameId, userId, cmd),
+        this.applyLocalWithCleanup(gameId, userId, cmd, ticket),
       );
+    }
+
+    // Server adjudication discovery validates existence before attempting a fallback
+    // ownership claim, preventing nonexistent or unvalidated pending join IDs from
+    // acquiring persistent leases in Redis (Qodo finding c2f34bf9).
+    const isAdjudicationDiscovery = userId === ADJUDICATION_ACTOR && cmd.kind === 'adjudicationChanged';
+    if (isAdjudicationDiscovery && !(await this.authority.knows(gameId))) {
+      throw new AuthorityError('unknown_game', `no such game ${gameId}`);
     }
 
     // Fallback path: claim/renew lease via Redis, then apply locally or forward.
@@ -378,8 +387,9 @@ export class RedisCommandRouter implements CommandRouter {
 
     if (claim.owned) {
       // Consumer was started by the onClaimed hook (or already running).
+      const ticket = this.registry.captureTicket(gameId);
       return withCommandSpan(this.tracer, cmd.kind, { traceId: generateTraceId() }, () =>
-        this.applyLocal(gameId, userId, cmd),
+        this.applyLocalWithCleanup(gameId, userId, cmd, ticket),
       );
     }
 
@@ -388,6 +398,32 @@ export class RedisCommandRouter implements CommandRouter {
     return withCommandSpan(this.tracer, cmd.kind, { traceId: commandTraceId }, (commandSpan) =>
       this.forward(gameId, userId, cmd, commandTraceId, commandSpan.spanId, commandSpan.sampled),
     );
+  }
+
+  private async applyLocalWithCleanup(
+    gameId: string,
+    userId: string,
+    cmd: Command,
+    ticket: OwnershipTicket | undefined,
+  ): Promise<ApplyResult> {
+    try {
+      return await this.applyLocal(gameId, userId, cmd);
+    } catch (err) {
+      if (err instanceof AuthorityError && err.code === 'unknown_game') {
+        if (ticket && this.registry.isTicketCurrent(ticket)) {
+          await this.releaseTicketSafely(gameId, err);
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async releaseTicketSafely(gameId: string, primaryError: AuthorityError): Promise<void> {
+    try {
+      await this.registry.release(gameId);
+    } catch (releaseErr) {
+      throw new AuthorityError(primaryError.code, primaryError.message, { cause: releaseErr });
+    }
   }
 
   private async claimOwnership(gameId: string) {
@@ -401,7 +437,11 @@ export class RedisCommandRouter implements CommandRouter {
     }
   }
 
-  private async applyLocal(gameId: string, userId: string, cmd: Command): Promise<ApplyResult> {
+  private async applyLocal(
+    gameId: string,
+    userId: string,
+    cmd: Command,
+  ): Promise<ApplyResult> {
     const admission = this.captureAdmission(gameId);
     admission.check(false);
     const ownership = admission.ownership;

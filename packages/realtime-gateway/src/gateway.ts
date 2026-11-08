@@ -713,7 +713,8 @@ export class RealtimeGateway {
     }
   }
 
-  private sendStateToRoom(gameId: string, state: StateView): void {
+  /** Send authoritative state to the local room and any pending join buffers. */
+  sendStateToRoom(gameId: string, state: StateView): void {
     const highest = this.observedRevision.get(gameId) ?? -1;
     if (state.stateRevision >= highest) {
       this.deliverState(gameId, state);

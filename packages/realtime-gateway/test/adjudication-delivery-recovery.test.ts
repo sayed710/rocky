@@ -887,3 +887,49 @@ test('gateway localGameIds accurately tracks rooms and clears upon disconnect', 
   assert.equal(gateway.localGameIds().has('game-local-1'), false);
   assert.equal(gateway.localGameIds().size, 0);
 });
+
+test('gateway sendStateToRoom delivers state to local room and deduplicates by stateRevision', async () => {
+  const pubsub = new InMemoryPubSub();
+  const eventLog = new InMemoryEventLog();
+  const authority = new GameAuthority(pubsub, () => 1000, eventLog);
+  const verifier = new StaticTokenVerifier();
+  const gateway = new RealtimeGateway(authority, pubsub, verifier, () => 1000);
+
+  const whiteId = 'user-white';
+  const blackId = 'user-black';
+  const gameId = 'game-state-delivery-1';
+
+  await authority.createGame({
+    gameId,
+    players: { white: whiteId, black: blackId },
+    timeControl: TC,
+    rated: false,
+    at: 1000,
+  });
+
+  const conn1 = new InMemoryConnection('conn-1');
+  gateway.handleConnection(conn1);
+  conn1.deliver({ t: 'join', gameId, token: `token:${whiteId}` });
+  await waitForMessage(conn1, 'joined');
+
+  // Move played on authority to advance state revision
+  const moveRes = await authority.apply(gameId, whiteId, { kind: 'move', uci: 'e2e4' });
+  assert.equal(moveRes.state.stateRevision, 1);
+
+  // Deliver authoritative state via sendStateToRoom
+  gateway.sendStateToRoom(gameId, moveRes.state);
+
+  const stateMsgs = conn1.sent.filter((m) => m.t === 'state');
+  assert.equal(stateMsgs.length, 1);
+  if (stateMsgs[0] && stateMsgs[0].t === 'state') {
+    assert.equal(stateMsgs[0].state.ply, 1);
+    assert.equal(stateMsgs[0].state.stateRevision, 1);
+  }
+
+  // Repeated call with same revision must be deduplicated
+  gateway.sendStateToRoom(gameId, moveRes.state);
+  const stateMsgsAfter = conn1.sent.filter((m) => m.t === 'state');
+  assert.equal(stateMsgsAfter.length, 1, 'Repeated sendStateToRoom with same revision must not duplicate message');
+
+  conn1.close();
+});

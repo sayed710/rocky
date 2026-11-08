@@ -21,7 +21,7 @@
  * coverage for retained rooms even under dynamic room churn, and clears cleanly when all rooms close.
  */
 
-import { ADJUDICATION_ACTOR, type CommandRouter, type GameAuthority } from '@chess-platform/realtime-gateway';
+import { ADJUDICATION_ACTOR, type CommandRouter, type GameAuthority, type StateView } from '@chess-platform/realtime-gateway';
 import type { Counter, Logger } from '@chess-platform/api';
 
 export interface AdjudicationResyncOptions {
@@ -31,6 +31,8 @@ export interface AdjudicationResyncOptions {
   readonly watched?: {
     /** Required fallback source of locally watched rooms and join buffers. */
     localGameIds(): Iterable<string>;
+    /** Receiver of authoritative state recovered during resync passes. */
+    sendStateToRoom(gameId: string, state: StateView): void;
     /** Optional fast hint of rooms observed in proving/stopped states. */
     watchedAdjudicatingGames?(): Iterable<string>;
   };
@@ -139,7 +141,8 @@ export class AdjudicationResync {
 
   async #routeCandidate(gameId: string): Promise<boolean> {
     try {
-      await this.options.router.route(gameId, ADJUDICATION_ACTOR, { kind: 'adjudicationChanged' });
+      const result = await this.options.router.route(gameId, ADJUDICATION_ACTOR, { kind: 'adjudicationChanged' });
+      this.options.watched?.sendStateToRoom(gameId, result.state);
       return true;
     } catch (error) {
       this.options.failuresCounter?.inc();

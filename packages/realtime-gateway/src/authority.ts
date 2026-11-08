@@ -98,8 +98,8 @@ export type AuthorityErrorCode =
 
 /** A refused command. `code` maps directly onto a protocol `RejectCode`. */
 export class AuthorityError extends Error {
-  constructor(readonly code: AuthorityErrorCode, message: string) {
-    super(message);
+  constructor(readonly code: AuthorityErrorCode, message: string, options?: ErrorOptions) {
+    super(message, options);
     this.name = 'AuthorityError';
   }
 }
