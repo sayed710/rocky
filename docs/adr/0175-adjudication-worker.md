@@ -82,6 +82,24 @@ Recovery and ordering:
   controller's capacity of 100; when capacity is saturated, no durable claims are attempted, and
   pagination reports more work pending until slots free up. Slots are reserved during concurrent
   admission to prevent overclaiming.
+- **Pass serialization and lifecycle ownership.** Public `runPass()` calls and scheduled ticks are
+  serialized through an owned promise chain (`#passTail`), ensuring exactly one pass executes at any
+  given time across all entry paths. Concurrent invocations (direct+direct, scheduled+direct) queue
+  deterministically rather than executing concurrently, preventing race conditions where the same held
+  job could be stepped, advanced, or settled twice across asynchronous yields, while retaining full
+  bounded concurrency (`concurrency`, default 4) *within* each individual pass. Handled failures or
+  rejections release downstream passes via clean resolution chaining without creating orphan or
+  unhandled rejection promises.
+- **Shutdown and queued restart semantics.** `stop()` owns and awaits all active pass execution and
+  in-flight IO (whether initiated manually or via scheduled tick), alongside all tracked active background
+  lease renewal promises, before cancelling and evicting remaining in-flight jobs from the local controller.
+  If `start()` is invoked while an asynchronous shutdown is in progress, the restart is explicitly queued
+  (`#restartPending`) rather than prematurely clearing halting/stopped flags; once the pending shutdown
+  has fully drained and completed its controller cleanup, the queued restart initializes a clean subsequent
+  generation without stale cleanup evicting newly admitted jobs. Repeated or concurrent calls to `stop()`
+  and `start()` are deterministic and idempotent, and a subsequent `stop()` while stopping cancels any
+  pending restart. Once stopped, further pass executions safely return empty passes without initiating
+  controller or database store work.
 - **Independent lease maintenance.** Background lease renewal is maintained independently per held job
   across the worker's bounded controller capacity. A slow or stalled database renewal on one held job
   does not block initiating due renewals for other held jobs or their subsequent renewal cycles while
