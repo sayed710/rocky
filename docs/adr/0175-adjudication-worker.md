@@ -82,6 +82,24 @@ Recovery and ordering:
   controller's capacity of 100; when capacity is saturated, no durable claims are attempted, and
   pagination reports more work pending until slots free up. Slots are reserved during concurrent
   admission to prevent overclaiming.
+- **Pass serialization and lifecycle ownership.** Public `runPass()` calls and scheduled ticks are
+  serialized through an owned promise chain (`#passTail`), ensuring exactly one pass executes at any
+  given time across all entry paths. Concurrent invocations (direct+direct, scheduled+direct) queue
+  deterministically rather than executing concurrently, preventing race conditions where the same held
+  job could be stepped, advanced, or settled twice across asynchronous yields, while retaining full
+  bounded concurrency (`concurrency`, default 4) *within* each individual pass. Handled failures or
+  rejections release downstream passes via clean resolution chaining without creating orphan or
+  unhandled rejection promises.
+- **Shutdown and queued restart semantics.** `stop()` owns and awaits all active pass execution and
+  in-flight IO (whether initiated manually or via scheduled tick), alongside all tracked active background
+  lease renewal promises, before cancelling and evicting remaining in-flight jobs from the local controller.
+  If `start()` is invoked while an asynchronous shutdown is in progress, the restart is explicitly queued
+  (`#restartPending`) rather than prematurely clearing halting/stopped flags; once the pending shutdown
+  has fully drained and completed its controller cleanup, the queued restart initializes a clean subsequent
+  generation without stale cleanup evicting newly admitted jobs. Repeated or concurrent calls to `stop()`
+  and `start()` are deterministic and idempotent, and a subsequent `stop()` while stopping cancels any
+  pending restart. Once stopped, further pass executions safely return empty passes without initiating
+  controller or database store work.
 - **Independent lease maintenance.** Background lease renewal is maintained independently per held job
   across the worker's bounded controller capacity. A slow or stalled database renewal on one held job
   does not block initiating due renewals for other held jobs or their subsequent renewal cycles while
@@ -98,6 +116,14 @@ Recovery and ordering:
   `leaseMs >= 2ms` where half-lease renewal can start before expiry) without fixed 10ms or 50ms floors forcing
   renewals to start at or after expiry; spacing is bounded to avoid 0ms busy loops, and genuinely unschedulable
   values (`leaseMs < 2`) are refused explicitly with `RangeError`.
+- **Poll Indexing (Migration 0055).** Migration 0055 introduces partial ordered poll indexes to support
+  the worker's sweep queries: `(created_at, game_id) WHERE execution_state = 'proving'` for claimable
+  operations, and `(completed_at, game_id) WHERE is_current_stop` for releasable stops. Existing query
+  semantics, security boundaries, and table grants remain completely unchanged. Controlled EXPLAIN tests
+  demonstrate indexability under test-local planner choices, not guaranteed production performance. No
+  production migration, role grants, worker construction, or runtime activation are performed; lower
+  PR 152 APIs remain unwired and default-off, and the upper gateway admission flag remains separate as
+  documented in ADR 0174.
 
 Privileges: the worker's role needs what every `PgAdjudicationStore` call needs, SELECT, INSERT and
 UPDATE on `game_adjudications` and `game_adjudication_releases` (and the event and queue tables it

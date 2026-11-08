@@ -28,9 +28,12 @@ and when it is on, the owner of a game must remain the only writer of its hot co
    Before deciding any command the owner also folds whatever the log holds beyond its copy, so a lost
    or late notice cannot leave a game looking proving or stopped once the next command arrives.
    Delivery does not rest on notices at all: only a game that is proving or stopped can be changed
-   by the worker, so every second (`AdjudicationResync`) the owner folds the log into each such game
-   it holds and owns. A worker that dies between its commit and its notice is therefore covered with
-   no publication table, cursor or time-window scan.
+   by the worker. Every pass, `AdjudicationResync` unions candidates from resident authority proving/stopped state
+   (`authority.adjudicatingGames()`) and bounded locally watched room hints (`watched.watchedAdjudicatingGames()`),
+   and routes `adjudicationChanged` through the canonical `CommandRouter`. The command router directs the command to
+   the current owner, or claims ownership via Redis router fallback if the previous owner died, folding the durable log
+   and broadcasting whatever the worker committed. A worker that dies between its commit and notice, or an owner that dies
+   before notice delivery, is therefore covered with no publication table, cursor, or time-window scan.
 4. **Recorded releases.** `AdjudicationClocksStarted` is never appended live, so a hot copy or a cold
    rebuild re-derives it with `Game.prepareClockRelease` and refuses a logged release that differs from
    the stop it records.
@@ -40,8 +43,10 @@ and when it is on, the owner of a game must remain the only writer of its hot co
 
 ## Consequences
 
-- Off by default. Enabling it requires migrations 0053/0054, `prepareAdjudicationGuard`, a web client
-  that understands the new `state` field, and the owner's rollout approval (Issue #124 HOLD).
+- Off by default. Enabling it requires migrations 0053/0054 and additive 0055 poll indexes, `prepareAdjudicationGuard`,
+  a web client that understands the new `state` field, and the owner's explicit production rollout approval
+  (Issue #124 HOLD under ADR 0174 §7 owner-approved scope exceptions and lone-king lemma). Lower pure domain and search
+  APIs remain ungated, while gateway integration stays off by default.
 - With it on, every command waits for its proof: latency is the proof time plus one worker pass.
 
 ## Recovery and Delivery Boundaries (Qodo 1852461 Remediation)
