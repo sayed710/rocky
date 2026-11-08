@@ -502,8 +502,9 @@ export class AdjudicationWorker {
     if (queue.drainer) {
       return queue.drainer;
     }
-    const task = (async () => {
-      try {
+    let task: Promise<boolean>;
+    queue.drainer = task = Promise.resolve()
+      .then(async () => {
         while (queue.items.length > 0) {
           if (this.#halting) return false;
           const next = queue.items[0]!;
@@ -517,11 +518,12 @@ export class AdjudicationWorker {
         }
         this.#unpublished.delete(gameId);
         return true;
-      } finally {
-        queue.drainer = undefined;
-      }
-    })();
-    queue.drainer = task;
+      })
+      .finally(() => {
+        if (queue.drainer === task) {
+          queue.drainer = undefined;
+        }
+      });
     return task;
   }
 
