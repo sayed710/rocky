@@ -116,6 +116,14 @@ Recovery and ordering:
   `leaseMs >= 2ms` where half-lease renewal can start before expiry) without fixed 10ms or 50ms floors forcing
   renewals to start at or after expiry; spacing is bounded to avoid 0ms busy loops, and genuinely unschedulable
   values (`leaseMs < 2`) are refused explicitly with `RangeError`.
+- **Poll Indexing (Migration 0055).** Migration 0055 introduces partial ordered poll indexes to support
+  the worker's sweep queries: `(created_at, game_id) WHERE execution_state = 'proving'` for claimable
+  operations, and `(completed_at, game_id) WHERE is_current_stop` for releasable stops. Existing query
+  semantics, security boundaries, and table grants remain completely unchanged. Controlled EXPLAIN tests
+  demonstrate indexability under test-local planner choices, not guaranteed production performance. No
+  production migration, role grants, worker construction, or runtime activation are performed; lower
+  PR 152 APIs remain unwired and default-off, and the upper gateway admission flag remains separate as
+  documented in ADR 0174.
 
 Privileges: the worker's role needs what every `PgAdjudicationStore` call needs, SELECT, INSERT and
 UPDATE on `game_adjudications` and `game_adjudication_releases` (and the event and queue tables it
