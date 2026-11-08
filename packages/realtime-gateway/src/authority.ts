@@ -668,16 +668,58 @@ export class GameAuthority {
   /** Preserve the command queue while replacing its state with PostgreSQL truth. */
   private async refreshSlot(gameId: string, slot: GameSlot, generation = slot.generation, revive = true): Promise<boolean> {
     if (generation !== slot.generation) return false;
-    if (slot.record) slot.record.stale = true;
+    const previous = slot.record;
+    if (previous) previous.stale = true;
     const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) => this.store.load(gameId, s));
     if (generation !== slot.generation || this.games.get(gameId) !== slot) return false;
     if (logged.length === 0) {
       slot.record = undefined;
       return false;
     }
-    slot.record = this.rebuildRecord(gameId, logged);
+    const newRecord = this.rebuildRecord(gameId, logged);
+    slot.record = newRecord;
     if (revive) slot.dispose = false;
+
+    // Delivery of missed committed broadcasts across owner takeover reload:
+    // When a takeover reload reveals newly committed adjudication workflow evidence
+    // (prior resident was proving/stopped, or new durable suffix contains adjudication lifecycle events),
+    // emit any newly observed committed broadcasts and updated state to the room channel.
+    if (previous !== undefined && newRecord.persistedSeq > previous.persistedSeq && this.hasAdjudicationRecoveryEvidence(previous, newRecord)) {
+      this.emitTakeoverBroadcasts(gameId, newRecord, previous.broadcasts.length);
+    }
+
     return true;
+  }
+
+  private isAdjudicatingRecord(record?: GameRecord): boolean {
+    if (!record) return false;
+    const game = record.game;
+    return !game.status.over && (game.isBlocked || game.stoppedClock !== null);
+  }
+
+  private hasAdjudicationRecoveryEvidence(previous: GameRecord, newRecord: GameRecord): boolean {
+    if (this.isAdjudicatingRecord(previous)) return true;
+    const suffix = newRecord.events.slice(previous.events.length);
+    for (const ev of suffix) {
+      if (
+        ev.type === 'AdjudicationStarted' ||
+        ev.type === 'AdjudicationResolved' ||
+        ev.type === 'AdjudicationClocksStarted'
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private emitTakeoverBroadcasts(gameId: string, newRecord: GameRecord, previousCount: number): void {
+    const freshBroadcasts = newRecord.broadcasts.slice(previousCount);
+    for (const entry of freshBroadcasts) {
+      this.pubsub.publish(gameChannel(gameId), entry.msg);
+      if (entry.msg.t === 'ended') this.pubsub.publish(gamesEndedChannel(), entry.msg);
+    }
+    const state = this.viewOf(newRecord.game, newRecord.persistedSeq);
+    this.pubsub.publish(gameChannel(gameId), { t: 'state', gameId, state });
   }
 
   /**

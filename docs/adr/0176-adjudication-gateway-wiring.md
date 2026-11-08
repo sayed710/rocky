@@ -43,3 +43,19 @@ and when it is on, the owner of a game must remain the only writer of its hot co
 - Off by default. Enabling it requires migrations 0053/0054, `prepareAdjudicationGuard`, a web client
   that understands the new `state` field, and the owner's rollout approval (Issue #124 HOLD).
 - With it on, every command waits for its proof: latency is the proof time plus one worker pass.
+
+## Recovery and Delivery Boundaries (Qodo 1852461 Remediation)
+
+1. **Owner death, pre-admission discovery, and bounded observed hints (`AdjudicationResync`, `RealtimeGateway`)**:
+   `AdjudicationResync.runPass()` routes `adjudicationChanged` through the canonical `CommandRouter` across candidates from both resident authority copies (`authority.adjudicatingGames()`) and bounded locally watched room hints (`watched.watchedAdjudicatingGames()`), removing the legacy unused `ownership` option. `RealtimeGateway` tracks ephemeral hints when room state frames show `adjudication: 'proving' | 'stopped'`, and clears them when the game is released (`adjudication === undefined`), ended, or when room sessions teardown (`room.size === 0` and join buffers empty). Bounded observed-room hints may also exist during join buffering. These hints are never treated as authoritative Game mutations and bypass no ownership or rehydration fencing; they enable survivor replicas to discover and recover games where clients connected before remote admission. When an owner dies, the survivor acquires canonical ownership via Redis router fallback, rehydrates from the durable log, and broadcasts settled/released states without waiting for player action.
+
+2. **Durable adjudication suffix-scoped reload replay (`GameAuthority.refreshSlot`)**:
+   During takeover reload (`authority.reloadFromLog` / `refreshSlot`), broadcast re-emission is strictly scoped by `hasAdjudicationRecoveryEvidence(previous, newRecord)`. Broadcasts and updated state are emitted only when the prior resident was actively proving/stopped or when the newly validated durable suffix contains genuine adjudication lifecycle events (`AdjudicationStarted`, `AdjudicationResolved`, `AdjudicationClocksStarted`). For ordinary games without adjudication, ordinary reloads (such as losing append races, failed appends, or malformed heads) publish zero broadcasts, preserving no-rebroadcast and slot revival semantics unchanged.
+
+3. **Unwatched remote ended copy eviction (`OwnerCommandConsumer`)**:
+   `OwnerCommandConsumer.processCommand` extends server-notice cleanup to recognize `(envelope.userId === ADJUDICATION_ACTOR && envelope.cmd.kind === 'adjudicationChanged')`. When a remote owner loads an unwatched ended game solely to fold a forwarded adjudication notice, `releaseExpiryCopy` evicts the ended copy from memory before replying to the forwarding replica. Preexisting resident copies, watched games with active client sessions, and newer connection fencing remain protected.
+
+4. **Independent per-recipient and per-handler delivery isolation (`Room`, `PubSub`)**:
+   - `Room.fanout` catches exceptions on individual member connection sends (`m.conn.send`), ensuring a failing local socket cannot suppress delivery to healthy same-room peers. Point-to-point `Room.sendTo` remains direct.
+   - `RedisPubSub.publish` and `InMemoryPubSub.publish` catch exceptions per local subscriber callback. A throwing local subscriber cannot abort remaining local subscribers or suppress step 2 remote Redis fanout. Diagnostic logs strictly redact payloads, moves, FEN strings, and raw Error objects.
+   - Best-effort Redis pub/sub semantics remain best-effort without an outbox redesign or durable delivery acknowledgment ledger. `GameAuthority` and `RealtimeGateway.ensureRoom` do not swallow publication failures.

@@ -108,6 +108,7 @@ export class RealtimeGateway {
   private readonly loadedGames = new Set<string>();
   private readonly joinBuffers = new Map<string, Set<ServerMessage[]>>();
   private readonly observedRevision = new Map<string, number>();
+  private readonly observedAdjudications = new Set<string>();
   private readonly stateRefreshes = new Map<string, { again: boolean }>();
   private readonly unconfirmedSubscriptionsSet = new Set<string>();
   /**
@@ -244,6 +245,14 @@ export class RealtimeGateway {
     return this.observedRevision.get(gameId);
   }
 
+  /**
+   * Games with active local rooms observed in proving or stopped adjudication states.
+   * Ephemeral hint for recovery passes; cleared when room closes or adjudication releases.
+   */
+  watchedAdjudicatingGames(): string[] {
+    return [...this.observedAdjudications];
+  }
+
   private onMessage(session: Session, msg: ClientMessage): void {
     switch (msg.t) {
       case 'join':
@@ -311,6 +320,7 @@ export class RealtimeGateway {
           this.joinBuffers.delete(gameId);
           if (!this.rooms.has(gameId)) {
             this.observedRevision.delete(gameId);
+            this.observedAdjudications.delete(gameId);
             this.unconfirmedSubscriptionsSet.delete(gameId);
           }
         }
@@ -633,6 +643,7 @@ export class RealtimeGateway {
         const buffers = this.joinBuffers.get(gameId);
         if (!buffers || buffers.size === 0) {
           this.observedRevision.delete(gameId);
+          this.observedAdjudications.delete(gameId);
           this.unconfirmedSubscriptionsSet.delete(gameId);
         }
       } else {
@@ -681,9 +692,24 @@ export class RealtimeGateway {
     }
     if (rev !== undefined) {
       const current = this.observedRevision.get(gameId);
-      if (current === undefined || rev > current) {
-        this.observedRevision.set(gameId, rev);
+      if (current === undefined || rev >= current) {
+        if (current === undefined || rev > current) {
+          this.observedRevision.set(gameId, rev);
+        }
+        this.updateObservedAdjudication(gameId, msg);
       }
+    }
+  }
+
+  private updateObservedAdjudication(gameId: string, msg: ServerMessage): void {
+    if (msg.t === 'state') {
+      if (msg.state.adjudication === 'proving' || msg.state.adjudication === 'stopped') {
+        this.observedAdjudications.add(gameId);
+      } else {
+        this.observedAdjudications.delete(gameId);
+      }
+    } else if (msg.t === 'ended') {
+      this.observedAdjudications.delete(gameId);
     }
   }
 

@@ -4,9 +4,10 @@
  *
  * The worker notifies a game's owner after it settles or releases, but a notice can be lost: the
  * worker's process can die between its commit and its notice, or the route can fail. Delivery must
- * not depend on it. Only a game that is proving or stopped can be changed by the worker, and the
- * owner knows exactly which of its resident games are in those states. So every pass, the owner
- * folds the durable log into each such game it holds, which publishes whatever the worker committed.
+ * not depend on it. Only a game that is proving or stopped can be changed by the worker, and each
+ * replica knows exactly which of its resident games are in those states. Every pass routes
+ * adjudicationChanged through the command router for each such game, which claims ownership or
+ * forwards to the owner to fold the durable log and publish whatever the worker committed.
  * A game with nothing new costs one read; a notice that did arrive makes the pass a no-op.
  */
 
@@ -16,8 +17,8 @@ import type { Counter, Logger } from '@chess-platform/api';
 export interface AdjudicationResyncOptions {
   readonly authority: Pick<GameAuthority, 'adjudicatingGames'>;
   readonly router: CommandRouter;
-  /** Only games this replica owns are folded; absent on a single node. */
-  readonly ownership?: { holdsValidLease(gameId: string): boolean };
+  /** Bounded source of locally watched games observed in proving/stopped states (e.g. RealtimeGateway). */
+  readonly watched?: { watchedAdjudicatingGames(): Iterable<string> };
   /** Delay between passes (default 1 s). */
   readonly intervalMs?: number;
   readonly logger?: Logger;
@@ -49,11 +50,16 @@ export class AdjudicationResync {
     await this.#running;
   }
 
-  /** Fold the log into every resident game this replica owns that is proving or stopped. */
+  /** Fold the log into every resident or watched game this replica knows that is proving or stopped. */
   async runPass(): Promise<number> {
     let failed = 0;
-    for (const gameId of this.options.authority.adjudicatingGames()) {
-      if (this.options.ownership && !this.options.ownership.holdsValidLease(gameId)) continue;
+    const candidates = new Set<string>(this.options.authority.adjudicatingGames());
+    if (this.options.watched) {
+      for (const gameId of this.options.watched.watchedAdjudicatingGames()) {
+        candidates.add(gameId);
+      }
+    }
+    for (const gameId of candidates) {
       try {
         await this.options.router.route(gameId, ADJUDICATION_ACTOR, { kind: 'adjudicationChanged' });
       } catch (error) {

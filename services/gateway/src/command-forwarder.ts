@@ -24,6 +24,7 @@ import {
   CommandOutcomeUnknownError,
   FLAG_ACTOR,
   NO_SHOW_ACTOR,
+  ADJUDICATION_ACTOR,
   type ApplyResult,
   type AuthorityErrorCode,
   type Command,
@@ -739,8 +740,11 @@ export class OwnerCommandConsumer {
     // owner already ended and evicted the game. A copy loaded only to answer it is let go again once
     // the game is over, as the expiry path itself does (ADR-0148/0149); a join that races this
     // reloads. A copy that was already resident, or one a local player joined meanwhile, is never touched.
-    const loadedForExpiry =
-      (envelope.userId === NO_SHOW_ACTOR || envelope.userId === FLAG_ACTOR) && !this.authority.has(envelope.gameId);
+    const isServerNotice =
+      envelope.userId === NO_SHOW_ACTOR ||
+      envelope.userId === FLAG_ACTOR ||
+      (envelope.userId === ADJUDICATION_ACTOR && envelope.cmd.kind === 'adjudicationChanged');
+    const loadedForExpiry = isServerNotice && !this.authority.has(envelope.gameId);
     // Before the response, so the forwarding replica never observes the reply ahead of the eviction.
     const releaseExpiryCopy = (): void => {
       // A late completion must not evict B's copy. With no replacement, R-04
