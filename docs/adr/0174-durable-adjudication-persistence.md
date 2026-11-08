@@ -162,8 +162,13 @@ broadens the bare-king lemma beyond the frozen king-and-pawns subclass. Both go 
 stage AUD-03a. The repository owner approved them explicitly for this stack on 2026-11-05, on PR
 #151: https://github.com/sayed710/rocky/pull/151#issuecomment-6655724172 ("I approve the scope
 exceptions in ADR 0174 §7 for this stack: settling unresolved timeouts by the flag rule (FIDE 6.9)
-and the general bare-king lemma."). An exhausted proof alone proves neither a loss nor a draw. Both remain behind
-`ADJUDICATION_ENABLED`, off by default, and enabling it still needs the owner's separate approval.
+and the general bare-king lemma."). An exhausted proof alone proves neither a loss nor a draw.
+At this unwired layer, these packages export pure domain and search behavior without environment-dependent
+runtime flag checks; the bare-king lemma also directly serves ordinary pure analysis APIs.
+Deployment and activation remain on HOLD with no production rollout permission. Live timeout settlement
+remains unwired until future upper gateway admission wiring, which is explicitly required to introduce
+and default-off `ADJUDICATION_ENABLED` before live use, and enabling it in production still needs the
+owner's separate approval.
 The lemma is sound for every position: a side with only its king cannot give check, so it can never
 mate, whatever the other side has.
 
