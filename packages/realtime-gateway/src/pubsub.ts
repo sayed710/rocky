@@ -72,7 +72,13 @@ export class InMemoryPubSub implements PubSub {
     const subs = this.channels.get(channel);
     if (!subs) return;
     // Snapshot so a handler that (un)subscribes during delivery is safe.
-    for (const handler of [...subs]) handler(msg);
+    for (const handler of [...subs]) {
+      try {
+        handler(msg);
+      } catch {
+        console.error(`[InMemoryPubSub] Subscriber threw on channel: ${channel}`);
+      }
+    }
   }
 
   subscribe(channel: string, handler: (msg: Broadcast) => void): Unsubscribe {
@@ -218,7 +224,11 @@ export class RedisPubSub implements PubSub {
       if (envelope.origin === this.nodeId) return;
 
       for (const handler of [...subs]) {
-        handler(envelope.msg);
+        try {
+          handler(envelope.msg);
+        } catch {
+          console.error(`[RedisPubSub] Remote subscriber threw on channel: ${channel}`);
+        }
       }
     };
 
@@ -286,7 +296,7 @@ export class RedisPubSub implements PubSub {
         }
       })
       .catch((err: unknown) => {
-        console.error(`[RedisPubSub] subscribe failed on channel ${channel}:`, err);
+        console.error(`[RedisPubSub] Subscribe failed on channel: ${channel}`);
         const current = this.subscriptionEntries.get(channel);
         if (current && current.generation === gen) {
           current.settled = 'failed';
@@ -310,8 +320,8 @@ export class RedisPubSub implements PubSub {
     for (const listener of [...this.reconnectListeners]) {
       try {
         listener();
-      } catch (err: unknown) {
-        console.error('[RedisPubSub] onReconnect listener threw:', err);
+      } catch {
+        console.error('[RedisPubSub] onReconnect listener threw');
       }
     }
   }
@@ -366,20 +376,26 @@ export class RedisPubSub implements PubSub {
     //    the Redis echo from double-delivering to these same handlers.
     const subs = this.subHandlers.get(channel);
     if (subs) {
-      for (const handler of [...subs]) handler(msg);
+      for (const handler of [...subs]) {
+        try {
+          handler(msg);
+        } catch {
+          console.error(`[RedisPubSub] Local subscriber threw on channel: ${channel}`);
+        }
+      }
     }
 
     // 2. Fan out to other nodes via Redis (fire-and-forget). Redis delivery is
     //    best-effort; a failed publish is logged but does not throw (the game
     //    state is authoritative, not the pub/sub layer).
     const envelope: RedisEnvelope = { origin: this.nodeId, msg };
-    void Promise.resolve(this.pub.publish(channel, JSON.stringify(envelope))).catch((err: unknown) => {
-      console.error(`[RedisPubSub] publish failed on channel ${channel}:`, err);
+    void Promise.resolve(this.pub.publish(channel, JSON.stringify(envelope))).catch(() => {
+      console.error(`[RedisPubSub] Publish failed on channel: ${channel}`);
       for (const listener of [...this.publishFailedListeners]) {
         try {
           listener(channel);
-        } catch (listenerErr: unknown) {
-          console.error('[RedisPubSub] onPublishFailed listener threw:', listenerErr);
+        } catch {
+          console.error(`[RedisPubSub] onPublishFailed listener threw on channel: ${channel}`);
         }
       }
     });
@@ -414,8 +430,8 @@ export class RedisPubSub implements PubSub {
           oldEntry.reject(new SubscriptionCancelledError(`Subscription cancelled on channel ${channel}`));
         }
         this.subscriptionEntries.delete(channel);
-        void Promise.resolve(this.sub.unsubscribe(channel)).catch((err: unknown) => {
-          console.error(`[RedisPubSub] unsubscribe failed on channel ${channel}:`, err);
+        void Promise.resolve(this.sub.unsubscribe(channel)).catch(() => {
+          console.error(`[RedisPubSub] Unsubscribe failed on channel: ${channel}`);
         });
       }
     };
