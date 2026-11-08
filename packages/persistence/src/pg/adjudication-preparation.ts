@@ -12,13 +12,14 @@
 import type { Pool, PoolClient } from 'pg';
 import { PersistenceError } from '../errors';
 
-/** Every SECURITY DEFINER routine migration 0053 installs. */
+/** Every SECURITY DEFINER routine migrations 0053 and 0054 install. */
 export const ADJUDICATION_DEFINER_ROUTINES: readonly string[] = Object.freeze([
   'public.adjudication_deferred_validator()',
   'public.adjudication_mark_changed(uuid)',
   'public.adjudication_queue_validator()',
   'public.adjudication_restore_deadlines(uuid,integer)',
   'public.adjudication_validate_game(uuid)',
+  'public.game_adjudication_releases_row_guard()',
   'public.game_adjudications_restore_queues()',
   'public.game_adjudications_row_guard()',
   'public.game_events_adjudication_guard()',
@@ -31,6 +32,7 @@ const GUARD_GRANTS = (owner: string): string => `
   GRANT SELECT ON public.game_events TO ${owner};
   GRANT SELECT, UPDATE ON public.game_adjudications TO ${owner};
   GRANT SELECT, INSERT, DELETE ON public.adjudication_validation_marks TO ${owner};
+  GRANT SELECT, UPDATE ON public.game_adjudication_releases TO ${owner};
   GRANT SELECT, INSERT, DELETE ON public.pregame_deadlines, public.flag_deadlines TO ${owner};`;
 
 export interface AdjudicationGuardPreparation {

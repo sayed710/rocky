@@ -110,13 +110,73 @@ Recovery after an uncertain outcome:
 `PgFencedNoShowCandidates.reschedule` records the loaded head even when the due time is unchanged, so
 a stale worker cannot dismiss a newer establishment.
 
+### 6. Release of a managed stop (migration 0054)
+
+`Game.prepareClockRelease` is the one authoritative producer of `AdjudicationClocksStarted`: it
+derives the event from the stop the game records and folds it through the replay reducer, so a live
+release and its replay cannot disagree. `PgAdjudicationStore.releaseClocks` writes, in one fenced
+transaction, a RELEASE permit (`game_adjudication_releases`: current stop, exact event, next
+position, and the flag and no-show deadlines the released domain computes), the event, and exactly
+those queue rows. The event guard admits that event alone and ends the stop; afterwards a managed
+observed-release game refuses every unpermitted event until it ends, so each later command is an
+adjudication again. The deferred validator checks every release against its permit and stop and,
+in the releasing transaction, the queues against the recorded deadlines. Release is idempotent by
+request id, including after a lost COMMIT reply. Migrations run before `prepareAdjudicationGuard`
+(or it is re-run), because `CREATE OR REPLACE` needs the routines owned by the migration role.
+
+### 7. Exhausted proofs: fewer, continued, then the flag rule
+
+A proof question that exhausts its search (`resource_limit`) would otherwise leave the game proving
+forever. Three measures keep that rare and never let exhaustion alone decide a result:
+
+- **A finder that finds.** Before its depth-first attempts, the witness finder runs guided
+  cooperative playouts (the winner tries every move for mate and heads for the loser's king; the loser
+  runs its king to a corner, crowds it and never takes the winner's material). They only propose a
+  witness: the same independent legal replay verifies it, so soundness is unchanged. They are sliced
+  per work unit and seeded from the position, so a position always explores the same playouts. And a
+  side with nothing but its king and no pawns of its own can never mate, whatever pawns the other side
+  has (the bare-king lemma no longer needs a pawn-free board), so the exact search closes those at
+  the root. On positions from 30 seeded games (measured, see the PR), the share of move proofs that
+  exhausted fell from 52% to 0.2% and their median time from 1.4 s to 14 ms; flag proofs from 43% to
+  1.5%.
+- **Continuation.** An exhausted timeout question is escalated before anything else
+  (`AdjudicationJobController.escalate`): a fresh finder with more and longer playouts (400 x 200
+  plies, then 2000 x 300), while the exact search keeps what it explored at its default capacity, so
+  an escalated job needs no more memory than a fresh one (the gateway runs in 512 MiB).
+  `concludeUnresolved` refuses a timeout question while a tier remains. With escalation, 0.4% of flag
+  proofs stayed unresolved in the same sample, and each of those positions is in fact winnable.
+- **The flag rule.** A question still unresolved after every tier is recorded as
+  `{ status: 'unresolved', reason: 'resource_limit' }`. An unresolved dead-position question is
+  treated as not dead (the command applies and play continues; no result is declared). An
+  unresolved timeout question settles by exactly the rule the platform applies without proofs
+  (`Game.claimFlag`): a loss on time unless the winner cannot mate (`canMate`, which already declares
+  a draw only on proven impossibility), matching FIDE 6.9, under which a fallen flag loses unless it
+  is established that the opponent cannot mate. Replay accepts exactly that recorded shape.
+
+Playout work counts toward the session's total, never toward a depth-first attempt's own budget, so
+unsuccessful playouts cannot cut short the attempts that follow them.
+
+**Scope authorization.** This section changes live timeout and successor settlement (the
+`unresolved` branches of `deriveTimeoutOutcomeEnding` and `resolveSuccessorEvidenceEnding`) and
+broadens the bare-king lemma beyond the frozen king-and-pawns subclass. Both go beyond the frozen
+stage AUD-03a. The repository owner approved them explicitly for this stack on 2026-11-05, on PR
+#151: https://github.com/sayed710/rocky/pull/151#issuecomment-6655724172 ("I approve the scope
+exceptions in ADR 0174 §7 for this stack: settling unresolved timeouts by the flag rule (FIDE 6.9)
+and the general bare-king lemma."). An exhausted proof alone proves neither a loss nor a draw.
+At this unwired layer, these packages export pure domain and search behavior without environment-dependent
+runtime flag checks; the bare-king lemma also directly serves ordinary pure analysis APIs.
+Deployment and activation remain on HOLD with no production rollout permission. Live timeout settlement
+remains unwired until future upper gateway admission wiring, which is explicitly required to introduce
+and default-off `ADJUDICATION_ENABLED` before live use, and enabling it in production still needs the
+owner's separate approval.
+The lemma is sound for every position: a side with only its king cannot give check, so it can never
+mate, whatever the other side has.
+
 ## Consequences
 
 - Rollout remains on HOLD (Issue #124): nothing constructs the store, no worker or client is wired,
   and no migration is applied to production by this change. Applying 0053 requires the migration
   owner to own the new SECURITY DEFINER functions; existing runtime grants are unchanged.
-- `AdjudicationClocksStarted` cannot be appended, so a stopped game stays stopped until the release
-  stage is separately designed and authorized.
 - A transaction touching a managed game pays for one whole-game validation at COMMIT, with
   event-level checks only for what it settled; legacy games pay one indexed existence check per
   insert.

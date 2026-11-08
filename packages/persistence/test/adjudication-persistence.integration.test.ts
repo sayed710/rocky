@@ -867,6 +867,7 @@ const DEFINER_ROUTINES = [
   'adjudication_deferred_validator', 'adjudication_mark_changed', 'adjudication_queue_validator',
   'adjudication_restore_deadlines', 'adjudication_validate_game', 'game_adjudications_restore_queues',
   'game_adjudications_row_guard', 'game_events_adjudication_guard', 'z_adjudication_queue_reconcile',
+  'game_adjudication_releases_row_guard',
 ];
 const INVOKER_ROUTINES = ['adjudication_flag_due', 'adjudication_json_number', 'adjudication_pregame_due', 'game_adjudications_no_truncate'];
 
@@ -891,11 +892,16 @@ test('every 0053 routine is owned by the table owner, pins search_path off publi
     // The marks table and the obligation table grant PUBLIC nothing.
     const acl = (await pool.query<{ rel: string; public_priv: boolean }>(
       `SELECT c.relname AS rel, EXISTS (SELECT 1 FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a WHERE a.grantee = 0) AS public_priv
-       FROM pg_class c WHERE c.oid IN ('public.adjudication_validation_marks'::regclass, 'public.game_adjudications'::regclass)`,
+       FROM pg_class c WHERE c.oid IN ('public.adjudication_validation_marks'::regclass, 'public.game_adjudications'::regclass,
+         'public.game_adjudication_releases'::regclass)`,
     )).rows;
-    assert.deepEqual(acl.map((a) => a.public_priv), [false, false]);
+    assert.deepEqual(acl.map((a) => a.public_priv), [false, false, false]);
     // TRUNCATE cannot sidestep the row-level DELETE refusal.
-    await assert.rejects(pool.query('TRUNCATE game_adjudications'), hasCode('PMA30'));
+    // TRUNCATE cannot sidestep the row-level DELETE refusal: plainly it is refused (by the release
+    // foreign key or the trigger), and with CASCADE every truncated table's trigger refuses it.
+    await assert.rejects(pool.query('TRUNCATE game_adjudications'), (err: unknown) =>
+      ['PMA30', '0A000'].includes((err as { code?: string }).code ?? ''));
+    await assert.rejects(pool.query('TRUNCATE game_adjudications CASCADE'), hasCode('PMA30'));
   });
 });
 

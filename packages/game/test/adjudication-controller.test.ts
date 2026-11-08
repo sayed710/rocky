@@ -864,13 +864,15 @@ describe('AdjudicationJobController: Domain-Owned Resumable Proof Jobs', () => {
 
     const view = ctrl.getJob(op.operationId)!;
     assert.equal(view.status, 'ready');
-    assert.equal(view.workCompleted, 20);
+    // The base witness now comes from a guided playout (no depth-first scoring), and the exact lane
+    // discharges Black's bare king at its root (the bare-king lemma), so both phases cost less.
+    assert.equal(view.workCompleted, 18);
     assert.equal(view.slicesExecuted, 3);
     assert.equal(view.generationWork, 2);
-    assert.equal(view.exactWork, 7);
+    assert.equal(view.exactWork, 6);
     assert.equal(view.completionWork, 2);
-    assert.equal(view.scoringWork, 8);
-    assert.equal(view.replayWork, 2);
+    assert.equal(view.scoringWork, 0);
+    assert.equal(view.replayWork, 3);
 
     const settlement = ctrl.settleJob(started, op.operationId, 20_100);
     assert.equal(settlement.game.status.over, true);
