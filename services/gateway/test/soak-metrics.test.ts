@@ -14,6 +14,7 @@ import {
   plyBucket,
   SoakMetricsTracker,
   TopKCollector,
+  WorkerLossBarrier,
   type MovePositionContext,
 } from './support/soak-metrics.js';
 
@@ -814,4 +815,252 @@ test('delayed admission after release updates settled sample and does not recrea
   assert.equal(sample.evidence.releaseDurationMs, 10, 'release duration preserved');
   assert.equal(sample.proofSteps, 20, 'proof steps preserved');
   assert.equal(sample.evidence.claimsCount, 1, 'claims count preserved');
+});
+
+test('WorkerLossBarrier coordinates replica loss to prevent graceful-drain race and enable successor takeover', async () => {
+  const barrier = new WorkerLossBarrier();
+  assert.equal(barrier.isArmed, false);
+  assert.equal(barrier.isTriggered, false);
+  const initialTarget = barrier.target;
+  assert.equal(initialTarget, undefined);
+
+  barrier.arm();
+  assert.equal(barrier.isArmed, true);
+
+  // Cheap ready proof passes through without triggering
+  let readyCompleted = false;
+  await barrier.interceptProofBoundary('game-ready', 'op-ready', 'ready').then(() => {
+    readyCompleted = true;
+  });
+  assert.equal(readyCompleted, true, 'ready proof must pass through without triggering barrier');
+  assert.equal(barrier.isTriggered, false);
+
+  // Active zero-budget proof pauses and triggers
+  let workerResumed = false;
+  const workerPromise = (async () => {
+    await barrier.interceptProofBoundary('game-takeover', 'op-takeover-1', 'active');
+    workerResumed = true;
+  })();
+
+  const target = await barrier.waitForPause(5000);
+  assert.equal(target.gameId, 'game-takeover');
+  assert.equal(target.operationId, 'op-takeover-1');
+  assert.equal(barrier.isTriggered, true);
+  const triggeredTarget = barrier.target;
+  assert.deepEqual(triggeredTarget, { gameId: 'game-takeover', operationId: 'op-takeover-1' });
+  assert.equal(workerResumed, false, 'worker must remain paused until barrier is released');
+
+  barrier.release();
+  await workerPromise;
+  assert.equal(workerResumed, true, 'worker must resume after barrier release');
+});
+
+test('WorkerLossBarrier passes through immediately when disarmed or after trigger', async () => {
+  const barrier = new WorkerLossBarrier();
+
+  // 1. Disarmed barrier returns immediately without pausing
+  let disarmedCompleted = false;
+  await barrier.interceptProofBoundary('game-skip', 'op-skip', 'active').then(() => {
+    disarmedCompleted = true;
+  });
+  assert.equal(disarmedCompleted, true);
+  assert.equal(barrier.isTriggered, false);
+  const disarmedTarget = barrier.target;
+  assert.equal(disarmedTarget, undefined);
+
+  // 2. Arm and trigger once with active proof
+  barrier.arm();
+  const triggerPromise = barrier.interceptProofBoundary('game-first', 'op-first', 'active');
+  const target = await barrier.waitForPause(5000);
+  assert.equal(target.operationId, 'op-first');
+  barrier.release();
+  await triggerPromise;
+
+  // 3. Subsequent calls after trigger pass through immediately without changing target
+  let subsequentCompleted = false;
+  await barrier.interceptProofBoundary('game-second', 'op-second', 'active').then(() => {
+    subsequentCompleted = true;
+  });
+  assert.equal(subsequentCompleted, true);
+  const finalTarget = barrier.target;
+  assert.equal(finalTarget?.operationId, 'op-first', 'target must remain first triggered operation');
+});
+
+test('WorkerLossBarrier abort releases waiters safely without hanging', async () => {
+  const barrierA = new WorkerLossBarrier();
+  barrierA.arm();
+
+  // Waiting pause waiter rejects on abort
+  const pausePromise = barrierA.waitForPause(5000);
+  barrierA.abort('simulated test shutdown');
+  await assert.rejects(pausePromise, {
+    name: 'Error',
+    message: 'simulated test shutdown',
+  });
+
+  // Waiting intercepted worker unblocks on abort
+  const barrierB = new WorkerLossBarrier();
+  barrierB.arm();
+  let workerUnblocked = false;
+  const workerPromise = (async () => {
+    await barrierB.interceptProofBoundary('game-abort', 'op-abort', 'active');
+    workerUnblocked = true;
+  })();
+  await barrierB.waitForPause(5000);
+  barrierB.abort('teardown abort');
+  await workerPromise;
+  assert.equal(workerUnblocked, true, 'worker must unblock when barrier aborts');
+
+  // Idempotent multiple aborts (e.g. catch then finally) do not throw or trigger unhandled rejection
+  const barrierC = new WorkerLossBarrier();
+  assert.doesNotThrow(() => barrierC.abort('first abort'));
+  assert.doesNotThrow(() => barrierC.abort('idempotent second abort'));
+});
+
+test('SoakMetricsTracker tracks exact target operation claims and settlement status across takeover', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-target-check';
+  const op = 'op-target-1';
+
+  assert.equal(tracker.isOperationSettled(op), false);
+  assert.equal(tracker.getOperationClaims(op), undefined);
+
+  tracker.recordStartAttempt(10, 0);
+  tracker.recordStartAdmitted(game, op, 0, 10);
+
+  // Worker 1 initial claim
+  tracker.recordClaim({
+    gameId: game,
+    operationId: op,
+    executorId: 'worker-1',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+
+  const claimsAfterFirst = tracker.getOperationClaims(op);
+  assert.ok(claimsAfterFirst);
+  assert.equal(claimsAfterFirst.length, 1);
+  assert.equal(claimsAfterFirst[0]?.executorId, 'worker-1');
+  assert.equal(claimsAfterFirst[0]?.generation, '1');
+  assert.equal(tracker.isOperationSettled(op), false);
+
+  // Worker 0 successor claim (takeover)
+  tracker.recordClaim({
+    gameId: game,
+    operationId: op,
+    executorId: 'worker-0',
+    generation: '2',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+
+  const claimsAfterTakeover = tracker.getOperationClaims(op);
+  assert.ok(claimsAfterTakeover);
+  assert.equal(claimsAfterTakeover.length, 2);
+  assert.equal(claimsAfterTakeover[1]?.executorId, 'worker-0');
+  assert.equal(claimsAfterTakeover[1]?.generation, '2');
+  assert.equal(tracker.successorTakeoversCount, 1);
+
+  // Settle and commit
+  tracker.recordStep(op, 10, 2, 500);
+  tracker.recordSettleAttempt(op, 4);
+  tracker.recordSettlementCommitted(op);
+
+  assert.equal(tracker.isOperationSettled(op), true);
+  const claimsAfterSettle = tracker.getOperationClaims(op);
+  assert.ok(claimsAfterSettle);
+  assert.equal(claimsAfterSettle.length, 2);
+});
+
+test('SoakMetricsTracker correlates move latency on state snapshot recovery without move broadcast and prevents double counting', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-cold-restart';
+
+  // 1. Pending move at basePly 1 expecting resultPly 2
+  const positionContext: MovePositionContext = {
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 1234,
+    attempt: 0,
+    basePly: 1,
+  };
+  tracker.onMovePending(game, 1, 1000, positionContext);
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // 2. Early recovery response or state broadcast at ply 1 (not yet advanced) does not match
+  const earlyRecovery = tracker.onRecoveryResponse(game, 1, 1050);
+  assert.equal(earlyRecovery, undefined);
+  const earlyState = tracker.onStateBroadcast(game, 1, 1060);
+  assert.equal(earlyState, undefined);
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // 3. Cold restart simulated player reconnect receives readRecovery response at ply 2
+  const recoveryLatency = tracker.onRecoveryResponse(game, 2, 1250);
+  assert.equal(recoveryLatency, 250);
+  assert.equal(tracker.matchedMovesCount, 1);
+
+  const metricsAfterRecovery = tracker.getMoveLatencyQuantiles();
+  assert.equal(metricsAfterRecovery.n, 1);
+  assert.equal(metricsAfterRecovery.min, 250);
+  assert.equal(metricsAfterRecovery.provenance.recovery_response, 1);
+  assert.equal(metricsAfterRecovery.provenance.move_broadcast, 0);
+  assert.equal(metricsAfterRecovery.provenance.state_broadcast, 0);
+  assert.ok(metricsAfterRecovery.note.includes('in-process simulated-player API/pubsub visibility'));
+
+  const top = tracker.getTopMoveLatency();
+  assert.equal(top.length, 1);
+  assert.equal(top[0]?.gameId, game);
+  assert.equal(top[0]?.basePly, 1);
+  assert.equal(top[0]?.resultPly, 2);
+  assert.equal(top[0]?.latencyMs, 250);
+  assert.equal(top[0]?.provenance, 'recovery_response');
+
+  // 4. Late move broadcast and late state broadcast do not double-count
+  const lateBroadcast = tracker.onMoveBroadcast(game, 2, 1300);
+  assert.equal(lateBroadcast, undefined);
+  const lateState = tracker.onStateBroadcast(game, 2, 1350);
+  assert.equal(lateState, undefined);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getMoveLatencyQuantiles().n, 1);
+
+  // 5. Normal move path (move broadcast arrives first) records move_broadcast provenance
+  tracker.onMovePending(game, 2, 1400);
+  const normBroadcast = tracker.onMoveBroadcast(game, 3, 1520);
+  assert.equal(normBroadcast, 120);
+  assert.equal(tracker.matchedMovesCount, 2);
+
+  // Late recovery response and late state broadcast for ply 3 do not double-count
+  const lateRecoveryNorm = tracker.onRecoveryResponse(game, 3, 1550);
+  assert.equal(lateRecoveryNorm, undefined);
+  const lateStateNorm = tracker.onStateBroadcast(game, 3, 1600);
+  assert.equal(lateStateNorm, undefined);
+  assert.equal(tracker.matchedMovesCount, 2);
+
+  // 6. Pubsub state broadcast delivery records state_broadcast provenance
+  tracker.onMovePending(game, 3, 1650);
+  const stateBroadcastLatency = tracker.onStateBroadcast(game, 4, 1750);
+  assert.equal(stateBroadcastLatency, 100);
+  assert.equal(tracker.matchedMovesCount, 3);
+
+  const lateMoveAfterState = tracker.onMoveBroadcast(game, 4, 1800);
+  assert.equal(lateMoveAfterState, undefined);
+  assert.equal(tracker.matchedMovesCount, 3);
+
+  // 7. Failed admission / retry isolation: onMoveFailed deletes pending move so state/recovery does not record it
+  tracker.onMovePending(game, 4, 1850);
+  tracker.onMoveFailed(game, 4);
+  const failedRecovery = tracker.onRecoveryResponse(game, 5, 1900);
+  assert.equal(failedRecovery, undefined);
+  const failedState = tracker.onStateBroadcast(game, 5, 1950);
+  assert.equal(failedState, undefined);
+  assert.equal(tracker.matchedMovesCount, 3);
+
+  // 8. Strict provenance breakdown verification
+  const finalSummary = tracker.getMoveLatencyQuantiles();
+  assert.equal(finalSummary.n, 3);
+  const counts = tracker.moveLatencyProvenanceCounts;
+  assert.equal(counts.recovery_response, 1);
+  assert.equal(counts.move_broadcast, 1);
+  assert.equal(counts.state_broadcast, 1);
+  assert.equal(counts.recovery_response + counts.move_broadcast + counts.state_broadcast, finalSummary.n);
 });

@@ -39,6 +39,7 @@ import { AdjudicationResync } from '../src/adjudication-resync.js';
 import {
   MemorySampler,
   SoakMetricsTracker,
+  WorkerLossBarrier,
   createPrng,
   deriveFaultSeed,
   deriveGameSeed,
@@ -126,10 +127,21 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
     const commitControl: LossyCommitControl = { enabled: false, targetMinLost: 0, rate: 0 };
     const lost = { lost: 0 };
     let heldAtDeathCount = 0;
+    let targetOpId = '';
+    let targetAbandonedGeneration = '';
+    let targetSuccessorGeneration = '';
+    let targetSuccessorExecutorId = '';
+    let targetSettled = false;
+    let targetResolvedEventsCount = 0;
+    let targetWrapperClaimsCount = 0;
+    let targetPreRemainingMs = 0;
+    let targetPostRemainingMs = 0;
+    let targetFaultDurationMs = 0;
     const faultRnd = createPrng(deriveFaultSeed(SOAK_SEED));
     const lossy = lossyCommits(pool, commitControl, lost, faultRnd);
 
     const tracker = new SoakMetricsTracker(10);
+    const worker1Barrier = new WorkerLossBarrier();
     const sampler = new MemorySampler();
     sampler.start(200);
     const loop = monitorEventLoopDelay({ resolution: 10 });
@@ -172,7 +184,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         route: (gameId: string, userId: string, cmd: Command) => replicas[ownerOf(gameId)]!.authority.apply(gameId, userId, cmd),
       };
 
-      const wrapTimedStore = (store: PgAdjudicationStore): PgAdjudicationStore => {
+      const wrapTimedStore = (store: PgAdjudicationStore, barrier?: WorkerLossBarrier): PgAdjudicationStore => {
         const origListClaimable = store.listClaimableAdjudications.bind(store);
         store.listClaimableAdjudications = async (limit: number) => {
           const t0 = performance.now();
@@ -225,7 +237,14 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         store.createProofJob = async (gameId: string, operationId: string) => {
           const t0 = performance.now();
           try {
-            return await origCreateJob(gameId, operationId);
+            const res = await origCreateJob(gameId, operationId);
+            if (barrier && barrier.isArmed && !barrier.isTriggered) {
+              const zeroStep = store.stepProofJob(operationId, 0);
+              if (zeroStep.status === 'active') {
+                await barrier.interceptProofBoundary(gameId, operationId, zeroStep.status);
+              }
+            }
+            return res;
           } finally {
             tracker.recordStoreCall('createProofJob', performance.now() - t0);
           }
@@ -309,8 +328,8 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         return store;
       };
 
-      const makeReplica = (): Replica => {
-        const store = wrapTimedStore(new PgAdjudicationStore(lossy));
+      const makeReplica = (barrier?: WorkerLossBarrier): Replica => {
+        const store = wrapTimedStore(new PgAdjudicationStore(lossy), barrier);
         const authority = new GameAuthority(pubsub, () => Date.now(), new PostgresEventStore(pool), {
           adjudication: { rulesVersion: 'rocky-adjudication@1', clockPolicy: 'observed-release-v1', start: (p) => store.startAdjudication(p) },
         });
@@ -326,7 +345,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         return { authority, worker, resync, store, executorId };
       };
 
-      replicas.push(makeReplica(), makeReplica());
+      replicas.push(makeReplica(), makeReplica(worker1Barrier));
       for (const g of games) await replicas[g.owner]!.authority.ensureLoaded(g.id);
       for (const r of replicas) { r.worker.start(); r.resync.start(); }
 
@@ -341,6 +360,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
             const phase = msg.state.adjudication;
             tracker.onProvingState(g.id, phase === 'proving', now);
             tracker.onStoppedState(g.id, phase === 'stopped', now);
+            tracker.onStateBroadcast(g.id, msg.state.ply, now);
           }
         });
         unsubs.push(unsub);
@@ -434,28 +454,226 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         tracker.recordFaultEnd('lossy_commits', performance.now());
         if (!running) return;
 
-        // Stage 2: Worker 1 death while actively holding a proving claim in game_adjudications
-        const worker1ExecutorId = replicas[1]!.executorId;
-        const waitClaimStart = performance.now();
-        while (running && performance.now() - waitClaimStart < 30_000) {
-          const res = await pool.query<{ n: number }>(
-            `SELECT count(*)::int AS n FROM game_adjudications WHERE execution_state = 'proving' AND executor_id = $1::uuid AND lease_until > clock_timestamp()`,
-            [worker1ExecutorId],
+        // Stage 2: Worker 1 simulated replica loss at active proof boundary
+        worker1Barrier.arm();
+        const pausedTarget = await worker1Barrier.waitForPause(30_000);
+        targetOpId = pausedTarget.operationId;
+
+        // Verify target operation is actively held in PostgreSQL and lease is unexpired before shutdown request
+        const preCheck = await pool.query<{
+          execution_state: string;
+          executor_id: string;
+          lease_until: Date;
+          generation: string;
+          lease_active: boolean;
+          remaining_lease_ms: number;
+        }>(
+          `SELECT
+             execution_state,
+             executor_id,
+             lease_until,
+             generation::text AS generation,
+             (lease_until > clock_timestamp()) AS lease_active,
+             (EXTRACT(EPOCH FROM (lease_until - clock_timestamp())) * 1000)::double precision AS remaining_lease_ms
+           FROM game_adjudications
+           WHERE operation_id = $1`,
+          [targetOpId],
+        );
+        const preRow = preCheck.rows[0];
+        if (!preRow || preRow.execution_state !== 'proving' || preRow.executor_id !== replicas[1]!.executorId) {
+          throw new Error(`Target operation ${targetOpId} not actively held in proving state by worker 1 before shutdown`);
+        }
+        assert.equal(
+          typeof preRow.remaining_lease_ms,
+          'number',
+          `preCheck remaining_lease_ms must be numeric from ::double precision SQL cast, received ${typeof preRow.remaining_lease_ms}`,
+        );
+        assert.ok(
+          Number.isFinite(preRow.remaining_lease_ms),
+          `preCheck remaining_lease_ms must be finite number, received ${preRow.remaining_lease_ms}`,
+        );
+        if (!preRow.lease_active || preRow.remaining_lease_ms <= 0) {
+          throw new Error(
+            `Target operation ${targetOpId} lease was not unexpired/active before shutdown: ${preRow.remaining_lease_ms}`,
           );
-          const held = res.rows[0]?.n ?? 0;
-          if (held > 0) {
-            heldAtDeathCount = held;
+        }
+        const preRemainingMs = preRow.remaining_lease_ms;
+        targetAbandonedGeneration = preRow.generation;
+
+        // Fault timeline starts when shutdown/loss is initiated
+        const faultStartMs = performance.now();
+        const finiteFaultDurationMs = preRemainingMs + 1000;
+        targetPreRemainingMs = preRemainingMs;
+        targetFaultDurationMs = finiteFaultDurationMs;
+        tracker.recordFaultStart('worker_1_death', faultStartMs, finiteFaultDurationMs);
+
+        // Request worker 1 shutdown while proof cannot finish
+        const stopPromise = replicas[1]!.worker.stop();
+
+        // Release barrier so worker 1 unblocks, observes #halting flag, and aborts pass without settling
+        worker1Barrier.release();
+        await stopPromise;
+
+        // Post-stop SQL verification: confirm target operation remains abandoned in proving state with active lease
+        const postCheck = await pool.query<{
+          execution_state: string;
+          executor_id: string;
+          lease_until: Date;
+          generation: string;
+          lease_active: boolean;
+          remaining_lease_ms: number;
+        }>(
+          `SELECT
+             execution_state,
+             executor_id,
+             lease_until,
+             generation::text AS generation,
+             (lease_until > clock_timestamp()) AS lease_active,
+             (EXTRACT(EPOCH FROM (lease_until - clock_timestamp())) * 1000)::double precision AS remaining_lease_ms
+           FROM game_adjudications
+           WHERE operation_id = $1`,
+          [targetOpId],
+        );
+        const postRow = postCheck.rows[0];
+        if (!postRow || postRow.execution_state !== 'proving' || postRow.executor_id !== replicas[1]!.executorId) {
+          throw new Error(`Target operation ${targetOpId} was not abandoned in proving state by worker 1 after shutdown`);
+        }
+        assert.equal(
+          typeof postRow.remaining_lease_ms,
+          'number',
+          `postCheck remaining_lease_ms must be numeric from ::double precision SQL cast, received ${typeof postRow.remaining_lease_ms}`,
+        );
+        assert.ok(
+          Number.isFinite(postRow.remaining_lease_ms),
+          `postCheck remaining_lease_ms must be finite number, received ${postRow.remaining_lease_ms}`,
+        );
+        if (!postRow.lease_active || postRow.remaining_lease_ms <= 0) {
+          throw new Error(
+            `Target operation ${targetOpId} lease expired during shutdown before abandonment verification: ${postRow.remaining_lease_ms}`,
+          );
+        }
+        const postRemainingMs = postRow.remaining_lease_ms;
+        targetPostRemainingMs = postRemainingMs;
+
+        // Count all truly abandoned proving claims left by Worker 1 with unexpired lease
+        const abandonedRes = await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM game_adjudications
+           WHERE execution_state = 'proving'
+             AND executor_id = $1::uuid
+             AND lease_until > clock_timestamp()`,
+          [replicas[1]!.executorId],
+        );
+        heldAtDeathCount = abandonedRes.rows[0]?.n ?? 0;
+        if (heldAtDeathCount === 0) {
+          throw new Error('Worker 1 held 0 active unexpired proving claims in PostgreSQL after shutdown');
+        }
+
+        // Wait until database clock indicates the abandoned lease has lapsed
+        while (running) {
+          const checkLapsed = await pool.query<{ lapsed: boolean }>(
+            `SELECT (clock_timestamp() >= $1::timestamptz) AS lapsed`,
+            [postRow.lease_until],
+          );
+          if (checkLapsed.rows[0]?.lapsed) break;
+          await sleep(50);
+        }
+        tracker.recordFaultEnd('worker_1_death', performance.now());
+
+        // Wait bounded interval for successor worker to claim the EXACT target operation
+        const takeoverWaitStart = performance.now();
+        let targetClaimRow: { execution_state: string; executor_id: string; generation: string } | undefined;
+        let targetSettledRow: { execution_state: string; is_current_stop: boolean; settlement_receipt: unknown } | undefined;
+
+        while (running && performance.now() - takeoverWaitStart < 15_000) {
+          const claimRes = await pool.query<{
+            execution_state: string;
+            executor_id: string;
+            generation: string;
+            is_current_stop: boolean;
+            settlement_receipt: unknown;
+          }>(
+            `SELECT
+               execution_state,
+               executor_id,
+               generation::text AS generation,
+               is_current_stop,
+               settlement_receipt
+             FROM game_adjudications
+             WHERE operation_id = $1`,
+            [targetOpId],
+          );
+          const row = claimRes.rows[0];
+          if (
+            row &&
+            row.executor_id === replicas[0]!.executorId &&
+            BigInt(row.generation) > BigInt(postRow.generation)
+          ) {
+            targetClaimRow = row;
+            if (row.execution_state === 'completed' || row.is_current_stop || row.settlement_receipt !== null) {
+              targetSettledRow = row;
+              break;
+            }
+          }
+          await sleep(50);
+        }
+
+        if (!running) return;
+
+        if (!targetClaimRow) {
+          throw new Error(
+            `Successor takeover unexercised: target operation ${targetOpId} was not claimed by surviving executor ${replicas[0]!.executorId} at generation > ${postRow.generation} within 15000ms deadline`,
+          );
+        }
+
+        // Wait for target operation to settle completely if not already settled
+        const settleWaitStart = performance.now();
+        while (running && !targetSettledRow && performance.now() - settleWaitStart < 15_000) {
+          const settleRes = await pool.query<{
+            execution_state: string;
+            is_current_stop: boolean;
+            settlement_receipt: unknown;
+          }>(
+            `SELECT
+               execution_state,
+               is_current_stop,
+               settlement_receipt
+             FROM game_adjudications
+             WHERE operation_id = $1`,
+            [targetOpId],
+          );
+          const sRow = settleRes.rows[0];
+          if (sRow && (sRow.execution_state === 'completed' || sRow.is_current_stop || sRow.settlement_receipt !== null)) {
+            targetSettledRow = sRow;
             break;
           }
-          await sleep(25);
+          await sleep(50);
         }
-        if (heldAtDeathCount === 0 && running) {
-          throw new Error('Fault coverage unexercised: worker 1 held 0 active proving claims before death injection within deadline');
+
+        if (!running) return;
+
+        if (!targetSettledRow) {
+          throw new Error(
+            `Target operation ${targetOpId} was claimed by surviving executor ${replicas[0]!.executorId} at generation ${targetClaimRow.generation} but failed to settle within 15000ms deadline`,
+          );
         }
-        // Finite 5000 ms lease window for worker 1 claims to lapse
-        tracker.recordFaultStart('worker_1_death', performance.now(), 5000);
-        await replicas[1]!.worker.stop();
-        await sleep(THINK_MS * PLIES * 0.2);
+
+        // Verify target operation resolved event in event log
+        const resolvedEventsRes = await pool.query<{ payload: { operationId?: string } }>(
+          `SELECT payload FROM game_events WHERE type = 'AdjudicationResolved' AND payload->>'operationId' = $1`,
+          [targetOpId],
+        );
+        targetResolvedEventsCount = resolvedEventsRes.rows.length;
+        if (targetResolvedEventsCount !== 1 && running) {
+          throw new Error(
+            `Target operation ${targetOpId} resolved event count in game_events is ${targetResolvedEventsCount}, expected exactly 1`,
+          );
+        }
+
+        const targetWrapperClaims = tracker.getOperationClaims(targetOpId) ?? [];
+        targetSuccessorGeneration = targetClaimRow.generation;
+        targetSuccessorExecutorId = targetClaimRow.executor_id;
+        targetSettled = targetSettledRow !== undefined;
+        targetWrapperClaimsCount = targetWrapperClaims.length;
         if (!running) return;
 
         // Stage 3: Owner 0 cold restart
@@ -467,7 +685,11 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
             adjudication: { rulesVersion: 'rocky-adjudication@1', clockPolicy: 'observed-release-v1', start: (p) => replicas[0]!.store.startAdjudication(p) },
           }),
         };
-        for (const g of games.filter((x) => x.owner === 0)) await replicas[0]!.authority.ensureLoaded(g.id);
+        for (const g of games.filter((x) => x.owner === 0)) {
+          await replicas[0]!.authority.ensureLoaded(g.id);
+          const recovery = await replicas[0]!.authority.readRecovery(g.id, 0);
+          tracker.onRecoveryResponse(g.id, recovery.state.ply, performance.now());
+        }
         replicas[0]!.resync = new AdjudicationResync({ authority: replicas[0]!.authority, router, intervalMs: 500 });
         replicas[0]!.resync.start();
         tracker.recordFaultEnd('owner_0_cold_restart', performance.now());
@@ -486,6 +708,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         await Promise.all(taskPromises);
       } catch (runErr) {
         running = false;
+        worker1Barrier.abort('run error teardown');
         await Promise.allSettled(taskPromises);
         throw runErr;
       }
@@ -546,6 +769,20 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           lostCommitReplies: lost.lost,
           heldAtDeath: heldAtDeathCount,
           successorTakeovers: tracker.successorTakeoversCount,
+          targetTakeover: {
+            operationId: targetOpId,
+            abandonedExecutorId: replicas[1]!.executorId,
+            abandonedGeneration: targetAbandonedGeneration,
+            successorExecutorId: targetSuccessorExecutorId,
+            successorGeneration: targetSuccessorGeneration,
+            wrapperClaimsCount: targetWrapperClaimsCount,
+            settled: targetSettled,
+            resolvedEventsCount: targetResolvedEventsCount,
+            remainingLeaseMs: targetPostRemainingMs,
+            preRemainingMs: targetPreRemainingMs,
+            postRemainingMs: targetPostRemainingMs,
+            finiteDurationMs: targetFaultDurationMs,
+          },
         },
         wallSeconds: +(wall / 1000).toFixed(1),
         movesPerSecond: +(moves / (wall / 1000)).toFixed(2),
@@ -574,11 +811,48 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
       assert.ok(moves >= GAMES * Math.min(PLIES, 4), 'games made progress');
       assert.ok(report.moveLatencyMs.n > 0, 'moveLatency samples must not be empty');
       assert.equal(report.moveLatencyMs.n, moves, 'moveLatency sample count must equal observed moves');
+      const provSum =
+        report.moveLatencyMs.provenance.move_broadcast +
+        report.moveLatencyMs.provenance.state_broadcast +
+        report.moveLatencyMs.provenance.recovery_response;
+      assert.equal(provSum, report.moveLatencyMs.n, 'provenance counts must sum to total moveLatency samples');
       assert.ok(report.faultCoverage.lostCommitReplies >= 1, 'must exercise at least one lost COMMIT reply');
       assert.ok(report.faultCoverage.heldAtDeath >= 1, 'worker 1 must hold at least one claim at death');
       assert.ok(report.faultCoverage.successorTakeovers >= 1, 'successor worker must take over at least one abandoned claim');
+      assert.equal(report.faultCoverage.targetTakeover.operationId, targetOpId);
+      assert.equal(report.faultCoverage.targetTakeover.successorExecutorId, replicas[0]!.executorId);
+      assert.ok(
+        BigInt(report.faultCoverage.targetTakeover.successorGeneration) >
+          BigInt(report.faultCoverage.targetTakeover.abandonedGeneration),
+        'successor generation must be strictly greater than abandoned generation',
+      );
+      assert.ok(report.faultCoverage.targetTakeover.wrapperClaimsCount >= 2, 'target must have at least abandoned and successor claims');
+      assert.equal(report.faultCoverage.targetTakeover.settled, true, 'target operation must settle');
+      assert.equal(report.faultCoverage.targetTakeover.resolvedEventsCount, 1, 'target operation must settle exactly once');
+      assert.equal(typeof report.faultCoverage.targetTakeover.preRemainingMs, 'number');
+      assert.ok(
+        report.faultCoverage.targetTakeover.preRemainingMs > 0,
+        'target preRemainingMs must be positive finite number',
+      );
+      assert.equal(typeof report.faultCoverage.targetTakeover.postRemainingMs, 'number');
+      assert.ok(
+        report.faultCoverage.targetTakeover.postRemainingMs > 0,
+        'target postRemainingMs must be positive finite number',
+      );
+      assert.equal(typeof report.faultCoverage.targetTakeover.remainingLeaseMs, 'number');
+      assert.ok(
+        report.faultCoverage.targetTakeover.remainingLeaseMs > 0,
+        'target remainingLeaseMs must be positive finite number',
+      );
+      assert.equal(typeof report.faultCoverage.targetTakeover.finiteDurationMs, 'number');
+      assert.equal(
+        report.faultCoverage.targetTakeover.finiteDurationMs,
+        report.faultCoverage.targetTakeover.preRemainingMs + 1000,
+        'finiteDurationMs must equal preRemainingMs + 1000 without string concatenation',
+      );
     } finally {
       running = false;
+      worker1Barrier.abort('test teardown');
       if (progressTimer) {
         clearInterval(progressTimer);
         progressTimer = undefined;

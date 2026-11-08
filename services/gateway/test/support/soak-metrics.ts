@@ -25,6 +25,14 @@ export type PlyBucket = '0-39' | '40-79' | '80-119' | '120+';
 
 export const PLY_BUCKETS: readonly PlyBucket[] = ['0-39', '40-79', '80-119', '120+'];
 
+export type MoveObservationProvenance = 'move_broadcast' | 'state_broadcast' | 'recovery_response';
+
+export interface MoveLatencyProvenanceCounts {
+  readonly move_broadcast: number;
+  readonly state_broadcast: number;
+  readonly recovery_response: number;
+}
+
 export interface MetricSummary {
   readonly n: number;
   readonly total: number;
@@ -35,6 +43,11 @@ export interface MetricSummary {
   readonly p99: number;
   readonly reservoirSize: number;
   readonly isSampled: boolean;
+}
+
+export interface MoveLatencySummary extends MetricSummary {
+  readonly provenance: MoveLatencyProvenanceCounts;
+  readonly note: string;
 }
 
 export interface MemoryStats {
@@ -128,6 +141,7 @@ export interface MoveTailSample {
   readonly faultAssociated: boolean;
   readonly faultReasons: readonly string[];
   readonly positionContext?: MovePositionContext;
+  readonly provenance?: MoveObservationProvenance;
 }
 
 export function parsePositiveInt(val: string | undefined, defaultVal: number, name: string): number {
@@ -384,8 +398,87 @@ export class MemorySampler {
       heapEndMB: toMB(final.heapUsed),
       externalMB: toMB(final.external),
       processModel: 'single-process-two-replica-instances',
-      note: 'Process memory sampled locally. Container 512Mi/500m cgroup limits enforced externally by Docker CLI.',
+      note: 'Process memory sampled locally; resource limits must be verified from external runner receipt.',
     };
+  }
+}
+
+/**
+ * Coordinates simulated replica loss at an active proof boundary.
+ *
+ * Prevents the graceful-drain race where worker.stop() finishes in-flight
+ * proofs before shutting down, ensuring the operation remains abandoned
+ * in PostgreSQL in 'proving' state for successor takeover verification.
+ */
+export class WorkerLossBarrier {
+  #armed = false;
+  #triggered = false;
+  #target?: { readonly gameId: string; readonly operationId: string };
+  #pauseResolve?: (target: { readonly gameId: string; readonly operationId: string }) => void;
+  #pauseReject?: (err: Error) => void;
+  readonly #pausePromise: Promise<{ readonly gameId: string; readonly operationId: string }>;
+  #releaseResolve?: () => void;
+  readonly #releasePromise: Promise<void>;
+
+  constructor() {
+    this.#pausePromise = new Promise((resolve, reject) => {
+      this.#pauseResolve = resolve;
+      this.#pauseReject = reject;
+    });
+    this.#pausePromise.catch(() => {});
+    this.#releasePromise = new Promise((resolve) => {
+      this.#releaseResolve = resolve;
+    });
+  }
+
+  arm(): void {
+    this.#armed = true;
+  }
+
+  get isArmed(): boolean {
+    return this.#armed;
+  }
+
+  get isTriggered(): boolean {
+    return this.#triggered;
+  }
+
+  get target(): { readonly gameId: string; readonly operationId: string } | undefined {
+    return this.#target;
+  }
+
+  async interceptProofBoundary(gameId: string, operationId: string, status?: string): Promise<void> {
+    if (!this.#armed || this.#triggered) return;
+    if (status !== undefined && status !== 'active') return;
+    this.#triggered = true;
+    this.#target = { gameId, operationId };
+    this.#pauseResolve?.(this.#target);
+    await this.#releasePromise;
+  }
+
+  async waitForPause(timeoutMs = 30_000): Promise<{ readonly gameId: string; readonly operationId: string }> {
+    if (this.#target) return this.#target;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Timed out waiting for worker proof boundary after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([this.#pausePromise, timeoutPromise]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  release(): void {
+    this.#releaseResolve?.();
+  }
+
+  abort(reason = 'aborted'): void {
+    this.#armed = false;
+    this.#pauseReject?.(new Error(reason));
+    this.#releaseResolve?.();
   }
 }
 
@@ -417,6 +510,12 @@ export class SoakMetricsTracker {
   readonly #topProvingWall: TopKCollector<TailSample>;
   readonly #topProofCpu: TopKCollector<TailSample>;
   readonly #topMoveLatencies: TopKCollector<MoveTailSample>;
+
+  readonly #provenanceCounts: { [K in MoveObservationProvenance]: number } = {
+    move_broadcast: 0,
+    state_broadcast: 0,
+    recovery_response: 0,
+  };
 
   #matchedMovesCount = 0;
   #settledCommittedCount = 0;
@@ -488,25 +587,63 @@ export class SoakMetricsTracker {
     }
   }
 
+  #recordMatchedMove(
+    match: { gameId: string; resultPly: number; provenance: MoveObservationProvenance },
+    pending: { basePly: number; expectedPly: number; atMs: number; positionContext?: MovePositionContext },
+    atMs: number,
+  ): number {
+    const latency = atMs - pending.atMs;
+    this.#moveLatencies.record(latency);
+    this.#matchedMovesCount++;
+    this.#provenanceCounts[match.provenance]++;
+    const faultCheck = isFaultAssociated(pending.atMs, atMs, this.#faults, false);
+    this.#topMoveLatencies.record({
+      gameId: match.gameId,
+      basePly: pending.basePly,
+      resultPly: match.resultPly,
+      latencyMs: +(latency.toFixed(1)),
+      faultAssociated: faultCheck.faultAssociated,
+      faultReasons: faultCheck.faultReasons,
+      positionContext: pending.positionContext,
+      provenance: match.provenance,
+    });
+    return latency;
+  }
+
   onMoveBroadcast(gameId: string, broadcastPly: number, atMs: number): number | undefined {
     const key = `${gameId}:${broadcastPly}`;
     const pending = this.#pendingMoves.get(key);
     if (pending === undefined) return undefined;
     this.#pendingMoves.delete(key);
-    const latency = atMs - pending.atMs;
-    this.#moveLatencies.record(latency);
-    this.#matchedMovesCount++;
-    const faultCheck = isFaultAssociated(pending.atMs, atMs, this.#faults, false);
-    this.#topMoveLatencies.record({
-      gameId,
-      basePly: pending.basePly,
-      resultPly: broadcastPly,
-      latencyMs: +(latency.toFixed(1)),
-      faultAssociated: faultCheck.faultAssociated,
-      faultReasons: faultCheck.faultReasons,
-      positionContext: pending.positionContext,
-    });
-    return latency;
+    return this.#recordMatchedMove({ gameId, resultPly: broadcastPly, provenance: 'move_broadcast' }, pending, atMs);
+  }
+
+  onStateBroadcast(gameId: string, statePly: number, atMs: number): number | undefined {
+    return this.#onStateObserved(gameId, statePly, atMs, 'state_broadcast');
+  }
+
+  onRecoveryResponse(gameId: string, recoveryPly: number, atMs: number): number | undefined {
+    return this.#onStateObserved(gameId, recoveryPly, atMs, 'recovery_response');
+  }
+
+  #onStateObserved(
+    gameId: string,
+    statePly: number,
+    atMs: number,
+    provenance: MoveObservationProvenance = 'state_broadcast',
+  ): number | undefined {
+    let lastLatency: number | undefined;
+    for (const [key, pending] of [...this.#pendingMoves.entries()]) {
+      if (key.startsWith(`${gameId}:`) && pending.expectedPly <= statePly) {
+        this.#pendingMoves.delete(key);
+        lastLatency = this.#recordMatchedMove(
+          { gameId, resultPly: pending.expectedPly, provenance },
+          pending,
+          atMs,
+        );
+      }
+    }
+    return lastLatency;
   }
 
   onMoveFailed(gameId: string, basePly: number): void {
@@ -806,8 +943,32 @@ export class SoakMetricsTracker {
     return this.#gamePositionContexts.size;
   }
 
-  getMoveLatencyQuantiles(): MetricSummary {
-    return this.#moveLatencies.summary;
+  get moveLatencyProvenanceCounts(): MoveLatencyProvenanceCounts {
+    return { ...this.#provenanceCounts };
+  }
+
+  getOperationClaims(operationId: string): readonly ClaimTimelineRecord[] | undefined {
+    const active = this.#activeOps.get(operationId);
+    if (active) return active.claims;
+    const settled = this.#completedSamples.get(operationId) ?? this.#settledAwaitingRelease.get(operationId);
+    return settled?.evidence.claims;
+  }
+
+  isOperationSettled(operationId: string): boolean {
+    return (
+      this.#completedOps.has(operationId) ||
+      this.#settledAwaitingRelease.has(operationId) ||
+      this.#completedSamples.has(operationId)
+    );
+  }
+
+  getMoveLatencyQuantiles(): MoveLatencySummary {
+    const summary = this.#moveLatencies.summary;
+    return {
+      ...summary,
+      provenance: this.moveLatencyProvenanceCounts,
+      note: 'Latency is in-process simulated-player API/pubsub visibility, excluding network/browser/WebSocket recovery time.',
+    };
   }
 
   getProvingWallQuantiles(): MetricSummary {
