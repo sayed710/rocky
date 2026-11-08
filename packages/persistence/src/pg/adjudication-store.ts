@@ -187,6 +187,49 @@ export class PgAdjudicationStore {
     return this.#seam.evictProofJob(operationId);
   }
 
+  /** Continue an exhausted timeout question at its next effort tier; false when none remains. */
+  escalateProofJob(operationId: string): boolean {
+    return this.#seam.escalateProofJob(operationId);
+  }
+
+  /** Conclude an exhausted proof question as unresolved: it never declares a dead position. */
+  concludeUnresolvedProofJob(operationId: string): JobStepResult {
+    return this.#seam.concludeUnresolvedProofJob(operationId);
+  }
+
+  /** Proving operations nobody holds a live lease on, oldest first: work a worker may claim. */
+  async listClaimableAdjudications(limit: number): Promise<Array<{ gameId: string; operationId: string; generation: string }>> {
+    const rows = await this.pool.query<{ game_id: string; operation_id: string; generation: string }>(
+      `SELECT game_id, operation_id, generation::text AS generation FROM game_adjudications
+       WHERE execution_state = 'proving' AND (lease_until IS NULL OR lease_until <= clock_timestamp())
+       ORDER BY created_at, game_id LIMIT $1`,
+      [limit],
+    );
+    return rows.rows.map((r) => ({ gameId: r.game_id, operationId: r.operation_id, generation: r.generation }));
+  }
+
+  /**
+   * Current stops with no adjudication proving, settled at least `minAgeMs` ago by database time:
+   * ready to release once their settlement had time to be published.
+   */
+  async listReleasableStops(
+    limit: number,
+    minAgeMs = 0,
+    excludeGameIds: readonly string[] = [],
+  ): Promise<Array<{ gameId: string; stopOperationId: string }>> {
+    const rows = await this.pool.query<{ game_id: string; operation_id: string }>(
+      `SELECT a.game_id, a.operation_id FROM game_adjudications a
+       WHERE a.is_current_stop
+         AND a.game_id <> ALL($3::uuid[])
+         AND a.completed_at <= clock_timestamp() - make_interval(secs => $2::double precision / 1000)
+         AND NOT EXISTS (
+           SELECT 1 FROM game_adjudications p WHERE p.game_id = a.game_id AND p.execution_state = 'proving')
+       ORDER BY a.completed_at, a.game_id LIMIT $1`,
+      [limit, minAgeMs, excludeGameIds],
+    );
+    return rows.rows.map((r) => ({ gameId: r.game_id, stopOperationId: r.operation_id }));
+  }
+
   stepJob(operationId: string, totalWorkBudget: number): JobStepResult {
     return this.stepProofJob(operationId, totalWorkBudget);
   }
