@@ -159,7 +159,7 @@ export class RealtimeGateway {
   }
 
   /** Games with a room or a pending join buffer on this node. */
-  private localGameIds(): Set<string> {
+  localGameIds(): Set<string> {
     const ids = new Set(this.rooms.keys());
     for (const [gameId, buffers] of this.joinBuffers) {
       if (buffers.size > 0) ids.add(gameId);

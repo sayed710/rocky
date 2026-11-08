@@ -852,3 +852,38 @@ test('evicted game slot is cleanly revived upon subsequent ensureLoaded or reloa
   });
   assert.equal(authority.getState(gameId).ply, 1);
 });
+
+test('gateway localGameIds accurately tracks rooms and clears upon disconnect', async () => {
+  const pubsub = new InMemoryPubSub();
+  const eventLog = new InMemoryEventLog();
+  const authority = new GameAuthority(pubsub, () => 1000, eventLog);
+  const verifier = new StaticTokenVerifier();
+  const gateway = new RealtimeGateway(authority, pubsub, verifier, () => 1000);
+
+  const whiteId = 'user-white';
+  const blackId = 'user-black';
+
+  await authority.createGame({
+    gameId: 'game-local-1',
+    players: { white: whiteId, black: blackId },
+    timeControl: TC,
+    rated: false,
+    at: 1000,
+  });
+
+  assert.equal(gateway.localGameIds().size, 0);
+
+  const conn1 = new InMemoryConnection('conn-1');
+  gateway.handleConnection(conn1);
+  conn1.deliver({ t: 'join', gameId: 'game-local-1', token: `token:${whiteId}` });
+  await waitForMessage(conn1, 'joined');
+
+  // Active room is present in localGameIds
+  assert.equal(gateway.localGameIds().has('game-local-1'), true);
+  assert.equal(gateway.localGameIds().size, 1);
+
+  // Disconnect removes game from localGameIds
+  conn1.close();
+  assert.equal(gateway.localGameIds().has('game-local-1'), false);
+  assert.equal(gateway.localGameIds().size, 0);
+});

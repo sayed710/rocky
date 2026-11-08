@@ -15,7 +15,11 @@ import { Game, type TimeControl } from '@chess-platform/game';
 import {
   GameAuthority,
   InMemoryConnection,
+  InMemoryEventLog,
+  InMemoryPubSub,
   RealtimeGateway,
+  type ApplyResult,
+  type CommandRouter,
   type TokenVerifier,
 } from '@chess-platform/realtime-gateway';
 import {
@@ -453,4 +457,316 @@ stackTest('forwarded remote adjudication notice evicts unwatched ended game on o
       await redis.quit().catch(() => undefined);
     }
   });
+});
+
+stackTest('resync recovers silently admitted game after owner death and lost worker notice', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const redis = new Redis(REDIS_URL!, { maxRetriesPerRequest: null });
+    const store = new PostgresEventStore(pool);
+    const adjudicationStore = new PgAdjudicationStore(pool);
+    const clock = { now: 2000 };
+    const nodeA = createNode(redis, store, adjudicationStore, clock);
+    const nodeB = createNode(redis, store, adjudicationStore, clock);
+
+    try {
+      const { gameId, black } = await seedGame(pool, FEN_MATE1);
+
+      // Node A claims initial ownership
+      const initialClaim = await nodeA.registry.claim(gameId);
+      assert.equal(initialClaim.owned, true);
+      assert.equal(await nodeA.authority.ensureLoaded(gameId), true);
+
+      // CRITICAL TIMING: Bob connects to survivor replica Node B and joins BEFORE admission
+      const bobConn = nodeB.connect();
+      nodeB.join(bobConn, gameId, black);
+      await waitForCondition('Bob joined on node B before admission', () => bobConn.sent.some((m) => m.t === 'joined'));
+
+      // Node B has a resident copy at sequence 0 (pre-admission) which is NOT proving
+      assert.equal(nodeB.authority.has(gameId), true);
+      assert.equal(nodeB.registry.holdsValidLease(gameId), false);
+      assert.deepEqual(nodeB.authority.adjudicatingGames(), [], 'Node B authority copy predates admission and is not proving');
+      assert.equal(nodeB.gateway.hasLocalSessions(gameId), true);
+      assert.equal(nodeB.gateway.localGameIds().has(gameId), true);
+
+      // White's move is admitted directly to store (simulating Owner A committing AdjudicationStarted
+      // to PostgreSQL but dying before publishing proving state to Redis)
+      const operationId = randomUUID();
+      await adjudicationStore.startAdjudication({
+        gameId,
+        command: { kind: 'move', uci: 'e7e4' },
+        context: {
+          operationId,
+          color: 'w',
+          at: 2000,
+          rulesVersion: 'rocky-adjudication@1',
+          clockPolicy: 'observed-release-v1',
+        },
+      });
+
+      // Confirm Bob on Node B received ZERO proving state messages (silent admission)
+      assert.equal(
+        bobConn.sent.some((m) => m.t === 'state' && m.state.adjudication === 'proving'),
+        false,
+        'Proving state publication was lost; Bob must not have received proving state',
+      );
+      // Because proving state was never observed, gateway observed hint is EMPTY
+      assert.deepEqual(nodeB.gateway.watchedAdjudicatingGames(), []);
+      // Authority cache on Node B still predates admission
+      assert.deepEqual(nodeB.authority.adjudicatingGames(), []);
+
+      // Worker settles and releases in Postgres; publish no-op simulates accepted-but-lost notice
+      const worker = new AdjudicationWorker({
+        store: adjudicationStore,
+        executorId: randomUUID(),
+        sliceBudget: 5_000,
+        releaseGraceMs: 0,
+        now: () => clock.now,
+        publish: async () => {},
+      });
+      clock.now = 2500;
+      const pass = await worker.runPass();
+      assert.equal(pass.settled, 1);
+      assert.equal(pass.released, 1);
+
+      // Old owner (Node A) dies completely
+      await nodeA.close();
+      await redis.del(ownerKey(gameId));
+
+      // Prior to resync: Bob has received neither the move nor the release
+      assert.equal(bobConn.sent.some((m) => m.t === 'move'), false);
+
+      // Survivor Node B runs AdjudicationResync pass
+      // On unpatched code (old 345): both authority.adjudicatingGames() and gateway.watchedAdjudicatingGames()
+      // were empty, so resync routed 0 games and Bob remained permanently starved.
+      // On corrected code: bounded fallback check of localGameIds() discovers the locally watched room,
+      // routes adjudicationChanged, claims ownership, folds durable log, and broadcasts move and state!
+      const failed = await nodeB.resync.runPass();
+      assert.equal(failed, 0);
+
+      // Verify Node B acquired ownership
+      assert.equal(
+        nodeB.registry.holdsValidLease(gameId),
+        true,
+        'Survivor replica must acquire ownership via fallback check of locally watched room',
+      );
+      assert.equal(nodeB.authority.getState(gameId).adjudication, undefined);
+      assert.deepEqual(nodeB.authority.adjudicatingGames(), []);
+      assert.deepEqual(nodeB.gateway.watchedAdjudicatingGames(), []);
+
+      // Verify Bob received the broadcasted move and final released state frames
+      await waitForCondition('Bob received move broadcast on node B', () => bobConn.sent.some((m) => m.t === 'move'));
+      const moveMsg = bobConn.sent.find((m) => m.t === 'move');
+      assert.ok(moveMsg !== undefined);
+      if (moveMsg && moveMsg.t === 'move') {
+        assert.equal(moveMsg.uci, 'e7e4');
+      }
+      const finalStateMsg = bobConn.sent.filter((m) => m.t === 'state').at(-1);
+      assert.ok(finalStateMsg !== undefined && finalStateMsg.t === 'state');
+      if (finalStateMsg && finalStateMsg.t === 'state') {
+        assert.equal(finalStateMsg.state.adjudication, undefined);
+        assert.equal(finalStateMsg.state.ply, 1);
+      }
+    } finally {
+      await nodeA.close();
+      await nodeB.close();
+      await redis.quit().catch(() => undefined);
+    }
+  });
+});
+
+async function createGenuineApplyResult(): Promise<ApplyResult> {
+  const pubsub = new InMemoryPubSub();
+  const eventLog = new InMemoryEventLog();
+  const authority = new GameAuthority(pubsub, () => 1000, eventLog);
+  const state = await authority.createGame({
+    gameId: 'fixture-game',
+    players: { white: 'w-fixture', black: 'b-fixture' },
+    timeControl: TC,
+    rated: false,
+    at: 1000,
+  });
+  return {
+    events: [],
+    broadcasts: [],
+    state,
+  };
+}
+
+test('AdjudicationResync enforces fallbackBatchSize budget and fair round-robin across passes', async () => {
+  const dummyApplyResult = await createGenuineApplyResult();
+  const routed: string[] = [];
+  const router: CommandRouter = {
+    route: async (gameId) => {
+      routed.push(gameId);
+      return dummyApplyResult;
+    },
+  };
+  let localGames = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6'];
+  const resync = new AdjudicationResync({
+    authority: { adjudicatingGames: () => [] },
+    router,
+    watched: {
+      localGameIds: () => localGames,
+    },
+    fallbackBatchSize: 2,
+  });
+
+  // Pass 1: routes first 2 games
+  await resync.runPass();
+  assert.deepEqual(routed, ['g1', 'g2']);
+
+  // Pass 2: routes next 2 games (no starvation in stable set)
+  routed.length = 0;
+  await resync.runPass();
+  assert.deepEqual(routed, ['g3', 'g4']);
+
+  // Pass 3: routes next 2 games
+  routed.length = 0;
+  await resync.runPass();
+  assert.deepEqual(routed, ['g5', 'g6']);
+
+  // Pass 4: wraps around to g1, g2
+  routed.length = 0;
+  await resync.runPass();
+  assert.deepEqual(routed, ['g1', 'g2']);
+
+  // Pass 5: when all rooms leave, zero routes occur
+  localGames = [];
+  routed.length = 0;
+  await resync.runPass();
+  assert.deepEqual(routed, []);
+
+  // Pass 6: reintroducing rooms resumes recovery
+  localGames = ['g7', 'g8'];
+  routed.length = 0;
+  await resync.runPass();
+  assert.deepEqual(routed, ['g7', 'g8']);
+});
+
+test('AdjudicationResync prioritizes fast candidates and avoids fallback duplication', async () => {
+  const dummyApplyResult = await createGenuineApplyResult();
+  const routed: string[] = [];
+  const router: CommandRouter = {
+    route: async (gameId) => {
+      routed.push(gameId);
+      return dummyApplyResult;
+    },
+  };
+  const fastCandidates = ['g2'];
+  const localGames = ['g1', 'g2', 'g3'];
+  const resync = new AdjudicationResync({
+    authority: { adjudicatingGames: () => [] },
+    router,
+    watched: {
+      watchedAdjudicatingGames: () => fastCandidates,
+      localGameIds: () => localGames,
+    },
+    fallbackBatchSize: 1,
+  });
+
+  // Pass 1: fast candidate g2 + fallback from cursor 0 (adds g1; inspected 1)
+  await resync.runPass();
+  assert.deepEqual(routed, ['g2', 'g1']);
+
+  // Pass 2: fast candidate g2 + fallback from cursor 1 (inspects g2, already present, adds g3; inspected 2)
+  routed.length = 0;
+  await resync.runPass();
+  assert.deepEqual(routed, ['g2', 'g3']);
+});
+
+test('AdjudicationResync validates constructor parameters', async () => {
+  const dummyApplyResult = await createGenuineApplyResult();
+  const router: CommandRouter = {
+    route: async () => dummyApplyResult,
+  };
+  assert.throws(
+    () => new AdjudicationResync({
+      authority: { adjudicatingGames: () => [] },
+      router,
+      fallbackBatchSize: 0,
+    }),
+    RangeError,
+  );
+  assert.throws(
+    () => new AdjudicationResync({
+      authority: { adjudicatingGames: () => [] },
+      router,
+      fallbackBatchSize: -1,
+    }),
+    RangeError,
+  );
+  assert.throws(
+    () => new AdjudicationResync({
+      authority: { adjudicatingGames: () => [] },
+      router,
+      intervalMs: 0,
+    }),
+    RangeError,
+  );
+});
+
+test('AdjudicationResync guarantees liveness for retained rooms under bounded churn counterexample', async () => {
+  const dummyApplyResult = await createGenuineApplyResult();
+  const allRouted: string[][] = [];
+  const router: CommandRouter = {
+    route: async (gameId) => {
+      allRouted.at(-1)?.push(gameId);
+      return dummyApplyResult;
+    },
+  };
+
+  const groupA = Array.from({ length: 8 }, (_, i) => `a${i}`);
+  const groupB = Array.from({ length: 8 }, (_, i) => `b${i}`);
+  const groupZ = Array.from({ length: 8 }, (_, i) => `z${i}`);
+  const groupZZ = Array.from({ length: 8 }, (_, i) => `zz${i}`);
+
+  let currentRooms: string[] = [];
+  const resync = new AdjudicationResync({
+    authority: { adjudicatingGames: () => [] },
+    router,
+    watched: {
+      localGameIds: () => currentRooms,
+    },
+    fallbackBatchSize: 8,
+  });
+
+  // Cycle pattern across passes: [A + B + Z], [A + B + Z], [B + Z + ZZ]
+  // Z is permanently watched (retained across all passes)
+  const pattern = [
+    [...groupA, ...groupB, ...groupZ],
+    [...groupA, ...groupB, ...groupZ],
+    [...groupB, ...groupZ, ...groupZZ],
+  ];
+
+  // Execute 4 cycles (12 passes total)
+  for (let pass = 0; pass < 12; pass++) {
+    currentRooms = pattern[pass % pattern.length]!;
+    allRouted.push([]);
+    await resync.runPass();
+  }
+
+  // 1. Initial waiting-survivor check: Pass 3 (index 2) must route waiting retained group Z
+  assert.deepEqual(allRouted[2], groupZ, 'Pass 3 must route waiting retained group Z');
+
+  // 2. Per-pass bounds, distinctness, and containment within currently watched rooms
+  for (let p = 0; p < allRouted.length; p++) {
+    const passRouted = allRouted[p]!;
+    assert.ok(passRouted.length <= 8, `Pass ${p + 1} routed count ${passRouted.length} must be <= budget 8`);
+    assert.equal(new Set(passRouted).size, passRouted.length, `Pass ${p + 1} must not contain duplicate routes`);
+    const watchedSet = new Set(pattern[p % pattern.length]!);
+    for (const id of passRouted) {
+      assert.ok(watchedSet.has(id), `Pass ${p + 1} routed ${id} which is not currently watched`);
+    }
+  }
+
+  // 3. Every retained Z ID must be present in the routed union for each successive 3-pass cycle (four cycles)
+  for (let cycle = 0; cycle < 4; cycle++) {
+    const cycleRouted = new Set(allRouted.slice(cycle * 3, cycle * 3 + 3).flat());
+    for (const zId of groupZ) {
+      assert.ok(
+        cycleRouted.has(zId),
+        `Cycle ${cycle + 1} (passes ${cycle * 3 + 1}..${cycle * 3 + 3}) must route retained room ${zId}`,
+      );
+    }
+  }
 });
