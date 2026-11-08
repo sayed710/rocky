@@ -1725,3 +1725,196 @@ test('short 10ms leases renew strictly before expiry across multiple intervals, 
     }
   }
 });
+
+test('non-async publish callback throwing synchronously on first delivery retries in exact FIFO order and releases clock only after delivery', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const OP = '018f2780-0000-7000-8000-0000000000b1';
+    store.completion = 'stopped';
+    store.claimable = [{ gameId: GAME, operationId: OP, generation: '0' }];
+    store.stops = [];
+    store.stepProofJob = () => step('ready');
+
+    // A real game has one current stop, created when settlement commits
+    const origSettle = store.settleAdjudication.bind(store);
+    store.settleAdjudication = async (params) => {
+      const receipt = await origSettle(params);
+      store.stops = [{ gameId: params.gameId, stopOperationId: params.operationId }];
+      return receipt;
+    };
+
+    let syncThrow = true;
+    const published: AdjudicationChange[] = [];
+    const publishCallback = (change: AdjudicationChange): Promise<void> => {
+      if (syncThrow) {
+        syncThrow = false;
+        throw new Error('synchronous publish failure');
+      }
+      published.push(change);
+      return Promise.resolve();
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      pollMs: 100,
+      concurrency: 1,
+      publish: publishCallback,
+      now: () => Date.now(),
+    });
+
+    // Pass 1: Settles OP. Synchronous throw in publish leaves notice queued.
+    // Clock release must NOT occur before delivery.
+    const pass1 = await worker.runPass();
+    assert.equal(pass1.settled, 1, 'OP settled in store');
+    assert.equal(pass1.released, 0, 'no immediate release before notice delivery');
+    assert.equal(published.length, 0, 'notice not delivered due to synchronous publish error');
+    assert.equal(store.releases.length, 0, 'clock release blocked while notice is unpublished');
+
+    // Pass 2: Retry flushes OP notice first, and clock release occurs only after delivery.
+    const pass2 = await worker.runPass();
+    assert.equal(pass2.settled, 0, 'no new operations settled in pass 2');
+    assert.equal(pass2.failed, 0, 'pass 2 completed without unhandled publication failures');
+    assert.equal(pass2.released, 1, 'clock released after notice delivered');
+    assert.equal(store.releases.length, 1, 'store recorded clock release');
+    assert.deepEqual(published.map((c) => c.kind), ['settled', 'released'], 'settled notice delivered before released notice in exact FIFO order');
+
+    const first = published[0];
+    if (!first || first.kind !== 'settled') {
+      assert.fail('expected first published change to be settled');
+    }
+    assert.equal(first.receipt.operationId, OP, 'settled notice has matching operationId');
+
+    const second = published[1];
+    if (!second || second.kind !== 'released') {
+      assert.fail('expected second published change to be released');
+    }
+  } finally {
+    try {
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('stop during in-flight settlement observes halting on publication, and restart retries retained notice and releases clock', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  let resolveSettlement!: () => void;
+  const settlementBarrier = new Promise<void>((resolve) => {
+    resolveSettlement = resolve;
+  });
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const OP_STOP = '018f2780-0000-7000-8000-0000000000c1';
+    store.completion = 'stopped';
+    store.claimable = [{ gameId: GAME, operationId: OP_STOP, generation: '0' }];
+    store.stops = [];
+    store.stepProofJob = () => step('ready');
+
+    let settlementEntered = false;
+    let pauseSettlement = true;
+    const origSettle = store.settleAdjudication.bind(store);
+    store.settleAdjudication = async (params) => {
+      if (pauseSettlement) {
+        pauseSettlement = false;
+        settlementEntered = true;
+        await settlementBarrier;
+      }
+      const receipt = await origSettle(params);
+      store.stops = [{ gameId: params.gameId, stopOperationId: params.operationId }];
+      return receipt;
+    };
+
+    const published: AdjudicationChange[] = [];
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      pollMs: 100,
+      concurrency: 1,
+      publish: async (change) => {
+        published.push(change);
+      },
+      now: () => Date.now(),
+    });
+
+    worker.start();
+    mock.timers.tick(0);
+
+    // Wait until in-flight settlement has entered the barrier
+    await pumpUntil(() => settlementEntered);
+    assert.equal(settlementEntered, true, 'settlement IO entered');
+
+    // While settlement IO is in flight, call worker.stop()
+    let stopResolved = false;
+    const stopPromise = worker.stop().then(() => {
+      stopResolved = true;
+    });
+
+    // Verify stop() does not resolve while settlement IO is paused
+    await pumpUntil(() => stopResolved, 5);
+    assert.equal(stopResolved, false, 'worker.stop() waits for in-flight settlement pass');
+
+    // Release settlement barrier so pass can complete settlement and attempt publication
+    resolveSettlement();
+    await stopPromise;
+    assert.equal(stopResolved, true, 'worker.stop() resolved after settlement completed');
+
+    // While halting during stop, publication was skipped/deferred and notice was retained
+    assert.equal(published.length, 0, 'notice was not published while worker was halting');
+    assert.equal(store.releases.length, 0, 'clock release deferred while worker was halting');
+
+    // Restart worker: restarted worker must drain retained notice and release clock
+    worker.start();
+    mock.timers.tick(0);
+    await pumpUntil(() => store.releases.length >= 1);
+
+    assert.equal(store.releases.length, 1, 'clock released once safe after restart');
+    assert.equal(published.length, 2, 'both settled and released notices delivered on restart');
+
+    const first = published[0];
+    if (!first || first.kind !== 'settled') {
+      assert.fail('expected first published change to be settled');
+    }
+    assert.equal(first.receipt.operationId, OP_STOP, 'retained notice delivered for OP_STOP');
+
+    const second = published[1];
+    if (!second || second.kind !== 'released') {
+      assert.fail('expected second published change to be released');
+    }
+  } finally {
+    try {
+      resolveSettlement?.();
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('caller-handled reporting failure leaves no orphan cleanup rejection through real public runPass', async () => {
+  const store = new FakeStore({ now: 0 });
+  store.stepProofJob = () => step('ready');
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    publish: () => {
+      throw new Error('publication failed');
+    },
+    failuresCounter: {
+      inc: () => {
+        throw new Error('reporting failed');
+      },
+    },
+  });
+  await assert.rejects(worker.runPass(), /reporting failed/);
+  await yieldToLoop();
+  await worker.stop();
+});

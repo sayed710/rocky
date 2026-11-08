@@ -60,7 +60,15 @@ Recovery and ordering:
   continue draining independently when one game's notice fails. Immediate clock release occurs only
   when that game's notice queue is empty, ensuring no notice debt is overwritten or silently discarded.
   A stop is never released while its game has an outstanding notice, and those games are excluded
-  before the page limit so they cannot starve other stops. The worker that settled a stop releases
+  before the page limit so they cannot starve other stops. Draining lifecycle ensures that task
+  assignment precedes execution via a chained microtask step (`Promise.resolve().then(...)`), where
+  a single returned/awaited promise chain owns both work execution and identity-fenced cleanup
+  (`.finally(() => { if (queue.drainer === task) queue.drainer = undefined; })`). This prevents
+  synchronous exceptions in publication callbacks or premature halting checks from clearing the drainer
+  before assignment, avoids detached derivative promises on handled rejections, and ensures failed
+  publication tasks are never permanently cached as false promises so subsequent passes can cleanly
+  retry draining the retained FIFO queue.
+  The worker that settled a stop releases
   it as soon as its notice queue is empty, with the same release request id, so a move that keeps the
   game going costs no extra clock pause. The release sweep, which picks up stops whose settler died or
   failed to release, takes a stop only once its settlement is `releaseGraceMs` old (database time,
