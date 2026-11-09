@@ -1918,3 +1918,731 @@ test('caller-handled reporting failure leaves no orphan cleanup rejection throug
   await yieldToLoop();
   await worker.stop();
 });
+
+interface Barrier {
+  readonly promise: Promise<void>;
+  resolve(): void;
+}
+
+function createBarrier(): Barrier {
+  let resolver: (() => void) | undefined;
+  const promise = new Promise<void>((res) => {
+    resolver = res;
+  });
+  if (!resolver) {
+    throw new Error('Promise executor did not run synchronously');
+  }
+  return { promise, resolve: resolver };
+}
+
+test('manual stop during awaited claim or renew waits for in-flight pass IO, halts prompt proof, and leaves no store work after shutdown', async () => {
+  // Scenario A: Manual pass paused in claimAdjudication when stop is called
+  {
+    const clock = { now: 1_000_000 };
+    const store = new FakeStore(clock);
+    let worker: AdjudicationWorker | undefined;
+    const claimBarrier = createBarrier();
+    let claimEntered = false;
+    let passPromise: Promise<unknown> | undefined;
+    let stopPromise: Promise<unknown> | undefined;
+
+    try {
+      worker = new AdjudicationWorker({
+        store,
+        executorId: EXECUTOR,
+        publish: async () => {},
+        now: () => clock.now,
+      });
+
+      const origClaim = store.claimAdjudication.bind(store);
+      store.claimAdjudication = async (params) => {
+        claimEntered = true;
+        await claimBarrier.promise;
+        return origClaim(params);
+      };
+
+      // Directly invoke runPass (manual pass, worker.start() was not called)
+      passPromise = worker.runPass();
+      await pumpUntil(() => claimEntered);
+      assert.equal(claimEntered, true, 'claimAdjudication entered in manual pass');
+
+      let stopResolved = false;
+      stopPromise = worker.stop().then(() => {
+        stopResolved = true;
+      });
+
+      // Bounded pump: stop() must NOT resolve while claim IO is in flight
+      await pumpUntil(() => stopResolved, 5);
+      assert.equal(stopResolved, false, 'worker.stop() must wait for in-flight claim IO');
+
+      // Release claim barrier
+      claimBarrier.resolve();
+      await stopPromise;
+      assert.equal(stopResolved, true, 'worker.stop() resolved after claim IO completed');
+
+      const passResult = await passPromise;
+      assert.equal((passResult as { settled: number }).settled, 0, 'pass did not settle');
+      assert.equal(store.settles.length, 0, 'no settlement executed after stop');
+      assert.equal(store.releases.length, 0, 'no release executed after stop');
+      assert.equal(store.calls.filter((c) => c.startsWith('step:')).length, 0, 'no proof step executed after stop');
+    } finally {
+      claimBarrier.resolve();
+      try { await passPromise; } catch {}
+      try { await stopPromise; } catch {}
+      if (worker) await worker.stop();
+    }
+  }
+
+  // Scenario B: Manual pass paused in renewAdjudication when stop is called
+  {
+    const clock = { now: 1_000_000 };
+    const store = new FakeStore(clock);
+    store.leaseUntil = clock.now + 10_000;
+    let mono = 0;
+    store.stepProofJob = () => {
+      mono += 100;
+      return step('active');
+    };
+
+    let worker: AdjudicationWorker | undefined;
+    const renewBarrier = createBarrier();
+    let renewEntered = false;
+    let pass2Promise: Promise<unknown> | undefined;
+    let stopPromise: Promise<unknown> | undefined;
+
+    try {
+      worker = new AdjudicationWorker({
+        store,
+        executorId: EXECUTOR,
+        leaseMs: 10_000,
+        proofSliceMs: 50,
+        publish: async () => {},
+        monotonic: () => mono,
+        now: () => clock.now,
+      });
+
+      // Pass 1 admits job, stays pending in #inFlight
+      const p1 = await worker.runPass();
+      assert.equal(p1.pending, 1);
+
+      // Advance clock so renewal is due
+      clock.now += 6_000;
+
+      const origRenew = store.renewAdjudication.bind(store);
+      store.renewAdjudication = async (params) => {
+        renewEntered = true;
+        await renewBarrier.promise;
+        return origRenew(params);
+      };
+
+      // Pass 2 runs #continue which enters renewAdjudication
+      pass2Promise = worker.runPass();
+      await pumpUntil(() => renewEntered);
+      assert.equal(renewEntered, true, 'renewAdjudication entered in manual pass');
+
+      let stopResolved = false;
+      stopPromise = worker.stop().then(() => {
+        stopResolved = true;
+      });
+
+      await pumpUntil(() => stopResolved, 5);
+      assert.equal(stopResolved, false, 'worker.stop() must wait for in-flight renewal IO');
+
+      renewBarrier.resolve();
+      await stopPromise;
+      assert.equal(stopResolved, true, 'worker.stop() resolved after renewal IO completed');
+
+      await pass2Promise;
+      assert.equal(store.settles.length, 0, 'no settlement executed after stop');
+      assert.equal(store.calls.filter((c) => c === 'cancel').length >= 1, true, 'held job cancelled on stop');
+      assert.equal(store.calls.filter((c) => c === 'evict').length >= 1, true, 'held job evicted on stop');
+    } finally {
+      renewBarrier.resolve();
+      try { await pass2Promise; } catch {}
+      try { await stopPromise; } catch {}
+      if (worker) await worker.stop();
+    }
+  }
+});
+
+test('two overlapping direct runPass calls serialize, preventing concurrent execution or duplicate settlement', async () => {
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  store.claimable = [{ gameId: GAME, operationId: OP, generation: '0' }];
+  store.stepProofJob = () => step('ready');
+
+  let pass1InIO = false;
+  let concurrentPassIO = false;
+  const ioBarrier = createBarrier();
+
+  let worker: AdjudicationWorker | undefined;
+  let p1: Promise<unknown> | undefined;
+  let p2: Promise<unknown> | undefined;
+
+  try {
+    const origCreate = store.createProofJob.bind(store);
+    store.createProofJob = async (gameId, op) => {
+      if (pass1InIO) {
+        concurrentPassIO = true;
+      }
+      pass1InIO = true;
+      await ioBarrier.promise;
+      pass1InIO = false;
+      return origCreate(gameId, op);
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      publish: async () => {},
+      now: () => clock.now,
+    });
+
+    // Call direct pass 1
+    p1 = worker.runPass();
+    await pumpUntil(() => pass1InIO);
+    assert.equal(pass1InIO, true, 'pass 1 entered createProofJob');
+
+    // Concurrently call direct pass 2 while pass 1 is waiting on barrier
+    p2 = worker.runPass();
+    await yieldToLoop();
+    await yieldToLoop();
+
+    assert.equal(concurrentPassIO, false, 'pass 2 must not enter pass IO while pass 1 is in-flight');
+
+    // Release barrier to let pass 1 complete, then pass 2 runs serialized
+    ioBarrier.resolve();
+    const [res1, res2] = await Promise.all([p1, p2]);
+
+    assert.equal(concurrentPassIO, false, 'passes never overlapped concurrently');
+    assert.equal((res1 as { settled: number }).settled, 1, 'pass 1 settled the job');
+    assert.equal((res2 as { settled: number }).settled, 0, 'pass 2 did not double-settle the job');
+    assert.equal(store.settles.length, 1, 'store settled adjudication exactly once');
+    assert.equal(store.calls.filter((c) => c === 'create').length, 1, 'proof job created exactly once');
+  } finally {
+    ioBarrier.resolve();
+    try { await p1; } catch {}
+    try { await p2; } catch {}
+    if (worker) await worker.stop();
+  }
+});
+
+test('scheduled pass and direct runPass serialize without concurrent execution or duplicate settlement', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  const scheduledIOBarrier = createBarrier();
+  let directPromise: Promise<unknown> | undefined;
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    store.claimable = [{ gameId: GAME, operationId: OP, generation: '0' }];
+    store.stepProofJob = () => step('ready');
+
+    let scheduledInIO = false;
+    let directEnteredConcurrent = false;
+
+    const origCreate = store.createProofJob.bind(store);
+    store.createProofJob = async (gameId, op) => {
+      if (scheduledInIO) {
+        directEnteredConcurrent = true;
+      }
+      scheduledInIO = true;
+      await scheduledIOBarrier.promise;
+      scheduledInIO = false;
+      return origCreate(gameId, op);
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      pollMs: 100,
+      publish: async () => {},
+      now: () => Date.now(),
+    });
+
+    worker.start();
+    // Fire scheduled pass from tick(0)
+    mock.timers.tick(0);
+    await pumpUntil(() => scheduledInIO);
+    assert.equal(scheduledInIO, true, 'scheduled pass entered createProofJob');
+
+    // While scheduled pass is paused on barrier, call direct runPass()
+    directPromise = worker.runPass();
+    await yieldToLoop();
+    await yieldToLoop();
+
+    assert.equal(directEnteredConcurrent, false, 'direct runPass must not execute concurrently with scheduled pass');
+
+    // Release scheduled pass barrier
+    scheduledIOBarrier.resolve();
+    const directResult = await directPromise;
+
+    assert.equal(directEnteredConcurrent, false, 'passes remained strictly serialized');
+    assert.equal((directResult as { settled: number }).settled, 0, 'direct pass did not re-settle already settled job');
+    assert.equal(store.settles.length, 1, 'operation settled exactly once');
+    assert.equal(store.calls.filter((c) => c === 'create').length, 1, 'proof job created exactly once');
+  } finally {
+    try {
+      scheduledIOBarrier.resolve();
+      try { await directPromise; } catch {}
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('start called while stop is waiting queues restart until stop cleanup completes, without dropping new generation jobs', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  const jobABarrier = createBarrier();
+  let stopPromise: Promise<unknown> | undefined;
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const OP_GEN1 = '018f2780-0000-7000-8000-000000000001';
+    const OP_GEN2 = '018f2780-0000-7000-8000-000000000002';
+    store.claimable = [{ gameId: GAME, operationId: OP_GEN1, generation: '0' }];
+    store.stepProofJob = () => step('ready');
+
+    let jobAEntered = false;
+    const createdOps: string[] = [];
+    const lifecycleEvents: string[] = [];
+
+    const origCancel = store.cancelProofJob.bind(store);
+    store.cancelProofJob = (op?: string) => {
+      if (typeof op === 'string') {
+        lifecycleEvents.push(`cancel:${op}`);
+      }
+      origCancel();
+    };
+
+    const origEvict = store.evictProofJob.bind(store);
+    store.evictProofJob = (op?: string) => {
+      if (typeof op === 'string') {
+        lifecycleEvents.push(`evict:${op}`);
+      }
+      return origEvict();
+    };
+
+    const origClaim = store.claimAdjudication.bind(store);
+    store.claimAdjudication = async (params) => {
+      lifecycleEvents.push(`claim:${params.operationId}`);
+      return origClaim(params);
+    };
+
+    const origCreate = store.createProofJob.bind(store);
+    store.createProofJob = async (gameId, op) => {
+      if (typeof op === 'string') {
+        createdOps.push(op);
+        lifecycleEvents.push(`create:${op}`);
+      }
+      if (op === OP_GEN1) {
+        jobAEntered = true;
+        await jobABarrier.promise;
+      }
+      return origCreate(gameId, op);
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      pollMs: 100,
+      publish: async () => {},
+      now: () => Date.now(),
+    });
+
+    worker.start();
+    // Fire pass 1 at delay 0: enters createProofJob for OP_GEN1 and pauses on barrier
+    mock.timers.tick(0);
+    await pumpUntil(() => jobAEntered);
+    assert.equal(jobAEntered, true, 'OP_GEN1 entered createProofJob');
+
+    // Call stop() while OP_GEN1 IO is in-flight
+    let stopResolved = false;
+    stopPromise = worker.stop().then(() => {
+      stopResolved = true;
+    });
+
+    await pumpUntil(() => stopResolved, 5);
+    assert.equal(stopResolved, false, 'stop() must not resolve while OP_GEN1 IO is in-flight');
+
+    // Call start() while stop is waiting: restart must be queued, not launched prematurely
+    worker.start();
+
+    // Prepare fresh claimable job for generation 2
+    store.claimable = [{ gameId: GAME, operationId: OP_GEN2, generation: '0' }];
+
+    // Advance timer/microtask while prior stop IO is still unresolved on the barrier:
+    // On broken 464 (or a mutant without restart queueing), start() immediately cleared halting/stopped
+    // and scheduled timer(0), firing a premature pass that claims/creates OP_GEN2 while stop is waiting.
+    mock.timers.tick(0);
+    await pumpUntil(() => store.claims.length >= 2, 5);
+
+    // Verify no premature new-lifecycle IO occurred while old stop was waiting
+    assert.equal(stopResolved, false, 'stop() remains unresolved while old IO is pending');
+    assert.equal(
+      store.claims.some((c) => c.operationId === OP_GEN2),
+      false,
+      'new generation job must not be claimed before prior stop completes',
+    );
+    assert.equal(
+      createdOps.includes(OP_GEN2),
+      false,
+      'new generation job must not be created before prior stop completes',
+    );
+    assert.equal(
+      store.settles.length,
+      0,
+      'no settlement must occur before prior stop completes',
+    );
+
+    // Release OP_GEN1 IO to allow prior stop to complete its lifecycle and cleanup
+    jobABarrier.resolve();
+    await stopPromise;
+    assert.equal(stopResolved, true, 'stop() resolved after OP_GEN1 completed');
+    assert.ok(createdOps.includes(OP_GEN1), 'OP_GEN1 proof job created');
+
+    // Prior stop must have halted generation 1 without settling it
+    assert.equal(
+      store.settles.some((s) => s.operationId === OP_GEN1),
+      false,
+      'generation 1 was halted on stop without settling',
+    );
+
+    // Now queued restart takes effect and schedules tick at delay 0 for generation 2
+    mock.timers.tick(0);
+    await pumpUntil(() => store.settles.some((s) => s.operationId === OP_GEN2));
+
+    assert.ok(
+      createdOps.includes(OP_GEN2),
+      'generation 2 proof job was created in controller',
+    );
+    assert.ok(
+      store.settles.some((s) => s.operationId === OP_GEN2),
+      'generation 2 job settled successfully on queued restart without being dropped by old stop',
+    );
+
+    // Explicit operation-tagged observable sequence: old OP_GEN1 cancel/evict precede OP_GEN2 claim/create
+    const cancelGen1Idx = lifecycleEvents.indexOf(`cancel:${OP_GEN1}`);
+    const evictGen1Idx = lifecycleEvents.indexOf(`evict:${OP_GEN1}`);
+    const claimGen2Idx = lifecycleEvents.indexOf(`claim:${OP_GEN2}`);
+    const createGen2Idx = lifecycleEvents.indexOf(`create:${OP_GEN2}`);
+
+    assert.ok(cancelGen1Idx !== -1, 'OP_GEN1 must be cancelled during stop cleanup');
+    assert.ok(evictGen1Idx !== -1, 'OP_GEN1 must be evicted during stop cleanup');
+    assert.ok(claimGen2Idx !== -1, 'OP_GEN2 must be claimed in generation 2');
+    assert.ok(createGen2Idx !== -1, 'OP_GEN2 must be created in generation 2');
+
+    assert.ok(
+      cancelGen1Idx < claimGen2Idx,
+      `old OP_GEN1 cancel (idx ${cancelGen1Idx}) must precede OP_GEN2 claim (idx ${claimGen2Idx})`,
+    );
+    assert.ok(
+      evictGen1Idx < claimGen2Idx,
+      `old OP_GEN1 evict (idx ${evictGen1Idx}) must precede OP_GEN2 claim (idx ${claimGen2Idx})`,
+    );
+    assert.ok(
+      cancelGen1Idx < createGen2Idx,
+      `old OP_GEN1 cancel (idx ${cancelGen1Idx}) must precede OP_GEN2 create (idx ${createGen2Idx})`,
+    );
+    assert.ok(
+      evictGen1Idx < createGen2Idx,
+      `old OP_GEN1 evict (idx ${evictGen1Idx}) must precede OP_GEN2 create (idx ${createGen2Idx})`,
+    );
+  } finally {
+    try {
+      jobABarrier.resolve();
+      try { await stopPromise; } catch {}
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('stop called while queued restart is pending cancels restart and leaves worker stopped until subsequent explicit start', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  const barrier = createBarrier();
+  let stop1Promise: Promise<unknown> | undefined;
+  let stop2Promise: Promise<unknown> | undefined;
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const OP_PAUSED = '018f2780-0000-7000-8000-0000000000d1';
+    const OP_NEXT = '018f2780-0000-7000-8000-0000000000d2';
+    store.claimable = [{ gameId: GAME, operationId: OP_PAUSED, generation: '0' }];
+    store.stepProofJob = () => step('ready');
+
+    let pausedEntered = false;
+    const createdOps: string[] = [];
+
+    const origCreate = store.createProofJob.bind(store);
+    store.createProofJob = async (gameId, op) => {
+      if (typeof op === 'string') {
+        createdOps.push(op);
+      }
+      if (op === OP_PAUSED) {
+        pausedEntered = true;
+        await barrier.promise;
+      }
+      return origCreate(gameId, op);
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 10_000,
+      pollMs: 100,
+      publish: async () => {},
+      now: () => Date.now(),
+    });
+
+    worker.start();
+    mock.timers.tick(0);
+    await pumpUntil(() => pausedEntered);
+    assert.equal(pausedEntered, true, 'OP_PAUSED entered in-flight IO');
+
+    // 1. First stop: initiates shutdown, awaits in-flight IO
+    let stop1Resolved = false;
+    stop1Promise = worker.stop().then(() => {
+      stop1Resolved = true;
+    });
+    await pumpUntil(() => stop1Resolved, 5);
+    assert.equal(stop1Resolved, false, 'first stop must await in-flight IO');
+
+    // 2. Call start() while stop is waiting (queues restart)
+    worker.start();
+
+    // 3. Call stop() AGAIN while prior shutdown is still waiting (must cancel queued restart)
+    let stop2Resolved = false;
+    stop2Promise = worker.stop().then(() => {
+      stop2Resolved = true;
+    });
+    await pumpUntil(() => stop2Resolved, 5);
+    assert.equal(stop2Resolved, false, 'second stop must also await in-flight IO');
+
+    // Prepare fresh work in store
+    store.claimable = [{ gameId: GAME, operationId: OP_NEXT, generation: '0' }];
+
+    // 4. Release barrier: shutdown IO completes
+    barrier.resolve();
+    await Promise.all([stop1Promise, stop2Promise]);
+    assert.equal(stop1Resolved, true, 'first stop resolved after IO finished');
+    assert.equal(stop2Resolved, true, 'second stop resolved after IO finished');
+
+    // 5. Advance timers and microtasks: assert no new claim/create/settle or renewal starts
+    mock.timers.tick(0);
+    mock.timers.tick(10_000);
+    await pumpUntil(() => store.claims.some((c) => c.operationId === OP_NEXT), 5);
+
+    assert.equal(
+      store.claims.some((c) => c.operationId === OP_NEXT),
+      false,
+      'no new claim should start when restart was cancelled by second stop',
+    );
+    assert.equal(
+      createdOps.includes(OP_NEXT),
+      false,
+      'no new proof job should be created when restart was cancelled by second stop',
+    );
+    assert.equal(
+      store.settles.some((s) => s.operationId === OP_NEXT),
+      false,
+      'no new settlement should occur when restart was cancelled by second stop',
+    );
+    assert.equal(
+      store.renewals.length,
+      0,
+      'no renewal should start when restart was cancelled by second stop',
+    );
+
+    // 6. Explicit new start() after shutdown completes re-enables work
+    worker.start();
+    mock.timers.tick(0);
+    await pumpUntil(() => store.settles.some((s) => s.operationId === OP_NEXT));
+
+    assert.ok(
+      store.settles.some((s) => s.operationId === OP_NEXT),
+      'new generation settles after explicit start following shutdown',
+    );
+    assert.ok(
+      createdOps.includes(OP_NEXT),
+      'new proof job created after explicit start following shutdown',
+    );
+  } finally {
+    try {
+      barrier.resolve();
+      try { await stop1Promise; } catch {}
+      try { await stop2Promise; } catch {}
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('repeated stop and start lifecycle calls are deterministic, idempotent, and resolve safely', async () => {
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  let worker: AdjudicationWorker | undefined;
+  const barrier = createBarrier();
+  let claimStarted = false;
+  let passPromise: Promise<unknown> | undefined;
+  let s1: Promise<unknown> | undefined;
+  let s2: Promise<unknown> | undefined;
+  let s3: Promise<unknown> | undefined;
+
+  try {
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      publish: async () => {},
+      now: () => clock.now,
+    });
+
+    // 1. Repeated stop on unstarted worker is idempotent
+    await worker.stop();
+    await worker.stop();
+
+    // 2. Start worker and immediately invoke repeated starts
+    worker.start();
+    worker.start();
+    worker.start();
+
+    // 3. Stop while pass is in-flight: multiple concurrent stops return the same shutdown promise
+    const origClaim = store.claimAdjudication.bind(store);
+    store.claimAdjudication = async (params) => {
+      claimStarted = true;
+      await barrier.promise;
+      return origClaim(params);
+    };
+
+    passPromise = worker.runPass();
+    await pumpUntil(() => claimStarted);
+
+    let stopCount = 0;
+    s1 = worker.stop().then(() => { stopCount += 1; });
+    s2 = worker.stop().then(() => { stopCount += 1; });
+    s3 = worker.stop().then(() => { stopCount += 1; });
+
+    await pumpUntil(() => stopCount > 0, 5);
+    assert.equal(stopCount, 0, 'all concurrent stops must wait for in-flight pass IO');
+
+    barrier.resolve();
+    await Promise.all([s1, s2, s3, passPromise]);
+    assert.equal(stopCount, 3, 'all concurrent stops resolved together');
+
+    // 4. Repeated stop on already stopped worker resolves immediately
+    let afterStopResolved = false;
+    await worker.stop().then(() => { afterStopResolved = true; });
+    assert.equal(afterStopResolved, true, 'stop on already stopped worker resolves immediately');
+
+    // 5. Subsequent runPass on stopped worker safely returns empty pass without store work
+    store.claimable = [{ gameId: GAME, operationId: OP, generation: '0' }];
+    const stoppedPass = await worker.runPass();
+    assert.equal(stoppedPass.settled, 0);
+    assert.equal(stoppedPass.failed, 0);
+    assert.equal(store.settles.length, 0, 'no store work executed on stopped worker');
+  } finally {
+    barrier.resolve();
+    await Promise.allSettled([s1, s2, s3, passPromise]);
+    if (worker) await worker.stop();
+  }
+});
+
+test('idle stop on fresh worker cleans retained pending jobs and disables later manual pass IO until explicit start', async () => {
+  // Scenario A: Fresh worker runs manual pass leaving pending job; idle stop cleans it and disables later pass until start
+  {
+    const clock = { now: 1_000_000 };
+    const store = new FakeStore(clock);
+    const OP_HELD = '018f2780-0000-7000-8000-000000000099';
+    store.claimable = [{ gameId: GAME, operationId: OP_HELD, generation: '0' }];
+    let mono = 0;
+    store.stepProofJob = () => {
+      mono += 100;
+      return step('active');
+    };
+    let worker: AdjudicationWorker | undefined;
+
+    try {
+      worker = new AdjudicationWorker({
+        store,
+        executorId: EXECUTOR,
+        proofSliceMs: 50,
+        publish: async () => {},
+        monotonic: () => mono,
+        now: () => clock.now,
+      });
+
+      // Pass 1: runs manually without start(), creates job, steps slice, returns pending
+      const pass1 = await worker.runPass();
+      assert.equal(pass1.pending, 1, 'manual pass left job pending');
+      assert.equal(store.calls.filter((c) => c === 'create' || c === `create:${OP_HELD}`).length, 1, 'proof job created in controller');
+
+      const cancelsBeforeStop = store.calls.filter((c) => c === 'cancel').length;
+      const evictsBeforeStop = store.calls.filter((c) => c === 'evict').length;
+
+      // Worker is now idle (no active pass running, activeRenewals 0, but #inFlight has 1 job).
+      // Explicit stop() must NOT early-return; it must establish halting and clean the retained job!
+      await worker.stop();
+
+      const cancelsAfterStop = store.calls.filter((c) => c === 'cancel').length;
+      const evictsAfterStop = store.calls.filter((c) => c === 'evict').length;
+      assert.equal(cancelsAfterStop - cancelsBeforeStop, 1, 'idle stop cancelled the retained job exactly once');
+      assert.equal(evictsAfterStop - evictsBeforeStop, 1, 'idle stop evicted the retained job exactly once');
+
+      // Repeated stop on already stopped worker is idempotent and does not repeat cancel/evict
+      await worker.stop();
+      assert.equal(store.calls.filter((c) => c === 'cancel').length, cancelsAfterStop, 'repeated stop does not repeat cancel');
+
+      // Later manual pass on stopped worker must perform NO IO and return empty pass
+      const stepsBeforePostStopPass = store.calls.filter((c) => c.startsWith('step:')).length;
+      const passAfterStop = await worker.runPass();
+      assert.equal(passAfterStop.settled, 0, 'post-stop pass does not settle');
+      assert.equal(passAfterStop.pending, 0, 'post-stop pass has no pending jobs');
+      assert.equal(store.calls.filter((c) => c.startsWith('step:')).length, stepsBeforePostStopPass, 'zero proof steps executed on stopped worker');
+
+      // Explicit start() re-enables work
+      worker.start();
+      const OP_FRESH = '018f2780-0000-7000-8000-000000000098';
+      store.claimable = [{ gameId: GAME, operationId: OP_FRESH, generation: '0' }];
+      store.stepProofJob = () => step('ready');
+
+      const passAfterStart = await worker.runPass();
+      assert.equal(passAfterStart.settled, 1, 'pass after explicit start settled fresh job');
+    } finally {
+      if (worker) await worker.stop();
+    }
+  }
+
+  // Scenario B: Explicit idle empty stop prevents later manual IO
+  {
+    const clock = { now: 1_000_000 };
+    const store = new FakeStore(clock);
+    store.claimable = [{ gameId: GAME, operationId: OP, generation: '0' }];
+    let workerEmpty: AdjudicationWorker | undefined;
+    try {
+      workerEmpty = new AdjudicationWorker({
+        store,
+        executorId: EXECUTOR,
+        publish: async () => {},
+        now: () => clock.now,
+      });
+
+      // Worker was never started and has no jobs. Call stop() while idle and empty:
+      await workerEmpty.stop();
+
+      // Later manual runPass must perform NO IO and return empty pass
+      const passOnStopped = await workerEmpty.runPass();
+      assert.equal(passOnStopped.settled, 0, 'post-stop pass does not settle');
+      assert.equal(store.claims.length, 0, 'idle empty stop prevented subsequent manual claim IO');
+      assert.equal(store.calls.length, 0, 'idle empty stop prevented subsequent controller IO');
+    } finally {
+      if (workerEmpty) await workerEmpty.stop();
+    }
+  }
+});

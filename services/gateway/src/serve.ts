@@ -738,7 +738,7 @@ async function main(): Promise<void> {
     const resync = new AdjudicationResync({
       authority,
       router: commandRouter,
-      ...(ownershipRegistry ? { ownership: ownershipRegistry } : {}),
+      watched: gateway,
       logger,
       failuresCounter: metrics.counter('gateway_adjudication_resync_failures_total'),
     });

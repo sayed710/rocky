@@ -158,6 +158,10 @@ export class AdjudicationWorker {
   #stopped = true;
   /** Set by stop(): a proof in progress returns at its next slice. */
   #halting = false;
+  #stoppingPromise: Promise<void> | undefined;
+  #restartPending = false;
+  #passTail: Promise<void> = Promise.resolve();
+  #runningPass: Promise<void> | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #renewalTimer: ReturnType<typeof setTimeout> | undefined;
   #running: Promise<void> | undefined;
@@ -202,30 +206,103 @@ export class AdjudicationWorker {
 
   /** Start passing at once, so work left by a process that stopped resumes immediately. */
   start(): void {
-    if (!this.#stopped) return;
+    if (this.#stoppingPromise) {
+      this.#restartPending = true;
+      return;
+    }
+    if (!this.#stopped && !this.#halting) return;
     this.#stopped = false;
     this.#halting = false;
+    this.#restartPending = false;
     this.#schedule(0);
     this.#scheduleRenewal();
   }
 
   /** Stop scheduling and wait for an in-flight pass. A proof in progress stops at its next slice. */
   async stop(): Promise<void> {
+    if (this.#stoppingPromise) {
+      this.#restartPending = false;
+      return this.#stoppingPromise;
+    }
+    if (this.#isCompletedStopped()) {
+      this.#restartPending = false;
+      return;
+    }
     this.#stopped = true;
     this.#halting = true;
-    if (this.#timer) clearTimeout(this.#timer);
-    this.#timer = undefined;
-    if (this.#renewalTimer) clearTimeout(this.#renewalTimer);
-    this.#renewalTimer = undefined;
-    await Promise.allSettled([this.#running, ...this.#activeRenewals]);
-    for (const operationId of this.#inFlight.keys()) {
-      this.#dropJob(operationId);
+    this.#restartPending = false;
+    if (this.#timer) {
+      clearTimeout(this.#timer);
+      this.#timer = undefined;
     }
-    this.#inFlight.clear();
+    if (this.#renewalTimer) {
+      clearTimeout(this.#renewalTimer);
+      this.#renewalTimer = undefined;
+    }
+    const stopping = this.#executeShutdown();
+    this.#stoppingPromise = stopping;
+    return stopping;
+  }
+
+  #isCompletedStopped(): boolean {
+    return this.#halting && this.#stopped && this.#inFlight.size === 0 &&
+      !this.#running && !this.#runningPass && this.#activeRenewals.size === 0;
+  }
+
+  async #executeShutdown(): Promise<void> {
+    try {
+      await Promise.allSettled([this.#running, this.#runningPass, ...this.#activeRenewals]);
+      for (const operationId of this.#inFlight.keys()) {
+        this.#dropJob(operationId);
+      }
+      this.#inFlight.clear();
+    } finally {
+      this.#stoppingPromise = undefined;
+      this.#finishShutdown();
+    }
+  }
+
+  #finishShutdown(): void {
+    if (!this.#restartPending) return;
+    this.#restartPending = false;
+    this.#stopped = false;
+    this.#halting = false;
+    this.#schedule(0);
+    this.#scheduleRenewal();
   }
 
   /** One bounded pass: settle what is claimable, then release what is published and stopped. */
   async runPass(): Promise<AdjudicationPass> {
+    if (this.#halting) {
+      return this.#haltedPass();
+    }
+    const prior = this.#passTail;
+    let release!: () => void;
+    const currentPass = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#passTail = currentPass;
+    this.#runningPass = currentPass;
+
+    await prior;
+    try {
+      if (this.#halting) {
+        return this.#haltedPass();
+      }
+      return await this.#executePass();
+    } finally {
+      if (this.#runningPass === currentPass) {
+        this.#runningPass = undefined;
+      }
+      release();
+    }
+  }
+
+  #haltedPass(): AdjudicationPass {
+    return { settled: 0, released: 0, skipped: 0, failed: 0, pending: this.#inFlight.size, more: false };
+  }
+
+  async #executePass(): Promise<AdjudicationPass> {
     let settled = 0;
     let skipped = 0;
     let failed = 0;
@@ -360,6 +437,7 @@ export class AdjudicationWorker {
   async #adjudicate(gameId: string, operationId: string, generation: string): Promise<'settled' | 'skipped' | 'pending'> {
     const claimed = await this.#claim(gameId, operationId, generation);
     if (claimed === null) return 'skipped';
+    if (this.#halting) return 'skipped';
     const heldJob: InFlightJob = {
       gameId,
       operationId,
@@ -404,16 +482,22 @@ export class AdjudicationWorker {
     }
   }
 
+  #isHeldJobEligible(heldJob: InFlightJob): boolean {
+    if (this.#halting) return false;
+    return this.#inFlight.get(heldJob.operationId) === heldJob;
+  }
+
   /**
    * Prove for one time slice and settle when ready. An unfinished proof keeps its claim and its local
    * job and is resumed next pass; any other outcome drops the local job.
    */
   async #continue(heldJob: InFlightJob): Promise<'settled' | 'skipped' | 'pending'> {
-    if (this.#inFlight.get(heldJob.operationId) !== heldJob) return 'skipped';
+    if (!this.#isHeldJobEligible(heldJob)) return 'skipped';
     const { gameId, operationId } = heldJob;
     let keep = false;
     try {
       heldJob.grant = await this.#renewHeldJob(heldJob);
+      if (this.#halting) return 'skipped';
       const retained = this.#store.retainedResolutionAt(gameId, operationId);
       let grant = heldJob.grant;
       if (retained === undefined) {
@@ -427,6 +511,7 @@ export class AdjudicationWorker {
         }
         grant = proved.grant;
       }
+      if (this.#halting) return 'skipped';
       await this.#settleAndRelease(gameId, operationId, grant, retained);
       return 'settled';
     } catch (error) {

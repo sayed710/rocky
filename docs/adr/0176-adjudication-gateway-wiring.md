@@ -28,9 +28,13 @@ and when it is on, the owner of a game must remain the only writer of its hot co
    Before deciding any command the owner also folds whatever the log holds beyond its copy, so a lost
    or late notice cannot leave a game looking proving or stopped once the next command arrives.
    Delivery does not rest on notices at all: only a game that is proving or stopped can be changed
-   by the worker, so every second (`AdjudicationResync`) the owner folds the log into each such game
-   it holds and owns. A worker that dies between its commit and its notice is therefore covered with
-   no publication table, cursor or time-window scan.
+   by the worker. Every pass, `AdjudicationResync` unions candidates from resident authority proving/stopped state
+   (`authority.adjudicatingGames()`) and bounded locally watched room hints (`watched.watchedAdjudicatingGames()`),
+   supplemented by a bounded fair round-robin batch of locally watched rooms (`watched.localGameIds()`),
+   and routes `adjudicationChanged` through the canonical `CommandRouter`. The command router directs the command to
+   the current owner, or claims ownership via Redis router fallback if the previous owner died, folding the durable log
+   and broadcasting whatever the worker committed. A worker that dies between its commit and notice, or an owner that dies
+   before notice delivery (including silent admission), is therefore covered with no publication table, cursor, or time-window scan.
 4. **Recorded releases.** `AdjudicationClocksStarted` is never appended live, so a hot copy or a cold
    rebuild re-derives it with `Game.prepareClockRelease` and refuses a logged release that differs from
    the stop it records.
@@ -47,6 +51,33 @@ and when it is on, the owner of a game must remain the only writer of its hot co
 
 ## Consequences
 
-- Off by default. Enabling it requires migrations 0053/0054, `prepareAdjudicationGuard`, a web client
-  that understands the new `state` field, and the owner's rollout approval (Issue #124 HOLD).
+- Off by default. Enabling it requires migrations 0053/0054 and additive 0055 poll indexes, `prepareAdjudicationGuard`,
+  a web client that understands the new `state` field, and the owner's explicit production rollout approval
+  (Issue #124 HOLD under ADR 0174 §7 owner-approved scope exceptions and lone-king lemma). Lower pure domain and search
+  APIs remain ungated, while gateway integration stays off by default.
 - With it on, every command waits for its proof: latency is the proof time plus one worker pass.
+
+## Recovery and Delivery Boundaries (Qodo 1852461, 1857452 & 1857828 Remediation)
+
+1. **Owner death, pre-admission discovery, and bounded observed hints (`AdjudicationResync`, `RealtimeGateway`)**:
+   `AdjudicationResync.runPass()` routes `adjudicationChanged` through the canonical `CommandRouter` across candidates from both resident authority copies (`authority.adjudicatingGames()`) and bounded locally watched room hints (`watched.watchedAdjudicatingGames()`), removing the legacy unused `ownership` option. `RealtimeGateway` tracks ephemeral hints when room state frames show `adjudication: 'proving' | 'stopped'`, and clears them when the game is released (`adjudication === undefined`), ended, or when room sessions teardown (`room.size === 0` and join buffers empty). Bounded observed-room hints may also exist during join buffering. These hints are never treated as authoritative Game mutations and bypass no ownership or rehydration fencing; they enable survivor replicas to discover and recover games where clients connected before remote admission. When an owner dies, the survivor acquires canonical ownership via Redis router fallback, rehydrates from the durable log, and broadcasts settled/released states without waiting for player action.
+
+2. **Durable adjudication suffix-scoped reload replay (`GameAuthority.refreshSlot`)**:
+   During takeover reload (`authority.reloadFromLog` / `refreshSlot`), broadcast re-emission is strictly scoped by `hasAdjudicationRecoveryEvidence(previous, newRecord)`. Broadcasts and updated state are emitted only when the prior resident was actively proving/stopped or when the newly validated durable suffix contains genuine adjudication lifecycle events (`AdjudicationStarted`, `AdjudicationResolved`, `AdjudicationClocksStarted`). For ordinary games without adjudication, ordinary reloads (such as losing append races, failed appends, or malformed heads) publish zero broadcasts, preserving no-rebroadcast and slot revival semantics unchanged.
+
+3. **Unwatched remote ended copy eviction (`OwnerCommandConsumer`)**:
+   `OwnerCommandConsumer.processCommand` extends server-notice cleanup to recognize `(envelope.userId === ADJUDICATION_ACTOR && envelope.cmd.kind === 'adjudicationChanged')`. When a remote owner loads an unwatched ended game solely to fold a forwarded adjudication notice, `releaseExpiryCopy` evicts the ended copy from memory before replying to the forwarding replica. Preexisting resident copies, watched games with active client sessions, and newer connection fencing remain protected.
+
+4. **Independent per-recipient and per-handler delivery isolation (`Room`, `PubSub`)**:
+   - `Room.fanout` catches exceptions on individual member connection sends (`m.conn.send`), ensuring a failing local socket cannot suppress delivery to healthy same-room peers. Point-to-point `Room.sendTo` remains direct.
+   - `RedisPubSub.publish` and `InMemoryPubSub.publish` catch exceptions per local subscriber callback. A throwing local subscriber cannot abort remaining local subscribers or suppress step 2 remote Redis fanout. Diagnostic logs strictly redact payloads, moves, FEN strings, and raw Error objects.
+   - Best-effort Redis pub/sub semantics remain best-effort without an outbox redesign or durable delivery acknowledgment ledger. `GameAuthority` and `RealtimeGateway.ensureRoom` do not swallow publication failures.
+
+5. **Silent admission recovery via bounded fair periodic check of locally watched rooms (Qodo 1857452 finding 3f11e6cf)**:
+   If an owner replica commits `AdjudicationStarted` to PostgreSQL but dies before publishing the proving state frame to Redis, and the worker notice is subsequently lost, survivor replicas where clients pre-connected have neither resident authority proving state nor observed phase hints. `RealtimeGateway.localGameIds()` exposes the set of locally watched rooms and pending join buffers. When a `watched` source is provided to `AdjudicationResync`, `localGameIds` is required. `AdjudicationResync.runPass()` supplements its fast priority candidates (`authority.adjudicatingGames()` and optional `watched.watchedAdjudicatingGames()`) with a bounded batch (`fallbackBatchSize`, default 8) of locally watched rooms selected via an in-memory rotation queue. The queue retains relative FIFO order for surviving rooms across passes, prunes departed rooms, appends new arrivals behind waiting survivors, and rotates chosen/inspected rooms to the back. This eliminates index-shifting starvation under room churn, guaranteeing that retained rooms receive their turn within bounded passes without requiring a persistent arrival ledger or database schema changes. The queue is bounded strictly by currently watched rooms and clears completely when all rooms close. Forwarding `adjudicationChanged` for normal games is a no-op (no suffix in durable log, zero broadcasts published, ordinary commands unaffected); for silently admitted games, the survivor replica claims ownership via Redis fallback, rehydrates from PostgreSQL, and broadcasts the missed move and state frames to connected clients. Global game table scans, unbounded outboxes, and polling of unwatched games remain strictly prohibited.
+
+6. **Authoritative `StateView` delivery on cold owners (`AdjudicationResync`, `RealtimeGateway`, Finding `c6452cf0`)**:
+   When a replica routes `adjudicationChanged` to a valid owner whose authority is cold (e.g. following process restart, eviction, or remote lease claim), the owner loads the durable head into memory, leaving an empty suffix for `absorbDurable` and emitting no Pub/Sub broadcasts. `AdjudicationResync.#routeCandidate` receives the returned `ApplyResult.state` and delivers it to local room sessions via `watched.sendStateToRoom(gameId, result.state)` (a required receiver method on the `watched` interface, satisfied by `RealtimeGateway.sendStateToRoom`). `RealtimeGateway.deliverState` deduplicates state frames against `lastFullStateRevision`, ensuring that the room immediately recovers the committed position and released state on the first pass while subsequent resync passes produce zero duplicate state or gameplay frames and zero history replay (per-request commandConfirmed acknowledgments may occur on forwarded requests). Fences, generation checks, and single-owner mutability remain strictly intact.
+
+7. **Pre-validation existence check & ticket-fenced cleanup of orphan leases (`RedisCommandRouter`, `GameAuthority`, Finding `c2f34bf9`)**:
+   `RealtimeGateway.localGameIds()` encompasses active rooms and pending join buffers to preserve recovery coverage during client join setup. To prevent unvalidated or nonexistent pending IDs from acquiring persistent leases in Redis, `RedisCommandRouter.route` validates `await this.authority.knows(gameId)` prior to fallback ownership acquisition specifically for server adjudication discovery (`userId === ADJUDICATION_ACTOR && cmd.kind === 'adjudicationChanged'`), failing with `unknown_game` immediately if nonexistent. For local command application, `RedisCommandRouter` executes ticket-fenced cleanup (`this.registry.release(gameId)`) if and only if `applyLocal` positively confirms `AuthorityError('unknown_game')` and the captured ticket remains current (`this.registry.isTicketCurrent(ticket)`). Proven-valid existing game leases and shared claim generations are strictly preserved without blanket release on transient read/timeout errors. If lease release fails during cleanup, `releaseTicketSafely` preserves the client-facing public error message and reject code without leaking raw Redis/DB connection sentinels, chaining the internal failure via standard `Error.cause` for observability without silent discard.
