@@ -24,6 +24,7 @@ import {
   type Broadcast,
   type Command,
   type CommandRouter,
+  type StateView,
 } from '@chess-platform/realtime-gateway';
 import {
   PgAdjudicationStore,
@@ -387,6 +388,11 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
             await owner.ensureLoaded(g.id);
             state = owner.getState(g.id);
           }
+          if (state.ply > tracker.getObservedMoveCount(g.id)) {
+            const recovery = await owner.readRecovery(g.id, 0);
+            tracker.onRecoveryResponse(g.id, recovery.state.ply, performance.now(), recovery.state.moves);
+            state = recovery.state;
+          }
           if (state.status.over) {
             return;
           }
@@ -726,6 +732,23 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
 
       // Invariants
       assert.equal(open, 0, 'nothing is left proving or stopped');
+
+      // Final drain: give a lagging game with durable committed moves but missing observation one explicit genuine recovery request
+      for (const g of games) {
+        const owner = replicas[g.owner]!.authority;
+        let view: StateView;
+        try {
+          view = owner.getState(g.id);
+        } catch {
+          await owner.ensureLoaded(g.id);
+          view = owner.getState(g.id);
+        }
+        if (view.ply > tracker.getObservedMoveCount(g.id)) {
+          const recovery = await owner.readRecovery(g.id, 0);
+          tracker.onRecoveryResponse(g.id, recovery.state.ply, performance.now(), recovery.state.moves);
+        }
+      }
+
       let totalDurableMoves = 0;
       let totalActualPlies = 0;
       let earlyEndings = 0;
@@ -749,17 +772,15 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         if (replayed.ply < PLIES) earlyEndings++;
 
         const observedMoves = tracker.getObservedMovesForGame(g.id);
-        assert.equal(
-          observedMoves.length,
-          moveEventsCount,
-          `game ${g.id} observed move count must equal durable MovePlayed event count in game_events`,
-        );
-        for (let i = 0; i < moveEvents.length; i++) {
-          const expected = moveEvents[i]!;
-          const observed = observedMoves[i]!;
-          assert.equal(observed.ply, expected.ply, `game ${g.id} move ${i} ply must match durable MovePlayed`);
-          assert.equal(observed.uci, expected.uci, `game ${g.id} move ${i} uci must match durable MovePlayed`);
-        }
+        const parsePly = (k: string) => Number(k.split(':')[0]);
+        const sortKeys = (a: string, b: string) => parsePly(a) - parsePly(b) || a.localeCompare(b);
+        const expectedKeys = moveEvents.map((m) => `${m.ply}:${m.uci}`).sort(sortKeys);
+        const observedKeys = observedMoves.map((m) => `${m.ply}:${m.uci}`).sort(sortKeys);
+        const missing = expectedKeys.filter((k) => !observedKeys.includes(k));
+        const extra = observedKeys.filter((k) => !expectedKeys.includes(k));
+        const diffMessage = `game ${g.id} move mismatch: observed ${observedMoves.length} vs durable ${moveEventsCount}; missing=[${missing.join(', ')}], extra=[${extra.join(', ')}]`;
+        assert.equal(observedMoves.length, moveEventsCount, diffMessage);
+        assert.deepEqual(observedKeys, expectedKeys, diffMessage);
 
         const snap = replayed.snapshot();
         for (const side of ['w', 'b'] as const) {

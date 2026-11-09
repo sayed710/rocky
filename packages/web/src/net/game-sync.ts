@@ -39,6 +39,7 @@ import {
   isInvalidDeadPositionEvent,
   isInvalidDeadPositionStatus,
   isValidDeadPositionOutcome,
+  isValidAdjudication,
 } from './ws-protocol.js';
 import { VARIANTS } from '../api/models.js';
 
@@ -184,10 +185,6 @@ function isValidOptionalReady(value: unknown): boolean {
 function isValidChess960StartId(value: unknown): boolean {
   if (value === undefined || value === null) return true;
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 959;
-}
-
-function isValidAdjudication(value: unknown): boolean {
-  return value === undefined || value === 'proving' || value === 'stopped';
 }
 
 function initialState(gameId: string): GameSyncState {
@@ -667,6 +664,9 @@ export class GameSync {
 
   private handleMessage(msg: ServerMessage): void {
     if (this.hasInvalidDeadPosition(msg)) return;
+    if ((msg.t === 'joined' || msg.t === 'state' || msg.t === 'resumed') && !isValidAdjudication(msg.state?.adjudication)) {
+      return;
+    }
     if ('gameId' in msg && msg.gameId !== this.gameId) return;
     if (msg.t !== 'joined' && msg.t !== 'reject' && !this.state.connected) return;
     switch (msg.t) {

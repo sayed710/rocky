@@ -359,6 +359,7 @@ function validRevisionFrame(parsed: Record<string, unknown>, mode: 'legacy' | 'r
   const payload = snapshot ? parsed.state : parsed;
   if (!record(payload)) return false;
   if (isInvalidDeadPositionEnding(payload)) return false;
+  if (snapshot && !isValidAdjudication(payload.adjudication)) return false;
   const revisioned = Object.hasOwn(payload, 'stateRevision');
   if (!revisioned && mode === 'revision') return false;
   if (revisioned && !(snapshot ? validState(payload) : validEvent(parsed))) return false;
@@ -429,6 +430,13 @@ function isInvalidDeadPositionEnding(val: unknown): boolean {
   return false;
 }
 
+/**
+ * Validate that an adjudication phase is undefined or one of the valid wire strings (ADR-0176).
+ */
+export function isValidAdjudication(value: unknown): value is 'proving' | 'stopped' | undefined {
+  return value === undefined || value === 'proving' || value === 'stopped';
+}
+
 function validRevision(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_STATE_REVISION;
 }
@@ -475,8 +483,7 @@ function validState(value: Record<string, unknown>): boolean {
     legalMoves(value.legalMoves) && (value.chess960StartId === null ||
       (typeof value.chess960StartId === 'number' && Number.isInteger(value.chess960StartId) &&
        value.chess960StartId >= 0 && value.chess960StartId <= 959)) &&
-    (value.ready === null || ready(value.ready)) &&
-    (value.adjudication === undefined || value.adjudication === 'proving' || value.adjudication === 'stopped');
+    (value.ready === null || ready(value.ready));
 }
 
 function validEvent(value: Record<string, unknown>): boolean {

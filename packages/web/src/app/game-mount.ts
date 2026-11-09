@@ -1215,11 +1215,11 @@ export function mountGame(deps: GameMountDependencies): MountedGame {
   // cannot open a window between them; and an ended game never goes live again.
   let boardFinished = false;
   const syncBoardOwnership = (): void => {
-    const { myColor, status, recovering } = gameSync.getState();
+    const { myColor, status, recovering, adjudication } = gameSync.getState();
     if (status?.over === true) boardFinished = true;
     const owner = boardFinished || myColor === null ? null : myColor === 'w' ? 'white' : 'black';
     board.setPlayerColor(owner);
-    board.setInputEnabled(owner !== null && !recovering);
+    board.setInputEnabled(owner !== null && !recovering && adjudication !== 'proving');
   };
 
   const renderMetadata = (state: GameMetadataState): void => {

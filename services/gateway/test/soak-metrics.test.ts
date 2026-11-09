@@ -1454,3 +1454,57 @@ test('SoakMetricsTracker never fabricates known move sample from state snapshot 
   assert.equal(tracker.matchedMovesCount, 1);
   assert.equal(tracker.getObservedMoveCount(game), 1);
 });
+
+test('SoakMetricsTracker records move latency exactly once on missed broadcast followed by canonical recovery, but rejects when context is missing', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-missed-broadcast-recovery';
+
+  const context: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 999,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  // 1. Move registered pending at t = 1000
+  tracker.onMovePending(game, 0, 1000, context);
+  assert.equal(tracker.matchedMovesCount, 0);
+  assert.equal(tracker.getObservedMoveCount(game), 0);
+
+  // 2. PubSub move broadcast was missed (not delivered)
+  // Simulated player or final drain executes recovery request returning canonical state.moves at t = 1250
+  const recoveryLatency = tracker.onRecoveryResponse(game, 1, 1250, [{ ply: 1, uci: 'e2e4' }]);
+  assert.equal(recoveryLatency, 250, 'must compute actual latency from pending start to recovery response return');
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+
+  const observed = tracker.getObservedMovesForGame(game);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0]?.ply, 1);
+  assert.equal(observed[0]?.uci, 'e2e4');
+
+  const summary = tracker.getMoveLatencyQuantiles();
+  assert.equal(summary.n, 1);
+  assert.equal(summary.min, 250);
+  assert.equal(summary.provenance.recovery_response, 1);
+  assert.equal(summary.provenance.move_broadcast, 0);
+
+  // 3. Repeated recovery response or late broadcast for ply 1 logs exactly once (deduplicated)
+  const dupRecovery = tracker.onRecoveryResponse(game, 1, 1300, [{ ply: 1, uci: 'e2e4' }]);
+  assert.equal(dupRecovery, undefined);
+  const lateBroadcast = tracker.onMoveBroadcast(game, 1, 1350, 'e2e4');
+  assert.equal(lateBroadcast, undefined);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+
+  // 4. Missing context: canonical recovery includes ply 2 ('d7d5'), but no pending attempt was registered for it
+  const missingContextLatency = tracker.onRecoveryResponse(game, 2, 1400, [
+    { ply: 1, uci: 'e2e4' },
+    { ply: 2, uci: 'd7d5' },
+  ]);
+  assert.equal(missingContextLatency, undefined, 'recovery without pending move context must not match or fabricate sample');
+  assert.equal(tracker.matchedMovesCount, 1, 'matched count must remain 1');
+  assert.equal(tracker.getObservedMoveCount(game), 1, 'observed move records must not include ply 2 without context');
+});
