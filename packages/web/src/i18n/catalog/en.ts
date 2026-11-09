@@ -682,6 +682,8 @@ export const enMessages = {
   'game.status.waitingPlayer': 'Waiting for {color} to join',
   'game.status.joining': 'Joining…',
   'game.status.waitingOpponent': 'Waiting for your opponent to join',
+  'game.status.adjudicating': 'Checking the position…',
+  'game.status.clocksPaused': 'Clocks paused. Play resumes in a moment.',
   'game.review.classification.brilliant': 'Brilliant',
   'game.review.classification.great': 'Great',
   'game.review.classification.best': 'Best',

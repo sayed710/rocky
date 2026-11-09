@@ -44,6 +44,8 @@ export interface GameActionState {
   readonly pendingAction: GameSyncState['pendingAction'];
   readonly recovering?: boolean;
   readonly conclusiveJoinRejected?: boolean;
+  /** A command awaits its proof (Issue #124): the server refuses every action until it settles. */
+  readonly proving?: boolean;
 }
 
 export interface GameMetadataState {
@@ -287,7 +289,8 @@ export class GameController {
            this.currentActionState?.connected === true &&
            !this.currentActionState?.isOver &&
            this.currentActionState?.pendingAction === null &&
-           !this.currentActionState?.recovering;
+           !this.currentActionState?.recovering &&
+           !this.currentActionState?.proving;
   }
 
   private canAbort(): boolean {
@@ -424,6 +427,8 @@ export class GameController {
       && state.turn === state.myColor
       && state.pending === null
       && !awaitingReadiness(state)
+      // While a command awaits its proof the server refuses every other command.
+      && state.adjudication !== 'proving'
       && !state.recovering
       // `ended` empties the legal-move map but keeps `turn`: a finished game is nobody's turn.
       && state.status?.over !== true;
@@ -476,6 +481,7 @@ export class GameController {
     const pendingAction = state.pendingAction;
     const recovering = state.recovering;
     const conclusiveJoinRejected = this.gameSync.isConclusiveJoinRejected();
+    const proving = state.adjudication === 'proving';
 
     const actionChanged = this.currentActionState === undefined
       || this.currentActionState.isPlayer !== isPlayer
@@ -487,7 +493,8 @@ export class GameController {
       || this.currentActionState.lastReject !== lastReject
       || this.currentActionState.pendingAction !== pendingAction
       || this.currentActionState.recovering !== recovering
-      || this.currentActionState.conclusiveJoinRejected !== conclusiveJoinRejected;
+      || this.currentActionState.conclusiveJoinRejected !== conclusiveJoinRejected
+      || this.currentActionState.proving !== proving;
 
     if (actionChanged) {
       this.currentActionState = {
@@ -501,6 +508,7 @@ export class GameController {
         pendingAction,
         recovering,
         conclusiveJoinRejected,
+        proving,
       };
       if (this.callbacks.onActionState) {
         this.callbacks.onActionState(this.currentActionState);
@@ -558,7 +566,10 @@ export class GameController {
     if (state.status === null) return t('game.status.waiting');
     if (!state.status.over) {
       if (state.turn === null) return t('game.status.waiting');
+      // A pending proof outranks readiness: a seat's readiness is itself adjudicated on join.
+      if (state.adjudication === 'proving') return t('game.status.adjudicating');
       if (awaitingReadiness(state)) return this.readinessText(state);
+      if (state.adjudication === 'stopped') return t('game.status.clocksPaused');
       const turnLabel = state.turn === 'w' ? t('game.player.white') : t('game.player.black');
       const turnText = state.turn === state.myColor
         ? t('game.status.yourTurn')

@@ -124,6 +124,12 @@ export interface StateView {
    * a rolling deploy makes normal; `GameSync` reads absence as `null`.
    */
   readonly ready?: ReadyView | null;
+  /**
+   * Present only while an adjudicated game is not running normally (Issue #124, ADR-0176): `proving`
+   * while a command awaits its proof, `stopped` while both clocks are stopped before the server
+   * releases them. Absent from every other state and from gateways without adjudication.
+   */
+  readonly adjudication?: 'proving' | 'stopped';
 }
 
 /** Durable readiness of both seats. */
@@ -353,6 +359,7 @@ function validRevisionFrame(parsed: Record<string, unknown>, mode: 'legacy' | 'r
   const payload = snapshot ? parsed.state : parsed;
   if (!record(payload)) return false;
   if (isInvalidDeadPositionEnding(payload)) return false;
+  if (snapshot && !isValidAdjudication(payload.adjudication)) return false;
   const revisioned = Object.hasOwn(payload, 'stateRevision');
   if (!revisioned && mode === 'revision') return false;
   if (revisioned && !(snapshot ? validState(payload) : validEvent(parsed))) return false;
@@ -421,6 +428,13 @@ function isInvalidDeadPositionEnding(val: unknown): boolean {
   if (isInvalidDeadPositionEvent(val)) return true;
   if (isInvalidDeadPositionStatus(val.status)) return true;
   return false;
+}
+
+/**
+ * Validate that an adjudication phase is undefined or one of the valid wire strings (ADR-0176).
+ */
+export function isValidAdjudication(value: unknown): value is 'proving' | 'stopped' | undefined {
+  return value === undefined || value === 'proving' || value === 'stopped';
 }
 
 function validRevision(value: unknown): value is number {
