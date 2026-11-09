@@ -6,7 +6,11 @@
 > to read **only this file** and continue immediately. Updated after every
 > milestone and every significant architectural step.
 
-_Last updated: 2026-11-09 — Issue #124 forward integration of PR #154 head into soak metrics branch: normal merge integrates accepted gateway adjudication recovery, worker lifecycle hardening, poll index migration 0055, and web reconnect into the soak metrics harness; combined validation and scaled soak measurements are pending on HOLD under ADR 0174 §7 scope exceptions and off-by-default feature flags._
+_Last updated: 2026-11-09 — Issue #124 typed moves ledger, persistent per-ply observation dedup & candidate-targeted failure isolation in services/gateway/test: 1) State broadcast and cold-restart recovery pass canonical typed snapshot moves ledger (`msg.state.moves` and `recovery.state.moves`) to `onStateBroadcast` and `onRecoveryResponse`, completely eliminating unknown ledger parsing; 2) Known pending UCIs strictly require matching durable ledger entries; empty/missing ledgers never match or fabricate samples; 3) Persistent central dedup (`#observedPlys`) and key-based iteration in `#onStateObserved` prevent double-counting and sibling resync issues; 4) Per-candidate failure isolation in `onMoveFailed(gameId, basePly, outcome, uci)` marks/deletes only the targeted candidate without deleting earlier ambiguous candidates at the same ply; 5) Post-run verification checks exact durable identities (ply and UCI) per game against `MovePlayed` events; 6) 4 new deterministic unit regressions in `soak-metrics.test.ts` (ambiguous A then definite failure B then A durable; two candidates one ledger observation; duplicate after re-registration suppressed; missing/empty ledger never fabricates known move); all new gates UNRUN by author per gate-ownership transfer._
+
+Prior: _Last updated: 2026-11-09 — Issue #124 durable replay-derived move accounting, exact UCI correlation & ambiguous lost-reply retention in services/gateway/test: 1) Decoupled command return counters (`routeSuccessReturns`) from durable committed moves (`durableMoves`), removing invalid `admittedMoves >= durableMoves` assumption invalidated by lost replies (e.g. 96 returns vs 97 actual plies); 2) Derived durable move counts and actual plies from independent PostgreSQL event replay (`logged.filter(e => e.type === 'MovePlayed')` and `replayed.ply`), adding independent per-game durable-vs-observed verification (`tracker.getObservedMoveCount(g.id) === moveEventsCount`); 3) Exact UCI matching per ply across move broadcasts, state snapshots, and recovery responses using move ledger (`extractMoveLedger`), rejecting mismatched UCIs at same ply; 4) Ambiguous lost reply retention (`isAmbiguous ? 'ambiguous_commit' : 'definite_failure'`) using real `AuthorityCommitError` and `CommandOutcomeUnknownError` boundary checks, keeping bounded candidate context per ply/UCI without overwriting unresolved committed attempts on retry; 5) 5 new deterministic unit regressions authored in `soak-metrics.test.ts` (lost reply same-move retry, terminal-no-move non-fabrication, multi-channel dedup, wrong UCI rejection, different UCI retry preservation); all new gates UNRUN by author per gate-ownership transfer._
+
+Prior: _Last updated: 2026-11-09 — Issue #124 forward integration of PR #154 head into soak metrics branch: normal merge integrates accepted gateway adjudication recovery, worker lifecycle hardening, poll index migration 0055, and web reconnect into the soak metrics harness; combined validation and scaled soak measurements are pending on HOLD under ADR 0174 §7 scope exceptions and off-by-default feature flags._
 
 Prior: _Last updated: 2026-11-09 — Issue #124 forward integration of accepted PR #153 (gateway adjudication recovery head 2eab5c900d99b2f2b000c2ee5a7b7eda5159ce11) into existing PR #154 local branch (work/rocky-reconnect-20261107, prior head 49522d06528394c77e164b353869f607e59b2c0a): normal merge combines accepted gateway adjudication recovery test harness corrections (isolated database schema migration for absent UUID pre-validation in `GameAuthority.knows` and gameplay/state frame deduplication assertions in cold-owner recovery; ADR 0176 §6 updated) with worker lifecycle hardening and poll index migration 0055 (ADR 0175) and web reconnect & adjudication recovery; combined PR #154 gates are UNRUN by author and pending root verification; prior passing gates are historical with exact source qualification (PR #153 head 2eab5c900d99b2f2b000c2ee5a7b7eda5159ce11 CI 42529664279 passed, Qodo standard 1858343 complete with zero open findings) and do not constitute current combined acceptance; ADR 0174 §7 approved scope exceptions and off-by-default feature flags (`ADJUDICATION_ENABLED`) remain in force; production migration, activation, and rollout remain strictly on HOLD with Issue #124 remaining open._
 
@@ -6703,6 +6707,54 @@ Addresses four blocking review findings identified by ChatGPT independent review
   - Uses only public `SoakMetricsTracker` methods.
 - **Verification Evidence**:
   - 22 unit tests authored in `services/gateway/test/soak-metrics.test.ts`.
+  - Code hygiene: all functions parameters <= 4, cyclomatic decisions <= 10, nesting <= 5, zero `as any`.
+- **HOLD & Remaining Scope**:
+  - Author gate execution disabled per owner instructions (EDITS+TEST AUTHORING ONLY); all verification gates, compiles, and benchmarks remain UNRUN BY AUTHOR for root ownership. Production rollout, flag activation, and remote changes remain on HOLD.
+
+### Development Slice: Issue #124 Durable Replay Move Accounting, Exact UCI Matching & Ambiguous Lost-Reply Retention (2026-11-09)
+
+- **Scope & Context**:
+  - Test harness accounting and observation boundary corrections in `services/gateway/test/adjudication-soak.integration.test.ts`, `services/gateway/test/support/soak-metrics.ts`, and `services/gateway/test/soak-metrics.test.ts` resolving scale-80 accounting discrepancy (`moves = 3188` vs `moveLatencyMs.n = 3187` and `actualPlies = 3187`).
+  - Preserves failed evidence: distinguishes command route returns from committed `MovePlayed` events; accounts for lost replies and terminal/no-move settlements.
+  - Zero production edits (`packages/`, `services/gateway/src/` untouched).
+- **Implemented Capabilities**:
+  - Distinct counters: `routeSuccessReturns` tracks successful `router.route()` acknowledgments without mislabeling as durable admissions; `durableMoves` and `actualPlies` derived directly from independent PostgreSQL persisted event replay (`game_events` / `Game.fromEvents`).
+  - Removed invalid `admittedMoves >= durableMoves` assertion, which fails when lost COMMIT replies mask committed admissions (e.g. 96 returns vs 97 actual plies).
+  - Independent per-game verification: asserts `tracker.getObservedMoveCount(g.id) === moveEventsCount` for each game independently, verifying every durable move has exactly one observation rather than asserting histogram summary against itself.
+  - Typed error classification: harness boundary checks `err instanceof AuthorityCommitError || err instanceof CommandOutcomeUnknownError` directly from `@chess-platform/realtime-gateway`, passing explicit typed `MoveFailureOutcome` (`'ambiguous_commit' | 'definite_failure'`) to `tracker.onMoveFailed()` without substring matching or arbitrary string sentinels.
+  - Bounded candidate tracking per `(gameId, ply, UCI)`: retrying with a different candidate move does not overwrite unresolved ambiguous attempt context.
+  - Exact UCI correlation: `onMoveBroadcast` matches both ply and UCI; `onStateBroadcast` and `onRecoveryResponse` use `extractMoveLedger` to correlate state snapshots against durable move ledger, rejecting mismatched UCIs at the same ply and preventing fabricated move samples on terminal or no-move decisions.
+  - Multi-channel deduplication: observation on any channel (move broadcast, state broadcast, recovery response) cleans up all pending candidate attempts for that ply, preventing duplicate latency samples across replayed broadcasts or retries.
+- **Verification Evidence**:
+  - 5 deterministic unit regressions authored in `services/gateway/test/soak-metrics.test.ts`:
+    1. `'SoakMetricsTracker retains original start timestamp across ambiguous lost reply followed by same move retry'` (asserting latency measured from initial attempt start, e.g. 250ms vs 150ms).
+    2. `'SoakMetricsTracker does not fabricate move latency sample on terminal or no-move settlement'` (asserting zero samples and zero observed moves).
+    3. `'SoakMetricsTracker deduplicates observations across move broadcast, state broadcast, and recovery response'` (asserting strict single observation count).
+    4. `'SoakMetricsTracker rejects wrong UCI at same ply and does not mislabel measurement context'` (asserting mismatched UCI rejected and correct UCI matched).
+    5. `'SoakMetricsTracker preserves uncommitted ambiguous attempt context when retry attempts different UCI'` (asserting independent retention across different candidate moves).
+  - Code hygiene: all functions parameters <= 4, cyclomatic decisions <= 10, nesting <= 5, zero `as any`.
+- **HOLD & Remaining Scope**:
+  - Author gate execution disabled per owner instructions (EDITS+TEST AUTHORING ONLY); all verification gates, compiles, and benchmarks remain UNRUN BY AUTHOR for root ownership. Production rollout, flag activation, and remote changes remain on HOLD.
+
+### Development Slice: Issue #124 Typed Moves Ledger, Persistent Per-Ply Observation Dedup & Candidate-Targeted Failure Isolation (2026-11-09)
+
+- **Scope & Context**:
+  - Soak harness metrics accuracy improvements in `services/gateway/test/support/soak-metrics.ts`, `services/gateway/test/adjudication-soak.integration.test.ts`, and `services/gateway/test/soak-metrics.test.ts`.
+  - Fixes concrete accounting issues identified in root code review: typed snapshot moves ledger propagation, persistent per-ply observation deduplication, per-candidate failure targeting, and exact durable event identity verification.
+  - Zero production edits (`packages/`, `services/gateway/src/` untouched).
+- **Implemented Capabilities**:
+  - Typed snapshot moves ledger: `GameAuthority.viewOf` maps the complete snapshot moves ledger into `StateView.moves`. The soak harness now passes `msg.state.moves` in pubsub state broadcasts and `recovery.state.moves` (replacing `recovery.missed`) in cold restart simulated player reconnect to `tracker.onStateBroadcast` and `tracker.onRecoveryResponse`.
+  - Removed speculative string/unknown parsing (`extractMoveLedger` eliminated); `DurableMoveLedgerEntry` (`{ readonly ply: number; readonly uci: string; }`) is strongly typed throughout the observation pipeline.
+  - Strict known UCI correlation: a pending move with a known UCI is strictly verified against `ledgerMap.get(pending.expectedPly)`. Missing or empty ledgers never match or fabricate samples for known moves.
+  - Persistent per-ply observation dedup: `#observedPlys` (`Set<string>` formatted `${gameId}:${ply}`) is checked centrally in `#recordMatchedMove` and `onMovePending`. Iterating over `[...this.#pendingMoves.keys()]` and skipping deleted entries prevents double-counting when sibling entries are removed. Stale retries cannot re-register already-observed plies.
+  - Candidate-targeted failure handling: `onMoveFailed(gameId, basePly, outcome, uci)` accepts an optional candidate UCI. When provided, it marks or deletes only the specific candidate (`${gameId}:${expectedPly}:${uci}`), ensuring a definite rejection of a different retry preserves an earlier ambiguous candidate.
+  - Per-game exact durable identity verification: post-run verification asserts every observed move matches the exact `ply` and `uci` of `logged.filter(e => e.type === 'MovePlayed')` for each game independently.
+- **Verification Evidence**:
+  - 4 new deterministic unit regressions authored in `services/gateway/test/soak-metrics.test.ts`:
+    1. `'SoakMetricsTracker preserves ambiguous attempt A when retry B suffers definite failure, matching A when durable'` (verifying candidate A remains intact and matches with original start time upon durable broadcast).
+    2. `'SoakMetricsTracker resolves two pending candidates at same ply exactly once against durable state ledger'` (verifying single resolution and dedup against durable state ledger).
+    3. `'SoakMetricsTracker suppresses re-registration and prevents double counting when stale retry registers already-observed ply'` (verifying central `#observedPlys` dedup suppresses stale retry re-registration).
+    4. `'SoakMetricsTracker never fabricates known move sample from state snapshot when ledger is missing or empty'` (verifying state snapshot without matching ledger never fabricates move samples).
   - Code hygiene: all functions parameters <= 4, cyclomatic decisions <= 10, nesting <= 5, zero `as any`.
 - **HOLD & Remaining Scope**:
   - Author gate execution disabled per owner instructions (EDITS+TEST AUTHORING ONLY); all verification gates, compiles, and benchmarks remain UNRUN BY AUTHOR for root ownership. Production rollout, flag activation, and remote changes remain on HOLD.

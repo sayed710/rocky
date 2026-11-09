@@ -14,11 +14,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
-import { Game, type GameEvent } from '@chess-platform/game';
+import { Game, type GameEvent, type MovePlayedEvent } from '@chess-platform/game';
 import {
   GameAuthority,
   InMemoryPubSub,
   gameChannel,
+  AuthorityCommitError,
+  CommandOutcomeUnknownError,
   type Broadcast,
   type Command,
   type CommandRouter,
@@ -155,7 +157,6 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
       // --- games ---
       const tc = { kind: 'increment' as const, initialMs: 300_000, incrementMs: 2_000, delayMs: 0 };
       const games: SoakGame[] = [];
-      const actualPliesByGame = new Map<string, number>();
 
       for (let g = 0; g < GAMES; g++) {
         const white = randomUUID();
@@ -175,7 +176,6 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           [id, JSON.stringify(created.events[0])],
         );
         games.push({ id, white, black, owner: g % 2, index: g });
-        actualPliesByGame.set(id, 0);
       }
 
       // --- replicas & timing wrapper ---
@@ -354,13 +354,13 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         const unsub = pubsub.subscribe(gameChannel(g.id), (msg: Broadcast) => {
           const now = performance.now();
           if (msg.t === 'move') {
-            tracker.onMoveBroadcast(g.id, msg.ply, now);
+            tracker.onMoveBroadcast(g.id, msg.ply, now, msg.uci);
           }
           if (msg.t === 'state') {
             const phase = msg.state.adjudication;
             tracker.onProvingState(g.id, phase === 'proving', now);
             tracker.onStoppedState(g.id, phase === 'stopped', now);
-            tracker.onStateBroadcast(g.id, msg.state.ply, now);
+            tracker.onStateBroadcast(g.id, msg.state.ply, now, msg.state.moves);
           }
         });
         unsubs.push(unsub);
@@ -368,7 +368,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
 
       // --- reproducible players with basePly-anchored choice generation ---
       let refused = 0;
-      let moves = 0;
+      let routeSuccessReturns = 0;
 
       const play = async (g: SoakGame) => {
         const gameSeed = deriveGameSeed(SOAK_SEED, g.index);
@@ -388,7 +388,6 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
             state = owner.getState(g.id);
           }
           if (state.status.over) {
-            actualPliesByGame.set(g.id, state.ply);
             return;
           }
           if (state.adjudication === 'proving') {
@@ -419,12 +418,14 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           tracker.onMovePending(g.id, basePly, performance.now(), positionContext);
           try {
             await router.route(g.id, user, { kind: 'move', uci });
-            moves++;
+            routeSuccessReturns++;
             attempt = 0;
-            actualPliesByGame.set(g.id, basePly + 1);
-          } catch {
+          } catch (err: unknown) {
             refused++;
-            tracker.onMoveFailed(g.id, basePly);
+            const isAmbiguous =
+              err instanceof AuthorityCommitError ||
+              err instanceof CommandOutcomeUnknownError;
+            tracker.onMoveFailed(g.id, basePly, isAmbiguous ? 'ambiguous_commit' : 'definite_failure', uci);
             ply--;
             attempt++;
             if (refused > GAMES * PLIES * 4) throw new Error('too many refusals');
@@ -688,7 +689,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         for (const g of games.filter((x) => x.owner === 0)) {
           await replicas[0]!.authority.ensureLoaded(g.id);
           const recovery = await replicas[0]!.authority.readRecovery(g.id, 0);
-          tracker.onRecoveryResponse(g.id, recovery.state.ply, performance.now());
+          tracker.onRecoveryResponse(g.id, recovery.state.ply, performance.now(), recovery.state.moves);
         }
         replicas[0]!.resync = new AdjudicationResync({ authority: replicas[0]!.authority, router, intervalMs: 500 });
         replicas[0]!.resync.start();
@@ -699,7 +700,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
       progressTimer = setInterval(() => {
         const elapsedSec = ((performance.now() - started) / 1000).toFixed(1);
         console.log(
-          `[soak progress] elapsed: ${elapsedSec}s, moves: ${moves}, activeProofs: ${tracker.activeOpsCount}, lostCommits: ${lost.lost}`,
+          `[soak progress] elapsed: ${elapsedSec}s, routeSuccessReturns: ${routeSuccessReturns}, activeProofs: ${tracker.activeOpsCount}, lostCommits: ${lost.lost}`,
         );
       }, 30_000);
 
@@ -725,6 +726,9 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
 
       // Invariants
       assert.equal(open, 0, 'nothing is left proving or stopped');
+      let totalDurableMoves = 0;
+      let totalActualPlies = 0;
+      let earlyEndings = 0;
       for (const g of games) {
         const logged = (await pool.query('SELECT payload FROM game_events WHERE game_id = $1 ORDER BY seq', [g.id])).rows.map((r) => r.payload as GameEvent);
         const replayed = Game.fromEvents(logged);
@@ -738,19 +742,30 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         const startedN = logged.filter((e) => e.type === 'AdjudicationStarted').length;
         assert.equal(resolved, startedN, 'every admitted command settled exactly once');
 
+        const moveEvents = logged.filter((e): e is MovePlayedEvent => e.type === 'MovePlayed');
+        const moveEventsCount = moveEvents.length;
+        totalDurableMoves += moveEventsCount;
+        totalActualPlies += replayed.ply;
+        if (replayed.ply < PLIES) earlyEndings++;
+
+        const observedMoves = tracker.getObservedMovesForGame(g.id);
+        assert.equal(
+          observedMoves.length,
+          moveEventsCount,
+          `game ${g.id} observed move count must equal durable MovePlayed event count in game_events`,
+        );
+        for (let i = 0; i < moveEvents.length; i++) {
+          const expected = moveEvents[i]!;
+          const observed = observedMoves[i]!;
+          assert.equal(observed.ply, expected.ply, `game ${g.id} move ${i} ply must match durable MovePlayed`);
+          assert.equal(observed.uci, expected.uci, `game ${g.id} move ${i} uci must match durable MovePlayed`);
+        }
+
         const snap = replayed.snapshot();
         for (const side of ['w', 'b'] as const) {
           assert.ok(snap.clock.remaining[side] >= 0);
           assert.ok(snap.clock.remaining[side] <= tc.initialMs + tc.incrementMs * replayed.ply);
         }
-      }
-
-      let earlyEndings = 0;
-      let totalActualPlies = 0;
-      for (const g of games) {
-        const pliesReached = actualPliesByGame.get(g.id) ?? 0;
-        totalActualPlies += pliesReached;
-        if (pliesReached < PLIES) earlyEndings++;
       }
 
       const memStats = sampler.stop();
@@ -762,7 +777,9 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         earlyEndings,
         thinkMs: THINK_MS,
         timeoutMs: config.timeoutMs,
-        moves,
+        routeSuccessReturns,
+        durableMoves: totalDurableMoves,
+        moves: totalDurableMoves,
         refusedRetries: refused,
         lostCommitReplies: lost.lost,
         faultCoverage: {
@@ -785,7 +802,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           },
         },
         wallSeconds: +(wall / 1000).toFixed(1),
-        movesPerSecond: +(moves / (wall / 1000)).toFixed(2),
+        movesPerSecond: +(totalDurableMoves / (wall / 1000)).toFixed(2),
         moveLatencyMs: tracker.getMoveLatencyQuantiles(),
         provingMs: tracker.getProvingWallQuantiles(),
         stoppedMs: tracker.getStoppedQuantiles(),
@@ -808,9 +825,10 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         },
       };
       console.log('SOAK', JSON.stringify(report));
-      assert.ok(moves >= GAMES * Math.min(PLIES, 4), 'games made progress');
+      assert.ok(totalDurableMoves >= GAMES * Math.min(PLIES, 4), 'games made progress');
       assert.ok(report.moveLatencyMs.n > 0, 'moveLatency samples must not be empty');
-      assert.equal(report.moveLatencyMs.n, moves, 'moveLatency sample count must equal observed moves');
+      assert.equal(report.moveLatencyMs.n, report.durableMoves, 'moveLatency sample count must equal durable committed moves');
+      assert.equal(report.durableMoves, report.actualPlies, 'durable committed moves must equal replayed actual plies');
       const provSum =
         report.moveLatencyMs.provenance.move_broadcast +
         report.moveLatencyMs.provenance.state_broadcast +

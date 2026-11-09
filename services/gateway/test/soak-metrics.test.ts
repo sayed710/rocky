@@ -15,6 +15,7 @@ import {
   SoakMetricsTracker,
   TopKCollector,
   WorkerLossBarrier,
+  type DurableMoveLedgerEntry,
   type MovePositionContext,
 } from './support/soak-metrics.js';
 
@@ -995,7 +996,7 @@ test('SoakMetricsTracker correlates move latency on state snapshot recovery with
   assert.equal(tracker.matchedMovesCount, 0);
 
   // 3. Cold restart simulated player reconnect receives readRecovery response at ply 2
-  const recoveryLatency = tracker.onRecoveryResponse(game, 2, 1250);
+  const recoveryLatency = tracker.onRecoveryResponse(game, 2, 1250, [{ ply: 2, uci: 'e2e4' }]);
   assert.equal(recoveryLatency, 250);
   assert.equal(tracker.matchedMovesCount, 1);
 
@@ -1049,9 +1050,9 @@ test('SoakMetricsTracker correlates move latency on state snapshot recovery with
   // 7. Failed admission / retry isolation: onMoveFailed deletes pending move so state/recovery does not record it
   tracker.onMovePending(game, 4, 1850);
   tracker.onMoveFailed(game, 4);
-  const failedRecovery = tracker.onRecoveryResponse(game, 5, 1900);
+  const failedRecovery = tracker.onRecoveryResponse(game, 5, 1900, [{ ply: 5, uci: 'g1f3' }]);
   assert.equal(failedRecovery, undefined);
-  const failedState = tracker.onStateBroadcast(game, 5, 1950);
+  const failedState = tracker.onStateBroadcast(game, 5, 1950, [{ ply: 5, uci: 'g1f3' }]);
   assert.equal(failedState, undefined);
   assert.equal(tracker.matchedMovesCount, 3);
 
@@ -1063,4 +1064,393 @@ test('SoakMetricsTracker correlates move latency on state snapshot recovery with
   assert.equal(counts.move_broadcast, 1);
   assert.equal(counts.state_broadcast, 1);
   assert.equal(counts.recovery_response + counts.move_broadcast + counts.state_broadcast, finalSummary.n);
+});
+
+test('SoakMetricsTracker retains original start timestamp across ambiguous lost reply followed by same move retry', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-lost-reply';
+
+  const context0: MovePositionContext = {
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 101,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  // Attempt 0 at t = 1000
+  tracker.onMovePending(game, 0, 1000, context0);
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // Ambiguous failure at t = 1050 (e.g. AuthorityCommitError on lost COMMIT reply)
+  tracker.onMoveFailed(game, 0, 'ambiguous_commit', 'e2e4');
+  assert.equal(tracker.matchedMovesCount, 0);
+  assert.equal(tracker.getObservedMoveCount(game), 0);
+
+  // Retry Attempt 1 for the SAME move at t = 1100
+  const context1: MovePositionContext = {
+    ...context0,
+    attempt: 1,
+  };
+  tracker.onMovePending(game, 0, 1100, context1);
+
+  // Definite refusal of the retry at t = 1150 must not delete the older ambiguous candidate
+  tracker.onMoveFailed(game, 0, 'definite_failure', 'e2e4');
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // Durable move broadcast arrives at t = 1250 for ply 1 with uci 'e2e4'
+  const latency = tracker.onMoveBroadcast(game, 1, 1250, 'e2e4');
+  // Latency MUST be measured from initial attempt start (1250 - 1000 = 250ms), NOT retry start (1250 - 1100 = 150ms)
+  assert.equal(latency, 250);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+
+  const summary = tracker.getMoveLatencyQuantiles();
+  assert.equal(summary.n, 1);
+  assert.equal(summary.min, 250);
+  assert.equal(summary.max, 250);
+  assert.equal(summary.provenance.move_broadcast, 1);
+
+  const top = tracker.getTopMoveLatency();
+  assert.equal(top.length, 1);
+  assert.equal(top[0]?.latencyMs, 250);
+  assert.equal(top[0]?.positionContext?.uci, 'e2e4');
+  assert.equal(top[0]?.provenance, 'move_broadcast');
+});
+
+test('SoakMetricsTracker does not fabricate move latency sample on terminal or no-move settlement', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-terminal-no-move';
+
+  const context: MovePositionContext = {
+    fen: 'fen-ply2',
+    uci: 'g1f3',
+    gameIndex: 0,
+    gameSeed: 202,
+    attempt: 0,
+    basePly: 2,
+  };
+
+  // 1. Move pending at basePly 2 (expectedPly 3)
+  tracker.onMovePending(game, 2, 1000, context);
+
+  // 2. Admission started
+  tracker.recordStartAttempt(10, 2);
+  tracker.recordStartAdmitted(game, 'op-term-1', 2, 10);
+  tracker.recordClaim({
+    gameId: game,
+    operationId: 'op-term-1',
+    executorId: 'worker-0',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+  tracker.recordStep('op-term-1', 10, 2, 100);
+
+  // 3. Settle commits terminal/no-move (ply does not advance)
+  tracker.recordSettleAttempt('op-term-1', 5);
+  tracker.recordSettlementCommitted('op-term-1');
+
+  // 4. Definite failure reported to tracker
+  tracker.onMoveFailed(game, 2, 'definite_failure');
+
+  // 5. State broadcast arrives at ply 2
+  const stateLat = tracker.onStateBroadcast(game, 2, 1100);
+  assert.equal(stateLat, undefined);
+
+  // 6. Recovery response arrives at ply 2
+  const recLat = tracker.onRecoveryResponse(game, 2, 1200);
+  assert.equal(recLat, undefined);
+
+  // 7. Verify zero fabricated move samples
+  assert.equal(tracker.matchedMovesCount, 0);
+  assert.equal(tracker.getObservedMoveCount(game), 0);
+  const summary = tracker.getMoveLatencyQuantiles();
+  assert.equal(summary.n, 0);
+  assert.equal(summary.total, 0);
+  assert.equal(tracker.getTopMoveLatency().length, 0);
+});
+
+test('SoakMetricsTracker deduplicates observations across move broadcast, state broadcast, and recovery response', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-dedup';
+
+  const context: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 303,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  tracker.onMovePending(game, 0, 1000, context);
+
+  // First observation: move broadcast arrives at t = 1150
+  const lat1 = tracker.onMoveBroadcast(game, 1, 1150, 'e2e4');
+  assert.equal(lat1, 150);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+
+  // Duplicate move broadcast at t = 1160 does not match
+  const dupMove = tracker.onMoveBroadcast(game, 1, 1160, 'e2e4');
+  assert.equal(dupMove, undefined);
+
+  // Duplicate state broadcast at t = 1200 does not match
+  const dupState = tracker.onStateBroadcast(game, 1, 1200);
+  assert.equal(dupState, undefined);
+
+  // Duplicate recovery response at t = 1300 does not match
+  const dupRecovery = tracker.onRecoveryResponse(game, 1, 1300);
+  assert.equal(dupRecovery, undefined);
+
+  // Counts remain strictly 1
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+  const counts = tracker.moveLatencyProvenanceCounts;
+  assert.equal(counts.move_broadcast, 1);
+  assert.equal(counts.state_broadcast, 0);
+  assert.equal(counts.recovery_response, 0);
+});
+
+test('SoakMetricsTracker rejects wrong UCI at same ply and does not mislabel measurement context', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-wrong-uci';
+
+  const context: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 404,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  // Pending move at ply 0 (expectedPly 1) for 'e2e4'
+  tracker.onMovePending(game, 0, 1000, context);
+
+  // Broadcast arrives for ply 1, but with wrong UCI 'd2d4'
+  const wrongMatch = tracker.onMoveBroadcast(game, 1, 1100, 'd2d4');
+  assert.equal(wrongMatch, undefined, 'must reject broadcast with different UCI at same ply');
+  assert.equal(tracker.matchedMovesCount, 0);
+  assert.equal(tracker.getObservedMoveCount(game), 0);
+
+  // State broadcast arrives with move ledger specifying ply 1 was 'd2d4'
+  const wrongStateMatch = tracker.onStateBroadcast(game, 1, 1150, [{ ply: 1, uci: 'd2d4' }]);
+  assert.equal(wrongStateMatch, undefined, 'state broadcast with mismatched durable UCI must not match pending move');
+  assert.equal(tracker.matchedMovesCount, 0);
+  assert.equal(tracker.getObservedMoveCount(game), 0);
+
+  // Correct broadcast arrives for 'e2e4' at ply 1
+  const correctMatch = tracker.onMoveBroadcast(game, 1, 1200, 'e2e4');
+  assert.equal(correctMatch, 200);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+  const top = tracker.getTopMoveLatency();
+  assert.equal(top.length, 1);
+  assert.equal(top[0]?.positionContext?.uci, 'e2e4');
+});
+
+test('SoakMetricsTracker preserves uncommitted ambiguous attempt context when retry attempts different UCI', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-diff-uci-retry';
+
+  const contextE4: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 505,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  // Attempt 0 for 'e2e4' at t = 1000
+  tracker.onMovePending(game, 0, 1000, contextE4);
+
+  // Ambiguous commit failure at t = 1050
+  tracker.onMoveFailed(game, 0, 'ambiguous_commit');
+
+  // Retry with DIFFERENT UCI 'c2c4' at t = 1080
+  const contextC4: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'c2c4',
+    gameIndex: 0,
+    gameSeed: 505,
+    attempt: 1,
+    basePly: 0,
+  };
+  tracker.onMovePending(game, 0, 1080, contextC4);
+
+  // If PostgreSQL actually committed the first attempt ('e2e4'), the broadcast arrives for 'e2e4':
+  const matchE4 = tracker.onMoveBroadcast(game, 1, 1200, 'e2e4');
+  // Must match 'e2e4' with its original measurement start time (1200 - 1000 = 200ms)
+  assert.equal(matchE4, 200);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+
+  // Subsequent broadcast for 'c2c4' cannot double-count or match
+  const lateC4 = tracker.onMoveBroadcast(game, 1, 1220, 'c2c4');
+  assert.equal(lateC4, undefined);
+  assert.equal(tracker.matchedMovesCount, 1);
+});
+
+test('SoakMetricsTracker preserves ambiguous attempt A when retry B suffers definite failure, matching A when durable', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-ambig-a-fail-b';
+
+  const contextA: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 601,
+    attempt: 0,
+    basePly: 0,
+  };
+  const contextB: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'c2c4',
+    gameIndex: 0,
+    gameSeed: 601,
+    attempt: 1,
+    basePly: 0,
+  };
+
+  // Attempt A at t = 1000
+  tracker.onMovePending(game, 0, 1000, contextA);
+
+  // Ambiguous failure on attempt A at t = 1050
+  tracker.onMoveFailed(game, 0, 'ambiguous_commit', 'e2e4');
+
+  // Attempt B at t = 1080
+  tracker.onMovePending(game, 0, 1080, contextB);
+
+  // Definite failure on attempt B at t = 1100 (e.g. invalid move or rejected)
+  tracker.onMoveFailed(game, 0, 'definite_failure', 'c2c4');
+
+  // Attempt A actually committed in PG, broadcast arrives for 'e2e4' at t = 1250
+  const matchA = tracker.onMoveBroadcast(game, 1, 1250, 'e2e4');
+  assert.equal(matchA, 250, 'latency must be measured from attempt A start');
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+  const observed = tracker.getObservedMovesForGame(game);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0]?.ply, 1);
+  assert.equal(observed[0]?.uci, 'e2e4');
+});
+
+test('SoakMetricsTracker resolves two pending candidates at same ply exactly once against durable state ledger', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-two-candidates';
+
+  const contextA: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 701,
+    attempt: 0,
+    basePly: 0,
+  };
+  const contextB: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'c2c4',
+    gameIndex: 0,
+    gameSeed: 701,
+    attempt: 1,
+    basePly: 0,
+  };
+
+  tracker.onMovePending(game, 0, 1000, contextA);
+  tracker.onMoveFailed(game, 0, 'ambiguous_commit', 'e2e4');
+  tracker.onMovePending(game, 0, 1100, contextB);
+
+  // State broadcast arrives with durable ledger indicating 'e2e4' was committed at ply 1
+  const ledger: readonly DurableMoveLedgerEntry[] = [{ ply: 1, uci: 'e2e4' }];
+  const match = tracker.onStateBroadcast(game, 1, 1300, ledger);
+
+  assert.equal(match, 300, 'must match candidate A with original t=1000 start (1300 - 1000 = 300)');
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+
+  const observed = tracker.getObservedMovesForGame(game);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0]?.ply, 1);
+  assert.equal(observed[0]?.uci, 'e2e4');
+
+  // Any subsequent recovery or broadcast for ply 1 cannot double count
+  const lateRecovery = tracker.onRecoveryResponse(game, 1, 1400, ledger);
+  assert.equal(lateRecovery, undefined);
+  const lateBroadcast = tracker.onMoveBroadcast(game, 1, 1450, 'c2c4');
+  assert.equal(lateBroadcast, undefined);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+});
+
+test('SoakMetricsTracker suppresses re-registration and prevents double counting when stale retry registers already-observed ply', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-stale-reregistration';
+
+  const context: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 801,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  // Initial attempt and broadcast
+  tracker.onMovePending(game, 0, 1000, context);
+  const firstLat = tracker.onMoveBroadcast(game, 1, 1150, 'e2e4');
+  assert.equal(firstLat, 150);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+
+  // Stale retry attempts to register pending move for the same basePly (expectedPly 1)
+  tracker.onMovePending(game, 0, 1200, { ...context, attempt: 1 });
+
+  // Stale broadcast or state snapshot for ply 1 arrives
+  const staleBroadcast = tracker.onMoveBroadcast(game, 1, 1250, 'e2e4');
+  assert.equal(staleBroadcast, undefined);
+
+  const staleState = tracker.onStateBroadcast(game, 1, 1300, [{ ply: 1, uci: 'e2e4' }]);
+  assert.equal(staleState, undefined);
+
+  const staleRecovery = tracker.onRecoveryResponse(game, 1, 1350, [{ ply: 1, uci: 'e2e4' }]);
+  assert.equal(staleRecovery, undefined);
+
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+  assert.equal(tracker.getMoveLatencyQuantiles().n, 1);
+});
+
+test('SoakMetricsTracker never fabricates known move sample from state snapshot when ledger is missing or empty', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-missing-ledger';
+
+  const context: MovePositionContext = {
+    fen: 'startfen',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 901,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  tracker.onMovePending(game, 0, 1000, context);
+
+  // 1. State broadcast without ledger
+  const matchNoLedger = tracker.onStateBroadcast(game, 1, 1100);
+  assert.equal(matchNoLedger, undefined, 'must not match known UCI when ledger is absent');
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // 2. Recovery response with empty ledger
+  const matchEmptyLedger = tracker.onRecoveryResponse(game, 1, 1150, []);
+  assert.equal(matchEmptyLedger, undefined, 'must not match known UCI when ledger is empty');
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // 3. State broadcast with ledger confirming 'e2e4' at ply 1
+  const matchWithLedger = tracker.onStateBroadcast(game, 1, 1200, [{ ply: 1, uci: 'e2e4' }]);
+  assert.equal(matchWithLedger, 200, 'matches once ledger confirms durable UCI');
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
 });

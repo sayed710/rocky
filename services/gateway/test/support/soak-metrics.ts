@@ -482,11 +482,33 @@ export class WorkerLossBarrier {
   }
 }
 
+export type MoveFailureOutcome = 'ambiguous_commit' | 'definite_failure';
+
+export interface DurableMoveLedgerEntry {
+  readonly ply: number;
+  readonly uci: string;
+}
+
+export interface ObservedMoveRecord {
+  readonly gameId: string;
+  readonly ply: number;
+  readonly uci: string;
+}
+
+interface PendingMoveRecord {
+  readonly gameId: string;
+  readonly basePly: number;
+  readonly expectedPly: number;
+  readonly atMs: number;
+  readonly positionContext?: MovePositionContext;
+  readonly uci?: string;
+  isAmbiguous?: boolean;
+}
+
 export class SoakMetricsTracker {
-  readonly #pendingMoves = new Map<
-    string,
-    { basePly: number; expectedPly: number; atMs: number; positionContext?: MovePositionContext }
-  >();
+  readonly #pendingMoves = new Map<string, PendingMoveRecord>();
+  readonly #observedPlys = new Set<string>();
+  readonly #observedMovesByGame = new Map<string, ObservedMoveRecord[]>();
   readonly #activeOps = new Map<string, ActiveOperation>();
   readonly #settledAwaitingRelease = new Map<string, TailSample>();
   readonly #completedSamples = new Map<string, TailSample>();
@@ -551,6 +573,14 @@ export class SoakMetricsTracker {
     return this.#gameBasePly.get(gameId) ?? 0;
   }
 
+  getObservedMoveCount(gameId: string): number {
+    return this.#observedMovesByGame.get(gameId)?.length ?? 0;
+  }
+
+  getObservedMovesForGame(gameId: string): readonly ObservedMoveRecord[] {
+    return this.#observedMovesByGame.get(gameId) ?? [];
+  }
+
   recordFaultStart(name: string, atMs: number, finiteDurationMs?: number): void {
     this.#faults.push({ name, startMs: atMs, finiteDurationMs });
   }
@@ -571,11 +601,25 @@ export class SoakMetricsTracker {
 
   onMovePending(gameId: string, basePly: number, atMs: number, context?: MovePositionContext): void {
     const expectedPly = basePly + 1;
-    this.#pendingMoves.set(`${gameId}:${expectedPly}`, {
+    if (this.#observedPlys.has(`${gameId}:${expectedPly}`)) {
+      return;
+    }
+    const uci = context?.uci;
+    const key = uci ? `${gameId}:${expectedPly}:${uci}` : `${gameId}:${expectedPly}`;
+    const existing = this.#pendingMoves.get(key);
+
+    const retainsContext = existing?.isAmbiguous === true;
+    const effectiveAtMs = retainsContext && existing ? existing.atMs : atMs;
+    const effectiveContext = retainsContext && existing?.positionContext ? existing.positionContext : context;
+
+    this.#pendingMoves.set(key, {
+      gameId,
       basePly,
       expectedPly,
-      atMs,
-      positionContext: context,
+      atMs: effectiveAtMs,
+      positionContext: effectiveContext,
+      uci,
+      isAmbiguous: retainsContext,
     });
     this.#gameBasePly.set(gameId, basePly);
     if (context) {
@@ -588,14 +632,26 @@ export class SoakMetricsTracker {
   }
 
   #recordMatchedMove(
-    match: { gameId: string; resultPly: number; provenance: MoveObservationProvenance },
-    pending: { basePly: number; expectedPly: number; atMs: number; positionContext?: MovePositionContext },
+    match: { gameId: string; resultPly: number; provenance: MoveObservationProvenance; uci?: string },
+    pending: PendingMoveRecord,
     atMs: number,
-  ): number {
+  ): number | undefined {
+    const identityKey = `${match.gameId}:${match.resultPly}`;
+    if (this.#observedPlys.has(identityKey)) {
+      return undefined;
+    }
+    this.#observedPlys.add(identityKey);
+
     const latency = atMs - pending.atMs;
     this.#moveLatencies.record(latency);
     this.#matchedMovesCount++;
     this.#provenanceCounts[match.provenance]++;
+
+    const effectiveUci = match.uci ?? pending.uci ?? '';
+    const records = this.#observedMovesByGame.get(match.gameId) ?? [];
+    records.push({ gameId: match.gameId, ply: match.resultPly, uci: effectiveUci });
+    this.#observedMovesByGame.set(match.gameId, records);
+
     const faultCheck = isFaultAssociated(pending.atMs, atMs, this.#faults, false);
     this.#topMoveLatencies.record({
       gameId: match.gameId,
@@ -610,46 +666,170 @@ export class SoakMetricsTracker {
     return latency;
   }
 
-  onMoveBroadcast(gameId: string, broadcastPly: number, atMs: number): number | undefined {
-    const key = `${gameId}:${broadcastPly}`;
-    const pending = this.#pendingMoves.get(key);
-    if (pending === undefined) return undefined;
-    this.#pendingMoves.delete(key);
-    return this.#recordMatchedMove({ gameId, resultPly: broadcastPly, provenance: 'move_broadcast' }, pending, atMs);
+  #cleanupPendingForPly(gameId: string, ply: number): void {
+    const prefix = `${gameId}:${ply}`;
+    for (const k of [...this.#pendingMoves.keys()]) {
+      if (k === prefix || k.startsWith(`${prefix}:`)) {
+        this.#pendingMoves.delete(k);
+      }
+    }
   }
 
-  onStateBroadcast(gameId: string, statePly: number, atMs: number): number | undefined {
-    return this.#onStateObserved(gameId, statePly, atMs, 'state_broadcast');
+  onMoveBroadcast(gameId: string, broadcastPly: number, atMs: number, uci?: string): number | undefined {
+    if (this.#observedPlys.has(`${gameId}:${broadcastPly}`)) {
+      return undefined;
+    }
+
+    let matchedKey: string | undefined;
+    let pending: PendingMoveRecord | undefined;
+
+    if (uci !== undefined) {
+      const exactKey = `${gameId}:${broadcastPly}:${uci}`;
+      pending = this.#pendingMoves.get(exactKey);
+      if (pending) {
+        matchedKey = exactKey;
+      }
+    }
+    if (!pending) {
+      const fallbackKey = `${gameId}:${broadcastPly}`;
+      const candidate = this.#pendingMoves.get(fallbackKey);
+      if (candidate && (uci === undefined || candidate.uci === undefined || candidate.uci === uci)) {
+        pending = candidate;
+        matchedKey = fallbackKey;
+      }
+    }
+    if (!pending && uci === undefined) {
+      for (const [k, p] of this.#pendingMoves.entries()) {
+        if (p.gameId === gameId && p.expectedPly === broadcastPly) {
+          pending = p;
+          matchedKey = k;
+          break;
+        }
+      }
+    }
+
+    if (!pending || !matchedKey) return undefined;
+
+    this.#pendingMoves.delete(matchedKey);
+    this.#cleanupPendingForPly(gameId, broadcastPly);
+    return this.#recordMatchedMove(
+      { gameId, resultPly: broadcastPly, provenance: 'move_broadcast', uci },
+      pending,
+      atMs,
+    );
   }
 
-  onRecoveryResponse(gameId: string, recoveryPly: number, atMs: number): number | undefined {
-    return this.#onStateObserved(gameId, recoveryPly, atMs, 'recovery_response');
-  }
-
-  #onStateObserved(
+  onStateBroadcast(
     gameId: string,
     statePly: number,
     atMs: number,
-    provenance: MoveObservationProvenance = 'state_broadcast',
+    moves?: readonly DurableMoveLedgerEntry[],
+  ): number | undefined {
+    return this.#onStateObserved(
+      { gameId, statePly, atMs, provenance: 'state_broadcast' },
+      moves,
+    );
+  }
+
+  onRecoveryResponse(
+    gameId: string,
+    recoveryPly: number,
+    atMs: number,
+    moves?: readonly DurableMoveLedgerEntry[],
+  ): number | undefined {
+    return this.#onStateObserved(
+      { gameId, statePly: recoveryPly, atMs, provenance: 'recovery_response' },
+      moves,
+    );
+  }
+
+  #onStateObserved(
+    obs: {
+      readonly gameId: string;
+      readonly statePly: number;
+      readonly atMs: number;
+      readonly provenance: MoveObservationProvenance;
+    },
+    moves?: readonly DurableMoveLedgerEntry[],
   ): number | undefined {
     let lastLatency: number | undefined;
-    for (const [key, pending] of [...this.#pendingMoves.entries()]) {
-      if (key.startsWith(`${gameId}:`) && pending.expectedPly <= statePly) {
-        this.#pendingMoves.delete(key);
-        lastLatency = this.#recordMatchedMove(
-          { gameId, resultPly: pending.expectedPly, provenance },
-          pending,
-          atMs,
-        );
+    const ledgerMap = moves && moves.length > 0
+      ? new Map(moves.map((m) => [m.ply, m.uci]))
+      : undefined;
+
+    for (const key of [...this.#pendingMoves.keys()]) {
+      const pending = this.#pendingMoves.get(key);
+      if (!pending || pending.gameId !== obs.gameId || pending.expectedPly > obs.statePly) {
+        continue;
+      }
+
+      let matchedUci: string | undefined;
+      if (pending.uci !== undefined) {
+        if (!ledgerMap) continue;
+        const durableUci = ledgerMap.get(pending.expectedPly);
+        if (durableUci !== pending.uci) continue;
+        matchedUci = durableUci;
+      } else if (ledgerMap) {
+        matchedUci = ledgerMap.get(pending.expectedPly);
+      }
+
+      this.#pendingMoves.delete(key);
+      this.#cleanupPendingForPly(obs.gameId, pending.expectedPly);
+      const latency = this.#recordMatchedMove(
+        {
+          gameId: obs.gameId,
+          resultPly: pending.expectedPly,
+          provenance: obs.provenance,
+          uci: matchedUci,
+        },
+        pending,
+        obs.atMs,
+      );
+      if (latency !== undefined) {
+        lastLatency = latency;
       }
     }
     return lastLatency;
   }
 
-  onMoveFailed(gameId: string, basePly: number): void {
+  onMoveFailed(
+    gameId: string,
+    basePly: number,
+    outcome: MoveFailureOutcome = 'definite_failure',
+    uci?: string,
+  ): void {
     const expectedPly = basePly + 1;
-    this.#pendingMoves.delete(`${gameId}:${expectedPly}`);
-    this.#gamePositionContexts.delete(`${gameId}:${basePly}`);
+    if (uci !== undefined) {
+      const key = `${gameId}:${expectedPly}:${uci}`;
+      const target = this.#pendingMoves.get(key);
+      if (target) {
+        if (outcome === 'ambiguous_commit') {
+          target.isAmbiguous = true;
+        } else if (!target.isAmbiguous) {
+          this.#pendingMoves.delete(key);
+        }
+      }
+      return;
+    }
+
+    const prefix = `${gameId}:${expectedPly}`;
+    for (const [k, p] of this.#pendingMoves.entries()) {
+      if (k === prefix || k.startsWith(`${prefix}:`)) {
+        if (outcome === 'ambiguous_commit') {
+          p.isAmbiguous = true;
+        } else if (!p.isAmbiguous) {
+          this.#pendingMoves.delete(k);
+        }
+      }
+    }
+    if (outcome === 'definite_failure') {
+      const hasAmbiguous = [...this.#pendingMoves.values()].some(
+        (p) => p.gameId === gameId && p.basePly === basePly && p.isAmbiguous,
+      );
+      if (!hasAmbiguous) {
+        this.#gamePositionContexts.delete(`${gameId}:${basePly}`);
+      }
+    }
   }
 
   onProvingState(gameId: string, isProving: boolean, atMs: number): void {
