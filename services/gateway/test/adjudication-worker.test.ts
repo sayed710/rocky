@@ -354,6 +354,11 @@ test('invalid options are refused', () => {
     { concurrency: 1.5 },
     { concurrency: 101 },
     { concurrency: Number.NaN },
+    { maxHeldProofs: 0 },
+    { maxHeldProofs: -1 },
+    { maxHeldProofs: 1.5 },
+    { maxHeldProofs: 101 },
+    { maxHeldProofs: Number.NaN },
   ]) {
     assert.throws(() => new AdjudicationWorker({ store, executorId: EXECUTOR, publish: async () => {}, ...bad }), RangeError);
   }
@@ -680,6 +685,7 @@ test('controller capacity 100 includes #inFlight: claims at most free capacity, 
   const worker = new AdjudicationWorker({
     store,
     executorId: EXECUTOR,
+    maxHeldProofs: 100,
     pageSize: 105,
     proofSliceMs: 50,
     publish: async () => {},
@@ -2643,6 +2649,464 @@ test('idle stop on fresh worker cleans retained pending jobs and disables later 
       assert.equal(store.calls.length, 0, 'idle empty stop prevented subsequent controller IO');
     } finally {
       if (workerEmpty) await workerEmpty.stop();
+    }
+  }
+});
+
+test('maxHeldProofs defaults to 8: bounds scan/admission to 8 held proofs and admits queued work as capacity is released', async () => {
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  let mono = 0;
+
+  const totalJobs = 12;
+  const allOps: Array<{ gameId: string; operationId: string; generation: string }> = [];
+  for (let i = 1; i <= totalJobs; i++) {
+    const hex = String(i).padStart(12, '0');
+    allOps.push({
+      gameId: `018f2780-0000-7000-8000-${hex}`,
+      operationId: `018f2780-0000-7000-9000-${hex}`,
+      generation: '0',
+    });
+  }
+  store.claimable = [...allOps];
+
+  store.stepProofJob = () => {
+    mono += 100;
+    return step('active');
+  };
+
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    pageSize: 20,
+    proofSliceMs: 50,
+    publish: async () => {},
+    monotonic: () => mono,
+    now: () => clock.now,
+  });
+
+  // Pass 1: without maxHeldProofs option, claims default 8 proofs up to bound
+  const pass1 = await worker.runPass();
+  assert.equal(pass1.pending, 8);
+  assert.equal(store.claims.length, 8, 'default bound claims exactly 8 jobs');
+  assert.equal(pass1.more, true, 'more work waiting');
+
+  // Pass 2: all 8 jobs held, free capacity is 0, no new claims
+  const pass2 = await worker.runPass();
+  assert.equal(pass2.pending, 8);
+  assert.equal(store.claims.length, 8, 'no new claims while capacity of 8 is full');
+  assert.equal(pass2.more, true);
+
+  // 2 jobs finish and settle
+  let settledCount = 0;
+  store.stepProofJob = () => {
+    mono += 100;
+    settledCount += 1;
+    if (settledCount <= 2) return step('ready');
+    return step('active');
+  };
+
+  // Pass 3: 2 jobs settle, releasing 2 capacity slots; 2 queued jobs are admitted
+  const pass3 = await worker.runPass();
+  assert.equal(pass3.settled, 2);
+  assert.equal(pass3.pending, 8);
+  assert.equal(store.claims.length, 10, '2 queued jobs admitted after 2 slots freed');
+});
+
+test('configured maxHeldProofs bounds scan/admission and per-pass reserved slots, and frees slots when settled', async () => {
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  let mono = 0;
+
+  const totalJobs = 6;
+  const allOps: Array<{ gameId: string; operationId: string; generation: string }> = [];
+  for (let i = 1; i <= totalJobs; i++) {
+    const hex = String(i).padStart(12, '0');
+    allOps.push({
+      gameId: `018f2780-0000-7000-8000-${hex}`,
+      operationId: `018f2780-0000-7000-9000-${hex}`,
+      generation: '0',
+    });
+  }
+  store.claimable = [...allOps];
+
+  store.stepProofJob = () => {
+    mono += 100;
+    return step('active');
+  };
+
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    maxHeldProofs: 3,
+    concurrency: 4,
+    pageSize: 10,
+    proofSliceMs: 50,
+    publish: async () => {},
+    monotonic: () => mono,
+    now: () => clock.now,
+  });
+
+  // Pass 1: configured bound of 3 limits claims to 3 despite concurrency 4 and pageSize 10
+  const pass1 = await worker.runPass();
+  assert.equal(pass1.pending, 3);
+  assert.equal(store.claims.length, 3, 'configured bound claims exactly 3 jobs');
+  assert.equal(pass1.more, true);
+
+  // Pass 2: capacity remains saturated
+  const pass2 = await worker.runPass();
+  assert.equal(pass2.pending, 3);
+  assert.equal(store.claims.length, 3, 'no new claims while configured capacity of 3 is full');
+
+  // Settle all 3 held jobs
+  store.stepProofJob = () => {
+    mono += 100;
+    return step('ready');
+  };
+
+  // Pass 3: all 3 settle, releasing all capacity; remaining 3 queued jobs admitted and settled
+  const pass3 = await worker.runPass();
+  assert.equal(pass3.settled, 6);
+  assert.equal(pass3.pending, 0);
+  assert.equal(store.claims.length, 6, 'remaining 3 jobs admitted and settled');
+});
+
+test('maxHeldProofs validation accepts [1, 100] and rejects out-of-range or non-integers', () => {
+  const store = new FakeStore({ now: 0 });
+  for (const valid of [1, 2, 8, 50, 100]) {
+    assert.doesNotThrow(() => new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      publish: async () => {},
+      maxHeldProofs: valid,
+    }));
+  }
+
+  for (const bad of [0, -1, -100, 101, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => new AdjudicationWorker({
+        store,
+        executorId: EXECUTOR,
+        publish: async () => {},
+        maxHeldProofs: bad as number,
+      }),
+      RangeError,
+    );
+  }
+});
+
+test('adversarial oversized page detects outer reservation check and bounds concurrent claims to maxHeldProofs', async () => {
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  const ops = [1, 2, 3, 4].map((i) => {
+    const hex = String(i).padStart(12, '0');
+    return {
+      gameId: `018f2780-0000-7000-8000-${hex}`,
+      operationId: `018f2780-0000-7000-9000-${hex}`,
+      generation: '0',
+    };
+  });
+  const [OP1, OP2] = ops.map((o) => o.operationId) as [string, string, string, string];
+
+  const requestedLimits: number[] = [];
+  // Return an adversarial oversized page exceeding the requested limit.
+  store.listClaimableAdjudications = async (limit = 20) => {
+    requestedLimits.push(limit);
+    return [...ops];
+  };
+
+  const claimBarrier = createBarrier();
+  const enteredClaims: string[] = [];
+  let activeClaims = 0;
+  let maxActiveClaims = 0;
+  const origClaim = store.claimAdjudication.bind(store);
+  store.claimAdjudication = async (params) => {
+    enteredClaims.push(params.operationId);
+    activeClaims += 1;
+    if (activeClaims > maxActiveClaims) {
+      maxActiveClaims = activeClaims;
+    }
+    try {
+      if (params.operationId === OP1 || params.operationId === OP2) {
+        await claimBarrier.promise;
+      }
+      return await origClaim(params);
+    } finally {
+      activeClaims -= 1;
+    }
+  };
+  store.stepProofJob = (_opId, budget) => step(budget === 0 ? 'active' : 'ready');
+
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    maxHeldProofs: 2,
+    concurrency: 4,
+    pageSize: 10,
+    proofSliceMs: 50,
+    publish: async () => {},
+    now: () => clock.now,
+  });
+
+  let passPromise: Promise<unknown> | undefined;
+  try {
+    passPromise = worker.runPass();
+    await pumpUntil(() => enteredClaims.length >= 2);
+    // Give the remaining concurrent lanes turns to hit the outer reservation check while #inFlight is still empty.
+    await pumpUntil(() => enteredClaims.length > 2, 5);
+
+    assert.deepEqual(requestedLimits, [2], 'production query-limit contract requests free capacity');
+    assert.deepEqual(enteredClaims, [OP1, OP2], 'outer reservation check skips OP3 and OP4 before claiming');
+    assert.equal(maxActiveClaims, 2, 'concurrent claims never exceed maxHeldProofs');
+
+    claimBarrier.resolve();
+    const pass = await passPromise;
+    assert.deepEqual(pass, { settled: 2, released: 0, skipped: 2, failed: 0, pending: 0, more: false });
+    assert.deepEqual(store.claims.map((c) => c.operationId), [OP1, OP2]);
+  } finally {
+    claimBarrier.resolve();
+    try { await passPromise; } catch {}
+    await worker.stop();
+  }
+});
+
+test('adversarial oversized page detects missing reservation transfer while a held proof executes', async () => {
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  const ops = [1, 2, 3].map((i) => {
+    const hex = String(i).padStart(12, '0');
+    return {
+      gameId: `018f2780-0000-7000-8000-${hex}`,
+      operationId: `018f2780-0000-7000-9000-${hex}`,
+      generation: '0',
+    };
+  });
+  const [OP1, OP2, OP3] = ops.map((o) => o.operationId) as [string, string, string];
+
+  const requestedLimits: number[] = [];
+  store.listClaimableAdjudications = async (limit = 20) => {
+    requestedLimits.push(limit);
+    return [...ops];
+  };
+
+  const op1InCreate = createBarrier();
+  const op1ReleaseCreate = createBarrier();
+  const origCreate = store.createProofJob.bind(store);
+  store.createProofJob = async (gameId, operationId) => {
+    if (operationId === OP1) {
+      op1InCreate.resolve();
+      await op1ReleaseCreate.promise;
+    }
+    return origCreate(gameId, operationId);
+  };
+
+  const origClaim = store.claimAdjudication.bind(store);
+  store.claimAdjudication = async (params) => {
+    if (params.operationId === OP2) {
+      await op1InCreate.promise;
+    }
+    return origClaim(params);
+  };
+
+  store.stepProofJob = (_opId, budget) => step(budget === 0 ? 'active' : 'ready');
+
+  const settledOps: string[] = [];
+  const origSettle = store.settleAdjudication.bind(store);
+  store.settleAdjudication = async (params) => {
+    const receipt = await origSettle(params);
+    settledOps.push(params.operationId);
+    return receipt;
+  };
+
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    maxHeldProofs: 2,
+    concurrency: 2,
+    pageSize: 10,
+    proofSliceMs: 50,
+    publish: async () => {},
+    now: () => clock.now,
+  });
+
+  let passPromise: Promise<unknown> | undefined;
+  try {
+    passPromise = worker.runPass();
+    const op3SettledWhileOp1Held = await pumpUntil(() => settledOps.includes(OP3), 30);
+    assert.equal(
+      op3SettledWhileOp1Held,
+      true,
+      'OP3 must claim and settle using the freed slot while OP1 holds its transferred #inFlight slot',
+    );
+    assert.equal(settledOps.includes(OP1), false, 'OP1 is still paused inside #continue');
+
+    op1ReleaseCreate.resolve();
+    const pass = await passPromise;
+    assert.deepEqual(requestedLimits, [2]);
+    assert.deepEqual(pass, { settled: 3, released: 0, skipped: 0, failed: 0, pending: 0, more: false });
+    assert.deepEqual(settledOps, [OP2, OP3, OP1]);
+  } finally {
+    op1InCreate.resolve();
+    op1ReleaseCreate.resolve();
+    try { await passPromise; } catch {}
+    await worker.stop();
+  }
+});
+
+test('slot remains usable after failed or interrupted claims', async () => {
+  // Scenario A: Conflict and failed claims release their reserved slots for subsequent operations on the page.
+  {
+    const clock = { now: 1_000_000 };
+    const store = new FakeStore(clock);
+    const ops = [1, 2, 3, 4].map((i) => {
+      const hex = String(i).padStart(12, '0');
+      return {
+        gameId: `018f2780-0000-7000-8000-${hex}`,
+        operationId: `018f2780-0000-7000-9000-${hex}`,
+        generation: '0',
+      };
+    });
+    const [OP1, OP2, OP3, OP4] = ops.map((o) => o.operationId) as [string, string, string, string];
+
+    const requestedLimits: number[] = [];
+    store.listClaimableAdjudications = async (limit = 20) => {
+      requestedLimits.push(limit);
+      return [...ops];
+    };
+
+    const origClaim = store.claimAdjudication.bind(store);
+    store.claimAdjudication = async (params) => {
+      if (params.operationId === OP1) {
+        throw new AdjudicationConflictError('claimed elsewhere');
+      }
+      if (params.operationId === OP2) {
+        throw new Error('connection reset');
+      }
+      return origClaim(params);
+    };
+
+    let op3InCreateEntered = false;
+    const op3ReleaseCreate = createBarrier();
+    const origCreate = store.createProofJob.bind(store);
+    store.createProofJob = async (gameId, operationId) => {
+      if (operationId === OP3) {
+        op3InCreateEntered = true;
+        await op3ReleaseCreate.promise;
+      }
+      return origCreate(gameId, operationId);
+    };
+
+    store.stepProofJob = (_opId, budget) => step(budget === 0 ? 'active' : 'ready');
+
+    const settledOps: string[] = [];
+    const origSettle = store.settleAdjudication.bind(store);
+    store.settleAdjudication = async (params) => {
+      const receipt = await origSettle(params);
+      settledOps.push(params.operationId);
+      return receipt;
+    };
+
+    const worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      maxHeldProofs: 2,
+      concurrency: 2,
+      pageSize: 10,
+      proofSliceMs: 50,
+      publish: async () => {},
+      now: () => clock.now,
+    });
+
+    let passPromise: Promise<unknown> | undefined;
+    try {
+      passPromise = worker.runPass();
+      const ready = await pumpUntil(() => op3InCreateEntered && settledOps.includes(OP4), 30);
+      assert.equal(ready, true, 'OP3 and OP4 must claim after OP1 conflict and OP2 claim failure');
+
+      op3ReleaseCreate.resolve();
+      const pass = await passPromise;
+      assert.deepEqual(requestedLimits, [2]);
+      assert.deepEqual(pass, { settled: 2, released: 0, skipped: 1, failed: 1, pending: 0, more: false });
+      assert.deepEqual(settledOps, [OP4, OP3]);
+    } finally {
+      op3ReleaseCreate.resolve();
+      try { await passPromise; } catch {}
+      await worker.stop();
+    }
+  }
+
+  // Scenario B: Claims interrupted by stop() leave full maxHeldProofs capacity usable after restart.
+  {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const clock = { now: 1_000_000 };
+    const store = new FakeStore(clock);
+    const ops = [1, 2, 3, 4].map((i) => {
+      const hex = String(i).padStart(12, '0');
+      return {
+        gameId: `018f2780-0000-7000-8000-${hex}`,
+        operationId: `018f2780-0000-7000-9000-${hex}`,
+        generation: '0',
+      };
+    });
+    const [OP1, OP2, OP3, OP4] = ops.map((o) => o.operationId) as [string, string, string, string];
+
+    const requestedLimits: number[] = [];
+    let passIndex = 0;
+    store.listClaimableAdjudications = async (limit = 20) => {
+      requestedLimits.push(limit);
+      passIndex += 1;
+      return passIndex === 1 ? [ops[0]!, ops[1]!, ops[2]!] : [ops[2]!, ops[3]!];
+    };
+
+    const claimBarrier = createBarrier();
+    const interruptedClaims: string[] = [];
+    const origClaim = store.claimAdjudication.bind(store);
+    store.claimAdjudication = async (params) => {
+      if (params.operationId === OP1 || params.operationId === OP2) {
+        interruptedClaims.push(params.operationId);
+        await claimBarrier.promise;
+      }
+      return origClaim(params);
+    };
+    store.stepProofJob = (_opId, budget) => step(budget === 0 ? 'active' : 'ready');
+
+    const worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      maxHeldProofs: 2,
+      concurrency: 2,
+      pageSize: 10,
+      proofSliceMs: 50,
+      publish: async () => {},
+      now: () => clock.now,
+    });
+
+    let pass1Promise: Promise<unknown> | undefined;
+    let stopPromise: Promise<void> | undefined;
+    try {
+      pass1Promise = worker.runPass();
+      await pumpUntil(() => interruptedClaims.length === 2);
+
+      stopPromise = worker.stop();
+      claimBarrier.resolve();
+      const [pass1] = await Promise.all([pass1Promise, stopPromise]);
+      assert.deepEqual(pass1, { settled: 0, released: 0, skipped: 2, failed: 0, pending: 0, more: false });
+      assert.equal(store.settles.length, 0);
+
+      worker.start();
+      const pass2 = await worker.runPass();
+      assert.deepEqual(requestedLimits, [2, 2], 'full maxHeldProofs capacity remains available after interrupted claims');
+      assert.deepEqual(pass2, { settled: 2, released: 0, skipped: 0, failed: 0, pending: 0, more: true });
+      assert.deepEqual(store.settles.map((s) => s.operationId).sort(), [OP3, OP4]);
+    } finally {
+      try {
+        claimBarrier.resolve();
+        try { await pass1Promise; } catch {}
+        try { await stopPromise; } catch {}
+        await worker.stop();
+      } finally {
+        mock.timers.reset();
+      }
     }
   }
 });
