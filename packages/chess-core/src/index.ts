@@ -37,5 +37,48 @@ export {
   applyMove,
 } from './movegen';
 export { Position, IllegalMoveError, HORDE_FEN, RACING_KINGS_FEN } from './position';
+export { isFrozenDeadPosition } from './dead-position';
 export { repetitionKey } from './repetition';
 export { validatePositionSemantics, validateFen } from './position-validator';
+export { validateAdmittedProofState } from './proof-admission';
+export type { AdmissionResult } from './proof-admission';
+export type {
+  WinnabilityStatus,
+  ProofProvenance,
+  PendingReason,
+  WinnabilityReachableResult,
+  WinnabilityImpossibleResult,
+  WinnabilityPendingResult,
+  WinnabilityResult,
+  DeadPositionTrueResult,
+  DeadPositionFalseResult,
+  DeadPositionPendingResult,
+  DeadPositionAnalysisResult,
+  CooperativeSearchOptions,
+  AnalysisOptions,
+} from './unwinnability-types';
+export {
+  computeMobility,
+} from './mobility';
+export type { MobilitySolution, OriginalPiece } from './mobility';
+export { isStaticallyUnwinnable } from './semi-static';
+export {
+  CooperativeSearchSession,
+  canonicalStateKey,
+} from './cooperative-search';
+export { analyzeWinnability, analyzeDeadPosition } from './unwinnability';
+export {
+  CooperativeWitnessSession,
+  verifyWitnessPath,
+  isCanonicalMoveMatch,
+  MAX_WITNESS_LENGTH,
+  DEFAULT_MAX_RETAINED_FRAMES,
+} from './witness-search';
+export type {
+  WitnessCounters,
+  WitnessPendingReason,
+  WitnessSearchResult,
+  WitnessAttemptConfig,
+  WitnessSearchOptions,
+  WitnessVerificationResult,
+} from './witness-search';

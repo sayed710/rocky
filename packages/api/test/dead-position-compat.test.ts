@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { describeTerminal, fromStatus } from '../src/analysis/terminal';
+import { describeTerminal, fromStatus, terminalOutcome } from '../src/analysis/terminal';
 import { storedStudyPartnerCoaching } from '../src/study-partner/coaching';
 
 test('describeTerminal formats dead_position as draw phrase', () => {
@@ -8,7 +8,7 @@ test('describeTerminal formats dead_position as draw phrase', () => {
   assert.equal(text, 'dead position — drawn');
 });
 
-test('fromStatus maps unchanged core GameStatus without emitting dead_position', () => {
+test('fromStatus maps core GameStatus including dead_position', () => {
   assert.deepEqual(fromStatus({ over: false }), undefined);
   assert.deepEqual(
     fromStatus({ over: true, reason: 'stalemate' }),
@@ -22,6 +22,15 @@ test('fromStatus maps unchanged core GameStatus without emitting dead_position',
     fromStatus({ over: true, reason: 'checkmate', winner: 'w' }),
     { reason: 'checkmate', result: '1-0' },
   );
+  assert.deepEqual(
+    fromStatus({ over: true, reason: 'dead_position' }),
+    { reason: 'dead_position', result: '1/2-1/2' },
+  );
+});
+
+test('terminalOutcome returns dead_position for issue FEN', () => {
+  const outcome = terminalOutcome('8/1pk2p1p/pPp1pPpP/P1P1P1P1/5K2/8/8/8 b - - 0 1', 'standard');
+  assert.deepEqual(outcome, { reason: 'dead_position', result: '1/2-1/2' });
 });
 
 test('storedStudyPartnerCoaching round-trips valid dead_position citation and mistake outcomes', () => {

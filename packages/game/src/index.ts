@@ -10,3 +10,32 @@ export * from './events';
 export { ENGINE_BOT_USER_IDS, isEngineBotUserId, isHumanGamePlayers } from './bot-accounts';
 export { Game, GameError, NOT_READY_MESSAGE, canMate } from './game';
 export type { GameState, GameStatus, CreateGameParams, NoShowVerdict } from './game';
+export * from './prepared-command';
+export {
+  getRegisteredEvidence,
+  evaluatePreparedProof,
+  type AdjudicationEvidenceHandle,
+  type ProofQuestion,
+  type VerifiedDeadOutcome,
+  type VerifiedEvidenceOutcome,
+  type VerifiedEvidenceRecord,
+} from './adjudication-proof';
+export * from './adjudication-lifecycle';
+export {
+  isSuccessorCheapEnding,
+  resolveRequiredProofRoles,
+  type ProofRoleKind,
+  type RequiredProofRole,
+  type AdjudicationRequirements,
+} from './adjudication-requirements';
+export {
+  AdjudicationJobController,
+  type AdjudicationJobView,
+  type ControllerOptions,
+  type JobStatus,
+  type JobStepResult,
+  type AllStepResult,
+} from './adjudication-controller';
+export * from './adjudication-clock-accounting';
+export * from './adjudication-completion';
+export * from './adjudication-release';
