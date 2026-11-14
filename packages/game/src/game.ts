@@ -17,41 +17,113 @@ import {
   isFrozenDeadPosition,
   opposite,
   parseFen,
+  repetitionKey,
   typeOf,
   type Color,
   type Variant,
-  repetitionKey,
 } from '@chess-platform/core';
 import {
   charge,
   flagDeadline,
+  freezeClock,
+  GameError,
   hasFlagged,
   initClock,
+  validateTimestamp,
   type ClockState,
   type TimeControl,
 } from './clock';
 import { adjudicateTimeoutPossibility } from './timeout-adjudication';
 import type {
+  AdjudicationClockPolicy,
+  AdjudicationClocksStartedEvent,
+  AdjudicationEffect,
+  AdjudicationResolvedEvent,
+  AdjudicationStartedEvent,
+  DrawDeclinedEvent,
+  DrawOfferedEvent,
   GameCreatedEvent,
   GameEndedEvent,
   GameEvent,
   GameSource,
   MovePlayedEvent,
   Players,
+  PlayerReadyEvent,
   ResultString,
   Termination,
 } from './events';
 import { FOLD_STORED } from './internal/stored-replay-key';
+import {
+  assertEffectsMatch,
+  deepCloneEffect,
+  projectSurvivingObligations,
+  validateRecordedResolution,
+  type AdjudicationPhase,
+  type PendingAdjudicationState,
+  type ResolutionContext,
+} from './adjudication-lifecycle';
+import {
+  clonePreparedOperation,
+  resolveLegalMove,
+  type PreparedIntent,
+  type PreparedOperation,
+} from './prepared-command';
+import {
+  applyCompletedTurn,
+  computeDisplayBalances,
+  computeFlagDeadline,
+  createAdjudicationClockBasis,
+  getClockAccountingSnapshot,
+  hasFlaggedAt,
+  type AdjudicationClockBasis,
+  type ClockAccountingSnapshot,
+} from './adjudication-clock-accounting';
+import {
+  cloneStoppedClockState,
+  deriveStartedBasis,
+  deriveStopId,
+  deriveTurnLineageId,
+  isChessClockApplicable,
+  validateClockPolicy,
+  validateIntegerPolicyInputs,
+  type GameStoppedClockState,
+} from './adjudication-completion';
+import {
+  cloneReleasedClockState,
+  cloneReleaseReceipt,
+  cloneReleaseReceiptsMap,
+  validateRecordedReleaseEvent,
+  buildReleasedClockState,
+  getActiveCausalBasis,
+  type AdjudicationReleaseReceipt,
+  type GameReleasedClockState,
+} from './adjudication-release';
 
-/** Raised when a command is invalid for the current game state. */
-export class GameError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'GameError';
-  }
+const REPLAY_TOKEN = Symbol('REPLAY_TOKEN');
+
+export { FOLD_STORED, GameError };
+export { repetitionKey } from '@chess-platform/core';
+
+export type PregameSource = GameSource;
+
+export interface PregameRules {
+  readonly source: GameSource;
+  readonly noShowAfterMs: number;
 }
 
-/** Terminal or ongoing status of a game. */
+export const SEEK_NO_SHOW_MS = 60_000;
+export const TOURNAMENT_NO_SHOW_MS = 30_000;
+export const NOT_READY_MESSAGE = 'Both players must be ready before the first move';
+
+const GAME_SOURCES: readonly unknown[] = ['seek', 'tournament'] satisfies readonly GameSource[];
+const MAX_DEADLINE_MS = 8_640_000_000_000_000;
+
+export type NoShowVerdict =
+  | { readonly kind: 'expire'; readonly ending: GameEndedEvent }
+  | { readonly kind: 'not_applicable' }
+  | { readonly kind: 'not_due' }
+  | { readonly kind: 'both_ready' };
+
 export type GameStatus =
   | { readonly over: false }
   | {
@@ -61,13 +133,8 @@ export type GameStatus =
       readonly winner: Color | null;
     };
 
-/**
- * Map from repetition key → occurrence count. Part of {@link GameState} so it
- * survives `Game.fromEvents` replay (the reducer builds it, not a side channel).
- */
 export type RepetitionHistory = ReadonlyMap<string, number>;
 
-/** Immutable snapshot of a game's derived state. */
 export interface GameState {
   readonly gameId: string;
   readonly variant: Variant;
@@ -81,40 +148,25 @@ export interface GameState {
   readonly moves: readonly MovePlayedEvent[];
   readonly status: GameStatus;
   readonly drawOffer: Color | null;
-  /** Position-key → occurrence count, for threefold-repetition detection. */
   readonly repetition: RepetitionHistory;
-  /**
-   * The Scharnagl id this Chess960 game started from, or `null` for every other variant — and for a
-   * Chess960 game stored before {@link GameCreatedEvent.chess960StartId} existed, whose arrangement
-   * replays exactly but whose *identity* was never recorded and is therefore not knowable.
-   */
   readonly chess960StartId: number | null;
-  /** The pregame lifecycle this game follows, or `null` for the original one (ADR-0148). */
   readonly source: GameSource | null;
-  /**
-   * When the pregame no-show deadline falls (`GameCreated.at + noShowAfterMs`), or `null` for a game
-   * without a source. Durable, so every replica and every replay agrees on it.
-   */
   readonly noShowAt: number | null;
-  /** Durable readiness per seat, recorded only before {@link noShowAt}. Only meaningful with a source. */
-  readonly ready: { readonly w: boolean; readonly b: boolean };
+  readonly ready: Readonly<Record<Color, boolean>>;
+  readonly phase: AdjudicationPhase;
+  readonly isBlocked: boolean;
+  readonly adjudication: PendingAdjudicationState | null;
+  readonly eventSequence: number;
+  readonly lastResolutionAt: number | null;
+  readonly clockPolicy: AdjudicationClockPolicy | null;
+  readonly stoppedClock: GameStoppedClockState | null;
+  readonly releasedClock: GameReleasedClockState | null;
+  readonly releaseReceipts: ReadonlyMap<string, AdjudicationReleaseReceipt>;
+  readonly releaseNeeded: boolean;
 }
 
-/**
- * What the pregame no-show rule says about a game at a moment (ADR-0148).
- *
- * - `expire`: the deadline has passed with no move played; `ending` is the event to append.
- * - `not_applicable`: the game has no source, is over, or has had its first move.
- * - `not_due`: the deadline has not passed yet.
- * - `both_ready`: a tournament game whose players are both ready; it waits for the first move.
- */
-export type NoShowVerdict =
-  | { readonly kind: 'expire'; readonly ending: GameEndedEvent }
-  | { readonly kind: 'not_applicable' }
-  | { readonly kind: 'not_due' }
-  | { readonly kind: 'both_ready' };
+export type GameSnapshot = GameState;
 
-/** Parameters to create a new game. */
 export interface CreateGameParams {
   readonly gameId: string;
   readonly variant?: Variant;
@@ -123,29 +175,92 @@ export interface CreateGameParams {
   readonly players: Players;
   readonly rated?: boolean;
   readonly at: number;
-  /**
-   * The Scharnagl starting-position id (0..959) for a `chess960` game.
-   *
-   * Required for that variant and refused for every other. The caller draws it — this is a rules
-   * boundary, not a source of entropy (ADR-0136 §1) — which is what lets a test name the arrangement
-   * it wants and a tournament derive one reproducibly.
-   */
   readonly chess960StartId?: number;
-  /** The pregame lifecycle to follow; omitted for bot and direct games (ADR-0148). */
   readonly source?: GameSource;
-  /** Required with `source` and refused without it: how long the game may wait for its first move. */
   readonly noShowAfterMs?: number;
 }
 
-const GAME_SOURCES: readonly unknown[] = ['seek', 'tournament'] satisfies readonly GameSource[];
+const ONGOING: GameStatus = Object.freeze({ over: false });
 
-/**
- * A stored or requested pregame lifecycle. Both fields absent is the original lifecycle; a known
- * source with a positive integer deadline and a finite creation time is a sourced game; anything else
- * is refused rather than guessed, because a sourced game whose deadline cannot be computed could never
- * be ended. This is the same rule the `pregame_deadlines` trigger applies (migration 0042), so a game
- * the log can replay as sourced is always one the queue holds.
- */
+function isStartId(id: unknown): id is number {
+  return typeof id === 'number' && Number.isInteger(id) && id >= 0 && id < CHESS960_POSITIONS;
+}
+
+function resolveChess960StartId(
+  variant: Variant,
+  startId: number | undefined,
+  initialFen: string | undefined,
+): number | null {
+  if (variant === 'chess960') {
+    if (!isStartId(startId)) {
+      throw new GameError(
+        `chess960 games need a starting-position id in 0..${CHESS960_POSITIONS - 1}; got ` +
+          `${startId === undefined ? 'none' : JSON.stringify(startId)}. The server draws it at ` +
+          'creation and records it on the GameCreated event. See ADR-0137.',
+      );
+    }
+    if (initialFen !== undefined) {
+      throw new GameError(
+        'chess960 games are started by starting-position id, not by initialFen: the id already ' +
+          'determines the position, and accepting both would let them disagree.',
+      );
+    }
+    return startId;
+  }
+  if (startId !== undefined) {
+    throw new GameError(
+      `a starting-position id is meaningless for '${variant}' and was refused rather than stored; ` +
+        'only chess960 games have one.',
+    );
+  }
+  return null;
+}
+
+function checkInitialDeadEnding(initialPos: Position, at: number): GameEndedEvent | null {
+  if (!isFrozenDeadPosition(initialPos.snapshot())) return null;
+  const initialStatus = initialPos.status();
+  if (initialStatus.over && initialStatus.reason === 'dead_position') {
+    return { type: 'GameEnded', result: '1/2-1/2', termination: 'dead_position', winner: null, at };
+  }
+  return null;
+}
+
+function deepClonePendingState(pending: PendingAdjudicationState): PendingAdjudicationState {
+  return Object.freeze({
+    operationId: pending.operationId,
+    baseRevision: pending.baseRevision,
+    startedSeq: pending.startedSeq,
+    acceptedAt: pending.acceptedAt,
+    rulesVersion: pending.rulesVersion,
+    thinkingElapsedAtA: pending.thinkingElapsedAtA,
+    originalNoShowAt: pending.originalNoShowAt,
+    remainingNoShowTimeAtA: pending.remainingNoShowTimeAtA,
+    ...(pending.resolutionAt !== undefined ? { resolutionAt: pending.resolutionAt } : {}),
+    cursor: pending.cursor,
+    prepared: clonePreparedOperation(pending.prepared),
+    originalClock: Object.freeze({
+      ...pending.originalClock,
+      remaining: Object.freeze({ ...pending.originalClock.remaining }),
+    }),
+    expectedEffects: Object.freeze(pending.expectedEffects.map(e => deepCloneEffect(e))),
+    ...(pending.clockPolicy !== undefined ? { clockPolicy: pending.clockPolicy } : {}),
+    ...(pending.originalBasis !== undefined ? { originalBasis: pending.originalBasis } : {}),
+  });
+}
+
+function checkNoShowApplicable(s: GameState, isBlocked: boolean, at: number): boolean {
+  if (s.source === null || s.noShowAt === null) return false;
+  if (s.status.over || s.ply > 0) return false;
+  return !isBlocked && at >= s.noShowAt;
+}
+
+function resolveTournamentNoShowEnding(ready: { w: boolean; b: boolean }, at: number): NoShowVerdict {
+  if (ready.w && ready.b) return { kind: 'both_ready' };
+  if (ready.w) return { kind: 'expire', ending: { type: 'GameEnded', result: '1-0', termination: 'no_show', winner: 'w', at } };
+  if (ready.b) return { kind: 'expire', ending: { type: 'GameEnded', result: '0-1', termination: 'no_show', winner: 'b', at } };
+  return { kind: 'expire', ending: { type: 'GameEnded', result: '*', termination: 'no_show', winner: null, at } };
+}
+
 function pregameOf(source: unknown, noShowAfterMs: unknown, at: unknown): { source: GameSource; noShowAfterMs: number } | null {
   if (source === undefined && noShowAfterMs === undefined) return null;
   if (typeof at !== 'number' || !Number.isSafeInteger(at) || at < 0) {
@@ -161,424 +276,388 @@ function pregameOf(source: unknown, noShowAfterMs: unknown, at: unknown): { sour
   return { source: source as GameSource, noShowAfterMs };
 }
 
-/**
- * The latest instant a no-show deadline may fall: ECMAScript's maximum `Date` (year 275760), which is
- * also inside PostgreSQL's `timestamptz` range, so a deadline the domain accepts is always one the
- * `pregame_deadlines` trigger can store. Migration 0042 applies the same bound.
- */
-const MAX_DEADLINE_MS = 8_640_000_000_000_000;
+const throwFrozenMap = (): never => {
+  throw new TypeError('Cannot mutate frozen Map');
+};
 
-/** Why a first move is refused until both seats are durably ready. */
-export const NOT_READY_MESSAGE = 'Both players must be ready before the first move';
-
-/** Whether `id` is a usable Scharnagl starting-position id. */
-function isStartId(id: unknown): id is number {
-  return typeof id === 'number' && Number.isInteger(id) && id >= 0 && id < CHESS960_POSITIONS;
+function freezeMap<K, V>(map: ReadonlyMap<K, V>): ReadonlyMap<K, V> {
+  const copy = new Map(map);
+  copy.set = throwFrozenMap;
+  copy.delete = throwFrozenMap;
+  copy.clear = throwFrozenMap;
+  return Object.freeze(copy);
 }
 
-const ONGOING: GameStatus = { over: false };
+function cloneTimeControl(tc: TimeControl): TimeControl {
+  return Object.freeze({
+    initialMs: tc.initialMs,
+    incrementMs: tc.incrementMs,
+    delayMs: tc.delayMs,
+    kind: tc.kind,
+  });
+}
 
-// Re-exported for backward compatibility with tests and consumers.
-export { repetitionKey } from '@chess-platform/core';
+function clonePlayers(players: Players): Players {
+  return Object.freeze({
+    white: players.white,
+    black: players.black,
+  });
+}
+
+function cloneMovePlayedEvent(event: MovePlayedEvent): MovePlayedEvent {
+  return Object.freeze({
+    type: 'MovePlayed',
+    ply: event.ply,
+    uci: event.uci,
+    san: event.san,
+    by: event.by,
+    moveTimeMs: event.moveTimeMs,
+    remaining: Object.freeze({ ...event.remaining }),
+    at: event.at,
+  });
+}
+
+function isolateState(state: GameState): GameState {
+  return Object.freeze({
+    ...state,
+    timeControl: cloneTimeControl(state.timeControl),
+    players: clonePlayers(state.players),
+    status: Object.freeze({ ...state.status }),
+    ready: Object.freeze({ ...state.ready }),
+    clock: Object.freeze({
+      ...state.clock,
+      remaining: Object.freeze({ ...state.clock.remaining }),
+    }),
+    moves: Object.freeze(state.moves.map(cloneMovePlayedEvent)),
+    repetition: new Map(state.repetition),
+    adjudication: state.adjudication ? deepClonePendingState(state.adjudication) : null,
+    stoppedClock: cloneStoppedClockState(state.stoppedClock),
+    releasedClock: cloneReleasedClockState(state.releasedClock),
+    releaseReceipts: cloneReleaseReceiptsMap(state.releaseReceipts),
+    clockPolicy: state.clockPolicy,
+    releaseNeeded: state.releaseNeeded,
+  });
+}
+
+function isolateSnapshot(state: GameState): GameState {
+  return Object.freeze({
+    ...state,
+    timeControl: cloneTimeControl(state.timeControl),
+    players: clonePlayers(state.players),
+    status: Object.freeze({ ...state.status }),
+    ready: Object.freeze({ ...state.ready }),
+    clock: Object.freeze({
+      ...state.clock,
+      remaining: Object.freeze({ ...state.clock.remaining }),
+    }),
+    moves: Object.freeze(state.moves.map(cloneMovePlayedEvent)),
+    repetition: freezeMap(new Map(state.repetition)),
+    adjudication: state.adjudication ? deepClonePendingState(state.adjudication) : null,
+    stoppedClock: cloneStoppedClockState(state.stoppedClock),
+    releasedClock: cloneReleasedClockState(state.releasedClock),
+    releaseReceipts: freezeMap(cloneReleaseReceiptsMap(state.releaseReceipts)),
+    clockPolicy: state.clockPolicy,
+    releaseNeeded: state.releaseNeeded,
+  });
+}
+
+function isNoShowSuppressedInPhase(s: GameState): boolean {
+  return s.phase === 'proving' || s.phase === 'settling' || s.phase === 'ended' || s.status.over;
+}
+
+function resolveManagedNoShowDeadline(s: GameState): number | null {
+  if (s.stoppedClock !== null || isNoShowSuppressedInPhase(s)) {
+    return null;
+  }
+  const rc = s.releasedClock;
+  if (rc === null) return s.noShowAt;
+  if (rc.noShowRunningSince === null || rc.basis.noShowRemainderMs === null) {
+    return null;
+  }
+  return rc.noShowRunningSince + rc.basis.noShowRemainderMs;
+}
+
+function resolveLegacyNoShowDeadline(s: GameState): number | null {
+  if (s.phase === 'proving' || s.phase === 'settling' || s.stoppedClock !== null) {
+    return null;
+  }
+  return s.noShowAt;
+}
+
+function getStoppedAccountingSnapshot(
+  stopped: GameStoppedClockState,
+  timeControl: TimeControl,
+  createdAt: number,
+  at?: number,
+): ClockAccountingSnapshot {
+  const basis = stopped.basis;
+  const now = at ?? basis.stoppedAt ?? createdAt;
+  return getClockAccountingSnapshot(basis, now, timeControl);
+}
+
+function getReleasedAccountingSnapshot(
+  rel: GameReleasedClockState,
+  timeControl: TimeControl,
+  at?: number,
+): ClockAccountingSnapshot {
+  const now = at ?? rel.releasedAt;
+  const snap = getClockAccountingSnapshot(rel.basis, now, timeControl);
+  if (rel.isChessApplicable) {
+    return snap;
+  }
+  const noShowDl = rel.noShowRunningSince !== null && rel.basis.noShowRemainderMs !== null
+    ? rel.noShowRunningSince + rel.basis.noShowRemainderMs
+    : null;
+  return Object.freeze({
+    ...snap,
+    flagDeadline: null,
+    flagged: false,
+    noShowDeadline: noShowDl,
+    isRunning: rel.noShowRunningSince !== null,
+  });
+}
 
 export class Game {
-  private constructor(private readonly state: GameState) {}
+  private readonly state: GameState;
 
-  /**
-   * Create a new game, returning the aggregate and its `GameCreated` event.
-   *
-   * **Chess960 requires `chess960StartId`, and every other variant refuses it.** The rule lives here
-   * rather than only at the API because this is the one place every game is born: seek acceptance,
-   * the bot route and the tournament launcher all arrive at this call, and a fourth caller added
-   * tomorrow inherits the rule instead of having to remember it. That is the same boundary ADR-0123
-   * chose to refuse the variant at; what changed is that there is now something truthful to do.
-   *
-   * ADR-0123 refused creation because the engine could only play one arrangement. ADR-0136 fixed the
-   * rules and kept the refusal, because nothing could yet *say* which arrangement a game used, and
-   * writing `variant: 'chess960'` beside an arrangement nobody chose would put a durable falsehood
-   * into an append-only store. The id closes exactly that gap: it is chosen once, by the server, and
-   * recorded on the creation event.
-   *
-   * The id is required rather than defaulted. Defaulting it to 518 would make the traditional array
-   * the silent answer to "which arrangement?", which is the falsehood in its most plausible costume —
-   * a real Chess960 game and a caller that forgot to draw an id would be indistinguishable afterwards.
-   *
-   * `initialFen` is refused for Chess960 for the same reason: the id already determines the position,
-   * and two ways to state one fact is two facts that can disagree. Every other variant keeps
-   * `initialFen` exactly as before.
-   */
-  static create(params: CreateGameParams): { game: Game; events: GameEvent[] } {
+  private constructor(state: GameState) {
+    this.state = isolateState(state);
+  }
+
+  static create(params: CreateGameParams): { game: Game; event: GameCreatedEvent; events: GameEvent[] } {
+    const at = params.at;
     const variant = params.variant ?? 'standard';
-    const startId = params.chess960StartId;
-
-    // Narrowed once, here, rather than asserted at each use below. `isStartId` is a type predicate,
-    // so the assignment inside this branch is what carries `number` out to the two places that need
-    // it; the alternative was `startId as number` twice, spending a cast to restate a check the line
-    // above already made.
-    let chess960StartId: number | null = null;
-
-    if (variant === 'chess960') {
-      if (!isStartId(startId)) {
-        throw new GameError(
-          `chess960 games need a starting-position id in 0..${CHESS960_POSITIONS - 1}; got ` +
-            `${startId === undefined ? 'none' : JSON.stringify(startId)}. The server draws it at ` +
-            'creation and records it on the GameCreated event. See ADR-0137.',
-        );
-      }
-      if (params.initialFen !== undefined) {
-        throw new GameError(
-          'chess960 games are started by starting-position id, not by initialFen: the id already ' +
-            'determines the position, and accepting both would let them disagree.',
-        );
-      }
-      chess960StartId = startId;
-    } else if (startId !== undefined) {
-      throw new GameError(
-        `a starting-position id is meaningless for '${variant}' and was refused rather than stored; ` +
-          'only chess960 games have one.',
-      );
-    }
-
-    const pregame = pregameOf(params.source, params.noShowAfterMs, params.at);
+    const chess960StartId = resolveChess960StartId(variant, params.chess960StartId, params.initialFen);
+    const pregame = pregameOf(params.source, params.noShowAfterMs, at);
     const initialFen =
       chess960StartId !== null ? chess960Fen(chess960StartId) : params.initialFen ?? Position.initial(variant).fen();
-    const event: GameEvent = {
+    const tc = cloneTimeControl(params.timeControl);
+    const players = clonePlayers(params.players);
+    const event: GameCreatedEvent = {
       type: 'GameCreated',
       gameId: params.gameId,
       variant,
       initialFen,
-      timeControl: params.timeControl,
-      players: params.players,
+      timeControl: tc,
+      players,
       rated: params.rated ?? false,
-      at: params.at,
+      at,
       ...(chess960StartId !== null ? { chess960StartId } : {}),
       ...(pregame !== null ? pregame : {}),
     };
+
     const initialPos = Position.fromFen(initialFen, variant);
     const events: GameEvent[] = [event];
-    if (isFrozenDeadPosition(initialPos.snapshot())) {
-      const initialStatus = initialPos.status();
-      if (initialStatus.over && initialStatus.reason === 'dead_position') {
-        events.push({
-          type: 'GameEnded',
-          result: '1/2-1/2',
-          termination: 'dead_position',
-          winner: null,
-          at: params.at,
-        });
-      }
-    }
-    return { game: Game.fromEvents(events), events };
+    const deadEnding = checkInitialDeadEnding(initialPos, at);
+    if (deadEnding) events.push(deadEnding);
+
+    return { game: Game.fromEvents(events), event, events };
   }
 
-  /** Reconstruct a game by folding its full event history. */
   static fromEvents(events: readonly GameEvent[]): Game {
+    if (events.length === 0) {
+      throw new GameError('Cannot reconstruct a game from zero events');
+    }
     let state: GameState | null = null;
+    for (const event of events) {
+      state = Game.reduce(state, event, REPLAY_TOKEN);
+    }
+    return new Game(state as GameState);
+  }
+
+  static applyAll(initial: Game, events: readonly GameEvent[]): Game {
+    let state: GameState = initial.state;
     for (const event of events) {
       state = Game.reduce(state, event);
     }
-    if (state === null) throw new GameError('Cannot reconstruct a game from zero events');
     return new Game(state);
   }
 
-  /** Fold trusted emitted/logged events onto this immutable prefix; not command admission. */
+  withEvent(event: GameEvent): Game {
+    return new Game(Game.reduce(this.state, event));
+  }
+
   withEvents(events: readonly GameEvent[]): Game {
     return Game.applyAll(this, events);
   }
 
-  /** The current derived state (read-only). */
-  snapshot(): GameState {
-    return this.state;
+  get id(): string { return this.state.gameId; }
+  get variant(): Variant { return this.state.variant; }
+  get players(): Players { return this.state.players; }
+  get timeControl(): TimeControl { return this.state.timeControl; }
+  get rated(): boolean { return this.state.rated; }
+  get createdAt(): number { return this.state.createdAt; }
+  get position(): Position { return this.state.position; }
+  get turn(): Color { return this.state.position.turn; }
+  get clock(): ClockState { return this.state.clock; }
+  get ply(): number { return this.state.ply; }
+  get moves(): readonly MovePlayedEvent[] { return this.state.moves; }
+  get status(): GameStatus { return this.state.status; }
+  get drawOffer(): Color | null { return this.state.drawOffer; }
+  get chess960StartId(): number | null { return this.state.chess960StartId; }
+  get pregameSource(): GameSource | null { return this.state.source; }
+  get noShowDeadline(): number | null {
+    const s = this.state;
+    if (s.clockPolicy === 'observed-release-v1') {
+      return resolveManagedNoShowDeadline(s);
+    }
+    return resolveLegacyNoShowDeadline(s);
+  }
+  get phase(): AdjudicationPhase { return this.state.phase; }
+  get isBlocked(): boolean { return this.state.phase === 'proving' || this.state.phase === 'settling'; }
+
+  get clockPolicy(): AdjudicationClockPolicy | null { return this.state.clockPolicy; }
+  get stoppedClock(): GameStoppedClockState | null { return cloneStoppedClockState(this.state.stoppedClock); }
+  get releasedClock(): GameReleasedClockState | null { return cloneReleasedClockState(this.state.releasedClock); }
+  get releaseNeeded(): boolean { return this.state.releaseNeeded; }
+
+  get releaseReceipts(): readonly AdjudicationReleaseReceipt[] {
+    return Object.freeze(Array.from(this.state.releaseReceipts.values()).map(r => cloneReleaseReceipt(r)));
   }
 
-  get status(): GameStatus {
-    return this.state.status;
+  getReleaseReceipt(requestId: string): AdjudicationReleaseReceipt | null {
+    const r = this.state.releaseReceipts.get(requestId);
+    return r ? cloneReleaseReceipt(r) : null;
   }
 
-  get turn(): Color {
-    return this.state.position.turn;
+  isStopConsumed(stopId: string): boolean {
+    for (const r of this.state.releaseReceipts.values()) {
+      if (r.stopId === stopId) return true;
+    }
+    return false;
+  }
+
+  clockAccountingSnapshot(at?: number): ClockAccountingSnapshot | null {
+    const s = this.state;
+    if (s.stoppedClock !== null) {
+      return getStoppedAccountingSnapshot(s.stoppedClock, s.timeControl, s.createdAt, at);
+    }
+    if (s.releasedClock !== null) {
+      return getReleasedAccountingSnapshot(s.releasedClock, s.timeControl, at);
+    }
+    return null;
   }
 
   get fen(): string {
     return this.state.position.fen();
   }
 
-  /**
-   * When the side to move flags on the clock the first move started, or `null` when no in-play flag
-   * can fall: the game is over, unlimited, or has no move yet (a sourced game's clock is not running,
-   * and a game without a source is still governed by its original lifecycle). The durable
-   * `flag_deadlines` queue holds exactly this instant for every such game (ADR-0149).
-   */
   get flagDeadline(): number | null {
     const s = this.state;
-    if (s.status.over || s.ply === 0) return null;
+    if (s.status.over || s.stoppedClock !== null) return null;
+    if (s.releasedClock !== null) {
+      if (!s.releasedClock.isChessApplicable) return null;
+      return computeFlagDeadline(s.releasedClock.basis, s.timeControl);
+    }
+    if (s.ply === 0) return null;
     return flagDeadline(s.clock, s.position.turn, s.timeControl);
   }
 
-  /**
-   * Whether the side to move has flagged by `at` on a clock the first move started. Then any command
-   * the owner applies — a late move, a resignation, a draw acceptance, the server's expiry — records
-   * the timeout instead, so the outcome depends on the authoritative time, not on who arrives first.
-   */
   timeoutDue(at: number): boolean {
     const s = this.state;
-    return !s.status.over && s.ply > 0 && hasFlagged(s.clock, s.position.turn, at, s.timeControl);
+    if (s.status.over) return false;
+    if (s.stoppedClock !== null) {
+      if (!isChessClockApplicable(s.source, s.ply, s.timeControl)) return false;
+      return hasFlaggedAt(s.stoppedClock.basis, at, s.timeControl);
+    }
+    if (s.releasedClock !== null) {
+      if (!s.releasedClock.isChessApplicable) return false;
+      return hasFlaggedAt(s.releasedClock.basis, at, s.timeControl);
+    }
+    if (s.ply === 0) return false;
+    return hasFlagged(s.clock, s.position.turn, at, s.timeControl);
   }
 
-  /** True while a sourced game still needs a seat's readiness before its first move can be played. */
+  get adjudication(): PendingAdjudicationState | null {
+    return this.state.adjudication ? deepClonePendingState(this.state.adjudication) : null;
+  }
+
+  get eventSequence(): number {
+    return this.state.eventSequence;
+  }
+
+  isReady(color: Color): boolean {
+    return this.state.ready[color];
+  }
+
   get awaitingReadiness(): boolean {
-    const s = this.state;
-    return s.source !== null && !s.status.over && s.ply === 0 && !(s.ready.w && s.ready.b);
+    if (this.state.source === null || this.state.ply > 0 || this.state.status.over) return false;
+    return !this.state.ready.w || !this.state.ready.b;
   }
 
-  // --- Commands ----------------------------------------------------------
+  snapshot(): GameState {
+    return isolateSnapshot(this.state);
+  }
 
-  /**
-   * Play a move (UCI). Emits `MovePlayed` and, if the position becomes terminal
-   * or the mover flags, a following `GameEnded`. Throws on illegal moves,
-   * wrong turn, or a finished game.
-   */
+  resolveMovePublic(uci: string): ReturnType<Position['legalMoves']>[number] {
+    return resolveLegalMove(this.state.position, uci);
+  }
+
+  assertNotBlocked(): void {
+    if (this.isBlocked) {
+      throw new GameError('Cannot execute command: game is currently blocked under adjudication');
+    }
+  }
+
+  private assertOngoing(): void {
+    if (this.state.status.over) {
+      throw new GameError('Game is already over');
+    }
+  }
+
   playMove(uci: string, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
-    // Like a move after a flag fall: once the no-show deadline has passed without a first move, the
-    // move does not count and the no-show ending is what gets recorded, however late the worker is.
-    if (this.noShowVerdict(at).kind === 'expire') return this.expireNoShow(at);
-    if (this.awaitingReadiness) throw new GameError(NOT_READY_MESSAGE);
-    const s = this.state;
-    const mover = s.position.turn;
+    this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
+    const verdict = this.noShowVerdict(at);
+    if (verdict.kind === 'expire') {
+      return this.expireNoShow(at);
+    }
+    if (this.awaitingReadiness) {
+      throw new GameError(NOT_READY_MESSAGE);
+    }
 
-    // Flag check first: a move submitted after the clock expired does not count.
-    const charged = charge(s.clock, mover, at, s.timeControl);
+    const sideToMove = this.state.position.turn;
+    const charged = charge(this.state.clock, sideToMove, at, this.state.timeControl);
     if (charged.flagged) {
-      return this.endByTimeout(mover, at);
+      return this.endByTimeout(sideToMove, at);
     }
 
-    let move: ReturnType<Position['legalMoves']>[number];
-    let san: string;
-    try {
-      move = this.resolveMove(uci);
-      san = s.position.toSan(move);
-    } catch (err) {
-      throw new GameError(`Illegal move "${uci}": ${(err as Error).message}`);
-    }
-
+    const move = this.resolveMovePublic(uci);
+    const san = this.state.position.toSan(move);
     const dead = this.deadPositionEnding(at);
     if (dead) return dead;
 
-    let nextPos: Position;
-    try {
-      nextPos = s.position.play(move);
-    } catch (err) {
-      throw new GameError(`Illegal move "${uci}": ${(err as Error).message}`);
-    }
-
+    const nextPos = this.state.position.play(move);
     const moveEvent: MovePlayedEvent = {
       type: 'MovePlayed',
-      ply: s.ply + 1,
+      ply: this.state.ply + 1,
       uci,
       san,
-      by: mover,
+      by: sideToMove,
       moveTimeMs: charged.moveTimeMs,
       remaining: charged.clock.remaining,
       at,
     };
-    const events: GameEvent[] = [moveEvent];
 
+    const events: GameEvent[] = [moveEvent];
     const posStatus = nextPos.status();
     if (posStatus.over) {
       events.push(this.terminalEventFor(posStatus, at));
     } else {
-      // Check threefold repetition: if the new position's key has occurred
-      // 3 times (including this one), the game ends as a draw.
-      const key = repetitionKey(nextPos.snapshot());
-      if ((s.repetition.get(key) ?? 0) + 1 >= 3) {
-        events.push({
-          type: 'GameEnded',
-          result: '1/2-1/2',
-          termination: 'threefold',
-          winner: null,
-          at,
-        });
+      const repKey = repetitionKey(nextPos.snapshot());
+      const seen = (this.state.repetition.get(repKey) ?? 0) + 1;
+      if (seen >= 3) {
+        events.push({ type: 'GameEnded', result: '1/2-1/2', termination: 'threefold', winner: null, at });
       }
     }
-
     return { game: Game.applyAll(this, events), events };
   }
 
-  /** Resign as `color`. */
-  resign(color: Color, at: number): { game: Game; events: GameEvent[] } {
-    this.assertOngoing();
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
-    const events: GameEvent[] = [{
-      type: 'GameEnded',
-      result: color === 'w' ? '0-1' : '1-0',
-      termination: 'resignation',
-      winner: opposite(color),
-      at,
-    }];
-    return { game: Game.applyAll(this, events), events };
-  }
-
-  /** Offer a draw as `color`. */
-  offerDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
-    this.assertOngoing();
-    if (this.state.drawOffer === color) {
-      throw new GameError('Draw already offered by this side');
-    }
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
-    const events: GameEvent[] = [{ type: 'DrawOffered', by: color, at }];
-    return { game: Game.applyAll(this, events), events };
-  }
-
-  /** Accept an outstanding draw offer made by the opponent of `color`. */
-  acceptDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
-    this.assertOngoing();
-    const offer = this.state.drawOffer;
-    if (offer === null || offer === color) {
-      throw new GameError('No draw offer from the opponent to accept');
-    }
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
-    const events: GameEvent[] = [{
-      type: 'GameEnded',
-      result: '1/2-1/2',
-      termination: 'agreement',
-      winner: null,
-      at,
-    }];
-    return { game: Game.applyAll(this, events), events };
-  }
-
-  /** Decline the outstanding draw offer as `color`. */
-  declineDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
-    this.assertOngoing();
-    if (this.state.drawOffer === null) throw new GameError('No draw offer to decline');
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
-    const events: GameEvent[] = [{ type: 'DrawDeclined', by: color, at }];
-    return { game: Game.applyAll(this, events), events };
-  }
-
-  /** Claim the side-to-move has flagged (opponent's clock claim). */
-  claimFlag(at: number): { game: Game; events: GameEvent[] } {
-    this.assertOngoing();
-    const s = this.state;
-    const sideToMove = s.position.turn;
-    if (!hasFlagged(s.clock, sideToMove, at, s.timeControl)) {
-      throw new GameError('Opponent has not flagged');
-    }
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
-    return this.endByTimeout(sideToMove, at);
-  }
-
-  /** Abort the game (allowed only before both players have moved). */
-  abort(at: number): { game: Game; events: GameEvent[] } {
-    this.assertOngoing();
-    if (this.state.ply >= 2) throw new GameError('Game can no longer be aborted');
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
-    const events: GameEvent[] = [{
-      type: 'GameEnded',
-      result: '*',
-      termination: 'aborted',
-      winner: null,
-      at,
-    }];
-    return { game: Game.applyAll(this, events), events };
-  }
-
-  /**
-   * Record that `color` is ready. Emits `PlayerReady` only when it changes something: a sourced game,
-   * not over, no move played yet, and that seat not already ready. Every other call is a no-op, so
-   * duplicate joins, reconnects and racing replicas can neither duplicate nor fail readiness.
-   */
-  markReady(color: Color, at: number): { game: Game; events: GameEvent[] } {
-    const s = this.state;
-    // Readiness after the deadline does not count: it must not undo a no-show that was already due.
-    if (s.noShowAt === null || at >= s.noShowAt) return { game: this, events: [] };
-    if (s.status.over || s.ply > 0 || s.ready[color]) return { game: this, events: [] };
-    const events: GameEvent[] = [{ type: 'PlayerReady', by: color, at }];
-    return { game: Game.applyAll(this, events), events };
-  }
-
-  /**
-   * The pregame no-show verdict at `at`, from the durable deadline (ADR-0148). Readiness counts only
-   * if it was recorded before the deadline, which {@link markReady} guarantees.
-   *
-   * Seek: aborted with no result whoever was ready, because the deadline governs the whole wait for
-   * the first move. Tournament: a forfeit win for the one ready player, a double forfeit when
-   * neither is ready, and no ending at all when both are.
-   */
-  noShowVerdict(at: number): NoShowVerdict {
-    const s = this.state;
-    if (s.source === null || s.noShowAt === null || s.status.over || s.ply > 0) return { kind: 'not_applicable' };
-    if (at < s.noShowAt) return { kind: 'not_due' };
-    const end = (result: ResultString, winner: Color | null): NoShowVerdict => ({
-      kind: 'expire',
-      ending: { type: 'GameEnded', result, termination: 'no_show', winner, at },
-    });
-    if (s.source === 'seek') return end('*', null);
-    if (s.ready.w && s.ready.b) return { kind: 'both_ready' };
-    if (s.ready.w) return end('1-0', 'w');
-    if (s.ready.b) return end('0-1', 'b');
-    return end('*', null);
-  }
-
-  /** End the game by the pregame no-show rule. Throws unless {@link noShowVerdict} says `expire`. */
-  expireNoShow(at: number): { game: Game; events: GameEvent[] } {
-    this.assertOngoing();
-    const verdict = this.noShowVerdict(at);
-    if (verdict.kind !== 'expire') throw new GameError(`No-show expiry refused: ${verdict.kind}`);
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
-    const events: GameEvent[] = [verdict.ending];
-    return { game: Game.applyAll(this, events), events };
-  }
-
-  // --- Internals ---------------------------------------------------------
-
-  private deadPositionEnding(at: number): { game: Game; events: GameEvent[] } | null {
-    if (!isFrozenDeadPosition(this.state.position.snapshot())) {
-      return null;
-    }
-    const status = this.state.position.status();
-    if (status.over && status.reason === 'dead_position') {
-      const events: GameEvent[] = [this.terminalEventFor(status, at)];
-      return { game: Game.applyAll(this, events), events };
-    }
-    return null;
-  }
-
-  private assertOngoing(): void {
-    if (this.state.status.over) throw new GameError('Game is already over');
-  }
-
-  private resolveMove(uci: string) {
-    // Position.play validates legality; we resolve to a Move for SAN first.
-    const legal = this.state.position.legalMoves();
-    for (const m of legal) {
-      if (this.state.position.toUci(m) === uci) return m;
-    }
-    throw new GameError(`No legal move matches "${uci}"`);
-  }
-
-  private endByTimeout(flagged: Color, at: number): { game: Game; events: GameEvent[] } {
-    const dead = this.deadPositionEnding(at);
-    if (dead) return dead;
-    const winner = opposite(flagged);
-    // If the side that would win on time cannot possibly mate, it is a draw.
-    const drawByInsufficient = !canMate(this.state.position.fen(), winner, this.state.variant);
-    const events: GameEvent[] = [{
-      type: 'GameEnded',
-      result: drawByInsufficient ? '1/2-1/2' : winner === 'w' ? '1-0' : '0-1',
-      termination: drawByInsufficient ? 'insufficient_material' : 'timeout',
-      winner: drawByInsufficient ? null : winner,
-      at,
-    }];
-    return { game: Game.applyAll(this, events), events };
+  move(uci: string, at: number): { game: Game; events: GameEvent[] } {
+    return this.playMove(uci, at);
   }
 
   private terminalEventFor(
@@ -617,36 +696,148 @@ export class Game {
     }
   }
 
-  private static applyAll(game: Game, events: readonly GameEvent[]): Game {
-    let state: GameState = game.state;
-    for (const event of events) state = Game.reduce(state, event);
-    return new Game(state);
+  private deadPositionEnding(at: number): { game: Game; events: GameEvent[] } | null {
+    if (!isFrozenDeadPosition(this.state.position.snapshot())) return null;
+    const status = this.state.position.status();
+    if (status.over && status.reason === 'dead_position') {
+      const events: GameEvent[] = [this.terminalEventFor(status, at)];
+      return { game: Game.applyAll(this, events), events };
+    }
+    return null;
   }
 
-  /**
-   * The starting-position id a stored `GameCreated` asserts, validated against the rest of the event.
-   *
-   * This runs on **replay**, not just on creation, because `Game.create` is not the only way an event
-   * reaches the reducer: a stored payload is JSON that was written by some earlier version of this
-   * code, and `Game.fromEvents` is where a game comes back from disk. A creation-time check alone
-   * would leave the store's own contents unchecked, which is the half that matters — the append-only
-   * log is the thing that cannot be corrected afterwards.
-   *
-   * Three ways an event can be wrong, and all three throw rather than resolve to something plausible:
-   *
-   * - **An id on a non-Chess960 game.** Only Chess960 has one; a `standard` event carrying one is
-   *   describing a game that does not exist.
-   * - **An out-of-range or non-integer id.** `-1`, `960` and `3.5` name no arrangement.
-   * - **An id that disagrees with `initialFen`.** Both are stored, so both can be tampered with
-   *   independently; a client that fabricated an initial state would show up here and nowhere else.
-   *   The comparison is exact string equality against `chess960Fen(id)`, which is what `Game.create`
-   *   writes, so agreement is the only thing that can pass.
-   *
-   * A `chess960` event with **no** id is the one case that is not an error: it predates the field.
-   * It replays from `initialFen` exactly as it always did and reports `null` — see
-   * {@link GameCreatedEvent.chess960StartId}.
-   */
-  private static startIdOf(event: GameCreatedEvent): number | null {
+  resign(color: Color, at: number): { game: Game; events: GameEvent[] } {
+    this.assertOngoing();
+    this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+    const ending: GameEndedEvent = {
+      type: 'GameEnded',
+      result: color === 'w' ? '0-1' : '1-0',
+      termination: 'resignation',
+      winner: opposite(color),
+      at,
+    };
+    return { game: this.withEvent(ending), events: [ending] };
+  }
+
+  offerDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
+    this.assertOngoing();
+    this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
+    if (this.state.drawOffer === color) throw new GameError('Draw already offered by this side');
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+    const event: DrawOfferedEvent = { type: 'DrawOffered', by: color, at };
+    return { game: this.withEvent(event), events: [event] };
+  }
+
+  acceptDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
+    this.assertOngoing();
+    this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
+    const offer = this.state.drawOffer;
+    if (offer === null || offer === color) {
+      throw new GameError('No draw offer from the opponent to accept');
+    }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+    const ending: GameEndedEvent = { type: 'GameEnded', result: '1/2-1/2', termination: 'agreement', winner: null, at };
+    return { game: this.withEvent(ending), events: [ending] };
+  }
+
+  declineDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
+    this.assertOngoing();
+    this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
+    if (this.state.drawOffer === null) throw new GameError('No draw offer to decline');
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+    const event: DrawDeclinedEvent = { type: 'DrawDeclined', by: color, at };
+    return { game: this.withEvent(event), events: [event] };
+  }
+
+  claimFlag(at: number): { game: Game; events: GameEvent[] } {
+    this.assertOngoing();
+    this.assertNotBlocked();
+    const sideToMove = this.state.position.turn;
+    if (!hasFlagged(this.state.clock, sideToMove, at, this.state.timeControl)) {
+      throw new GameError('Opponent has not flagged');
+    }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+    return this.endByTimeout(sideToMove, at);
+  }
+
+  claimTimeout(at: number): { game: Game; events: GameEvent[] } {
+    return this.claimFlag(at);
+  }
+
+  private endByTimeout(flagged: Color, at: number): { game: Game; events: GameEvent[] } {
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+    const winner = opposite(flagged);
+    const drawByInsufficient = !canMate(this.state.position.fen(), winner, this.state.variant);
+    const ending: GameEndedEvent = {
+      type: 'GameEnded',
+      result: drawByInsufficient ? '1/2-1/2' : winner === 'w' ? '1-0' : '0-1',
+      termination: drawByInsufficient ? 'insufficient_material' : 'timeout',
+      winner: drawByInsufficient ? null : winner,
+      at,
+    };
+    return { game: this.withEvent(ending), events: [ending] };
+  }
+
+  abort(at: number): { game: Game; events: GameEvent[] } {
+    this.assertOngoing();
+    this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
+    if (this.state.ply >= 2) throw new GameError('Game can no longer be aborted');
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+    const events: GameEvent[] = [{ type: 'GameEnded', result: '*', termination: 'aborted', winner: null, at }];
+    return { game: this.withEvent(events[0]), events };
+  }
+
+  markReady(color: Color, at: number): { game: Game; events: GameEvent[] } {
+    this.assertNotBlocked();
+    if (this.state.clockPolicy === 'observed-release-v1') {
+      throw new GameError('Cannot execute raw command on managed game; use prepared command flow');
+    }
+    const s = this.state;
+    if (s.noShowAt === null || at >= s.noShowAt) return { game: this, events: [] };
+    if (s.status.over || s.ply > 0 || s.ready[color]) return { game: this, events: [] };
+    const events: GameEvent[] = [{ type: 'PlayerReady', by: color, at }];
+    return { game: Game.applyAll(this, events), events };
+  }
+
+  noShowVerdict(at: number): NoShowVerdict {
+    return checkStateNoShowVerdict(this.state, at, this.isBlocked);
+  }
+
+  expireNoShow(at: number): { game: Game; events: GameEvent[] } {
+    this.assertOngoing();
+    this.assertNotBlocked();
+    const verdict = this.noShowVerdict(at);
+    if (verdict.kind !== 'expire') throw new GameError(`No-show expiry refused: ${verdict.kind}`);
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+    const events: GameEvent[] = [verdict.ending];
+    return { game: this.withEvent(verdict.ending), events };
+  }
+
+  static startIdOf(event: GameCreatedEvent): number | null {
     const id = event.chess960StartId;
     if (id === undefined) return null;
     if (event.variant !== 'chess960') {
@@ -671,31 +862,75 @@ export class Game {
     return id;
   }
 
-  /** Fold a `MovePlayed` whose resulting `position` the caller has already established. */
+  private static computeMoveClock(state: GameState, event: MovePlayedEvent): ClockState {
+    if (state.adjudication?.clockPolicy === 'observed-release-v1') {
+      if (!state.adjudication.originalBasis) {
+        throw new GameError('Missing originalBasis for observed-release-v1 move fold');
+      }
+      const turnComp = applyCompletedTurn(
+        state.adjudication.originalBasis,
+        event.at,
+        state.timeControl,
+        {
+          clearNoShow: true,
+          nextLineage: { policy: 'observed-release-v1' },
+        },
+      );
+      if (turnComp.flagged) {
+        throw new GameError(`Cannot play move: clock expired for ${state.position.turn}`);
+      }
+      if (
+        event.moveTimeMs !== turnComp.moveTimeMs ||
+        event.remaining.w !== turnComp.nextBasis.turnBaseBalances.w ||
+        event.remaining.b !== turnComp.nextBasis.turnBaseBalances.b
+      ) {
+        throw new GameError('MovePlayed payload does not match deterministic managed turn accounting');
+      }
+      return Object.freeze({
+        remaining: Object.freeze({ ...turnComp.nextBasis.turnBaseBalances }),
+        turnStartedAt: null,
+      });
+    }
+    const clockToCharge = state.adjudication ? state.adjudication.originalClock : state.clock;
+    const charged = charge(clockToCharge, event.by, event.at, state.timeControl, event.moveTimeMs);
+    return charged.clock;
+  }
+
   private static foldMove(state: GameState, event: MovePlayedEvent, position: Position): GameState {
-    const charged = charge(state.clock, event.by, event.at, state.timeControl, event.moveTimeMs);
-    // Update repetition history: increment the count for the new position's key.
+    const moveClock = Game.computeMoveClock(state, event);
     const key = repetitionKey(position.snapshot());
     const rep = new Map(state.repetition);
     rep.set(key, (rep.get(key) ?? 0) + 1);
-    return {
+
+    const intermediate: GameState = {
       ...state,
       position,
-      clock: charged.clock,
+      clock: moveClock,
       ply: event.ply,
-      moves: [...state.moves, event],
+      moves: [...state.moves, cloneMovePlayedEvent(event)],
       drawOffer: null,
       repetition: rep,
+      eventSequence: state.eventSequence + 1,
     };
+
+    if (state.phase === 'settling' && state.adjudication) {
+      const adjudication = state.adjudication;
+      if (adjudication.cursor + 1 === adjudication.expectedEffects.length) {
+        const resAt = adjudication.resolutionAt ?? adjudication.acceptedAt;
+        return finalizeCompletion(intermediate, adjudication, resAt, adjudication.expectedEffects);
+      }
+      return {
+        ...intermediate,
+        phase: 'settling',
+        isBlocked: true,
+        clock: { ...moveClock, turnStartedAt: null },
+        adjudication: Object.freeze({ ...adjudication, cursor: adjudication.cursor + 1 }),
+      };
+    }
+
+    return intermediate;
   }
 
-  /**
-   * Stored-history replay only (`stored-history.ts`, #127), keyed by a symbol the package does not
-   * export. The strict fold of {@link fromEvents}, except that a `MovePlayed` the rules reject is offered
-   * to `admit`, which may return the position the stored move led to. Every other event, and every move
-   * `admit` refuses, folds — or throws — exactly as in `fromEvents`. `onPly` sees each move before it
-   * is folded, with `admitted` set only for a move the rules rejected.
-   */
   static [FOLD_STORED](
     events: readonly GameEvent[],
     admit: (index: number, state: GameState, event: MovePlayedEvent) => Position | null,
@@ -707,119 +942,1008 @@ export class Game {
         throw new GameError(`${event.type} after GameEnded`);
       }
       if (event.type !== 'MovePlayed' || state === null) {
-        state = Game.reduce(state, event);
+        state = Game.reduce(state, event, REPLAY_TOKEN);
         continue;
       }
-      let after: Position;
-      let admitted = false;
-      try {
-        after = state.position.play(event.uci);
-      } catch (err) {
-        const fallback = err instanceof IllegalMoveError ? admit(index, state, event) : null;
-        if (fallback === null) throw err;
-        after = fallback;
-        admitted = true;
-      }
-      onPly(state, event, after, admitted);
-      state = Game.foldMove(state, event, after);
+      assertStoredMoveAllowed(state, event);
+      const safeEvent: MovePlayedEvent = Object.freeze({
+        ...event,
+        remaining: Object.freeze({ ...event.remaining }),
+      });
+      const { after, admitted } = resolveStoredMovePosition(index, state, safeEvent, admit);
+      onPly(isolateSnapshot(state), safeEvent, after, admitted);
+      state = Game.foldMove(state, safeEvent, after);
     }
     if (state === null) throw new GameError('Cannot reconstruct a game from zero events');
     return new Game(state);
   }
 
-  /** The pure reducer: `(state, event) -> state`. */
-  private static reduce(state: GameState | null, event: GameEvent): GameState {
-    if (state !== null && state.status.over) {
-      throw new GameError(`${event.type} after GameEnded`);
+  private static advanceSettlingNonMove(state: GameState): GameState {
+    if (state.phase !== 'settling' || !state.adjudication) {
+      return state;
     }
+    const nextCursor = state.adjudication.cursor + 1;
+    if (nextCursor === state.adjudication.expectedEffects.length) {
+      const resAt = state.adjudication.resolutionAt ?? state.adjudication.acceptedAt;
+      return finalizeCompletion(state, state.adjudication, resAt, state.adjudication.expectedEffects);
+    }
+    return {
+      ...state,
+      phase: 'settling',
+      isBlocked: true,
+      adjudication: Object.freeze({ ...state.adjudication, cursor: nextCursor }),
+    };
+  }
+
+  private static reduce(state: GameState | null, event: GameEvent, replayToken?: symbol): GameState {
+    assertLifecyclePreconditions(state, event);
+
     switch (event.type) {
-      case 'GameCreated': {
-        if (state !== null) throw new GameError('GameCreated after GameCreated');
-        const startId = Game.startIdOf(event);
-        const pregame = pregameOf(event.source, event.noShowAfterMs, event.at);
-        const source = pregame?.source ?? null;
-        const position = Position.fromFen(event.initialFen, event.variant);
-        // Seed the repetition history with the initial position (count = 1).
-        const rep = new Map<string, number>();
-        rep.set(repetitionKey(position.snapshot()), 1);
-        return {
-          gameId: event.gameId,
-          variant: event.variant,
-          players: event.players,
-          timeControl: event.timeControl,
-          rated: event.rated,
-          createdAt: event.at,
-          position,
-          // A sourced game's clock starts at its first move, so nothing is anchored at creation. A game
-          // without a source keeps the creation anchor it always had, so a game stored before ADR-0148
-          // and still in progress is not reinterpreted.
-          clock: initClock(event.timeControl, source === null ? event.at : null),
-          ply: 0,
-          moves: [],
-          status: ONGOING,
-          drawOffer: null,
-          repetition: rep,
-          chess960StartId: startId,
-          source,
-          noShowAt: pregame === null ? null : event.at + pregame.noShowAfterMs,
-          ready: { w: false, b: false },
-        };
-      }
-      case 'PlayerReady': {
-        if (state === null) throw new GameError('PlayerReady before GameCreated');
-        if (event.by !== 'w' && event.by !== 'b') {
-          throw new GameError(`PlayerReady for unknown seat ${JSON.stringify(event.by)}`);
-        }
-        return { ...state, ready: { ...state.ready, [event.by]: true } };
-      }
-      case 'MovePlayed': {
-        if (state === null) throw new GameError('MovePlayed before GameCreated');
-        return Game.foldMove(state, event, state.position.play(event.uci));
-      }
-      case 'DrawOffered': {
-        if (state === null) throw new GameError('DrawOffered before GameCreated');
-        return { ...state, drawOffer: event.by };
-      }
-      case 'DrawDeclined': {
-        if (state === null) throw new GameError('DrawDeclined before GameCreated');
-        return { ...state, drawOffer: null };
-      }
-      case 'GameEnded': {
-        if (state === null) throw new GameError('GameEnded before GameCreated');
-        return {
-          ...state,
-          status: { over: true, result: event.result, termination: event.termination, winner: event.winner },
-          drawOffer: null,
-        };
-      }
+      case 'GameCreated':
+        return reduceGameCreated(state, event);
+      case 'PlayerReady':
+        return reducePlayerReady(state as GameState, event);
+      case 'MovePlayed':
+        return reduceMovePlayed(state as GameState, event);
+      case 'DrawOffered':
+        return reduceDrawOffered(state as GameState, event);
+      case 'DrawDeclined':
+        return reduceDrawDeclined(state as GameState, event);
+      case 'GameEnded':
+        return reduceGameEnded(state as GameState, event);
       default:
-        throw new GameError(`Unknown event type ${JSON.stringify((event as { type: unknown }).type)}`);
+        return reduceAdjudicationEvent(state as GameState, event, replayToken);
     }
   }
 }
 
-/**
- * Whether `color` could still win, used to convert a timeout into a draw when the opponent could
- * not possibly have won anyway.
- *
- * The question is variant-specific, and asking the standard one everywhere is wrong in a way that
- * costs players games. "Enough material to deliver checkmate" only means anything in a variant whose
- * win condition *is* checkmate. King of the Hill is won by walking a king to the centre; Racing
- * Kings by reaching the eighth rank; Three-check by giving three checks; Atomic by exploding the
- * enemy king; Crazyhouse by dropping the pieces in hand, which the board position does not show at
- * all. Treating those as standard chess turned a win into a draw whenever the loser flagged.
- *
- * Conservative in one direction on purpose: it answers "could this side possibly win", so where the
- * honest answer is unclear it says yes. Awarding a draw the winner did not deserve is the failure
- * mode worth avoiding; the guard exists only to spare someone a loss they could never have converted.
- */
+function reduceAdjudicationEvent(
+  state: GameState,
+  event: GameEvent,
+  replayToken?: symbol,
+): GameState {
+  if (event.type === 'AdjudicationStarted') {
+    return reduceAdjudicationStarted(state, event);
+  }
+  if (event.type === 'AdjudicationResolved') {
+    return reduceAdjudicationResolved(state, event);
+  }
+  if (event.type === 'AdjudicationClocksStarted') {
+    if (replayToken !== REPLAY_TOKEN) {
+      throw new GameError('AdjudicationClocksStarted cannot be submitted directly via live Game.withEvents; replay/reconstruction route required');
+    }
+    return reduceAdjudicationClocksStarted(state, event);
+  }
+  throw new GameError(`Unknown event type ${JSON.stringify((event as { type: unknown }).type)}`);
+}
+
+function finalizeLegacyCompletion(
+  state: GameState,
+  adjudication: PendingAdjudicationState,
+  resolutionAt: number,
+  effects: readonly AdjudicationEffect[],
+): GameState {
+  if (state.status.over) {
+    return {
+      ...state,
+      phase: 'ended',
+      isBlocked: false,
+      adjudication: null,
+      clock: { ...state.clock, turnStartedAt: null },
+    };
+  }
+  const moveEffect = effects.find(e => e.type === 'MovePlayed');
+  if (moveEffect) {
+    return {
+      ...state,
+      phase: 'idle',
+      isBlocked: false,
+      adjudication: null,
+    };
+  }
+  const resumed = projectSurvivingObligations(
+    adjudication,
+    effects,
+    resolutionAt,
+    {
+      source: state.source,
+      ply: state.ply,
+      ready: state.ready,
+      timeControl: state.timeControl,
+      sideToMove: state.position.turn,
+      historicalNoShowAt: state.noShowAt,
+    },
+  );
+  return {
+    ...state,
+    phase: 'idle',
+    isBlocked: false,
+    adjudication: null,
+    clock: resumed.resumedClock,
+    noShowAt: resumed.resumedNoShowAt,
+  };
+}
+
+function finalizeManagedTerminal(
+  state: GameState,
+  _adjudication: PendingAdjudicationState,
+): GameState {
+  return {
+    ...state,
+    phase: 'ended',
+    isBlocked: false,
+    adjudication: null,
+    clock: { ...state.clock, turnStartedAt: null },
+    noShowAt: null,
+    stoppedClock: null,
+    releasedClock: null,
+    releaseReceipts: state.releaseReceipts,
+    releaseNeeded: false,
+  };
+}
+
+function deriveNextManagedBasis(
+  state: GameState,
+  adjudication: PendingAdjudicationState,
+  resolutionAt: number,
+  moveEffect?: MovePlayedEvent,
+): AdjudicationClockBasis {
+  if (moveEffect) {
+    if (!adjudication.originalBasis) {
+      throw new GameError('Missing originalBasis for observed-release-v1 move completion');
+    }
+    const turnComp = applyCompletedTurn(
+      adjudication.originalBasis,
+      resolutionAt,
+      state.timeControl,
+      {
+        clearNoShow: true,
+        nextLineage: { policy: 'observed-release-v1' },
+      },
+    );
+    return turnComp.nextBasis;
+  }
+
+  const currentBasis = adjudication.originalBasis;
+  if (!currentBasis) {
+    throw new GameError('Missing originalBasis for observed-release-v1 non-move completion');
+  }
+  const isTournamentBothReady = state.source === 'tournament' && state.ready.w && state.ready.b;
+  const nextNoShow = (isTournamentBothReady || state.ply > 0)
+    ? null
+    : currentBasis.noShowRemainderMs;
+
+  return createAdjudicationClockBasis({
+    initialBalances: currentBasis.turnBaseBalances,
+    elapsedThinkingMs: currentBasis.elapsedThinkingMs,
+    sideToMove: currentBasis.sideToMove,
+    ply: currentBasis.ply,
+    runningSince: null,
+    stoppedAt: resolutionAt,
+    policy: 'observed-release-v1',
+    noShowRemainderMs: nextNoShow,
+  });
+}
+
+function finalizeManagedCompletion(
+  state: GameState,
+  adjudication: PendingAdjudicationState,
+  resolutionAt: number,
+  effects: readonly AdjudicationEffect[],
+): GameState {
+  const moveEffect = effects.find(e => e.type === 'MovePlayed') as MovePlayedEvent | undefined;
+  const nextBasis = deriveNextManagedBasis(state, adjudication, resolutionAt, moveEffect);
+  const isNewTurn = moveEffect !== undefined;
+  const resolvedSeq = adjudication.startedSeq + 1;
+  const stopId = deriveStopId(adjudication.operationId, resolvedSeq);
+  const turnLineageId = deriveTurnLineageId(
+    adjudication.prepared.gameId,
+    state.ply,
+    adjudication.prepared.turnLineageId,
+    isNewTurn,
+  );
+  const completionHead = resolvedSeq + effects.length;
+
+  const stoppedClock: GameStoppedClockState = Object.freeze({
+    basis: nextBasis,
+    stopId,
+    originatingOperationId: adjudication.operationId,
+    originatingResolvedSeq: resolvedSeq,
+    startedSeq: adjudication.startedSeq,
+    rulesVersion: adjudication.rulesVersion,
+    turnLineageId,
+    parentStopId: adjudication.prepared.parentStopId ?? null,
+    completionHead,
+  });
+
+  const dispBalances = computeDisplayBalances(nextBasis, resolutionAt, state.timeControl);
+  const exposedClock: ClockState = Object.freeze({
+    remaining: dispBalances,
+    turnStartedAt: null,
+  });
+
+  const releaseNeeded = isChessClockApplicable(state.source, state.ply, state.timeControl) || nextBasis.noShowRemainderMs !== null;
+
+  return {
+    ...state,
+    phase: 'idle',
+    isBlocked: false,
+    adjudication: null,
+    clock: exposedClock,
+    clockPolicy: 'observed-release-v1',
+    stoppedClock,
+    releasedClock: null,
+    releaseReceipts: state.releaseReceipts,
+    releaseNeeded,
+  };
+}
+
+function finalizeCompletion(
+  state: GameState,
+  adjudication: PendingAdjudicationState,
+  resolutionAt: number,
+  effects: readonly AdjudicationEffect[],
+): GameState {
+  if (adjudication.clockPolicy !== 'observed-release-v1') {
+    return finalizeLegacyCompletion(state, adjudication, resolutionAt, effects);
+  }
+  if (state.status.over) {
+    return finalizeManagedTerminal(state, adjudication);
+  }
+  return finalizeManagedCompletion(state, adjudication, resolutionAt, effects);
+}
+
+function assertStoredMoveAllowed(state: GameState, event: MovePlayedEvent): void {
+  if (state.phase === 'proving') {
+    throw new GameError('MovePlayed forbidden while adjudication is pending');
+  }
+  if (state.phase === 'settling') {
+    const adjudication = state.adjudication;
+    if (!adjudication) throw new GameError('Missing adjudication state while settling');
+    const expected = adjudication.expectedEffects[adjudication.cursor];
+    if (!expected) throw new GameError(`No declared effect expected at cursor ${adjudication.cursor}`);
+    assertEffectsMatch(event, expected, adjudication.cursor);
+  }
+  if (state.phase === 'idle' && state.clockPolicy === 'observed-release-v1') {
+    throw new GameError('Raw MovePlayed cannot bypass managed adjudication route when clock policy is observed-release-v1');
+  }
+}
+
+function resolveStoredMovePosition(
+  index: number,
+  state: GameState,
+  event: MovePlayedEvent,
+  admit: (index: number, state: GameState, event: MovePlayedEvent) => Position | null,
+): { after: Position; admitted: boolean } {
+  try {
+    return { after: state.position.play(event.uci), admitted: false };
+  } catch (err) {
+    const fallback = err instanceof IllegalMoveError ? admit(index, state, event) : null;
+    if (fallback === null) throw err;
+    return { after: fallback, admitted: true };
+  }
+}
+
+function assertIdlePhasePreconditions(state: GameState, event: GameEvent): void {
+  if (event.type === 'AdjudicationResolved') {
+    throw new GameError('AdjudicationResolved without matching AdjudicationStarted');
+  }
+  if (
+    state.clockPolicy === 'observed-release-v1' &&
+    event.type !== 'AdjudicationStarted' &&
+    event.type !== 'AdjudicationClocksStarted'
+  ) {
+    throw new GameError(`Raw ${event.type} cannot bypass managed adjudication route when clock policy is observed-release-v1`);
+  }
+}
+
+function assertLifecyclePreconditions(state: GameState | null, event: GameEvent): void {
+  if (state === null) return;
+  if (state.status.over) {
+    throw new GameError(`${event.type} after GameEnded`);
+  }
+  if (state.phase === 'proving' && event.type !== 'AdjudicationResolved') {
+    throw new GameError(`${event.type} forbidden while adjudication is pending`);
+  }
+  if (state.phase === 'settling') {
+    assertSettlingEventAllowed(state, event);
+  }
+  if (state.phase === 'idle') {
+    assertIdlePhasePreconditions(state, event);
+  }
+}
+
+function assertSettlingEventAllowed(state: GameState, event: GameEvent): void {
+  if (
+    event.type === 'AdjudicationStarted' ||
+    event.type === 'AdjudicationResolved' ||
+    event.type === 'AdjudicationClocksStarted'
+  ) {
+    throw new GameError(`${event.type} forbidden while settling adjudication effects`);
+  }
+  const adjudication = state.adjudication;
+  if (!adjudication) throw new GameError('Missing adjudication state while settling');
+  const expected = adjudication.expectedEffects[adjudication.cursor];
+  if (!expected) {
+    throw new GameError(`No declared effect expected at cursor ${adjudication.cursor}`);
+  }
+  assertEffectsMatch(event, expected, adjudication.cursor);
+}
+
+function reduceGameCreated(state: GameState | null, event: GameCreatedEvent): GameState {
+  if (state !== null) throw new GameError('GameCreated after GameCreated');
+  const startId = Game.startIdOf(event);
+  const pregame = pregameOf(event.source, event.noShowAfterMs, event.at);
+  const source = pregame?.source ?? null;
+  const position = Position.fromFen(event.initialFen, event.variant);
+  const rep = new Map<string, number>();
+  rep.set(repetitionKey(position.snapshot()), 1);
+  const tc = cloneTimeControl(event.timeControl);
+  return {
+    gameId: event.gameId,
+    variant: event.variant,
+    players: clonePlayers(event.players),
+    timeControl: tc,
+    rated: event.rated,
+    createdAt: event.at,
+    position,
+    clock: initClock(tc, source === null ? event.at : null),
+    ply: 0,
+    moves: [],
+    status: ONGOING,
+    drawOffer: null,
+    repetition: rep,
+    chess960StartId: startId,
+    source,
+    noShowAt: pregame === null ? null : event.at + pregame.noShowAfterMs,
+    ready: { w: false, b: false },
+    phase: 'idle',
+    isBlocked: false,
+    adjudication: null,
+    eventSequence: 0,
+    lastResolutionAt: null,
+    clockPolicy: null,
+    stoppedClock: null,
+    releasedClock: null,
+    releaseReceipts: Object.freeze(new Map()),
+    releaseNeeded: false,
+  };
+}
+
+function reducePlayerReady(state: GameState, event: PlayerReadyEvent): GameState {
+  if (event.by !== 'w' && event.by !== 'b') {
+    throw new GameError(`PlayerReady for unknown seat ${JSON.stringify(event.by)}`);
+  }
+  const intermediate: GameState = {
+    ...state,
+    ready: { ...state.ready, [event.by]: true },
+    eventSequence: state.eventSequence + 1,
+  };
+  return Game['advanceSettlingNonMove'](intermediate);
+}
+
+function reduceMovePlayed(state: GameState, event: MovePlayedEvent): GameState {
+  return Game['foldMove'](state, event, state.position.play(event.uci));
+}
+
+function reduceDrawOffered(state: GameState, event: DrawOfferedEvent): GameState {
+  const intermediate: GameState = {
+    ...state,
+    drawOffer: event.by,
+    eventSequence: state.eventSequence + 1,
+  };
+  return Game['advanceSettlingNonMove'](intermediate);
+}
+
+function reduceDrawDeclined(state: GameState, _event: DrawDeclinedEvent): GameState {
+  const intermediate: GameState = {
+    ...state,
+    drawOffer: null,
+    eventSequence: state.eventSequence + 1,
+  };
+  return Game['advanceSettlingNonMove'](intermediate);
+}
+
+function reduceGameEnded(state: GameState, event: GameEndedEvent): GameState {
+  if (state.phase === 'settling') {
+    const adjudication = state.adjudication;
+    if (adjudication && adjudication.cursor + 1 < adjudication.expectedEffects.length) {
+      throw new GameError('Premature GameEnded effect: declared effects plan has unconsumed suffix');
+    }
+  }
+  const intermediate: GameState = {
+    ...state,
+    status: { over: true, result: event.result, termination: event.termination, winner: event.winner },
+    drawOffer: null,
+    phase: 'ended',
+    isBlocked: false,
+    clock: { ...state.clock, turnStartedAt: null },
+    eventSequence: state.eventSequence + 1,
+  };
+  if (state.adjudication) {
+    const resAt = state.adjudication.resolutionAt ?? state.adjudication.acceptedAt;
+    return finalizeCompletion(intermediate, state.adjudication, resAt, state.adjudication.expectedEffects);
+  }
+  return intermediate;
+}
+
+function reduceAdjudicationClocksStarted(state: GameState, event: AdjudicationClocksStartedEvent): GameState {
+  const causalFloor = getActiveCausalBasis(state);
+  const isChessApplicable = validateRecordedReleaseEvent(state, event, causalFloor);
+  const { releasedClock, receipt } = buildReleasedClockState(state, event, isChessApplicable);
+  const nextReceipts = new Map(state.releaseReceipts);
+  nextReceipts.set(event.releaseRequestId, receipt);
+
+  const dispBalances = computeDisplayBalances(releasedClock.basis, event.at, state.timeControl);
+  const exposedClock: ClockState = Object.freeze({
+    remaining: dispBalances,
+    turnStartedAt: null,
+  });
+
+  return {
+    ...state,
+    stoppedClock: null,
+    releasedClock,
+    releaseReceipts: Object.freeze(nextReceipts),
+    releaseNeeded: false,
+    clock: exposedClock,
+    eventSequence: state.eventSequence + 1,
+    lastResolutionAt: event.at,
+  };
+}
+
+function assertStartedTopLevel(state: GameState, event: AdjudicationStartedEvent): void {
+  if (state.phase !== 'idle') throw new GameError(`Cannot start adjudication in phase "${state.phase}"`);
+  if (event.gameId !== state.gameId) throw new GameError(`AdjudicationStarted gameId mismatch: expected "${state.gameId}", got "${event.gameId}"`);
+  if (event.baseRevision !== state.eventSequence) throw new GameError(`AdjudicationStarted baseRevision mismatch: expected ${state.eventSequence}, got ${event.baseRevision}`);
+  if (event.at !== event.prepared.at) throw new GameError('AdjudicationStarted timestamp mismatch');
+  validateTimestamp(event.at, 'AdjudicationStarted timestamp');
+  const basis = getActiveCausalBasis(state);
+  if (event.at < basis) {
+    throw new GameError(`Suspension timestamp ${event.at} cannot precede active causal basis ${basis}`);
+  }
+}
+
+function assertNegotiationColor(color: unknown): void {
+  if (color !== 'w' && color !== 'b') {
+    throw new GameError(`Invalid negotiation color: ${JSON.stringify(color)}`);
+  }
+}
+
+function resolveStartedMove(pos: Position, uci: string): ReturnType<Position['legalMoves']>[number] {
+  try {
+    return resolveLegalMove(pos, uci);
+  } catch (err) {
+    throw new GameError(`Illegal move "${uci}": ${(err as Error).message}`);
+  }
+}
+
+function assertStoppedMoveReadiness(state: GameState): void {
+  if (state.stoppedClock?.basis.noShowRemainderMs === 0) {
+    throw new GameError('Cannot play move: no-show deadline has expired');
+  }
+  if (state.source !== null && state.ply === 0 && (!state.ready.w || !state.ready.b)) {
+    throw new GameError(NOT_READY_MESSAGE);
+  }
+}
+
+function assertUnstoppedMoveReadiness(state: GameState, at: number): void {
+  if (state.source === null || state.ply > 0) return;
+  const verdict = checkStateNoShowVerdict(state, at);
+  if (verdict.kind === 'expire') {
+    throw new GameError('Cannot play move: no-show deadline has expired');
+  }
+  if (!state.ready.w || !state.ready.b) {
+    throw new GameError(NOT_READY_MESSAGE);
+  }
+}
+
+function assertReleasedMoveReadiness(state: GameState, at: number): void {
+  const rel = state.releasedClock!;
+  if (rel.basis.noShowRemainderMs === 0) {
+    throw new GameError('Cannot play move: no-show deadline has expired');
+  }
+  if (rel.noShowRunningSince !== null && rel.basis.noShowRemainderMs !== null) {
+    if (at >= rel.noShowRunningSince + rel.basis.noShowRemainderMs) {
+      throw new GameError('Cannot play move: no-show deadline has expired');
+    }
+  }
+  if (state.source !== null && state.ply === 0 && (!state.ready.w || !state.ready.b)) {
+    throw new GameError(NOT_READY_MESSAGE);
+  }
+}
+
+function assertStartedMoveReadiness(state: GameState, at: number): void {
+  if (state.stoppedClock !== null) {
+    assertStoppedMoveReadiness(state);
+    return;
+  }
+  if (state.releasedClock !== null) {
+    assertReleasedMoveReadiness(state, at);
+    return;
+  }
+  assertUnstoppedMoveReadiness(state, at);
+}
+
+function assertReleasedMoveBalanceNotExpired(
+  rc: GameReleasedClockState,
+  tc: TimeControl,
+  mover: Color,
+  at: number,
+): void {
+  if (rc.isChessApplicable) {
+    const dispBalances = computeDisplayBalances(rc.basis, at, tc);
+    if (tc.kind !== 'unlimited' && dispBalances[mover] <= 0) {
+      throw new GameError(`Cannot play move: clock expired for ${mover}`);
+    }
+    return;
+  }
+  if (tc.kind !== 'unlimited' && rc.basis.turnBaseBalances[mover] <= 0) {
+    throw new GameError(`Cannot play move: clock expired for ${mover}`);
+  }
+}
+
+function assertMoveBalanceNotExpired(state: GameState, mover: Color, at: number): void {
+  if (state.stoppedClock !== null) {
+    const dispBalances = computeDisplayBalances(state.stoppedClock.basis, at, state.timeControl);
+    if (state.timeControl.kind !== 'unlimited' && dispBalances[mover] <= 0) {
+      throw new GameError(`Cannot play move: clock expired for ${mover}`);
+    }
+    return;
+  }
+  if (state.releasedClock !== null) {
+    assertReleasedMoveBalanceNotExpired(state.releasedClock, state.timeControl, mover, at);
+    return;
+  }
+  if (hasFlagged(state.clock, mover, at, state.timeControl)) {
+    throw new GameError(`Cannot play move: clock expired for ${mover}`);
+  }
+}
+
+function assertStartedMoveAdmission(state: GameState, op: PreparedOperation): void {
+  const intent = op.intent as { kind: 'move'; mover: Color; uci: string; san: string; successorFen: string };
+  if (intent.mover !== state.position.turn) {
+    throw new GameError(`Move mover mismatch: expected ${state.position.turn}, got ${intent.mover}`);
+  }
+  assertStartedMoveReadiness(state, op.at);
+  assertMoveBalanceNotExpired(state, intent.mover, op.at);
+  const moveObj = resolveStartedMove(state.position, intent.uci);
+  const san = state.position.toSan(moveObj);
+  if (intent.san !== san) {
+    throw new GameError(`Prepared SAN mismatch: expected "${san}", got "${intent.san}"`);
+  }
+  const succ = state.position.play(moveObj);
+  if (intent.successorFen !== succ.fen()) {
+    throw new GameError('Prepared successor FEN mismatch');
+  }
+}
+
+function assertStartedDrawNegotiation(state: GameState, intent: PreparedIntent): boolean {
+  if (intent.kind === 'offerDraw') {
+    assertNegotiationColor(intent.color);
+    if (state.drawOffer === intent.color) throw new GameError('Draw already offered by this side');
+    return true;
+  }
+  if (intent.kind === 'acceptDraw') {
+    assertNegotiationColor(intent.color);
+    const opp = intent.color === 'w' ? 'b' : 'w';
+    if (state.drawOffer !== opp) throw new GameError('No draw offer to accept');
+    return true;
+  }
+  if (intent.kind === 'declineDraw') {
+    assertNegotiationColor(intent.color);
+    if (state.drawOffer === null) throw new GameError('No draw offer to decline');
+    return true;
+  }
+  return false;
+}
+
+function assertStartedEndingNegotiation(state: GameState, intent: PreparedIntent): void {
+  if (intent.kind === 'resign') {
+    assertNegotiationColor(intent.color);
+  } else if (intent.kind === 'abort') {
+    if (intent.color !== undefined) assertNegotiationColor(intent.color);
+    if (state.ply >= 2) throw new GameError('Game can no longer be aborted');
+  }
+}
+
+function assertStartedNegotiationAdmission(state: GameState, intent: PreparedIntent): void {
+  if (assertStartedDrawNegotiation(state, intent)) return;
+  assertStartedEndingNegotiation(state, intent);
+}
+
+function resolveNoShowEndingForSource(
+  source: GameSource | null | undefined,
+  ready: Readonly<{ w: boolean; b: boolean }>,
+  at: number,
+): NoShowVerdict {
+  if (source === 'seek') {
+    return { kind: 'expire', ending: { type: 'GameEnded', result: '*', termination: 'no_show', winner: null, at } };
+  }
+  return resolveTournamentNoShowEnding(ready, at);
+}
+
+function checkStoppedNoShowVerdict(s: GameState, at: number): NoShowVerdict {
+  const stopped = s.stoppedClock;
+  if (!stopped) return { kind: 'not_applicable' };
+  if (stopped.basis.noShowRemainderMs === null || s.status.over || s.ply > 0) {
+    return { kind: 'not_applicable' };
+  }
+  if (stopped.basis.noShowRemainderMs === 0) {
+    return resolveNoShowEndingForSource(s.source, s.ready, at);
+  }
+  return { kind: 'not_due' };
+}
+
+function checkReleasedNoShowVerdict(s: GameState, at: number, isBlocked: boolean): NoShowVerdict {
+  const rel = s.releasedClock;
+  if (!rel) return { kind: 'not_applicable' };
+  if (rel.basis.noShowRemainderMs === null || s.status.over || s.ply > 0) {
+    return { kind: 'not_applicable' };
+  }
+  if (rel.basis.noShowRemainderMs === 0) {
+    return resolveNoShowEndingForSource(s.source, s.ready, at);
+  }
+  if (rel.noShowRunningSince !== null) {
+    const deadline = rel.noShowRunningSince + rel.basis.noShowRemainderMs;
+    if (!isBlocked && at >= deadline) {
+      return resolveNoShowEndingForSource(s.source, s.ready, at);
+    }
+  }
+  return { kind: 'not_due' };
+}
+
+function checkStateNoShowVerdict(s: GameState, at: number, isBlocked: boolean = false): NoShowVerdict {
+  if (s.stoppedClock !== null) {
+    return checkStoppedNoShowVerdict(s, at);
+  }
+  if (s.releasedClock !== null) {
+    return checkReleasedNoShowVerdict(s, at, isBlocked);
+  }
+  if (!checkNoShowApplicable(s, isBlocked, at)) {
+    return (s.noShowAt === null || s.status.over || s.ply > 0)
+      ? { kind: 'not_applicable' }
+      : { kind: 'not_due' };
+  }
+  return resolveNoShowEndingForSource(s.source, s.ready, at);
+}
+
+function assertReleasedReadyDeadline(rel: GameReleasedClockState, at: number): void {
+  if (rel.basis.noShowRemainderMs === 0) {
+    throw new GameError('Cannot mark ready after no-show deadline');
+  }
+  if (rel.noShowRunningSince !== null && rel.basis.noShowRemainderMs !== null) {
+    if (at >= rel.noShowRunningSince + rel.basis.noShowRemainderMs) {
+      throw new GameError('Cannot mark ready after no-show deadline');
+    }
+  }
+}
+
+function assertReadyDeadlineValid(state: GameState, at: number): void {
+  if (state.stoppedClock !== null) {
+    if (state.stoppedClock.basis.noShowRemainderMs === 0) {
+      throw new GameError('Cannot mark ready after no-show deadline');
+    }
+    return;
+  }
+  if (state.releasedClock !== null) {
+    assertReleasedReadyDeadline(state.releasedClock, at);
+    return;
+  }
+  if (state.noShowAt !== null && at >= state.noShowAt) {
+    throw new GameError('Cannot mark ready after no-show deadline');
+  }
+}
+
+function assertStartedReadyAdmission(
+  state: GameState,
+  intent: { kind: 'ready'; color: Color; isNoop?: boolean },
+  at: number,
+): void {
+  if (intent.color !== 'w' && intent.color !== 'b') throw new GameError('Invalid ready seat');
+  if (state.source === null || state.ply > 0) throw new GameError('Readiness is only valid before first move of sourced games');
+  if (intent.isNoop === true) throw new GameError('AdjudicationStarted cannot be created for ready no-op');
+  if (state.ready[intent.color] === true) throw new GameError('Player is already marked ready');
+  assertReadyDeadlineValid(state, at);
+}
+
+function assertEndingResultMatch(ending: Record<string, unknown>, verdict: GameEndedEvent): void {
+  if (ending.result !== verdict.result || ending.winner !== verdict.winner) {
+    throw new GameError('Prepared no-show ending mismatch');
+  }
+  if (ending.termination !== verdict.termination || ending.at !== verdict.at) {
+    throw new GameError('Prepared no-show ending mismatch');
+  }
+}
+
+function assertStartedNoShowEnding(intentEnding: unknown, verdictEnding: GameEndedEvent): void {
+  if (typeof intentEnding !== 'object' || intentEnding === null) {
+    throw new GameError('Prepared no-show ending must be an object');
+  }
+  const ending = intentEnding as Record<string, unknown>;
+  if (ending.type !== 'GameEnded') {
+    throw new GameError('Prepared no-show ending must have type "GameEnded"');
+  }
+  const allowed = new Set(['type', 'result', 'termination', 'winner', 'at']);
+  for (const k of Object.keys(ending)) {
+    if (!allowed.has(k)) {
+      throw new GameError(`Unexpected property "${k}" in prepared no-show ending`);
+    }
+  }
+  assertEndingResultMatch(ending, verdictEnding);
+}
+
+function assertStartedNoShowAdmission(state: GameState, intent: { kind: 'expireNoShow'; ending: GameEndedEvent }, at: number): void {
+  if (state.source === null || state.ply > 0) {
+    throw new GameError('No-show expiry is only valid before first move of sourced games');
+  }
+  const verdict = checkStateNoShowVerdict(state, at);
+  if (verdict.kind !== 'expire') {
+    throw new GameError(`No-show expiry refused: ${verdict.kind}`);
+  }
+  assertStartedNoShowEnding(intent.ending, verdict.ending);
+}
+
+function assertStartedPregameAdmission(state: GameState, intent: PreparedIntent, at: number): void {
+  if (intent.kind === 'ready') {
+    assertStartedReadyAdmission(state, intent, at);
+  } else if (intent.kind === 'expireNoShow') {
+    assertStartedNoShowAdmission(state, intent, at);
+  } else if (intent.kind === 'creationAdmission') {
+    if (state.eventSequence !== 0) throw new GameError('Creation admission is only valid at base revision 0');
+  } else {
+    throw new GameError(`Unknown prepared intent kind: ${(intent as { kind: string }).kind}`);
+  }
+}
+
+function assertManagedFlagFallen(state: GameState, flagged: Color, at: number, tc: TimeControl): void {
+  if (!isChessClockApplicable(state.source, state.ply, tc)) {
+    throw new GameError(`Chess clock flag expiry is not applicable for ${flagged} at ply ${state.ply}`);
+  }
+  if (state.stoppedClock !== null) {
+    if (!hasFlaggedAt(state.stoppedClock.basis, at, tc)) {
+      throw new GameError(`Flag has not fallen for ${flagged} at ${at}`);
+    }
+    return;
+  }
+  if (state.releasedClock !== null) {
+    if (!state.releasedClock.isChessApplicable || !hasFlaggedAt(state.releasedClock.basis, at, tc)) {
+      throw new GameError(`Flag has not fallen for ${flagged} at ${at}`);
+    }
+  }
+}
+
+function assertStartedTimeoutAdmission(state: GameState, intent: PreparedIntent, at: number, tc: TimeControl): void {
+  if (intent.kind !== 'expireFlag') return;
+  if (intent.flagged !== state.position.turn) throw new GameError(`Flagged color ${intent.flagged} is not side to move`);
+  const isManaged = state.clockPolicy === 'observed-release-v1' || state.stoppedClock !== null || state.releasedClock !== null;
+  if (isManaged) {
+    assertManagedFlagFallen(state, intent.flagged, at, tc);
+    return;
+  }
+  if (!hasFlagged(state.clock, intent.flagged, at, tc)) {
+    throw new GameError(`Flag has not fallen for ${intent.flagged} at ${at}`);
+  }
+}
+
+function isNegotiationIntent(kind: string): boolean {
+  return kind === 'offerDraw' || kind === 'acceptDraw' || kind === 'declineDraw' || kind === 'resign' || kind === 'abort';
+}
+
+function assertStartedIntentAdmissible(state: GameState, event: AdjudicationStartedEvent): void {
+  const intent = event.prepared.intent;
+  if (intent.kind === 'move') {
+    assertStartedMoveAdmission(state, event.prepared);
+  } else if (intent.kind === 'expireFlag') {
+    assertStartedTimeoutAdmission(state, intent, event.at, state.timeControl);
+  } else if (isNegotiationIntent(intent.kind)) {
+    assertStartedNegotiationAdmission(state, intent);
+  } else {
+    assertStartedPregameAdmission(state, intent, event.at);
+  }
+}
+
+function assertStartedPreparedCore(state: GameState, event: AdjudicationStartedEvent): void {
+  if (event.prepared.gameId !== state.gameId) throw new GameError('AdjudicationStarted prepared gameId mismatch');
+  if (event.prepared.operationId !== event.operationId) throw new GameError('AdjudicationStarted operationId mismatch');
+  if (event.prepared.baseRevision !== state.eventSequence) throw new GameError('AdjudicationStarted prepared baseRevision mismatch');
+  if (event.prepared.baseFen !== state.position.fen()) throw new GameError('AdjudicationStarted baseFen mismatch');
+  if (event.prepared.variant !== state.variant) throw new GameError('AdjudicationStarted variant mismatch');
+  if (event.rulesVersion !== event.prepared.rulesVersion) throw new GameError('AdjudicationStarted rulesVersion mismatch');
+}
+
+function assertStartedPolicyMatch(state: GameState, event: AdjudicationStartedEvent): void {
+  if (event.clockPolicy !== event.prepared.clockPolicy) {
+    throw new GameError('AdjudicationStarted clockPolicy mismatch with prepared operation');
+  }
+  if (state.clockPolicy !== null && event.clockPolicy !== state.clockPolicy) {
+    throw new GameError(`Cannot change or downgrade clock policy: active is "${state.clockPolicy}", event has "${String(event.clockPolicy)}"`);
+  }
+  if (event.clockPolicy !== undefined) {
+    validateClockPolicy(event.clockPolicy);
+  }
+}
+
+function assertStoppedLineage(stoppedClock: GameStoppedClockState, prepared: PreparedOperation): void {
+  if (typeof prepared.parentStopId !== 'string' || prepared.parentStopId !== stoppedClock.stopId) {
+    throw new GameError(`AdjudicationStarted prepared parentStopId mismatch: expected "${stoppedClock.stopId}", got "${String(prepared.parentStopId)}"`);
+  }
+  if (typeof prepared.turnLineageId !== 'string' || prepared.turnLineageId !== stoppedClock.turnLineageId) {
+    throw new GameError(`AdjudicationStarted prepared turnLineageId mismatch: expected "${stoppedClock.turnLineageId}", got "${String(prepared.turnLineageId)}"`);
+  }
+}
+
+function assertReleasedLineage(releasedClock: GameReleasedClockState, prepared: PreparedOperation): void {
+  if (typeof prepared.parentStopId !== 'string' || prepared.parentStopId !== releasedClock.consumedStopId) {
+    throw new GameError(`AdjudicationStarted prepared parentStopId mismatch: expected "${releasedClock.consumedStopId}", got "${String(prepared.parentStopId)}"`);
+  }
+  if (typeof prepared.turnLineageId !== 'string' || prepared.turnLineageId !== releasedClock.turnLineageId) {
+    throw new GameError(`AdjudicationStarted prepared turnLineageId mismatch: expected "${releasedClock.turnLineageId}", got "${String(prepared.turnLineageId)}"`);
+  }
+}
+
+function assertUnstoppedLineage(gameId: string, ply: number, prepared: PreparedOperation): void {
+  if (prepared.parentStopId !== null && prepared.parentStopId !== undefined) {
+    throw new GameError('AdjudicationStarted prepared parentStopId must be null for non-stopped game');
+  }
+  if (prepared.turnLineageId !== null && prepared.turnLineageId !== undefined) {
+    const canonical = deriveTurnLineageId(gameId, ply);
+    if (typeof prepared.turnLineageId !== 'string' || prepared.turnLineageId !== canonical) {
+      throw new GameError('AdjudicationStarted prepared turnLineageId must be null, undefined, or canonical for non-stopped game');
+    }
+  }
+}
+
+function resolveRemainingNoShow(state: GameState, at: number): number | null {
+  if (state.stoppedClock !== null) {
+    return state.stoppedClock.basis.noShowRemainderMs;
+  }
+  if (state.releasedClock !== null) {
+    const rel = state.releasedClock;
+    if (rel.noShowRunningSince !== null && rel.basis.noShowRemainderMs !== null) {
+      return Math.max(0, rel.basis.noShowRemainderMs - Math.max(0, at - rel.noShowRunningSince));
+    }
+    return rel.basis.noShowRemainderMs;
+  }
+  return state.noShowAt !== null ? Math.max(0, state.noShowAt - at) : null;
+}
+
+function assertStartedLineageAndBounds(state: GameState, event: AdjudicationStartedEvent): void {
+  if (state.stoppedClock !== null) {
+    assertStoppedLineage(state.stoppedClock, event.prepared);
+  } else if (state.releasedClock !== null) {
+    assertReleasedLineage(state.releasedClock, event.prepared);
+  } else {
+    assertUnstoppedLineage(state.gameId, state.ply, event.prepared);
+  }
+  const remainingNoShow = resolveRemainingNoShow(state, event.at);
+  validateIntegerPolicyInputs(state.timeControl, state.clock.remaining, remainingNoShow);
+}
+
+function assertStartedPrepared(state: GameState, event: AdjudicationStartedEvent): void {
+  assertStartedPreparedCore(state, event);
+  assertStartedPolicyMatch(state, event);
+  if (event.clockPolicy === 'observed-release-v1') {
+    assertStartedLineageAndBounds(state, event);
+  }
+  assertStartedIntentAdmissible(state, event);
+}
+
+function assertStartedMetadata(state: GameState, event: AdjudicationStartedEvent): void {
+  assertStartedTopLevel(state, event);
+  assertStartedPrepared(state, event);
+}
+
+function reduceAdjudicationStarted(state: GameState, event: AdjudicationStartedEvent): GameState {
+  assertStartedMetadata(state, event);
+  const { frozenClock, elapsed } = freezeClock(state.clock, state.position.turn, event.at, state.timeControl);
+  const remainingNoShow = resolveRemainingNoShow(state, event.at);
+
+  const basis = deriveStartedBasis({
+    clockPolicy: event.clockPolicy,
+    stoppedClock: state.stoppedClock,
+    releasedClock: state.releasedClock,
+    timeControl: state.timeControl,
+    turnStartedAt: state.clock.turnStartedAt,
+    remainingBalances: state.clock.remaining,
+    sideToMove: state.position.turn,
+    ply: state.ply,
+    atA: event.at,
+    noShowRemainderMs: remainingNoShow,
+  });
+
+  const publicFrozenClock: ClockState = basis !== null
+    ? Object.freeze({
+        remaining: computeDisplayBalances(basis, event.at, state.timeControl),
+        turnStartedAt: null,
+      })
+    : frozenClock;
+  const thinkingElapsed = basis !== null ? basis.elapsedThinkingMs : elapsed;
+  const pendingNoShowRemainder = basis !== null ? basis.noShowRemainderMs : remainingNoShow;
+
+  const pending: PendingAdjudicationState = deepClonePendingState({
+    operationId: event.operationId,
+    baseRevision: event.baseRevision,
+    startedSeq: state.eventSequence + 1,
+    acceptedAt: event.at,
+    rulesVersion: event.rulesVersion,
+    prepared: event.prepared,
+    originalClock: state.clock,
+    thinkingElapsedAtA: thinkingElapsed,
+    originalNoShowAt: state.noShowAt,
+    remainingNoShowTimeAtA: pendingNoShowRemainder,
+    cursor: 0,
+    expectedEffects: [],
+    ...(event.clockPolicy ? { clockPolicy: event.clockPolicy } : {}),
+    ...(basis ? { originalBasis: basis } : {}),
+  });
+
+  return {
+    ...state,
+    clock: publicFrozenClock,
+    phase: 'proving',
+    isBlocked: true,
+    adjudication: pending,
+    eventSequence: state.eventSequence + 1,
+  };
+}
+
+function reduceAdjudicationResolved(state: GameState, event: AdjudicationResolvedEvent): GameState {
+  if (state.phase !== 'proving' || !state.adjudication) {
+    throw new GameError(`Cannot resolve adjudication in phase "${state.phase}"`);
+  }
+  const clockPolicy = state.adjudication.clockPolicy ?? state.clockPolicy;
+  const context: ResolutionContext = {
+    pending: state.adjudication,
+    basePosition: state.position,
+    variant: state.variant,
+    timeControl: state.timeControl,
+    repetition: state.repetition,
+    drawOffer: state.drawOffer,
+    ready: state.ready,
+    source: state.source,
+    noShowAt: state.noShowAt,
+    ply: state.ply,
+    ...(clockPolicy ? { clockPolicy } : {}),
+    stoppedClock: state.stoppedClock,
+  };
+
+  const derivedEffects = validateRecordedResolution(context, event);
+
+  if (derivedEffects.length === 0) {
+    const kind = state.adjudication.prepared.intent.kind;
+    if (kind === 'move' || kind === 'resign') {
+      throw new GameError(`No-op resolution cannot swallow ${kind}`);
+    }
+    const intermediate: GameState = {
+      ...state,
+      eventSequence: state.eventSequence + 1,
+      lastResolutionAt: event.at,
+    };
+    return finalizeCompletion(intermediate, state.adjudication, event.at, []);
+  }
+
+  return {
+    ...state,
+    phase: 'settling',
+    isBlocked: true,
+    adjudication: Object.freeze({
+      ...state.adjudication,
+      resolutionAt: event.at,
+      cursor: 0,
+      expectedEffects: derivedEffects,
+    }),
+    eventSequence: state.eventSequence + 1,
+    lastResolutionAt: event.at,
+  };
+}
+
 export function canMate(fen: string, color: Color, variant: Variant = 'standard'): boolean {
   switch (variant) {
     case 'kingofthehill':
     case 'racingkings':
     case 'crazyhouse':
     case 'horde':
-      // Validates FEN syntax preserving non-standard error behavior.
       parseFen(fen, variant);
       return true;
 

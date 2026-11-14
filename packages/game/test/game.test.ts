@@ -36,7 +36,7 @@ test('incremental event prefixes agree with full replay without mutating the res
     assert.deepEqual(prefix.snapshot(), replay.snapshot());
     assert.equal(prefix.status.over, i === result.events.length - 1);
   }
-  assert.equal(created.game.snapshot(), before);
+  assert.deepEqual(created.game.snapshot(), before);
   assert.equal(created.game.status.over, false);
   assert.deepEqual(prefix.snapshot(), result.game.snapshot());
 });

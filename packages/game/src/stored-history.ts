@@ -86,6 +86,7 @@ export function replayStoredHistory(
   const game = Game[FOLD_STORED](
     events,
     (index, state, event) => {
+      if (state.clockPolicy !== null) return null;
       const after = admitPre127Atomic(rows, index, state, event);
       if (after !== null) historicalPly = event.ply;
       return after;

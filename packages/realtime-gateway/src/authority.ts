@@ -1203,7 +1203,7 @@ export class GameAuthority {
           fenHash: fenHash(prefix.fen),
           clock: { w: ev.remaining.w, b: ev.remaining.b },
           serverTs: ev.at,
-          legalMoves: prefix.status.over ? {} : legalMovesOf(prefix.snapshot().position),
+          legalMoves: prefix.status.over || prefix.isBlocked ? {} : legalMovesOf(prefix.snapshot().position),
         };
       case 'GameEnded':
         return {
@@ -1244,7 +1244,7 @@ export class GameAuthority {
       status: snap.status,
       drawOffer: snap.drawOffer,
       moves: snap.moves.map((m) => ({ ply: m.ply, uci: m.uci, san: m.san, by: m.by })),
-      legalMoves: snap.status.over ? {} : legalMovesOf(snap.position),
+      legalMoves: snap.status.over || game.isBlocked ? {} : legalMovesOf(snap.position),
       chess960StartId: snap.chess960StartId,
       ready: snap.source === null ? null : { ...snap.ready },
     };
