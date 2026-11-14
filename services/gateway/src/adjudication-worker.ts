@@ -86,6 +86,10 @@ export interface AdjudicationWorkerOptions {
    * the event loop.
    */
   readonly concurrency?: number;
+  /**
+   * Maximum held proof claims permitted concurrently on this worker (default 8, max 100).
+   */
+  readonly maxHeldProofs?: number;
   /** Monotonic milliseconds for proof time slices (default `performance.now`). */
   readonly monotonic?: () => number;
   /** Delay between passes once nothing more is waiting (default 250 ms). */
@@ -122,6 +126,7 @@ export interface AdjudicationPass {
 
 const MAX_CONTROLLER_CAPACITY = 100;
 const DEFAULT_CONCURRENCY = 4;
+const DEFAULT_MAX_HELD_PROOFS = 8;
 
 interface InFlightJob {
   readonly gameId: string;
@@ -151,6 +156,7 @@ export class AdjudicationWorker {
   readonly #pageSize: number;
   readonly #maxBackoffMs: number;
   readonly #concurrency: number;
+  readonly #maxHeldProofs: number;
   readonly #newIntent: () => ClaimIntent;
   readonly #now: () => number;
   #stopped = true;
@@ -175,7 +181,7 @@ export class AdjudicationWorker {
   /** Stops released right after their own settlement during the current pass. */
   #releasedNow = 0;
 
-  // Clean-code-guard narrow intentional exception: Constructor contains 12 decisions (11 declarative ?? defaults
+  // Clean-code-guard narrow intentional exception: Constructor contains 13 decisions (12 declarative ?? defaults
   // plus baseline configuration assignment without behavioral branching). Preserves standard configuration pattern.
   // Revisit trigger: extract an options-resolution record if options exceed 15 or behavioral branching is introduced.
   constructor(private readonly options: AdjudicationWorkerOptions) {
@@ -186,6 +192,11 @@ export class AdjudicationWorker {
     this.#pageSize = positive(options.pageSize ?? 20, 'pageSize');
     this.#maxBackoffMs = positive(options.maxBackoffMs ?? 30_000, 'maxBackoffMs');
     this.#concurrency = positiveBounded(options.concurrency ?? DEFAULT_CONCURRENCY, 'concurrency', MAX_CONTROLLER_CAPACITY);
+    this.#maxHeldProofs = positiveBounded(
+      options.maxHeldProofs ?? DEFAULT_MAX_HELD_PROOFS,
+      'maxHeldProofs',
+      MAX_CONTROLLER_CAPACITY,
+    );
     this.#newIntent = options.newIntent ?? (() => PgAdjudicationStore.newClaimIntent());
     this.#now = options.now ?? (() => Date.now());
     this.#releaseGraceMs = nonnegative(options.releaseGraceMs ?? 1_000, 'releaseGraceMs');
@@ -315,8 +326,9 @@ export class AdjudicationWorker {
       };
 
       failed += await this.#sweepHeld(tally);
-      const freeCapacity = Math.max(0, MAX_CONTROLLER_CAPACITY - this.#inFlight.size);
-      const freshResult = await this.#admitFresh(freeCapacity, tally);
+      const capacityBound = Math.min(this.#maxHeldProofs, MAX_CONTROLLER_CAPACITY);
+      const freeCapacity = Math.max(0, capacityBound - this.#inFlight.size);
+      const freshResult = await this.#admitFresh(freeCapacity, capacityBound, tally);
       failed += freshResult.failed;
 
       const stopsResult = await this.#sweepStops();
@@ -360,6 +372,7 @@ export class AdjudicationWorker {
 
   async #admitFresh(
     freeCapacity: number,
+    capacityBound: number,
     onOutcome: (outcome: 'settled' | 'skipped' | 'pending') => void,
   ): Promise<{ failed: number; claimLimit: number; claimableCount: number }> {
     const claimLimit = Math.min(this.#pageSize, freeCapacity);
@@ -371,18 +384,27 @@ export class AdjudicationWorker {
     let failed = 0;
     let reservedSlots = 0;
     await this.#eachBounded(fresh, async (op) => {
-      if (this.#inFlight.size + reservedSlots >= MAX_CONTROLLER_CAPACITY) {
+      if (this.#inFlight.size + reservedSlots >= capacityBound) {
         onOutcome('skipped');
         return;
       }
       reservedSlots += 1;
+      let slotTransferred = false;
+      const onClaimed = (): void => {
+        if (!slotTransferred) {
+          slotTransferred = true;
+          reservedSlots -= 1;
+        }
+      };
       try {
-        onOutcome(await this.#adjudicate(op.gameId, op.operationId, op.generation));
+        onOutcome(await this.#adjudicate(op.gameId, op.operationId, op.generation, onClaimed));
       } catch (error) {
         failed += 1;
         this.#fail('Adjudication failed for an operation; it is retried once its lease lapses', error, op);
       } finally {
-        reservedSlots -= 1;
+        if (!slotTransferred) {
+          reservedSlots -= 1;
+        }
       }
     });
     return { failed, claimLimit, claimableCount: claimable.length };
@@ -432,7 +454,12 @@ export class AdjudicationWorker {
     await Promise.all(Array.from({ length: count }, lane));
   }
 
-  async #adjudicate(gameId: string, operationId: string, generation: string): Promise<'settled' | 'skipped' | 'pending'> {
+  async #adjudicate(
+    gameId: string,
+    operationId: string,
+    generation: string,
+    onClaimed?: () => void,
+  ): Promise<'settled' | 'skipped' | 'pending'> {
     const claimed = await this.#claim(gameId, operationId, generation);
     if (claimed === null) return 'skipped';
     if (this.#halting) return 'skipped';
@@ -443,6 +470,7 @@ export class AdjudicationWorker {
       jobInitialized: false,
     };
     this.#inFlight.set(operationId, heldJob);
+    onClaimed?.();
     this.#scheduleRenewal();
     return this.#continue(heldJob);
   }
