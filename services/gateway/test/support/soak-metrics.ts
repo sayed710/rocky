@@ -11,6 +11,8 @@
  * - Bounded retention for tail latency investigation
  */
 
+import assert from 'node:assert/strict';
+
 export interface SoakConfig {
   readonly seed: number;
   readonly games: number;
@@ -85,6 +87,7 @@ export interface ClaimEvidenceInput {
 export interface PhaseEvidence {
   admissionStartMs: number;
   admissionDurationMs: number;
+  hasBoundStart?: boolean;
   readonly firstClaimAtMs?: number;
   readonly firstExecutorId?: string;
   readonly lastClaimAtMs?: number;
@@ -350,6 +353,7 @@ interface ActiveOperation {
   resultPly: number;
   admissionStartAt: number;
   admissionDurationMs: number;
+  hasBoundStart: boolean;
   readonly claims: ClaimTimelineRecord[];
   isTakeover: boolean;
   claimGapWallMs: number;
@@ -505,11 +509,76 @@ interface PendingMoveRecord {
   isAmbiguous?: boolean;
 }
 
+export interface StartAdjudicationRequestInput {
+  readonly gameId: string;
+  readonly operationId: string;
+  readonly basePly: number;
+  readonly atMs: number;
+  readonly uci?: string;
+}
+
+interface UnresolvedStartEvidence {
+  readonly gameId: string;
+  readonly operationId: string;
+  readonly basePly: number;
+  readonly entryAtMs: number;
+  readonly uci?: string;
+  readonly positionContext?: MovePositionContext;
+}
+
+export interface StateViewSnapshotLike {
+  readonly fen: string;
+  readonly stateRevision: number;
+  readonly adjudication?: 'proving' | 'stopped';
+  readonly ply: number;
+  readonly turn: string;
+  readonly clock: { readonly w: number; readonly b: number };
+  readonly turnStartedAt: number | null;
+  readonly status: { readonly over: boolean };
+  readonly drawOffer: string | null;
+}
+
+export interface ReplayedGameLike {
+  readonly fen: string;
+  readonly adjudication: unknown;
+  readonly ply: number;
+  readonly turn: string;
+  readonly status: { readonly over: boolean };
+  readonly drawOffer: string | null;
+  snapshot(): {
+    readonly clock: {
+      readonly remaining: { readonly w: number; readonly b: number };
+      readonly turnStartedAt: number | null;
+    };
+  };
+}
+
+export function assertStateViewMatchesReplay(
+  view: StateViewSnapshotLike,
+  replayed: ReplayedGameLike,
+  loggedEventsCount: number,
+): void {
+  assert.equal(view.fen, replayed.fen, 'owner copy equals replay fen');
+  assert.equal(view.stateRevision, loggedEventsCount - 1, 'owner stateRevision equals logged head seq');
+  assert.equal(view.adjudication, undefined, 'released or ended, never stuck');
+  assert.equal(replayed.adjudication, null, 'replayed adjudication must be null');
+  assert.equal(view.ply, replayed.ply, 'owner ply equals replay ply');
+  assert.equal(view.turn, replayed.turn, 'owner turn equals replay turn');
+  assert.deepEqual(view.status, replayed.status, 'owner status equals replay status');
+  assert.equal(view.drawOffer, replayed.drawOffer, 'owner drawOffer equals replay drawOffer');
+
+  const snap = replayed.snapshot();
+  assert.equal(view.clock.w, snap.clock.remaining.w, 'owner white clock matches replay snapshot');
+  assert.equal(view.clock.b, snap.clock.remaining.b, 'owner black clock matches replay snapshot');
+  assert.equal(view.turnStartedAt, snap.clock.turnStartedAt, 'owner turnStartedAt matches replay snapshot');
+}
+
 export class SoakMetricsTracker {
   readonly #pendingMoves = new Map<string, PendingMoveRecord>();
   readonly #observedPlys = new Set<string>();
   readonly #observedMovesByGame = new Map<string, ObservedMoveRecord[]>();
   readonly #activeOps = new Map<string, ActiveOperation>();
+  readonly #unresolvedStarts = new Map<string, UnresolvedStartEvidence>();
   readonly #settledAwaitingRelease = new Map<string, TailSample>();
   readonly #completedSamples = new Map<string, TailSample>();
   readonly #completedOps = new Set<string>();
@@ -590,13 +659,6 @@ export class SoakMetricsTracker {
     if (existing) {
       existing.endMs = atMs;
     }
-  }
-
-  #findPositionContext(gameId: string, basePly: number): MovePositionContext | undefined {
-    return (
-      this.#gamePositionContexts.get(`${gameId}:${basePly}`) ??
-      this.#pendingMoves.get(`${gameId}:${basePly + 1}`)?.positionContext
-    );
   }
 
   onMovePending(gameId: string, basePly: number, atMs: number, context?: MovePositionContext): void {
@@ -753,9 +815,8 @@ export class SoakMetricsTracker {
     moves?: readonly DurableMoveLedgerEntry[],
   ): number | undefined {
     let lastLatency: number | undefined;
-    const ledgerMap = moves && moves.length > 0
-      ? new Map(moves.map((m) => [m.ply, m.uci]))
-      : undefined;
+    const hasLedger = moves !== undefined;
+    const ledgerMap = hasLedger ? new Map(moves.map((m) => [m.ply, m.uci])) : undefined;
 
     for (const key of [...this.#pendingMoves.keys()]) {
       const pending = this.#pendingMoves.get(key);
@@ -764,13 +825,19 @@ export class SoakMetricsTracker {
       }
 
       let matchedUci: string | undefined;
-      if (pending.uci !== undefined) {
-        if (!ledgerMap) continue;
-        const durableUci = ledgerMap.get(pending.expectedPly);
-        if (durableUci !== pending.uci) continue;
+      if (hasLedger) {
+        if (!ledgerMap!.has(pending.expectedPly)) {
+          continue;
+        }
+        const durableUci = ledgerMap!.get(pending.expectedPly);
+        if (pending.uci !== undefined && durableUci !== pending.uci) {
+          continue;
+        }
         matchedUci = durableUci;
-      } else if (ledgerMap) {
-        matchedUci = ledgerMap.get(pending.expectedPly);
+      } else {
+        if (pending.uci !== undefined) {
+          continue;
+        }
       }
 
       this.#pendingMoves.delete(key);
@@ -852,6 +919,52 @@ export class SoakMetricsTracker {
     }
   }
 
+  get unresolvedStartsCount(): number {
+    return this.#unresolvedStarts.size;
+  }
+
+  recordStartRequest(req: StartAdjudicationRequestInput): void {
+    if (this.#unresolvedStarts.has(req.operationId)) {
+      return;
+    }
+
+    const expectedPly = req.basePly + 1;
+    let positionContext: MovePositionContext | undefined;
+    if (req.uci !== undefined) {
+      const candidateKey = `${req.gameId}:${expectedPly}:${req.uci}`;
+      const candidate = this.#pendingMoves.get(candidateKey);
+      if (candidate?.positionContext && candidate.positionContext.uci === req.uci) {
+        positionContext = candidate.positionContext;
+      }
+    } else {
+      const contextless = this.#pendingMoves.get(`${req.gameId}:${expectedPly}`);
+      if (contextless && contextless.uci === undefined) {
+        positionContext = contextless.positionContext;
+      }
+    }
+
+    if (this.#unresolvedStarts.size >= 512) {
+      const oldest = this.#unresolvedStarts.keys().next().value;
+      if (oldest) this.#unresolvedStarts.delete(oldest);
+    }
+    this.#unresolvedStarts.set(req.operationId, {
+      gameId: req.gameId,
+      operationId: req.operationId,
+      basePly: req.basePly,
+      entryAtMs: req.atMs,
+      uci: req.uci,
+      positionContext,
+    });
+  }
+
+  clearUnresolvedStart(operationId: string): void {
+    this.#unresolvedStarts.delete(operationId);
+  }
+
+  recordStartNoop(operationId: string): void {
+    this.clearUnresolvedStart(operationId);
+  }
+
   recordStartAttempt(durationMs: number, basePly: number): void {
     const bucket = plyBucket(basePly);
     this.#startDurationsByBucket.get(bucket)!.record(durationMs);
@@ -859,15 +972,17 @@ export class SoakMetricsTracker {
   }
 
   recordStartAdmitted(gameId: string, operationId: string, basePly: number, durationMs: number): void {
+    const unresolved = this.#unresolvedStarts.get(operationId);
+    if (unresolved) {
+      this.#unresolvedStarts.delete(operationId);
+    }
     const op = this.#activeOps.get(operationId);
     if (op) {
-      op.admissionStartAt = performance.now() - durationMs;
-      op.admissionDurationMs = durationMs;
-      op.basePly = basePly;
-      op.resultPly = basePly + 1;
-      const positionContext = this.#findPositionContext(gameId, basePly);
-      if (positionContext && !op.positionContext) {
-        op.positionContext = positionContext;
+      if (op.admissionDurationMs === 0) {
+        op.admissionDurationMs = durationMs;
+      }
+      if (!op.positionContext && unresolved?.positionContext) {
+        op.positionContext = unresolved.positionContext;
       }
       return;
     }
@@ -879,9 +994,12 @@ export class SoakMetricsTracker {
     ) {
       const settledSample = this.#completedSamples.get(operationId) ?? this.#settledAwaitingRelease.get(operationId);
       if (settledSample && settledSample.evidence.admissionDurationMs === 0) {
-        const startMs = performance.now() - durationMs;
         settledSample.evidence.admissionDurationMs = +(durationMs.toFixed(1));
+        const startMs = settledSample.evidence.hasBoundStart
+          ? settledSample.evidence.admissionStartMs
+          : (unresolved ? unresolved.entryAtMs : performance.now() - durationMs);
         settledSample.evidence.admissionStartMs = +(startMs.toFixed(1));
+        settledSample.evidence.hasBoundStart = true;
         const endWall = settledSample.evidence.releaseCommittedAtMs ?? settledSample.evidence.settleCommittedAtMs;
         if (endWall !== undefined) {
           settledSample.wallDurationMs = +(
@@ -895,14 +1013,17 @@ export class SoakMetricsTracker {
       return;
     }
 
-    const positionContext = this.#findPositionContext(gameId, basePly);
+    const positionContext = unresolved?.positionContext;
+    const admissionStartAt = unresolved ? unresolved.entryAtMs : performance.now() - durationMs;
+    const effectiveBasePly = unresolved ? unresolved.basePly : basePly;
     this.#activeOps.set(operationId, {
       operationId,
       gameId,
-      basePly,
-      resultPly: basePly + 1,
-      admissionStartAt: performance.now() - durationMs,
+      basePly: effectiveBasePly,
+      resultPly: effectiveBasePly + 1,
+      admissionStartAt,
       admissionDurationMs: durationMs,
+      hasBoundStart: true,
       claims: [],
       isTakeover: false,
       claimGapWallMs: 0,
@@ -922,15 +1043,19 @@ export class SoakMetricsTracker {
     const now = performance.now();
     let op = this.#activeOps.get(claim.operationId);
     if (!op) {
-      const basePly = this.getGameBasePly(claim.gameId);
-      const positionContext = this.#findPositionContext(claim.gameId, basePly);
+      const unresolved = this.#unresolvedStarts.get(claim.operationId);
+      if (unresolved) {
+        this.#unresolvedStarts.delete(claim.operationId);
+      }
+      const basePly = unresolved ? unresolved.basePly : this.getGameBasePly(claim.gameId);
       op = {
         operationId: claim.operationId,
         gameId: claim.gameId,
         basePly,
         resultPly: basePly + 1,
-        admissionStartAt: now,
+        admissionStartAt: unresolved ? unresolved.entryAtMs : now,
         admissionDurationMs: 0,
+        hasBoundStart: unresolved !== undefined,
         claims: [],
         isTakeover: false,
         claimGapWallMs: 0,
@@ -942,7 +1067,7 @@ export class SoakMetricsTracker {
         questionKind: 'unknown/inferred',
         settleAttempts: 0,
         settleDbWallMs: 0,
-        positionContext,
+        positionContext: unresolved?.positionContext,
       };
       this.#activeOps.set(claim.operationId, op);
     }
@@ -1026,6 +1151,7 @@ export class SoakMetricsTracker {
       evidence: {
         admissionStartMs: +(op.admissionStartAt.toFixed(1)),
         admissionDurationMs: +(op.admissionDurationMs.toFixed(1)),
+        hasBoundStart: op.hasBoundStart,
         firstClaimAtMs: firstClaim ? +(firstClaim.claimedAtMonotonicMs.toFixed(1)) : undefined,
         firstExecutorId: firstClaim?.executorId,
         lastClaimAtMs: lastClaim ? +(lastClaim.claimedAtMonotonicMs.toFixed(1)) : undefined,
@@ -1050,6 +1176,7 @@ export class SoakMetricsTracker {
     this.#topProofCpu.record(tailSample);
     this.#settledCommittedCount++;
     this.#activeOps.delete(operationId);
+    this.#unresolvedStarts.delete(operationId);
 
     if (this.#settledAwaitingRelease.size >= 256) {
       const oldest = this.#settledAwaitingRelease.keys().next().value;

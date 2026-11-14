@@ -15,8 +15,11 @@ import {
   SoakMetricsTracker,
   TopKCollector,
   WorkerLossBarrier,
+  assertStateViewMatchesReplay,
   type DurableMoveLedgerEntry,
   type MovePositionContext,
+  type ReplayedGameLike,
+  type StateViewSnapshotLike,
 } from './support/soak-metrics.js';
 
 test('parseSoakConfig validates positive integers and rejects invalid/blank env', () => {
@@ -400,6 +403,7 @@ test('SoakMetricsTracker retains exact position and candidate move context in ta
   };
 
   tracker.onMovePending(game, 4, 1000, context);
+  tracker.recordStartRequest({ gameId: game, operationId: op, basePly: 4, atMs: 1000, uci: 'g1f3' });
   tracker.recordStartAttempt(5, 4);
   tracker.recordStartAdmitted(game, op, 4, 5);
   tracker.recordClaim({
@@ -463,7 +467,9 @@ test('SoakMetricsTracker isolates position context without cross-game or cross-p
   tracker.onMovePending('game-A', 2, 1000, ctxA);
   tracker.onMovePending('game-B', 6, 1010, ctxB);
 
+  tracker.recordStartRequest({ gameId: 'game-A', operationId: 'op-A-1', basePly: 2, atMs: 1000, uci: 'c2c4' });
   tracker.recordStartAdmitted('game-A', 'op-A-1', 2, 5);
+  tracker.recordStartRequest({ gameId: 'game-B', operationId: 'op-B-1', basePly: 6, atMs: 1010, uci: 'd7d5' });
   tracker.recordStartAdmitted('game-B', 'op-B-1', 6, 6);
 
   tracker.recordSettleAttempt('op-A-1', 4);
@@ -514,6 +520,7 @@ test('SoakMetricsTracker replaces position context on failed retry without misma
   };
   tracker.onMovePending(game, 10, 1050, retryContext);
 
+  tracker.recordStartRequest({ gameId: game, operationId: 'op-retry-ok', basePly: 10, atMs: 1050, uci: 'd2d4' });
   tracker.recordStartAdmitted(game, 'op-retry-ok', 10, 5);
   tracker.recordSettleAttempt('op-retry-ok', 4);
   tracker.recordSettlementCommitted('op-retry-ok');
@@ -544,6 +551,7 @@ test('SoakMetricsTracker updates provisional early-claim op with true admission 
   };
 
   tracker.onMovePending(game, 0, 1000, context);
+  tracker.recordStartRequest({ gameId: game, operationId: op, basePly: 0, atMs: 1000, uci: 'e2e4' });
 
   // Early claim arrives before startAdjudication returns
   tracker.recordClaim({
@@ -622,6 +630,7 @@ test('SoakMetricsTracker bounds and cleans up retained position context', () => 
 
   // 3. Settle cleans up context
   tracker.onMovePending('game-clean', 0, 1050, ctx);
+  tracker.recordStartRequest({ gameId: 'game-clean', operationId: 'op-clean-1', basePly: 0, atMs: 1050, uci: 'e2e4' });
   tracker.recordStartAdmitted('game-clean', 'op-clean-1', 0, 10);
   tracker.recordSettleAttempt('op-clean-1', 5);
   tracker.recordSettlementCommitted('op-clean-1');
@@ -1507,4 +1516,376 @@ test('SoakMetricsTracker records move latency exactly once on missed broadcast f
   assert.equal(missingContextLatency, undefined, 'recovery without pending move context must not match or fabricate sample');
   assert.equal(tracker.matchedMovesCount, 1, 'matched count must remain 1');
   assert.equal(tracker.getObservedMoveCount(game), 1, 'observed move records must not include ply 2 without context');
+});
+
+test('SoakMetricsTracker preserves original candidate context and start time across lost reply and subsequent retry when claim arrives for earlier attempt', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-ambiguous-retry-claim';
+
+  const contextA: MovePositionContext = {
+    fen: 'fen-A',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 1234,
+    attempt: 0,
+    basePly: 0,
+  };
+  const contextB: MovePositionContext = {
+    fen: 'fen-A',
+    uci: 'd2d4',
+    gameIndex: 0,
+    gameSeed: 1234,
+    attempt: 1,
+    basePly: 0,
+  };
+
+  // 1. Move A registered pending and request entered at t = 1000
+  tracker.onMovePending(game, 0, 1000, contextA);
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-A',
+    basePly: 0,
+    atMs: 1000,
+    uci: 'e2e4',
+  });
+  assert.equal(tracker.unresolvedStartsCount, 1);
+
+  // 2. Reply is lost / ambiguous failure on move A
+  tracker.onMoveFailed(game, 0, 'ambiguous_commit', 'e2e4');
+
+  // 3. Retry B registered pending and request entered at t = 1400
+  tracker.onMovePending(game, 0, 1400, contextB);
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-B',
+    basePly: 0,
+    atMs: 1400,
+    uci: 'd2d4',
+  });
+  assert.equal(tracker.unresolvedStartsCount, 2);
+
+  // 4. Claim arrives for op-A at t = 2000 (worker picked up op-A from DB)
+  tracker.recordClaim({
+    gameId: game,
+    operationId: 'op-A',
+    executorId: 'worker-1',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+  assert.equal(tracker.unresolvedStartsCount, 1, 'op-A promoted from unresolved starts');
+
+  // 5. op-A completes proof and settles
+  tracker.recordStep('op-A', 50, 40, 1);
+  tracker.recordRoles('op-A', ['white'], 'draw');
+  tracker.recordSettleAttempt('op-A', 10);
+  tracker.recordSettlementCommitted('op-A');
+  assert.equal(tracker.unresolvedStartsCount, 1);
+
+  // 6. Verify top proving wall preserved contextA (e2e4, attempt 0) and original admissionStartMs = 1000
+  const topWall = tracker.getTopProvingWall();
+  assert.equal(topWall.length, 1);
+  const sampleA = topWall[0]!;
+  assert.equal(sampleA.operationId, 'op-A');
+  assert.equal(sampleA.positionContext?.uci, 'e2e4', 'must preserve original candidate UCI e2e4, not retry d2d4');
+  assert.equal(sampleA.positionContext?.attempt, 0, 'must preserve attempt 0, not retry attempt 1');
+  assert.equal(sampleA.evidence.admissionStartMs, 1000, 'must preserve original request entry atMs');
+  assert.equal(sampleA.evidence.admissionDurationMs, 0, 'lost reply has 0 direct admission duration');
+});
+
+test('SoakMetricsTracker preserves proving wall duration from request entry when claim arrives after delayed admission', (t) => {
+  let currentTime = 1000;
+  t.mock.method(performance, 'now', () => currentTime);
+
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-delayed-claim-wall';
+
+  const context: MovePositionContext = {
+    fen: 'fen-start',
+    uci: 'g1f3',
+    gameIndex: 1,
+    gameSeed: 5678,
+    attempt: 0,
+    basePly: 2,
+  };
+
+  // 1. Move registered pending and startAdjudication entered at entry time (t = 1000)
+  tracker.onMovePending(game, 2, currentTime, context);
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-delayed',
+    basePly: 2,
+    atMs: currentTime,
+    uci: 'g1f3',
+  });
+
+  // 2. Claim arrives later at claim time (t = 2500) (delayed worker claim, reply lost/timeout)
+  currentTime = 2500;
+  tracker.recordClaim({
+    gameId: game,
+    operationId: 'op-delayed',
+    executorId: 'worker-2',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+
+  // 3. Settlement commits at settle time (t = 3000)
+  currentTime = 3000;
+  tracker.recordStep('op-delayed', 100, 80, 2);
+  tracker.recordSettleAttempt('op-delayed', 15);
+  tracker.recordSettlementCommitted('op-delayed');
+
+  const topWall = tracker.getTopProvingWall();
+  assert.equal(topWall.length, 1);
+  const sample = topWall[0]!;
+  assert.equal(sample.operationId, 'op-delayed');
+  assert.equal(sample.evidence.admissionStartMs, 1000, 'admissionStartMs must be request entry monotonic time');
+  assert.equal(sample.evidence.firstClaimAtMs, 2500, 'firstClaimAtMs must record claim time');
+
+  const expectedDurationFromEntry = 3000 - 1000; // 2000
+  const durationFromClaim = 3000 - 2500; // 500
+  assert.equal(sample.wallDurationMs, expectedDurationFromEntry, 'wall duration measured from entry');
+  assert.notEqual(sample.wallDurationMs, durationFromClaim, 'using claim time as start must fail');
+  assert.ok(sample.wallDurationMs > durationFromClaim, 'proving wall from entry exceeds proving wall from claim');
+  assert.equal(sample.positionContext?.uci, 'g1f3');
+});
+
+test('SoakMetricsTracker rejects contextless pending candidate when supplied ledger omits pending ply', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-unrelated-ply-ledger';
+
+  // 1. Contextless pending candidate registered for expected ply 1
+  tracker.onMovePending(game, 0, 1000);
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // 2. State broadcast supplied with empty ledger []
+  const matchEmpty = tracker.onStateBroadcast(game, 1, 1100, []);
+  assert.equal(matchEmpty, undefined, 'empty ledger must reject contextless pending move');
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // 3. State broadcast supplied with unrelated ply ledger (ply 5 present, ply 1 missing)
+  const matchUnrelated = tracker.onStateBroadcast(game, 5, 1200, [{ ply: 5, uci: 'g1f3' }]);
+  assert.equal(matchUnrelated, undefined, 'ledger omitting pending ply must reject contextless pending move');
+  assert.equal(tracker.matchedMovesCount, 0);
+
+  // 4. State broadcast supplied with ledger containing ply 1
+  const matchValid = tracker.onStateBroadcast(game, 1, 1300, [{ ply: 1, uci: 'e2e4' }]);
+  assert.equal(matchValid, 300, 'ledger containing pending ply must match contextless candidate');
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.equal(tracker.getObservedMoveCount(game), 1);
+  assert.equal(tracker.getObservedMovesForGame(game)[0]?.uci, 'e2e4');
+});
+
+test('assertStateViewMatchesReplay detects stale clock and turnStartedAt mismatches against replay snapshot', () => {
+  const baseReplayed: ReplayedGameLike = {
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    adjudication: null,
+    ply: 0,
+    turn: 'w',
+    status: { over: false },
+    drawOffer: null,
+    snapshot: () => ({
+      clock: {
+        remaining: { w: 300_000, b: 300_000 },
+        turnStartedAt: 1_000,
+      },
+    }),
+  };
+
+  const validView: StateViewSnapshotLike = {
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    stateRevision: 0,
+    adjudication: undefined,
+    ply: 0,
+    turn: 'w',
+    status: { over: false },
+    drawOffer: null,
+    clock: { w: 300_000, b: 300_000 },
+    turnStartedAt: 1_000,
+  };
+
+  // Valid view matches cleanly
+  assertStateViewMatchesReplay(validView, baseReplayed, 1);
+
+  // Stale white clock throws
+  assert.throws(
+    () => assertStateViewMatchesReplay({ ...validView, clock: { w: 299_000, b: 300_000 } }, baseReplayed, 1),
+    /owner white clock matches replay snapshot/,
+  );
+
+  // Stale black clock throws
+  assert.throws(
+    () => assertStateViewMatchesReplay({ ...validView, clock: { w: 300_000, b: 298_000 } }, baseReplayed, 1),
+    /owner black clock matches replay snapshot/,
+  );
+
+  // Stale turnStartedAt throws
+  assert.throws(
+    () => assertStateViewMatchesReplay({ ...validView, turnStartedAt: 2_000 }, baseReplayed, 1),
+    /owner turnStartedAt matches replay snapshot/,
+  );
+
+  // Replay ply mismatch throws
+  assert.throws(
+    () => assertStateViewMatchesReplay({ ...validView, ply: 1 }, baseReplayed, 1),
+    /owner ply equals replay ply/,
+  );
+});
+
+test('SoakMetricsTracker preserves earliest wrapper entry and context on same-ID retry and duplicate admission after claim', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-same-id-earliest-entry';
+
+  const contextA: MovePositionContext = {
+    fen: 'fen-start',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 4321,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  // 1. Initial request entered at t = 1000
+  tracker.onMovePending(game, 0, 1000, contextA);
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-same-id',
+    basePly: 0,
+    atMs: 1000,
+    uci: 'e2e4',
+  });
+
+  // 2. Same-ID retry request at t = 1100 must NOT overwrite original entryAtMs (1000) or context
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-same-id',
+    basePly: 0,
+    atMs: 1100,
+    uci: 'e2e4',
+  });
+  assert.equal(tracker.unresolvedStartsCount, 1);
+
+  // 3. Worker claim arrives at t = 1200, promoting the operation
+  tracker.recordClaim({
+    gameId: game,
+    operationId: 'op-same-id',
+    executorId: 'worker-1',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+  assert.equal(tracker.unresolvedStartsCount, 0);
+
+  // 4. Duplicate admission response arrives at t = 1300 with duration 300ms
+  // Must NOT move admissionStartAt from 1000 or overwrite context
+  tracker.recordStartAdmitted(game, 'op-same-id', 0, 300);
+
+  // 5. Complete and settle
+  tracker.recordStep('op-same-id', 20, 15, 1);
+  tracker.recordSettleAttempt('op-same-id', 10);
+  tracker.recordSettlementCommitted('op-same-id');
+
+  const topWall = tracker.getTopProvingWall();
+  assert.equal(topWall.length, 1);
+  const sample = topWall[0]!;
+  assert.equal(sample.operationId, 'op-same-id');
+  assert.equal(sample.evidence.admissionStartMs, 1000, 'must preserve earliest wrapper entry monotonic start');
+  assert.equal(sample.evidence.admissionDurationMs, 300, 'updates duration from admission response');
+  assert.equal(sample.positionContext?.uci, 'e2e4');
+  assert.equal(sample.positionContext?.attempt, 0);
+});
+
+test('SoakMetricsTracker omits unverifiable move context when exact candidate is absent despite conflicting sibling', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-conflicting-sibling';
+
+  const siblingContext: MovePositionContext = {
+    fen: 'fen-start',
+    uci: 'e2e4',
+    gameIndex: 2,
+    gameSeed: 7777,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  // 1. Pending candidate registered for sibling UCI 'e2e4'
+  tracker.onMovePending(game, 0, 1000, siblingContext);
+
+  // 2. Request entered for a DIFFERENT UCI 'd2d4' that has no exact pending candidate registered
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-conflicting',
+    basePly: 0,
+    atMs: 1500,
+    uci: 'd2d4',
+  });
+
+  // 3. Claim arrives for op-conflicting; must NOT steal sibling 'e2e4' context
+  tracker.recordClaim({
+    gameId: game,
+    operationId: 'op-conflicting',
+    executorId: 'worker-sibling',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+
+  tracker.recordStep('op-conflicting', 40, 30, 1);
+  tracker.recordSettleAttempt('op-conflicting', 10);
+  tracker.recordSettlementCommitted('op-conflicting');
+
+  const topWall = tracker.getTopProvingWall();
+  assert.equal(topWall.length, 1);
+  const sample = topWall[0]!;
+  assert.equal(sample.operationId, 'op-conflicting');
+  assert.equal(sample.positionContext, undefined, 'unverifiable move context must be omitted without stealing sibling');
+  assert.equal(sample.evidence.admissionStartMs, 1500);
+});
+
+test('SoakMetricsTracker preserves original bound entry when same-ID duplicate admission arrives after claim and settlement', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-settled-dup';
+  const op = 'op-settled-dup';
+
+  const context: MovePositionContext = {
+    fen: 'fen-settled',
+    uci: 'e2e4',
+    gameIndex: 0,
+    gameSeed: 888,
+    attempt: 0,
+    basePly: 0,
+  };
+
+  // 1. Pending candidate registered and request entered at monotonic t = 1000
+  tracker.onMovePending(game, 0, 1000, context);
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: op,
+    basePly: 0,
+    atMs: 1000,
+    uci: 'e2e4',
+  });
+
+  // 2. Claim arrives and promotes op at t = 1200
+  tracker.recordClaim({
+    gameId: game,
+    operationId: op,
+    executorId: 'worker-1',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+
+  // 3. Operation completes and settles before duplicate admission return arrives
+  tracker.recordStep(op, 30, 20, 1);
+  tracker.recordSettleAttempt(op, 10);
+  tracker.recordSettlementCommitted(op);
+
+  // 4. Duplicate admission arrives AFTER settlement
+  // Must preserve bound admissionStartMs = 1000 and update admissionDurationMs to 45
+  tracker.recordStartAdmitted(game, op, 0, 45);
+
+  const topWall = tracker.getTopProvingWall();
+  assert.equal(topWall.length, 1);
+  const sample = topWall[0]!;
+  assert.equal(sample.operationId, op);
+  assert.equal(sample.evidence.admissionStartMs, 1000, 'must preserve original bound entry startMs');
+  assert.equal(sample.evidence.admissionDurationMs, 45, 'updates admissionDurationMs from duplicate response');
+  assert.equal(sample.positionContext?.uci, 'e2e4', 'preserves original bound position context');
 });

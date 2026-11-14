@@ -43,6 +43,7 @@ import {
   MemorySampler,
   SoakMetricsTracker,
   WorkerLossBarrier,
+  assertStateViewMatchesReplay,
   createPrng,
   deriveFaultSeed,
   deriveGameSeed,
@@ -312,12 +313,31 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         store.startAdjudication = async (params: StartAdjudicationParams) => {
           const t0 = performance.now();
           const basePly = tracker.getGameBasePly(params.gameId);
+          const operationId = params.context?.operationId ?? params.prepared?.operationId;
+          const uci = params.command?.kind === 'move'
+            ? params.command.uci
+            : params.prepared?.intent?.kind === 'move'
+              ? params.prepared.intent.uci
+              : undefined;
+
+          if (operationId) {
+            tracker.recordStartRequest({
+              gameId: params.gameId,
+              operationId,
+              basePly,
+              atMs: t0,
+              uci,
+            });
+          }
+
           try {
             const res = await origStart(params);
             const duration = performance.now() - t0;
             tracker.recordStartAttempt(duration, basePly);
             if (res.status === 'started' || res.status === 'proving') {
               tracker.recordStartAdmitted(params.gameId, res.operationId, basePly, duration);
+            } else if ((res.status === 'noop' || res.status === 'completed') && operationId) {
+              tracker.clearUnresolvedStart(operationId);
             }
             return res;
           } catch (err) {
@@ -757,10 +777,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         const replayed = Game.fromEvents(logged);
         const owner = replicas[g.owner]!.authority;
         const view = owner.getState(g.id);
-        assert.equal(view.fen, replayed.fen, 'owner copy equals replay');
-        assert.equal(view.stateRevision, logged.length - 1);
-        assert.equal(view.adjudication, undefined, 'released or ended, never stuck');
-        assert.equal(replayed.adjudication, null);
+        assertStateViewMatchesReplay(view, replayed, logged.length);
         const resolved = logged.filter((e) => e.type === 'AdjudicationResolved').length;
         const startedN = logged.filter((e) => e.type === 'AdjudicationStarted').length;
         assert.equal(resolved, startedN, 'every admitted command settled exactly once');
