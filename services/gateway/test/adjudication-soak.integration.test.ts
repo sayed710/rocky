@@ -43,8 +43,10 @@ import { AdjudicationResync } from '../src/adjudication-resync.js';
 import {
   LostCommitTracker,
   MemorySampler,
+  ReplicaRouteGate,
   SoakMetricsTracker,
   WorkerLossBarrier,
+  assertRecoveryStateMatchesReplayPrefix,
   assertStateViewMatchesReplay,
   createPrng,
   createReplicaPublicationGuard,
@@ -77,7 +79,13 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 interface ReplicaStats {
   readonly disposed: boolean;
   readonly publishCount: number;
+  readonly appendCount: number;
+  readonly broadcastCount: number;
+  readonly authorityApplyCount: number;
   readonly stalePublishBlockedCount: number;
+  readonly staleAuthorityBlockedCount: number;
+  readonly staleAppendBlockedCount: number;
+  readonly staleBroadcastBlockedCount: number;
 }
 
 interface Replica {
@@ -89,6 +97,7 @@ interface Replica {
   readonly eventStore: PostgresEventStore;
   readonly executorId: string;
   readonly getStats: () => ReplicaStats;
+  readonly stopWorkers: () => Promise<void>;
   readonly dispose: () => Promise<void>;
 }
 
@@ -127,10 +136,13 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
     let postRestartReplica0ExecutorId = '';
     let oldReplica0Ref: Replica | undefined;
     let oldReplica0PublishCountAtDispose = 0;
+    let oldReplica0AppendCountAtDispose = 0;
+    let oldReplica0BroadcastCountAtDispose = 0;
     let abandonedAtColdRestartCount = 0;
     let abandonedColdRestartReclaimedCount = 0;
     let coldRestartLiveRoutingVerified = false;
     let coldRestartDistinctResourcesVerified = false;
+    let coldRestartStaleCommandBlockedVerified = false;
     const faultRnd = createPrng(deriveFaultSeed(SOAK_SEED));
     const lossy = lossyCommits(pool, commitControl, lost, faultRnd);
 
@@ -142,6 +154,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
     loop.enable();
     const unsubs: Array<() => void> = [];
     const replicas: Replica[] = [];
+    const owner0Gate = new ReplicaRouteGate(0);
     const createdReplicas = new Set<Replica>();
     let progressTimer: NodeJS.Timeout | undefined;
     let running = true;
@@ -174,7 +187,44 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
       // --- replicas & timing wrapper ---
       const ownerOf = (gameId: string) => games.find((g) => g.id === gameId)!.owner;
       const router: CommandRouter = {
-        route: (gameId: string, userId: string, cmd: Command) => replicas[ownerOf(gameId)]!.authority.apply(gameId, userId, cmd),
+        route: (gameId: string, userId: string, cmd: Command) => {
+          const slot = ownerOf(gameId);
+          if (slot !== 0) {
+            return replicas[slot]!.authority.apply(gameId, userId, cmd);
+          }
+          const isDrainBypass = userId === ADJUDICATION_ACTOR || cmd.kind === 'adjudicationChanged';
+          return owner0Gate.route(
+            isDrainBypass,
+            () => replicas[0]!,
+            (replica) => replica.authority.apply(gameId, userId, cmd),
+          );
+        },
+      };
+
+      const verifyRecoverySnapshot = async (gameId: string, state: StateView): Promise<void> => {
+        assert.ok(
+          Number.isSafeInteger(state.stateRevision) && state.stateRevision >= 0,
+          `recovery stateRevision must be a non-negative safe integer for game ${gameId}`,
+        );
+        const prefixRows = (
+          await pool.query<{ seq: number; payload: unknown }>(
+            `SELECT seq, payload
+             FROM game_events
+             WHERE game_id = $1 AND seq <= $2
+             ORDER BY seq ASC`,
+            [gameId, state.stateRevision],
+          )
+        ).rows;
+        assert.equal(
+          prefixRows.length,
+          state.stateRevision + 1,
+          `recovery prefix row count must equal stateRevision + 1 for game ${gameId}`,
+        );
+        for (let i = 0; i < prefixRows.length; i++) {
+          assert.equal(prefixRows[i]!.seq, i, `recovery prefix seq must be contiguous at ${i} for game ${gameId}`);
+        }
+        const replayedPrefix = Game.fromEvents(prefixRows.map((r) => r.payload as GameEvent));
+        assertRecoveryStateMatchesReplayPrefix(state, replayedPrefix, prefixRows.length);
       };
 
       const wrapTimedStore = (store: PgAdjudicationStore, barrier?: WorkerLossBarrier): PgAdjudicationStore => {
@@ -377,10 +427,9 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
 
       const makeReplica = (slotIndex: 0 | 1, barrier?: WorkerLossBarrier): Replica => {
         const store = wrapTimedStore(new PgAdjudicationStore(lossy), barrier);
+        const origStartAdjudication = store.startAdjudication.bind(store);
         const eventStore = new PostgresEventStore(pool);
-        const authority = new GameAuthority(pubsub, () => Date.now(), eventStore, {
-          adjudication: { rulesVersion: 'rocky-adjudication@1', clockPolicy: 'observed-release-v1', start: (p) => store.startAdjudication(p) },
-        });
+        const origEventAppend = eventStore.append.bind(eventStore);
         const executorId = randomUUID();
         let replicaRef: Replica | undefined;
         const publicationGuard = createReplicaPublicationGuard(
@@ -388,6 +437,22 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           (idx) => replicas[idx],
           () => replicaRef,
         );
+        store.startAdjudication = publicationGuard.wrapAsyncCall('startAdjudication', origStartAdjudication);
+        eventStore.append = publicationGuard.wrapAsyncCall('eventStore.append', origEventAppend);
+        const guardedPubsub = new Proxy(pubsub, {
+          get(target, prop, receiver) {
+            if (prop === 'publish') {
+              return publicationGuard.wrapSyncBroadcast(target.publish.bind(target));
+            }
+            const val = Reflect.get(target, prop, receiver);
+            return typeof val === 'function' ? val.bind(target) : val;
+          },
+        });
+        const authority = new GameAuthority(guardedPubsub, () => Date.now(), eventStore, {
+          adjudication: { rulesVersion: 'rocky-adjudication@1', clockPolicy: 'observed-release-v1', start: (p) => store.startAdjudication(p) },
+        });
+        const origAuthorityApply = authority.apply.bind(authority);
+        authority.apply = publicationGuard.wrapAsyncCall('authority.apply', origAuthorityApply);
         const rawPublish = routedAdjudicationChange({ authority, router, hasLocalSessions: () => false });
         const worker = new AdjudicationWorker({
           store,
@@ -397,12 +462,20 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           publish: publicationGuard.wrapPublish<AdjudicationChange>(rawPublish),
         });
         const resync = new AdjudicationResync({ authority, router, intervalMs: 500 });
+        let stopWorkersPromise: Promise<void> | undefined;
+        const stopWorkers = (): Promise<void> => {
+          if (stopWorkersPromise) return stopWorkersPromise;
+          stopWorkersPromise = (async () => {
+            await Promise.allSettled([resync.stop(), worker.stop()]);
+          })();
+          return stopWorkersPromise;
+        };
         let disposePromise: Promise<void> | undefined;
         const dispose = (): Promise<void> => {
           if (disposePromise) return disposePromise;
           disposePromise = (async () => {
             publicationGuard.markDisposed();
-            await Promise.allSettled([resync.stop(), worker.stop()]);
+            await stopWorkers();
             for (const g of games) {
               authority.evict(g.id);
             }
@@ -421,8 +494,15 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           getStats: () => ({
             disposed: publicationGuard.isDisposed,
             publishCount: publicationGuard.publishCount,
+            appendCount: publicationGuard.appendCount,
+            broadcastCount: publicationGuard.broadcastCount,
+            authorityApplyCount: publicationGuard.authorityApplyCount,
             stalePublishBlockedCount: publicationGuard.staleBlockedCount,
+            staleAuthorityBlockedCount: publicationGuard.staleAuthorityBlockedCount,
+            staleAppendBlockedCount: publicationGuard.staleAppendBlockedCount,
+            staleBroadcastBlockedCount: publicationGuard.staleBroadcastBlockedCount,
           }),
+          stopWorkers,
           dispose,
         };
         createdReplicas.add(replicaRef);
@@ -593,15 +673,14 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
 
         const injectedRecord = lostCommitTracker.getInjections()[0]!;
         const durableWaitStart = performance.now();
-        let verifiedInjectedMove = false;
-        let durableVerifyFailureReason = 'timed out waiting for completed adjudication and non-pending routeOutcome';
+        let verifiedInjectedAdmission = false;
+        let durableVerifyFailureReason = 'timed out waiting for persisted AdjudicationStarted and non-pending routeOutcome';
         while (running && performance.now() - durableWaitStart < 15_000) {
           const adjRes = await pool.query<{
             execution_state: string;
             started_seq: number | null;
-            final_seq: number | null;
           }>(
-            `SELECT execution_state, started_seq, final_seq
+            `SELECT execution_state, started_seq
              FROM game_adjudications
              WHERE game_id = $1 AND operation_id = $2`,
             [injectedRecord.gameId, injectedRecord.operationId],
@@ -609,25 +688,29 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           const adjRow = adjRes.rows[0];
           if (adjRow) {
             durableVerifyFailureReason = `execution_state=${adjRow.execution_state}, routeOutcome=${injectedRecord.routeOutcome}`;
+          } else if (injectedRecord.routeOutcome !== 'pending') {
+            durableVerifyFailureReason = `missing game_adjudications row for operationId=${injectedRecord.operationId}, routeOutcome=${injectedRecord.routeOutcome}`;
           }
-          if (adjRow && adjRow.execution_state === 'completed' && injectedRecord.routeOutcome !== 'pending') {
-            const evRes = await pool.query<{ seq: number; type: string; payload: unknown }>(
-              `SELECT seq, type, payload
-               FROM game_events
-               WHERE game_id = $1 AND seq >= $2 AND seq <= $3
-               ORDER BY seq ASC`,
-              [injectedRecord.gameId, adjRow.started_seq, adjRow.final_seq],
-            );
-            const detail = lostCommitTracker.verifyDurableEvidenceDetailed(injectedRecord.operationId, {
+          if (adjRow && injectedRecord.routeOutcome !== 'pending') {
+            const evRes =
+              adjRow.started_seq !== null
+                ? await pool.query<{ seq: number; type: string; payload: unknown }>(
+                    `SELECT seq, type, payload
+                     FROM game_events
+                     WHERE game_id = $1 AND seq = $2
+                     ORDER BY seq ASC`,
+                    [injectedRecord.gameId, adjRow.started_seq],
+                  )
+                : { rows: [] as Array<{ seq: number; type: string; payload: unknown }> };
+            const detail = lostCommitTracker.verifyAdmissionStartedDetailed(injectedRecord.operationId, {
               gameId: injectedRecord.gameId,
               operationId: injectedRecord.operationId,
               executionState: adjRow.execution_state,
               startedSeq: adjRow.started_seq,
-              finalSeq: adjRow.final_seq,
               events: evRes.rows,
             });
             if (detail.valid) {
-              verifiedInjectedMove = true;
+              verifiedInjectedAdmission = true;
             } else {
               durableVerifyFailureReason = detail.reason;
             }
@@ -635,9 +718,9 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           }
           await sleep(50);
         }
-        if (running && !verifiedInjectedMove) {
+        if (running && !verifiedInjectedAdmission) {
           throw new Error(
-            `Lost COMMIT move admission ${injectedRecord.operationId} (game ${injectedRecord.gameId}, uci ${injectedRecord.uci}) failed uncertain-route or durable move persistence verification: ${durableVerifyFailureReason}`,
+            `Lost COMMIT move admission ${injectedRecord.operationId} (game ${injectedRecord.gameId}, uci ${injectedRecord.uci}) failed uncertain-route or durable AdjudicationStarted verification: ${durableVerifyFailureReason}`,
           );
         }
         tracker.recordFaultEnd('lossy_commits', performance.now());
@@ -872,8 +955,19 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           const oldReplica = replicas[0]!;
           oldReplica0Ref = oldReplica;
 
+          // Pause new owner-0 work at route boundary, drain commands already dispatched to owner 0,
+          // stop resync & worker (whose ADJUDICATION_ACTOR route paths bypass the pause so they cannot deadlock),
+          // drain any residual bypass calls and fence the slot before disposing old replica.
+          await owner0Gate.pauseAndDrain();
+          await oldReplica.stopWorkers();
+          await owner0Gate.drainAndFence();
+          assert.equal(owner0Gate.inFlightCount, 0, 'owner 0 must have zero in-flight route calls at cutover');
+
           await oldReplica.dispose();
-          oldReplica0PublishCountAtDispose = oldReplica.getStats().publishCount;
+          const oldStatsAtDispose = oldReplica.getStats();
+          oldReplica0PublishCountAtDispose = oldStatsAtDispose.publishCount;
+          oldReplica0AppendCountAtDispose = oldStatsAtDispose.appendCount;
+          oldReplica0BroadcastCountAtDispose = oldStatsAtDispose.broadcastCount;
 
           const heldByOldRes = await pool.query<{ operation_id: string }>(
             `SELECT operation_id
@@ -899,10 +993,12 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           for (const g of games.filter((x) => x.owner === 0)) {
             await replacement.authority.ensureLoaded(g.id);
             const recovery = await replacement.authority.readRecovery(g.id, 0);
+            await verifyRecoverySnapshot(g.id, recovery.state);
             tracker.onRecoveryResponse(g.id, recovery.state.ply, performance.now(), recovery.state.moves);
           }
           replacement.worker.start();
           replacement.resync.start();
+          owner0Gate.resume();
 
           const owner0SampleGame = games.find((x) => x.owner === 0);
           if (owner0SampleGame) {
@@ -910,6 +1006,17 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
             coldRestartLiveRoutingVerified =
               replacement.authority.has(owner0SampleGame.id) &&
               !oldReplica.authority.has(owner0SampleGame.id);
+
+            await assert.rejects(
+              () => oldReplica.authority.apply(owner0SampleGame.id, ADJUDICATION_ACTOR, { kind: 'adjudicationChanged' }),
+              /Stale replica/,
+            );
+            const oldStatsAfterStaleAttempt = oldReplica.getStats();
+            coldRestartStaleCommandBlockedVerified =
+              oldStatsAfterStaleAttempt.staleAuthorityBlockedCount >= 1 &&
+              oldStatsAfterStaleAttempt.appendCount === oldReplica0AppendCountAtDispose &&
+              oldStatsAfterStaleAttempt.broadcastCount === oldReplica0BroadcastCountAtDispose &&
+              oldStatsAfterStaleAttempt.publishCount === oldReplica0PublishCountAtDispose;
           }
 
           if (heldByOldIds.length > 0) {
@@ -962,6 +1069,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
       } catch (runErr) {
         running = false;
         worker1Barrier.abort('run error teardown');
+        await owner0Gate.abort(runErr instanceof Error ? runErr.message : String(runErr));
         await Promise.allSettled(taskPromises);
         throw runErr;
       }
@@ -991,7 +1099,51 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         }
         if (view.ply > tracker.getObservedMoveCount(g.id)) {
           const recovery = await owner.readRecovery(g.id, 0);
+          await verifyRecoverySnapshot(g.id, recovery.state);
           tracker.onRecoveryResponse(g.id, recovery.state.ply, performance.now(), recovery.state.moves);
+        }
+      }
+
+      // Final drain durable proof: verify every lost-COMMIT move admission settled with its exact matching MovePlayed
+      for (const injected of lostCommitTracker.getInjections()) {
+        const adjRes = await pool.query<{
+          execution_state: string;
+          started_seq: number | null;
+          final_seq: number | null;
+        }>(
+          `SELECT execution_state, started_seq, final_seq
+           FROM game_adjudications
+           WHERE game_id = $1 AND operation_id = $2`,
+          [injected.gameId, injected.operationId],
+        );
+        const adjRow = adjRes.rows[0];
+        if (!adjRow) {
+          throw new Error(
+            `Lost COMMIT move admission ${injected.operationId} (game ${injected.gameId}, uci ${injected.uci}) missing game_adjudications row at final drain`,
+          );
+        }
+        const evRes =
+          adjRow.started_seq !== null && adjRow.final_seq !== null
+            ? await pool.query<{ seq: number; type: string; payload: unknown }>(
+                `SELECT seq, type, payload
+                 FROM game_events
+                 WHERE game_id = $1 AND seq >= $2 AND seq <= $3
+                 ORDER BY seq ASC`,
+                [injected.gameId, adjRow.started_seq, adjRow.final_seq],
+              )
+            : { rows: [] as Array<{ seq: number; type: string; payload: unknown }> };
+        const detail = lostCommitTracker.verifyDurableEvidenceDetailed(injected.operationId, {
+          gameId: injected.gameId,
+          operationId: injected.operationId,
+          executionState: adjRow.execution_state,
+          startedSeq: adjRow.started_seq,
+          finalSeq: adjRow.final_seq,
+          events: evRes.rows,
+        });
+        if (!detail.valid) {
+          throw new Error(
+            `Lost COMMIT move admission ${injected.operationId} (game ${injected.gameId}, uci ${injected.uci}) failed final durable MovePlayed verification: ${detail.reason}`,
+          );
         }
       }
 
@@ -1053,18 +1205,23 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
             uncertainRouteCount: lostCommitTracker.uncertainRouteCount,
             verifiedCommittedCount: lostCommitTracker.verifiedCommittedCount,
             rawProxyLostCount: lost.lost,
-            injections: lostCommitTracker.getInjections().map((rec) => ({
-              operationId: rec.operationId,
-              gameId: rec.gameId,
-              uci: rec.uci,
-              basePly: rec.basePly,
-              commandKind: rec.commandKind,
-              purpose: rec.purpose,
-              hadInsertInTx: rec.hadInsertInTx,
-              routeOutcome: rec.routeOutcome,
-              routeErrorName: rec.routeErrorName,
-              durableVerified: rec.durableVerified,
-            })),
+            injections: lostCommitTracker.getInjections().map((rec) => {
+              const queuedElapsedMs = tracker.getOperationQueuedMs(rec.operationId);
+              return {
+                operationId: rec.operationId,
+                gameId: rec.gameId,
+                uci: rec.uci,
+                basePly: rec.basePly,
+                commandKind: rec.commandKind,
+                purpose: rec.purpose,
+                hadInsertInTx: rec.hadInsertInTx,
+                routeOutcome: rec.routeOutcome,
+                routeErrorName: rec.routeErrorName,
+                admissionVerified: rec.admissionVerified ?? false,
+                durableVerified: rec.durableVerified,
+                ...(queuedElapsedMs !== undefined ? { queuedElapsedMs } : {}),
+              };
+            }),
           },
           heldAtDeath: heldAtDeathCount,
           successorTakeovers: tracker.successorTakeoversCount,
@@ -1087,10 +1244,18 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
             newExecutorId: postRestartReplica0ExecutorId,
             distinctResourcesVerified: coldRestartDistinctResourcesVerified,
             liveRoutingVerified: coldRestartLiveRoutingVerified,
+            staleCommandBlockedVerified: coldRestartStaleCommandBlockedVerified,
             oldReplicaDisposed: oldReplica0Ref?.getStats().disposed ?? false,
             oldPublishCountAtDispose: oldReplica0PublishCountAtDispose,
             oldPublishCountAtEnd: oldReplica0Ref?.getStats().publishCount ?? 0,
+            oldAppendCountAtDispose: oldReplica0AppendCountAtDispose,
+            oldAppendCountAtEnd: oldReplica0Ref?.getStats().appendCount ?? 0,
+            oldBroadcastCountAtDispose: oldReplica0BroadcastCountAtDispose,
+            oldBroadcastCountAtEnd: oldReplica0Ref?.getStats().broadcastCount ?? 0,
             oldStalePublishBlockedCount: oldReplica0Ref?.getStats().stalePublishBlockedCount ?? 0,
+            oldStaleAuthorityBlockedCount: oldReplica0Ref?.getStats().staleAuthorityBlockedCount ?? 0,
+            oldStaleAppendBlockedCount: oldReplica0Ref?.getStats().staleAppendBlockedCount ?? 0,
+            oldStaleBroadcastBlockedCount: oldReplica0Ref?.getStats().staleBroadcastBlockedCount ?? 0,
             abandonedHeldCount: abandonedAtColdRestartCount,
             abandonedReclaimedCount: abandonedColdRestartReclaimedCount,
           },
@@ -1142,7 +1307,12 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
       );
       assert.ok(
         report.faultCoverage.lostCommitMoveAdmission.injections.every(
-          (inj) => inj.purpose === 'move_admission' && inj.commandKind === 'move' && inj.hadInsertInTx && inj.durableVerified,
+          (inj) =>
+            inj.purpose === 'move_admission' &&
+            inj.commandKind === 'move' &&
+            inj.hadInsertInTx &&
+            inj.admissionVerified &&
+            inj.durableVerified,
         ),
         'all lost COMMIT injections must correlate to move_admission transactions with durable proof',
       );
@@ -1155,11 +1325,22 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
       assert.equal(replicas[0]!.executorId, postRestartReplica0ExecutorId, 'active owner 0 replica must be the cold replacement');
       assert.equal(report.faultCoverage.ownerColdRestart.distinctResourcesVerified, true, 'owner cold restart must replace worker, store, eventStore, authority and resync');
       assert.equal(report.faultCoverage.ownerColdRestart.liveRoutingVerified, true, 'owner cold restart must bind live routing to replacement authority');
+      assert.equal(report.faultCoverage.ownerColdRestart.staleCommandBlockedVerified, true, 'old owner replica must reject stale commands after cutover');
       assert.equal(report.faultCoverage.ownerColdRestart.oldReplicaDisposed, true, 'old owner replica must be disposed after cold restart');
       assert.equal(
         report.faultCoverage.ownerColdRestart.oldPublishCountAtEnd,
         report.faultCoverage.ownerColdRestart.oldPublishCountAtDispose,
         'old owner replica must not publish after disposal',
+      );
+      assert.equal(
+        report.faultCoverage.ownerColdRestart.oldAppendCountAtEnd,
+        report.faultCoverage.ownerColdRestart.oldAppendCountAtDispose,
+        'old owner replica must not append events after disposal',
+      );
+      assert.equal(
+        report.faultCoverage.ownerColdRestart.oldBroadcastCountAtEnd,
+        report.faultCoverage.ownerColdRestart.oldBroadcastCountAtDispose,
+        'old owner replica must not broadcast after disposal',
       );
       assert.equal(
         report.faultCoverage.ownerColdRestart.abandonedReclaimedCount,
@@ -1198,6 +1379,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
     } finally {
       running = false;
       worker1Barrier.abort('test teardown');
+      await owner0Gate.abort('test teardown');
       if (progressTimer) {
         clearInterval(progressTimer);
         progressTimer = undefined;

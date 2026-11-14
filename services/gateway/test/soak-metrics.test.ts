@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   BoundedReservoir,
   LostCommitTracker,
+  ReplicaRouteGate,
   createPrng,
   createReplicaPublicationGuard,
   deriveFaultSeed,
@@ -18,9 +19,12 @@ import {
   runWithLossyTransactionScope,
   SoakMetricsTracker,
   TopKCollector,
+  verifyLostCommitAdmissionStarted,
   verifyLostCommitDurableEvidence,
   WorkerLossBarrier,
+  assertRecoveryStateMatchesReplayPrefix,
   assertStateViewMatchesReplay,
+  type DurableLostCommitAdmissionEvidence,
   type DurableLostCommitEvidence,
   type DurableMoveLedgerEntry,
   type LossyCommitControl,
@@ -2626,4 +2630,639 @@ test('createReplicaPublicationGuard blocks stale and disposed replica publicatio
   await newPublish({ gameId: 'g-1' });
   assert.equal(newGuard.publishCount, 1);
   assert.deepEqual(publishedBy, ['old:g-1', 'new:g-1']);
+});
+
+test('LostCommitTracker Stage 1 admission verification rejects wrong identity and requires final MovePlayed proof', () => {
+  const tracker = new LostCommitTracker();
+  const injection: LostCommitInjectionRecord = {
+    gameId: 'game-1',
+    operationId: 'op-1',
+    purpose: 'move_admission',
+    commandKind: 'move',
+    uci: 'e2e4',
+    basePly: 0,
+    hadInsertInTx: true,
+    injectedAtMs: 100,
+    routeOutcome: 'pending',
+    admissionVerified: false,
+    durableVerified: false,
+  };
+  assert.equal(tracker.recordInjection(injection), true);
+
+  const makeAdmissionEvidence = (
+    overrides?: Partial<DurableLostCommitAdmissionEvidence>,
+  ): DurableLostCommitAdmissionEvidence => ({
+    gameId: 'game-1',
+    operationId: 'op-1',
+    executionState: 'proving',
+    startedSeq: 1,
+    events: [
+      {
+        seq: 1,
+        type: 'AdjudicationStarted',
+        payload: {
+          gameId: 'game-1',
+          operationId: 'op-1',
+          prepared: { gameId: 'game-1', operationId: 'op-1', intent: { kind: 'move', uci: 'e2e4' } },
+        },
+      },
+    ],
+    ...overrides,
+  });
+
+  // Pending route outcome must be rejected even when AdjudicationStarted is already persisted
+  const pendingAdm = tracker.verifyAdmissionStartedDetailed('op-1', makeAdmissionEvidence());
+  assert.equal(pendingAdm.valid, false);
+  assert.match(tracker.lastFailureReason ?? '', /routeOutcome was "pending"/);
+
+  tracker.recordRouteOutcome('op-1', 'uncertain_error', 'AuthorityCommitError');
+  const validRec = tracker.getRecord('op-1')!;
+
+  // Wrong identity cases must be rejected with explicit failure reasons
+  const wrongCases: Array<{ label: string; evidence: DurableLostCommitAdmissionEvidence; pattern: RegExp }> = [
+    {
+      label: 'wrong AdjudicationStarted gameId',
+      evidence: makeAdmissionEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: {
+              gameId: 'game-wrong',
+              operationId: 'op-1',
+              prepared: { gameId: 'game-1', operationId: 'op-1', intent: { kind: 'move', uci: 'e2e4' } },
+            },
+          },
+        ],
+      }),
+      pattern: /AdjudicationStarted gameId.*does not match/,
+    },
+    {
+      label: 'missing AdjudicationStarted gameId',
+      evidence: makeAdmissionEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: {
+              operationId: 'op-1',
+              prepared: { intent: { kind: 'move', uci: 'e2e4' } },
+            },
+          },
+        ],
+      }),
+      pattern: /AdjudicationStarted gameId.*does not match/,
+    },
+    {
+      label: 'wrong AdjudicationStarted operationId',
+      evidence: makeAdmissionEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: {
+              gameId: 'game-1',
+              operationId: 'op-wrong',
+              prepared: { gameId: 'game-1', operationId: 'op-1', intent: { kind: 'move', uci: 'e2e4' } },
+            },
+          },
+        ],
+      }),
+      pattern: /AdjudicationStarted operationId.*does not match/,
+    },
+    {
+      label: 'wrong prepared.gameId',
+      evidence: makeAdmissionEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: {
+              gameId: 'game-1',
+              operationId: 'op-1',
+              prepared: { gameId: 'game-wrong', operationId: 'op-1', intent: { kind: 'move', uci: 'e2e4' } },
+            },
+          },
+        ],
+      }),
+      pattern: /prepared gameId.*does not match/,
+    },
+    {
+      label: 'wrong prepared.operationId',
+      evidence: makeAdmissionEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: {
+              gameId: 'game-1',
+              operationId: 'op-1',
+              prepared: { gameId: 'game-1', operationId: 'op-wrong', intent: { kind: 'move', uci: 'e2e4' } },
+            },
+          },
+        ],
+      }),
+      pattern: /prepared operationId.*does not match/,
+    },
+    {
+      label: 'wrong move UCI in prepared intent',
+      evidence: makeAdmissionEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: {
+              gameId: 'game-1',
+              operationId: 'op-1',
+              prepared: { gameId: 'game-1', operationId: 'op-1', intent: { kind: 'move', uci: 'd2d4' } },
+            },
+          },
+        ],
+      }),
+      pattern: /prepared intent.*does not match admitted move UCI/,
+    },
+    {
+      label: 'non-AdjudicationStarted event at startedSeq',
+      evidence: makeAdmissionEvidence({
+        events: [{ seq: 1, type: 'MovePlayed', payload: { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' } }],
+      }),
+      pattern: /missing durable AdjudicationStarted event at startedSeq=1/,
+    },
+    {
+      label: 'invalid executionState',
+      evidence: makeAdmissionEvidence({ executionState: 'aborted' }),
+      pattern: /durable execution_state was "aborted"/,
+    },
+  ];
+
+  for (const tc of wrongCases) {
+    const res = tracker.verifyAdmissionStartedDetailed('op-1', tc.evidence);
+    assert.equal(res.valid, false, `${tc.label} must fail`);
+    assert.match(tracker.lastFailureReason ?? '', tc.pattern, `${tc.label} must expose failure reason`);
+    assert.equal(verifyLostCommitAdmissionStarted(validRec, tc.evidence).valid, false);
+    assert.equal(validRec.admissionVerified, false);
+    assert.equal(tracker.verifiedCommittedCount, 0);
+  }
+
+  // Valid Stage 1 admission verification succeeds while still 'proving' (queued),
+  // WITHOUT marking durableVerified or counting as covered before final MovePlayed proof.
+  const admOk = tracker.verifyAdmissionStartedDetailed('op-1', makeAdmissionEvidence());
+  assert.equal(admOk.valid, true);
+  if (admOk.valid) {
+    assert.equal(admOk.startedSeq, 1);
+    assert.equal(admOk.executionState, 'proving');
+  }
+  assert.equal(validRec.admissionVerified, true);
+  assert.equal(validRec.durableVerified, false);
+  assert.equal(tracker.verifiedCommittedCount, 0, 'admission verification alone must not count as covered');
+  assert.equal(tracker.lastFailureReason, undefined);
+
+  // Final drain check MUST fail while operation is still proving (no final MovePlayed proof yet)
+  const prematureFinal = tracker.verifyDurableEvidenceDetailed('op-1', {
+    ...makeAdmissionEvidence(),
+    finalSeq: null,
+  });
+  assert.equal(prematureFinal.valid, false);
+  assert.match(tracker.lastFailureReason ?? '', /execution_state was "proving", expected "completed"/);
+  assert.equal(validRec.durableVerified, false);
+  assert.equal(tracker.verifiedCommittedCount, 0);
+
+  // Final drain check succeeds once matching AdjudicationResolved + MovePlayed settle the exact command
+  const finalOk = tracker.verifyDurableEvidenceDetailed('op-1', {
+    gameId: 'game-1',
+    operationId: 'op-1',
+    executionState: 'completed',
+    startedSeq: 1,
+    finalSeq: 3,
+    events: [
+      ...makeAdmissionEvidence().events,
+      {
+        seq: 2,
+        type: 'AdjudicationResolved',
+        payload: {
+          gameId: 'game-1',
+          operationId: 'op-1',
+          startedSeq: 1,
+          effects: [{ type: 'MovePlayed', ply: 1, uci: 'e2e4', san: 'e4', by: 'w' }],
+        },
+      },
+      { seq: 3, type: 'MovePlayed', payload: { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' } },
+    ],
+  });
+  assert.equal(finalOk.valid, true);
+  assert.equal(validRec.durableVerified, true);
+  assert.equal(tracker.verifiedCommittedCount, 1);
+  assert.equal(tracker.lastFailureReason, undefined);
+});
+
+test('SoakMetricsTracker.getOperationQueuedMs reports elapsed queued time when available and omits when unavailable', () => {
+  const tracker = new SoakMetricsTracker(5);
+  assert.equal(tracker.getOperationQueuedMs('op-missing'), undefined);
+
+  tracker.recordStartRequest({
+    gameId: 'game-q',
+    operationId: 'op-q1',
+    basePly: 0,
+    atMs: 1000,
+    uci: 'e2e4',
+  });
+  // Before any claim, queued elapsed is unavailable
+  assert.equal(tracker.getOperationQueuedMs('op-q1'), undefined);
+
+  // Claim arrives after admission request (without recordStartAdmitted, simulating lost COMMIT)
+  tracker.recordClaim({
+    gameId: 'game-q',
+    operationId: 'op-q1',
+    executorId: 'worker-0',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+  const activeQueuedMs = tracker.getOperationQueuedMs('op-q1');
+  assert.equal(typeof activeQueuedMs, 'number');
+  assert.ok(activeQueuedMs! >= 0);
+
+  tracker.recordSettleAttempt('op-q1', 4);
+  tracker.recordSettlementCommitted('op-q1');
+  const settledQueuedMs = tracker.getOperationQueuedMs('op-q1');
+  assert.equal(settledQueuedMs, activeQueuedMs);
+});
+
+test('assertRecoveryStateMatchesReplayPrefix verifies exact prefix with proving/stopped/absent phase and rejects mutated snapshots', () => {
+  const makeReplayed = (overrides?: Partial<ReplayedGameLike>, moves = [{ ply: 1, uci: 'e2e4', san: 'e4', by: 'w' }]): ReplayedGameLike => ({
+    fen: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1',
+    adjudication: null,
+    isBlocked: false,
+    stoppedClock: null,
+    ply: 1,
+    turn: 'b',
+    status: { over: false },
+    drawOffer: null,
+    snapshot: () => ({
+      clock: { remaining: { w: 299_500, b: 300_000 }, turnStartedAt: 12_345 },
+      moves,
+    }),
+    ...overrides,
+  });
+
+  const baseRecovery: StateViewSnapshotLike = {
+    fen: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1',
+    stateRevision: 1,
+    ply: 1,
+    turn: 'b',
+    clock: { w: 299_500, b: 300_000 },
+    turnStartedAt: 12_345,
+    status: { over: false },
+    drawOffer: null,
+    moves: [{ ply: 1, uci: 'e2e4', san: 'e4', by: 'w' }],
+  };
+
+  // Valid absent, proving, and stopped phases against exact prefix (not a racing later head at rev=2)
+  assertRecoveryStateMatchesReplayPrefix(baseRecovery, makeReplayed(), 2);
+  assertRecoveryStateMatchesReplayPrefix(
+    { ...baseRecovery, adjudication: 'proving' },
+    makeReplayed({ isBlocked: true, adjudication: { operationId: 'op-1' } }),
+    2,
+  );
+  assertRecoveryStateMatchesReplayPrefix(
+    { ...baseRecovery, adjudication: 'stopped' },
+    makeReplayed({ isBlocked: false, stoppedClock: { stopId: 'stop-1' } }),
+    2,
+  );
+
+  // Mutated recovery snapshots must fail with clear reasons
+  assert.throws(
+    () => assertRecoveryStateMatchesReplayPrefix({ ...baseRecovery, adjudication: 'proving' }, makeReplayed(), 2),
+    /recovery adjudication phase matches replay prefix/,
+  );
+  assert.throws(
+    () => assertRecoveryStateMatchesReplayPrefix(baseRecovery, makeReplayed({ stoppedClock: { stopId: 'stop-1' } }), 2),
+    /recovery adjudication phase matches replay prefix/,
+  );
+  assert.throws(
+    () => assertRecoveryStateMatchesReplayPrefix({ ...baseRecovery, stateRevision: 2 }, makeReplayed(), 2),
+    /recovery stateRevision equals logged head seq/,
+  );
+  assert.throws(
+    () => assertRecoveryStateMatchesReplayPrefix({ ...baseRecovery, fen: 'bad-fen' }, makeReplayed(), 2),
+    /recovery copy equals replay fen/,
+  );
+  assert.throws(
+    () => assertRecoveryStateMatchesReplayPrefix({ ...baseRecovery, drawOffer: 'w' }, makeReplayed(), 2),
+    /recovery drawOffer equals replay drawOffer/,
+  );
+  assert.throws(
+    () =>
+      assertRecoveryStateMatchesReplayPrefix(
+        { ...baseRecovery, moves: [{ ply: 1, uci: 'd2d4', san: 'd4', by: 'w' }] },
+        makeReplayed(),
+        2,
+      ),
+    /recovery moves match replay snapshot/,
+  );
+});
+
+test('ReplicaRouteGate and createReplicaPublicationGuard drain in-flight work, bypass draining workers, and block post-cutover writes', async () => {
+  const deferred = <T = void>() => {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  };
+
+  const eventsAppended: string[] = [];
+  const broadcastsSent: string[] = [];
+  const publishesSent: string[] = [];
+
+  interface MockReplica {
+    readonly executorId: string;
+    readonly getStats: () => { readonly disposed: boolean };
+    readonly apply: (tag: string) => Promise<string>;
+    readonly append: (ev: string) => Promise<void>;
+    readonly broadcast: (msg: string) => void;
+    readonly publish: (chg: { readonly gameId: string }) => Promise<void>;
+  }
+
+  const active: Array<MockReplica | undefined> = [];
+  const makeMockReplica = (executorId: string): { replica: MockReplica; guard: ReturnType<typeof createReplicaPublicationGuard> } => {
+    let ref: MockReplica | undefined;
+    const guard = createReplicaPublicationGuard(0, (i) => active[i], () => ref);
+    const append = guard.wrapAsyncCall('eventStore.append', async (ev: string) => {
+      eventsAppended.push(`${executorId}:${ev}`);
+    });
+    const broadcast = guard.wrapSyncBroadcast((msg: string) => {
+      broadcastsSent.push(`${executorId}:${msg}`);
+    });
+    const publish = guard.wrapPublish(async (chg: { readonly gameId: string }) => {
+      publishesSent.push(`${executorId}:${chg.gameId}`);
+    });
+    const apply = guard.wrapAsyncCall('authority.apply', async (tag: string) => {
+      await append(tag);
+      broadcast(tag);
+      return `${executorId}:${tag}`;
+    });
+    ref = {
+      executorId,
+      getStats: () => ({ disposed: guard.isDisposed }),
+      apply,
+      append,
+      broadcast,
+      publish,
+    };
+    return { replica: ref, guard };
+  };
+
+  const oldPair = makeMockReplica('old-exec');
+  const newPair = makeMockReplica('new-exec');
+  active[0] = oldPair.replica;
+  const gate = new ReplicaRouteGate(0);
+
+  // 1) Pre-cutover in-flight command starts on oldReplica before pause
+  const cmdAGate = deferred<void>();
+  const cmdAPromise = gate.route(
+    false,
+    () => active[0]!,
+    async (r) => {
+      await cmdAGate.promise;
+      return r.apply('cmdA');
+    },
+  );
+  assert.equal(gate.inFlightCount, 1);
+
+  // 2) Begin pauseAndDrain: must wait for cmdA, while blocking new normal cmdB behind pause
+  let pauseResolved = false;
+  const pausePromise = gate.pauseAndDrain().then(() => {
+    pauseResolved = true;
+  });
+  await Promise.resolve();
+  assert.equal(pauseResolved, false);
+  assert.equal(gate.phase, 'draining');
+
+  let cmdBDispatchedTo: string | undefined;
+  const cmdBPromise = gate.route(
+    false,
+    () => active[0]!,
+    async (r) => {
+      cmdBDispatchedTo = r.executorId;
+      return r.apply('cmdB');
+    },
+  );
+  await Promise.resolve();
+  assert.equal(gate.pausedWaitersCount, 1);
+  assert.equal(cmdBDispatchedTo, undefined, 'paused new work must not dispatch to old replica');
+
+  // Release cmdA -> completes on oldReplica and unblocks pauseAndDrain
+  cmdAGate.resolve();
+  assert.equal(await cmdAPromise, 'old-exec:cmdA');
+  await pausePromise;
+  assert.equal(pauseResolved, true);
+  assert.equal(gate.inFlightCount, 0);
+
+  // 3) Draining worker bypass path runs during 'draining' WITHOUT deadlocking behind pause
+  const workerBypassGate = deferred<void>();
+  const workerBypassPromise = gate.route(
+    true,
+    () => active[0]!,
+    async (r) => {
+      await workerBypassGate.promise;
+      return r.apply('workerDrain');
+    },
+  );
+  assert.equal(gate.inFlightCount, 1);
+
+  let fenceResolved = false;
+  const fencePromise = gate.drainAndFence().then(() => {
+    fenceResolved = true;
+  });
+  await Promise.resolve();
+  assert.equal(fenceResolved, false, 'drainAndFence must wait for in-flight draining worker call');
+
+  workerBypassGate.resolve();
+  assert.equal(await workerBypassPromise, 'old-exec:workerDrain');
+  await fencePromise;
+  assert.equal(fenceResolved, true);
+  assert.equal(gate.phase, 'fenced');
+
+  // Stray bypass during 'fenced' rejects immediately without deadlocking
+  await assert.rejects(
+    () => gate.route(true, () => active[0]!, (r) => r.apply('strayBypass')),
+    /cutover fenced/,
+  );
+
+  // 4) Dispose old replica, swap fresh replica, and resume routing
+  oldPair.guard.markDisposed();
+  active[0] = newPair.replica;
+  gate.resume();
+  assert.equal(gate.phase, 'active');
+
+  // Paused cmdB now wakes up and executes on new replica
+  assert.equal(await cmdBPromise, 'new-exec:cmdB');
+  assert.equal(cmdBDispatchedTo, 'new-exec');
+
+  // 5) Old commands cannot apply, append, broadcast, or publish after cutover
+  const appendsBeforeStale = eventsAppended.length;
+  const broadcastsBeforeStale = broadcastsSent.length;
+  const publishesBeforeStale = publishesSent.length;
+
+  await assert.rejects(() => oldPair.replica.apply('staleApply'), /Stale replica old-exec/);
+  await assert.rejects(() => oldPair.replica.append('staleAppend'), /Stale replica old-exec/);
+  assert.throws(() => oldPair.replica.broadcast('staleBroadcast'), /Stale replica old-exec/);
+  await assert.rejects(() => oldPair.replica.publish({ gameId: 'g-1' }), /Stale replica old-exec/);
+
+  assert.equal(eventsAppended.length, appendsBeforeStale);
+  assert.equal(broadcastsSent.length, broadcastsBeforeStale);
+  assert.equal(publishesSent.length, publishesBeforeStale);
+  assert.equal(oldPair.guard.staleAuthorityBlockedCount, 1);
+  assert.equal(oldPair.guard.staleAppendBlockedCount, 1);
+  assert.equal(oldPair.guard.staleBroadcastBlockedCount, 1);
+  assert.equal(oldPair.guard.staleBlockedCount, 4);
+});
+
+test('ReplicaRouteGate.abort unblocks paused callers on failing cutover, drains in-flight work, blocks stale dispatch, and preserves primary error', async () => {
+  const deferred = <T = void>() => {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  };
+
+  const replica = {
+    executorId: 'old-exec',
+    getStats: () => ({ disposed: false }),
+  };
+  const gate = new ReplicaRouteGate(0);
+
+  let pausedDispatchCount = 0;
+  let futureDispatchCount = 0;
+  let inFlightDispatchCount = 0;
+  let inFlightCompleted = false;
+
+  const cutoverStepGate = deferred<void>();
+  const inFlightGate = deferred<void>();
+  const primaryErr = new Error('cutover failed before resume');
+
+  // Begin cutover pause so new player routes wait behind the gate
+  await gate.pauseAndDrain();
+  assert.equal(gate.phase, 'draining');
+
+  // Start a genuine outstanding draining-worker bypass call
+  const genuineInFlightPromise = gate.route(
+    true,
+    () => replica,
+    async () => {
+      inFlightDispatchCount++;
+      await inFlightGate.promise;
+      inFlightCompleted = true;
+      return 'drained-ok';
+    },
+  );
+  assert.equal(inFlightDispatchCount, 1);
+  assert.equal(gate.inFlightCount, 1);
+
+  // Queue a paused caller behind the gate before cutover fails
+  let playerCaughtAbort: unknown;
+  let playerTerminated = false;
+  const pausedPlayerTask = (async () => {
+    try {
+      await gate.route(
+        false,
+        () => replica,
+        async () => {
+          pausedDispatchCount++;
+          return 'should-never-dispatch';
+        },
+      );
+    } catch (err) {
+      playerCaughtAbort = err;
+    } finally {
+      playerTerminated = true;
+    }
+  })();
+
+  const failingCutoverTask = (async () => {
+    await cutoverStepGate.promise;
+    throw primaryErr;
+  })();
+
+  await Promise.resolve();
+  assert.equal(gate.pausedWaitersCount, 1);
+  assert.equal(pausedDispatchCount, 0);
+  assert.equal(playerTerminated, false);
+
+  // Trigger cutover failure before resume() is ever reached
+  cutoverStepGate.resolve();
+
+  const taskPromises = [pausedPlayerTask, failingCutoverTask];
+  let abortResolved = false;
+  let drainedResult: PromiseSettledResult<unknown>[] = [];
+
+  await assert.rejects(
+    async () => {
+      try {
+        await Promise.all(taskPromises);
+      } catch (runErr) {
+        const abortPromise = gate
+          .abort(runErr instanceof Error ? runErr.message : String(runErr))
+          .then(() => {
+            abortResolved = true;
+          });
+
+        // Paused caller immediately wakes & terminates without dispatching stale work
+        await pausedPlayerTask;
+        assert.equal(playerTerminated, true);
+        assert.match(String(playerCaughtAbort), /Slot 0 route gate aborted: cutover failed before resume/);
+        assert.equal(pausedDispatchCount, 0);
+        assert.equal(gate.phase, 'aborted');
+        assert.equal(gate.pausedWaitersCount, 0);
+
+        // Terminal abort cannot be undone by resume() and blocks future routes & cutover phases
+        gate.resume();
+        assert.equal(gate.phase, 'aborted');
+
+        await assert.rejects(
+          () =>
+            gate.route(false, () => replica, async () => {
+              futureDispatchCount++;
+              return 'stale-normal';
+            }),
+          /Slot 0 route gate aborted/,
+        );
+        await assert.rejects(
+          () =>
+            gate.route(true, () => replica, async () => {
+              futureDispatchCount++;
+              return 'stale-bypass';
+            }),
+          /Slot 0 route gate aborted/,
+        );
+        assert.equal(futureDispatchCount, 0);
+        await assert.rejects(() => gate.pauseAndDrain(), /Slot 0 route gate aborted/);
+        await assert.rejects(() => gate.drainAndFence(), /Slot 0 route gate aborted/);
+        assert.equal(gate.phase, 'aborted');
+
+        // abort() must still wait for genuine outstanding in-flight dispatch to finish draining
+        await Promise.resolve();
+        assert.equal(abortResolved, false);
+        assert.equal(inFlightCompleted, false);
+
+        inFlightGate.resolve();
+        assert.equal(await genuineInFlightPromise, 'drained-ok');
+        await abortPromise;
+        assert.equal(abortResolved, true);
+        assert.equal(inFlightCompleted, true);
+        assert.equal(gate.inFlightCount, 0);
+
+        drainedResult = await Promise.allSettled(taskPromises);
+        throw runErr;
+      }
+    },
+    (err: unknown) => err === primaryErr,
+  );
+
+  assert.equal(drainedResult.length, 2);
+  assert.equal(drainedResult[0]?.status, 'fulfilled');
+  assert.equal(drainedResult[1]?.status, 'rejected');
+  assert.equal(pausedDispatchCount, 0);
+  assert.equal(futureDispatchCount, 0);
 });

@@ -528,6 +528,13 @@ interface UnresolvedStartEvidence {
   readonly positionContext?: MovePositionContext;
 }
 
+export interface StateMoveIdentityLike {
+  readonly ply: number;
+  readonly uci: string;
+  readonly san: string;
+  readonly by: string;
+}
+
 export interface StateViewSnapshotLike {
   readonly fen: string;
   readonly stateRevision: number;
@@ -538,11 +545,14 @@ export interface StateViewSnapshotLike {
   readonly turnStartedAt: number | null;
   readonly status: { readonly over: boolean };
   readonly drawOffer: string | null;
+  readonly moves?: readonly StateMoveIdentityLike[];
 }
 
 export interface ReplayedGameLike {
   readonly fen: string;
   readonly adjudication: unknown;
+  readonly isBlocked?: boolean;
+  readonly stoppedClock?: unknown | null;
   readonly ply: number;
   readonly turn: string;
   readonly status: { readonly over: boolean };
@@ -552,7 +562,35 @@ export interface ReplayedGameLike {
       readonly remaining: { readonly w: number; readonly b: number };
       readonly turnStartedAt: number | null;
     };
+    readonly moves?: readonly StateMoveIdentityLike[];
   };
+}
+
+function assertCoreStateViewFields(
+  view: StateViewSnapshotLike,
+  replayed: ReplayedGameLike,
+  expectedEventsCount: number,
+  label: 'owner' | 'recovery',
+): void {
+  assert.equal(view.fen, replayed.fen, `${label} copy equals replay fen`);
+  assert.equal(view.stateRevision, expectedEventsCount - 1, `${label} stateRevision equals logged head seq`);
+  assert.equal(view.ply, replayed.ply, `${label} ply equals replay ply`);
+  assert.equal(view.turn, replayed.turn, `${label} turn equals replay turn`);
+  assert.deepEqual(view.status, replayed.status, `${label} status equals replay status`);
+  assert.equal(view.drawOffer, replayed.drawOffer, `${label} drawOffer equals replay drawOffer`);
+
+  const snap = replayed.snapshot();
+  assert.equal(view.clock.w, snap.clock.remaining.w, `${label} white clock matches replay snapshot`);
+  assert.equal(view.clock.b, snap.clock.remaining.b, `${label} black clock matches replay snapshot`);
+  assert.equal(view.turnStartedAt, snap.clock.turnStartedAt, `${label} turnStartedAt matches replay snapshot`);
+
+  if (view.moves !== undefined && snap.moves !== undefined) {
+    assert.deepEqual(
+      view.moves.map((m) => ({ ply: m.ply, uci: m.uci, san: m.san, by: m.by })),
+      snap.moves.map((m) => ({ ply: m.ply, uci: m.uci, san: m.san, by: m.by })),
+      `${label} moves match replay snapshot`,
+    );
+  }
 }
 
 export function assertStateViewMatchesReplay(
@@ -560,19 +598,23 @@ export function assertStateViewMatchesReplay(
   replayed: ReplayedGameLike,
   loggedEventsCount: number,
 ): void {
-  assert.equal(view.fen, replayed.fen, 'owner copy equals replay fen');
-  assert.equal(view.stateRevision, loggedEventsCount - 1, 'owner stateRevision equals logged head seq');
+  assertCoreStateViewFields(view, replayed, loggedEventsCount, 'owner');
   assert.equal(view.adjudication, undefined, 'released or ended, never stuck');
   assert.equal(replayed.adjudication, null, 'replayed adjudication must be null');
-  assert.equal(view.ply, replayed.ply, 'owner ply equals replay ply');
-  assert.equal(view.turn, replayed.turn, 'owner turn equals replay turn');
-  assert.deepEqual(view.status, replayed.status, 'owner status equals replay status');
-  assert.equal(view.drawOffer, replayed.drawOffer, 'owner drawOffer equals replay drawOffer');
+}
 
-  const snap = replayed.snapshot();
-  assert.equal(view.clock.w, snap.clock.remaining.w, 'owner white clock matches replay snapshot');
-  assert.equal(view.clock.b, snap.clock.remaining.b, 'owner black clock matches replay snapshot');
-  assert.equal(view.turnStartedAt, snap.clock.turnStartedAt, 'owner turnStartedAt matches replay snapshot');
+export function assertRecoveryStateMatchesReplayPrefix(
+  view: StateViewSnapshotLike,
+  replayed: ReplayedGameLike,
+  prefixEventsCount: number,
+): void {
+  assertCoreStateViewFields(view, replayed, prefixEventsCount, 'recovery');
+  const expectedAdjudication: 'proving' | 'stopped' | undefined = replayed.isBlocked
+    ? 'proving'
+    : replayed.stoppedClock !== null && replayed.stoppedClock !== undefined
+      ? 'stopped'
+      : undefined;
+  assert.equal(view.adjudication, expectedAdjudication, 'recovery adjudication phase matches replay prefix');
 }
 
 export class SoakMetricsTracker {
@@ -1271,6 +1313,19 @@ export class SoakMetricsTracker {
     );
   }
 
+  getOperationQueuedMs(operationId: string): number | undefined {
+    const active = this.#activeOps.get(operationId);
+    if (active) {
+      if (!active.hasBoundStart || active.claims.length === 0) return undefined;
+      return +(Math.max(0, active.claims[0]!.claimedAtMonotonicMs - active.admissionStartAt).toFixed(1));
+    }
+    const settled = this.#completedSamples.get(operationId) ?? this.#settledAwaitingRelease.get(operationId);
+    if (!settled || !settled.evidence.hasBoundStart || settled.evidence.firstClaimAtMs === undefined) {
+      return undefined;
+    }
+    return +(Math.max(0, settled.evidence.firstClaimAtMs - settled.evidence.admissionStartMs).toFixed(1));
+  }
+
   getMoveLatencyQuantiles(): MoveLatencySummary {
     const summary = this.#moveLatencies.summary;
     return {
@@ -1373,6 +1428,7 @@ export interface LostCommitInjectionRecord {
   readonly injectedAtMs: number;
   routeOutcome: LostCommitRouteOutcome;
   routeErrorName?: string;
+  admissionVerified?: boolean;
   durableVerified: boolean;
   durableResultPly?: number;
   durableStartedSeq?: number;
@@ -1386,17 +1442,31 @@ export interface LossyCommitCounter {
   onInjected?: (record: LostCommitInjectionRecord) => void;
 }
 
-export interface DurableLostCommitEvidence {
+export interface DurableLostCommitAdmissionEvidence {
   readonly gameId: string;
   readonly operationId: string;
   readonly executionState: string;
   readonly startedSeq: number | null;
-  readonly finalSeq: number | null;
   readonly events: readonly {
     readonly seq: number;
     readonly type: string;
     readonly payload: unknown;
   }[];
+}
+
+export type DurableLostCommitAdmissionVerificationResult =
+  | {
+      readonly valid: true;
+      readonly startedSeq: number;
+      readonly executionState: 'proving' | 'completed';
+    }
+  | {
+      readonly valid: false;
+      readonly reason: string;
+    };
+
+export interface DurableLostCommitEvidence extends DurableLostCommitAdmissionEvidence {
+  readonly finalSeq: number | null;
 }
 
 export type DurableLostCommitVerificationResult =
@@ -1567,6 +1637,7 @@ export function lossyCommits<
                       hadInsertInTx: hadInsert,
                       injectedAtMs: performance.now(),
                       routeOutcome: 'pending',
+                      admissionVerified: false,
                       durableVerified: false,
                     };
                     counter.injections?.push(record);
@@ -1586,14 +1657,13 @@ export function lossyCommits<
 }
 
 /**
- * Verifies durable PostgreSQL evidence proving an injected lost-COMMIT move admission
- * resulted in an uncertain route outcome and persisted the exact admitted operation's move
- * in accordance with settlePrepared ([resolved, ...resolved.effects] written at startedSeq+1..finalSeq).
+ * Verifies Stage 1 admission durability for an injected lost-COMMIT move admission:
+ * exact uncertain route outcome and persisted matching AdjudicationStarted event.
  */
-export function verifyLostCommitDurableEvidence(
+export function verifyLostCommitAdmissionStarted(
   record: LostCommitInjectionRecord,
-  evidence: DurableLostCommitEvidence,
-): DurableLostCommitVerificationResult {
+  evidence: DurableLostCommitAdmissionEvidence,
+): DurableLostCommitAdmissionVerificationResult {
   if (record.gameId !== evidence.gameId || record.operationId !== evidence.operationId) {
     return { valid: false, reason: 'gameId or operationId mismatch between injection and durable evidence' };
   }
@@ -1603,26 +1673,14 @@ export function verifyLostCommitDurableEvidence(
       reason: `routeOutcome was "${record.routeOutcome}", expected "uncertain_error"`,
     };
   }
-  if (evidence.executionState !== 'completed') {
+  if (evidence.executionState !== 'proving' && evidence.executionState !== 'completed') {
     return {
       valid: false,
-      reason: `durable execution_state was "${evidence.executionState}", expected "completed"`,
+      reason: `durable execution_state was "${evidence.executionState}", expected "proving" or "completed"`,
     };
   }
-  if (
-    evidence.startedSeq === null ||
-    evidence.finalSeq === null ||
-    !Number.isSafeInteger(evidence.startedSeq) ||
-    !Number.isSafeInteger(evidence.finalSeq) ||
-    evidence.finalSeq <= evidence.startedSeq
-  ) {
-    return { valid: false, reason: 'missing or invalid startedSeq/finalSeq bounds on completed adjudication' };
-  }
-  if (evidence.finalSeq < evidence.startedSeq + 2) {
-    return {
-      valid: false,
-      reason: `completed move adjudication finalSeq=${evidence.finalSeq} must be >= startedSeq+2 (${evidence.startedSeq + 2})`,
-    };
+  if (evidence.startedSeq === null || !Number.isSafeInteger(evidence.startedSeq) || evidence.startedSeq < 0) {
+    return { valid: false, reason: 'missing or invalid startedSeq on admitted adjudication' };
   }
 
   const startedEvent = evidence.events.find((e) => e.seq === evidence.startedSeq);
@@ -1632,23 +1690,83 @@ export function verifyLostCommitDurableEvidence(
       reason: `missing durable AdjudicationStarted event at startedSeq=${evidence.startedSeq} (found=${startedEvent?.type ?? 'none'})`,
     };
   }
-  if (
-    typeof startedEvent.payload['gameId'] === 'string' &&
-    startedEvent.payload['gameId'] !== record.gameId
-  ) {
-    return { valid: false, reason: 'AdjudicationStarted gameId does not match injected gameId' };
+  if (startedEvent.payload['gameId'] !== record.gameId) {
+    return {
+      valid: false,
+      reason: `AdjudicationStarted gameId "${String(startedEvent.payload['gameId'])}" does not match injected gameId "${record.gameId}"`,
+    };
   }
   if (startedEvent.payload['operationId'] !== record.operationId) {
-    return { valid: false, reason: 'AdjudicationStarted operationId does not match injected operationId' };
+    return {
+      valid: false,
+      reason: `AdjudicationStarted operationId "${String(startedEvent.payload['operationId'])}" does not match injected operationId "${record.operationId}"`,
+    };
   }
   const prepared = startedEvent.payload['prepared'];
+  if (isPlainRecord(prepared)) {
+    if (prepared['gameId'] !== undefined && prepared['gameId'] !== record.gameId) {
+      return {
+        valid: false,
+        reason: `AdjudicationStarted prepared gameId "${String(prepared['gameId'])}" does not match injected gameId "${record.gameId}"`,
+      };
+    }
+    if (prepared['operationId'] !== undefined && prepared['operationId'] !== record.operationId) {
+      return {
+        valid: false,
+        reason: `AdjudicationStarted prepared operationId "${String(prepared['operationId'])}" does not match injected operationId "${record.operationId}"`,
+      };
+    }
+  }
   const intent = isPlainRecord(prepared) && isPlainRecord(prepared['intent']) ? prepared['intent'] : undefined;
   if (!intent || intent['kind'] !== 'move' || intent['uci'] !== record.uci) {
-    return { valid: false, reason: 'AdjudicationStarted prepared intent does not match admitted move UCI' };
+    return {
+      valid: false,
+      reason: `AdjudicationStarted prepared intent (${String(intent?.['kind'])}:${String(intent?.['uci'])}) does not match admitted move UCI "${record.uci}"`,
+    };
+  }
+
+  return {
+    valid: true,
+    startedSeq: evidence.startedSeq,
+    executionState: evidence.executionState,
+  };
+}
+
+/**
+ * Verifies durable PostgreSQL evidence proving an injected lost-COMMIT move admission
+ * resulted in an uncertain route outcome and persisted the exact admitted operation's move
+ * in accordance with settlePrepared ([resolved, ...resolved.effects] written at startedSeq+1..finalSeq).
+ */
+export function verifyLostCommitDurableEvidence(
+  record: LostCommitInjectionRecord,
+  evidence: DurableLostCommitEvidence,
+): DurableLostCommitVerificationResult {
+  const admissionCheck = verifyLostCommitAdmissionStarted(record, evidence);
+  if (!admissionCheck.valid) {
+    return admissionCheck;
+  }
+  if (evidence.executionState !== 'completed') {
+    return {
+      valid: false,
+      reason: `durable execution_state was "${evidence.executionState}", expected "completed"`,
+    };
+  }
+  if (
+    evidence.finalSeq === null ||
+    !Number.isSafeInteger(evidence.finalSeq) ||
+    evidence.finalSeq <= admissionCheck.startedSeq
+  ) {
+    return { valid: false, reason: 'missing or invalid startedSeq/finalSeq bounds on completed adjudication' };
+  }
+  if (evidence.finalSeq < admissionCheck.startedSeq + 2) {
+    return {
+      valid: false,
+      reason: `completed move adjudication finalSeq=${evidence.finalSeq} must be >= startedSeq+2 (${admissionCheck.startedSeq + 2})`,
+    };
   }
 
   // settlePrepared builds batch [resolved, ...resolved.effects]; appendSettlementBatch inserts resolved at startedSeq + 1
-  const resolvedSeq = evidence.startedSeq + 1;
+  const resolvedSeq = admissionCheck.startedSeq + 1;
   const resolvedEvent = evidence.events.find((e) => e.seq === resolvedSeq);
   if (!resolvedEvent || resolvedEvent.type !== 'AdjudicationResolved' || !isPlainRecord(resolvedEvent.payload)) {
     return {
@@ -1664,7 +1782,7 @@ export function verifyLostCommitDurableEvidence(
   }
   if (
     resolvedEvent.payload['operationId'] !== record.operationId ||
-    resolvedEvent.payload['startedSeq'] !== evidence.startedSeq
+    resolvedEvent.payload['startedSeq'] !== admissionCheck.startedSeq
   ) {
     return { valid: false, reason: 'AdjudicationResolved operationId or startedSeq mismatch' };
   }
@@ -1749,7 +1867,7 @@ export function verifyLostCommitDurableEvidence(
   return {
     valid: true,
     resultPly: declaredPly,
-    startedSeq: evidence.startedSeq,
+    startedSeq: admissionCheck.startedSeq,
     resolvedSeq,
   };
 }
@@ -1789,6 +1907,27 @@ export class LostCommitTracker {
     if (outcome === 'uncertain_error') {
       this.#uncertainRouteCount++;
     }
+  }
+
+  verifyAdmissionStartedDetailed(
+    operationId: string,
+    evidence: DurableLostCommitAdmissionEvidence,
+  ): DurableLostCommitAdmissionVerificationResult {
+    const existing = this.#records.get(operationId);
+    if (!existing) {
+      const reason = `unknown lost-COMMIT operationId ${operationId}`;
+      this.#lastFailureReason = reason;
+      return { valid: false, reason };
+    }
+    const check = verifyLostCommitAdmissionStarted(existing, evidence);
+    if (!check.valid) {
+      this.#lastFailureReason = check.reason;
+      return check;
+    }
+    existing.admissionVerified = true;
+    existing.durableStartedSeq = check.startedSeq;
+    this.#lastFailureReason = undefined;
+    return check;
   }
 
   verifyDurableEvidenceDetailed(
@@ -1860,13 +1999,26 @@ export interface ReplicaPublicationGuard {
   markDisposed(): void;
   readonly isDisposed: boolean;
   readonly publishCount: number;
+  readonly appendCount: number;
+  readonly broadcastCount: number;
+  readonly authorityApplyCount: number;
   readonly staleBlockedCount: number;
+  readonly staleAuthorityBlockedCount: number;
+  readonly staleAppendBlockedCount: number;
+  readonly staleBroadcastBlockedCount: number;
   wrapPublish<TChange extends { readonly gameId: string }>(
     publish: (change: TChange) => Promise<void>,
   ): (change: TChange) => Promise<void>;
+  wrapAsyncCall<TArgs extends unknown[], TResult>(
+    action: 'authority.apply' | 'eventStore.append' | 'startAdjudication',
+    fn: (...args: TArgs) => Promise<TResult>,
+  ): (...args: TArgs) => Promise<TResult>;
+  wrapSyncBroadcast<TArgs extends unknown[], TResult>(
+    fn: (...args: TArgs) => TResult,
+  ): (...args: TArgs) => TResult;
 }
 
-/** Guards a replica's worker publication callback against stale/disposed execution. */
+/** Guards a replica's publication, authority apply, and event append callbacks against stale/disposed execution. */
 export function createReplicaPublicationGuard<R extends ReplicaIdentity>(
   slotIndex: number,
   getActiveReplica: (slotIndex: number) => R | undefined,
@@ -1874,7 +2026,24 @@ export function createReplicaPublicationGuard<R extends ReplicaIdentity>(
 ): ReplicaPublicationGuard {
   let disposed = false;
   let publishCount = 0;
+  let appendCount = 0;
+  let broadcastCount = 0;
+  let authorityApplyCount = 0;
   let staleBlockedCount = 0;
+  let staleAuthorityBlockedCount = 0;
+  let staleAppendBlockedCount = 0;
+  let staleBroadcastBlockedCount = 0;
+
+  const checkActive = (action: string, onBlocked?: () => void): void => {
+    const own = getOwnReplica();
+    if (disposed || own === undefined || getActiveReplica(slotIndex) !== own) {
+      staleBlockedCount++;
+      onBlocked?.();
+      throw new Error(
+        `Stale replica ${own?.executorId ?? 'uninitialized'} (slot ${slotIndex}) blocked from ${action}`,
+      );
+    }
+  };
 
   return {
     markDisposed(): void {
@@ -1886,23 +2055,223 @@ export function createReplicaPublicationGuard<R extends ReplicaIdentity>(
     get publishCount(): number {
       return publishCount;
     },
+    get appendCount(): number {
+      return appendCount;
+    },
+    get broadcastCount(): number {
+      return broadcastCount;
+    },
+    get authorityApplyCount(): number {
+      return authorityApplyCount;
+    },
     get staleBlockedCount(): number {
       return staleBlockedCount;
+    },
+    get staleAuthorityBlockedCount(): number {
+      return staleAuthorityBlockedCount;
+    },
+    get staleAppendBlockedCount(): number {
+      return staleAppendBlockedCount;
+    },
+    get staleBroadcastBlockedCount(): number {
+      return staleBroadcastBlockedCount;
     },
     wrapPublish<TChange extends { readonly gameId: string }>(
       publish: (change: TChange) => Promise<void>,
     ): (change: TChange) => Promise<void> {
       return async (change: TChange): Promise<void> => {
-        const own = getOwnReplica();
-        if (disposed || own === undefined || getActiveReplica(slotIndex) !== own) {
-          staleBlockedCount++;
-          throw new Error(
-            `Stale replica ${own?.executorId ?? 'uninitialized'} (slot ${slotIndex}) blocked from publishing for game ${change.gameId}`,
-          );
-        }
+        checkActive(`publishing for game ${change.gameId}`);
         publishCount++;
         return publish(change);
       };
     },
+    wrapAsyncCall<TArgs extends unknown[], TResult>(
+      action: 'authority.apply' | 'eventStore.append' | 'startAdjudication',
+      fn: (...args: TArgs) => Promise<TResult>,
+    ): (...args: TArgs) => Promise<TResult> {
+      return async (...args: TArgs): Promise<TResult> => {
+        checkActive(action, () => {
+          if (action === 'authority.apply') staleAuthorityBlockedCount++;
+          else if (action === 'eventStore.append') staleAppendBlockedCount++;
+        });
+        if (action === 'authority.apply') authorityApplyCount++;
+        else if (action === 'eventStore.append') appendCount++;
+        return fn(...args);
+      };
+    },
+    wrapSyncBroadcast<TArgs extends unknown[], TResult>(
+      fn: (...args: TArgs) => TResult,
+    ): (...args: TArgs) => TResult {
+      return (...args: TArgs): TResult => {
+        checkActive('broadcasting', () => {
+          staleBroadcastBlockedCount++;
+        });
+        broadcastCount++;
+        return fn(...args);
+      };
+    },
   };
+}
+
+export type RouteGatePhase = 'active' | 'draining' | 'fenced' | 'aborted';
+
+/**
+ * Coordinates in-process route boundary pause, in-flight command drain, draining-worker
+ * bypass, and cutover fencing for a replica slot during cold restart.
+ */
+export class ReplicaRouteGate {
+  readonly #slotIndex: number;
+  #phase: RouteGatePhase = 'active';
+  #inFlight = 0;
+  #pausedWaiters = 0;
+  #blockedStaleRoutes = 0;
+  #abortError: Error | undefined;
+  #resumePromise: Promise<void> | undefined;
+  #resumeResolve: (() => void) | undefined;
+  #resumeReject: ((err: Error) => void) | undefined;
+  #drainResolvers: Array<() => void> = [];
+
+  constructor(slotIndex: number) {
+    this.#slotIndex = slotIndex;
+  }
+
+  get phase(): RouteGatePhase {
+    return this.#phase;
+  }
+
+  get inFlightCount(): number {
+    return this.#inFlight;
+  }
+
+  get pausedWaitersCount(): number {
+    return this.#pausedWaiters;
+  }
+
+  get blockedStaleRoutesCount(): number {
+    return this.#blockedStaleRoutes;
+  }
+
+  #ensureResumePromise(): Promise<void> {
+    if (!this.#resumePromise) {
+      this.#resumePromise = new Promise<void>((resolve, reject) => {
+        this.#resumeResolve = resolve;
+        this.#resumeReject = reject;
+      });
+      this.#resumePromise.catch(() => {});
+    }
+    return this.#resumePromise;
+  }
+
+  #notifyDrained(): void {
+    if (this.#inFlight > 0 || this.#drainResolvers.length === 0) return;
+    const resolvers = this.#drainResolvers;
+    this.#drainResolvers = [];
+    for (const resolve of resolvers) resolve();
+  }
+
+  async #waitForDrain(): Promise<void> {
+    if (this.#inFlight === 0) return;
+    await new Promise<void>((resolve) => {
+      this.#drainResolvers.push(resolve);
+    });
+  }
+
+  #throwIfAborted(): void {
+    if (this.#phase === 'aborted') {
+      throw this.#abortError!;
+    }
+  }
+
+  /** Pause new non-bypass work on this slot and drain commands already dispatched. */
+  async pauseAndDrain(): Promise<void> {
+    this.#throwIfAborted();
+    this.#ensureResumePromise();
+    if (this.#phase === 'active') {
+      this.#phase = 'draining';
+    }
+    await this.#waitForDrain();
+    this.#throwIfAborted();
+  }
+
+  /** Drain any remaining bypass calls after workers/resync stop, then fence the slot. */
+  async drainAndFence(): Promise<void> {
+    this.#throwIfAborted();
+    this.#ensureResumePromise();
+    if (this.#phase === 'active') {
+      this.#phase = 'draining';
+    }
+    await this.#waitForDrain();
+    this.#throwIfAborted();
+    this.#phase = 'fenced';
+  }
+
+  /** Resume routing once the fresh replica is installed in this slot. */
+  resume(): void {
+    if (this.#phase === 'aborted') return;
+    this.#phase = 'active';
+    const resolve = this.#resumeResolve;
+    this.#resumePromise = undefined;
+    this.#resumeResolve = undefined;
+    this.#resumeReject = undefined;
+    resolve?.();
+  }
+
+  /**
+   * Terminally abort this gate on failure/teardown: reject all paused waiters,
+   * reject future routes so stale work cannot dispatch, and drain genuine in-flight calls.
+   */
+  async abort(reason = 'aborted'): Promise<void> {
+    if (this.#phase !== 'aborted') {
+      this.#phase = 'aborted';
+      this.#abortError = new Error(`Slot ${this.#slotIndex} route gate aborted: ${reason}`);
+      const reject = this.#resumeReject;
+      this.#resumePromise = undefined;
+      this.#resumeResolve = undefined;
+      this.#resumeReject = undefined;
+      reject?.(this.#abortError);
+    }
+    await this.#waitForDrain();
+  }
+
+  async route<R extends { readonly getStats?: () => { readonly disposed: boolean } }, T>(
+    isDrainBypass: boolean,
+    getReplica: () => R,
+    dispatch: (replica: R) => Promise<T>,
+  ): Promise<T> {
+    if (this.#phase === 'aborted') {
+      this.#blockedStaleRoutes++;
+      throw this.#abortError!;
+    }
+    if (!isDrainBypass) {
+      while (this.#phase !== 'active') {
+        this.#throwIfAborted();
+        const waitPromise = this.#ensureResumePromise();
+        this.#pausedWaiters++;
+        try {
+          await waitPromise;
+        } finally {
+          this.#pausedWaiters--;
+        }
+      }
+    } else if (this.#phase === 'fenced') {
+      this.#blockedStaleRoutes++;
+      throw new Error(`Slot ${this.#slotIndex} cutover fenced: stale bypass route rejected`);
+    }
+
+    const replica = getReplica();
+    if (replica.getStats?.().disposed) {
+      this.#blockedStaleRoutes++;
+      throw new Error(`Slot ${this.#slotIndex} replica is disposed: stale route rejected`);
+    }
+
+    this.#inFlight++;
+    try {
+      return await dispatch(replica);
+    } finally {
+      this.#inFlight--;
+      if (this.#inFlight === 0) {
+        this.#notifyDrained();
+      }
+    }
+  }
 }
