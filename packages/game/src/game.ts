@@ -14,6 +14,7 @@ import {
   IllegalMoveError,
   Position,
   chess960Fen,
+  isFrozenDeadPosition,
   opposite,
   parseFen,
   typeOf,
@@ -253,7 +254,21 @@ export class Game {
       ...(chess960StartId !== null ? { chess960StartId } : {}),
       ...(pregame !== null ? pregame : {}),
     };
-    return { game: Game.fromEvents([event]), events: [event] };
+    const initialPos = Position.fromFen(initialFen, variant);
+    const events: GameEvent[] = [event];
+    if (isFrozenDeadPosition(initialPos.snapshot())) {
+      const initialStatus = initialPos.status();
+      if (initialStatus.over && initialStatus.reason === 'dead_position') {
+        events.push({
+          type: 'GameEnded',
+          result: '1/2-1/2',
+          termination: 'dead_position',
+          winner: null,
+          at: params.at,
+        });
+      }
+    }
+    return { game: Game.fromEvents(events), events };
   }
 
   /** Reconstruct a game by folding its full event history. */
@@ -338,11 +353,20 @@ export class Game {
       return this.endByTimeout(mover, at);
     }
 
-    let nextPos: Position;
+    let move: ReturnType<Position['legalMoves']>[number];
     let san: string;
     try {
-      const move = this.resolveMove(uci);
+      move = this.resolveMove(uci);
       san = s.position.toSan(move);
+    } catch (err) {
+      throw new GameError(`Illegal move "${uci}": ${(err as Error).message}`);
+    }
+
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
+
+    let nextPos: Position;
+    try {
       nextPos = s.position.play(move);
     } catch (err) {
       throw new GameError(`Illegal move "${uci}": ${(err as Error).message}`);
@@ -384,6 +408,8 @@ export class Game {
   /** Resign as `color`. */
   resign(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [{
       type: 'GameEnded',
       result: color === 'w' ? '0-1' : '1-0',
@@ -400,6 +426,8 @@ export class Game {
     if (this.state.drawOffer === color) {
       throw new GameError('Draw already offered by this side');
     }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [{ type: 'DrawOffered', by: color, at }];
     return { game: Game.applyAll(this, events), events };
   }
@@ -411,6 +439,8 @@ export class Game {
     if (offer === null || offer === color) {
       throw new GameError('No draw offer from the opponent to accept');
     }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [{
       type: 'GameEnded',
       result: '1/2-1/2',
@@ -425,6 +455,8 @@ export class Game {
   declineDraw(color: Color, at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
     if (this.state.drawOffer === null) throw new GameError('No draw offer to decline');
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [{ type: 'DrawDeclined', by: color, at }];
     return { game: Game.applyAll(this, events), events };
   }
@@ -437,6 +469,8 @@ export class Game {
     if (!hasFlagged(s.clock, sideToMove, at, s.timeControl)) {
       throw new GameError('Opponent has not flagged');
     }
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     return this.endByTimeout(sideToMove, at);
   }
 
@@ -444,6 +478,8 @@ export class Game {
   abort(at: number): { game: Game; events: GameEvent[] } {
     this.assertOngoing();
     if (this.state.ply >= 2) throw new GameError('Game can no longer be aborted');
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [{
       type: 'GameEnded',
       result: '*',
@@ -496,11 +532,25 @@ export class Game {
     this.assertOngoing();
     const verdict = this.noShowVerdict(at);
     if (verdict.kind !== 'expire') throw new GameError(`No-show expiry refused: ${verdict.kind}`);
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const events: GameEvent[] = [verdict.ending];
     return { game: Game.applyAll(this, events), events };
   }
 
   // --- Internals ---------------------------------------------------------
+
+  private deadPositionEnding(at: number): { game: Game; events: GameEvent[] } | null {
+    if (!isFrozenDeadPosition(this.state.position.snapshot())) {
+      return null;
+    }
+    const status = this.state.position.status();
+    if (status.over && status.reason === 'dead_position') {
+      const events: GameEvent[] = [this.terminalEventFor(status, at)];
+      return { game: Game.applyAll(this, events), events };
+    }
+    return null;
+  }
 
   private assertOngoing(): void {
     if (this.state.status.over) throw new GameError('Game is already over');
@@ -516,6 +566,8 @@ export class Game {
   }
 
   private endByTimeout(flagged: Color, at: number): { game: Game; events: GameEvent[] } {
+    const dead = this.deadPositionEnding(at);
+    if (dead) return dead;
     const winner = opposite(flagged);
     // If the side that would win on time cannot possibly mate, it is a draw.
     const drawByInsufficient = !canMate(this.state.position.fen(), winner, this.state.variant);
@@ -560,6 +612,8 @@ export class Game {
         return { type: 'GameEnded', result: '1/2-1/2', termination: 'threefold', winner: null, at };
       case 'variant_draw':
         return { type: 'GameEnded', result: '1/2-1/2', termination: 'variant', winner: null, at };
+      case 'dead_position':
+        return { type: 'GameEnded', result: '1/2-1/2', termination: 'dead_position', winner: null, at };
     }
   }
 
@@ -787,6 +841,12 @@ export function canMate(fen: string, color: Color, variant: Variant = 'standard'
     case 'chess960':
     default: {
       const pos = Position.fromFen(fen, variant);
+      if (isFrozenDeadPosition(pos.snapshot())) {
+        const status = pos.status();
+        if (status.over && status.reason === 'dead_position') {
+          return false;
+        }
+      }
       return adjudicateTimeoutPossibility(pos, color);
     }
   }
