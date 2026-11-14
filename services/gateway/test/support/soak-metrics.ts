@@ -12,6 +12,8 @@
  */
 
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { performance } from 'node:perf_hooks';
 
 export interface SoakConfig {
   readonly seed: number;
@@ -1322,4 +1324,585 @@ export class SoakMetricsTracker {
   getTopProofCpu(): readonly TailSample[] {
     return this.#topProofCpu.items;
   }
+}
+
+export type LossyTransactionPurpose = 'move_admission' | 'other_admission';
+
+export interface LossyTransactionScope {
+  readonly purpose: LossyTransactionPurpose;
+  readonly gameId: string;
+  readonly operationId: string;
+  readonly commandKind: string;
+  readonly uci?: string;
+  readonly basePly?: number;
+  readonly onInjected?: (injection: LostCommitInjectionRecord) => void;
+}
+
+export interface MoveRouteCorrelation {
+  readonly gameId: string;
+  readonly uci: string;
+  readonly basePly: number;
+  operationId?: string;
+  injected?: LostCommitInjectionRecord;
+}
+
+export interface LossyCommitControl {
+  enabled: boolean;
+  targetMinLost: number;
+  rate: number;
+  targetGameId?: string;
+  targetOperationId?: string;
+  maxLost?: number;
+  requireInsertInTx?: boolean;
+}
+
+export type LostCommitRouteOutcome =
+  | 'pending'
+  | 'uncertain_error'
+  | 'unexpected_success'
+  | 'non_uncertain_error';
+
+export interface LostCommitInjectionRecord {
+  readonly gameId: string;
+  readonly operationId: string;
+  readonly purpose: LossyTransactionPurpose;
+  readonly commandKind: string;
+  readonly uci: string;
+  readonly basePly?: number;
+  readonly hadInsertInTx: boolean;
+  readonly injectedAtMs: number;
+  routeOutcome: LostCommitRouteOutcome;
+  routeErrorName?: string;
+  durableVerified: boolean;
+  durableResultPly?: number;
+  durableStartedSeq?: number;
+  durableResolvedSeq?: number;
+}
+
+export interface LossyCommitCounter {
+  lost: number;
+  readonly injectedOperationIds?: Set<string>;
+  readonly injections?: LostCommitInjectionRecord[];
+  onInjected?: (record: LostCommitInjectionRecord) => void;
+}
+
+export interface DurableLostCommitEvidence {
+  readonly gameId: string;
+  readonly operationId: string;
+  readonly executionState: string;
+  readonly startedSeq: number | null;
+  readonly finalSeq: number | null;
+  readonly events: readonly {
+    readonly seq: number;
+    readonly type: string;
+    readonly payload: unknown;
+  }[];
+}
+
+export type DurableLostCommitVerificationResult =
+  | {
+      readonly valid: true;
+      readonly resultPly: number;
+      readonly startedSeq: number;
+      readonly resolvedSeq: number;
+    }
+  | {
+      readonly valid: false;
+      readonly reason: string;
+    };
+
+const lossyTransactionStorage = new AsyncLocalStorage<LossyTransactionScope>();
+const moveRouteCorrelationStorage = new AsyncLocalStorage<MoveRouteCorrelation>();
+
+/** Runs an async operation inside a scoped transaction purpose for lossy COMMIT targeting. */
+export function runWithLossyTransactionScope<T>(
+  scope: LossyTransactionScope,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return lossyTransactionStorage.run(scope, fn);
+}
+
+/** Returns the active transaction scope, if any. */
+export function getCurrentLossyTransactionScope(): LossyTransactionScope | undefined {
+  return lossyTransactionStorage.getStore();
+}
+
+/** Runs a routed move attempt inside an AsyncLocalStorage correlation slot. */
+export function runWithMoveRouteCorrelation<T>(
+  correlation: MoveRouteCorrelation,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return moveRouteCorrelationStorage.run(correlation, fn);
+}
+
+/** Returns the active move route correlation slot, if any. */
+export function getCurrentMoveRouteCorrelation(): MoveRouteCorrelation | undefined {
+  return moveRouteCorrelationStorage.getStore();
+}
+
+function isPlainRecord(val: unknown): val is Record<string, unknown> {
+  return typeof val === 'object' && val !== null;
+}
+
+function extractSqlText(sql: unknown): string | undefined {
+  if (typeof sql === 'string') return sql;
+  if (isPlainRecord(sql) && typeof sql['text'] === 'string') {
+    return sql['text'];
+  }
+  return undefined;
+}
+
+type SqlCommandKind = 'BEGIN' | 'COMMIT' | 'ROLLBACK' | 'INSERT' | 'OTHER';
+
+function classifySqlCommand(sqlText: string | undefined): SqlCommandKind {
+  if (sqlText === undefined) return 'OTHER';
+  const upper = sqlText.trim().toUpperCase();
+  if (upper === 'BEGIN' || upper === 'BEGIN;' || upper.startsWith('BEGIN ') || upper.startsWith('START TRANSACTION')) {
+    return 'BEGIN';
+  }
+  if (upper === 'COMMIT' || upper === 'COMMIT;' || upper.startsWith('COMMIT ')) {
+    return 'COMMIT';
+  }
+  if (upper === 'ROLLBACK' || upper === 'ROLLBACK;' || upper.startsWith('ROLLBACK ')) {
+    return 'ROLLBACK';
+  }
+  if (upper.startsWith('INSERT')) {
+    return 'INSERT';
+  }
+  return 'OTHER';
+}
+
+function isEligibleMoveAdmissionScope(
+  scope: LossyTransactionScope | undefined,
+  control: LossyCommitControl,
+): scope is LossyTransactionScope & { readonly uci: string } {
+  if (!scope) return false;
+  if (scope.purpose !== 'move_admission' || scope.commandKind !== 'move') return false;
+  if (scope.gameId.length === 0 || scope.operationId.length === 0) return false;
+  if (typeof scope.uci !== 'string' || scope.uci.length === 0) return false;
+  if (control.targetGameId !== undefined && scope.gameId !== control.targetGameId) return false;
+  if (control.targetOperationId !== undefined && scope.operationId !== control.targetOperationId) return false;
+  return true;
+}
+
+/**
+ * Wraps a pg Pool so only scoped move-admission COMMIT replies are dropped after PostgreSQL
+ * commits them. Ordinary worker transactions, out-of-scope transactions, duplicate retries of
+ * an already-injected operationId, and underlying query failures are never misattributed.
+ */
+export function lossyCommits<
+  P extends { connect: (...args: never[]) => Promise<object>; query: (...args: never[]) => unknown },
+>(
+  pool: P,
+  control: LossyCommitControl,
+  counter: LossyCommitCounter,
+  faultRnd: () => number,
+): P {
+  const seenInjectedOps = counter.injectedOperationIds ?? new Set<string>();
+
+  return new Proxy(pool, {
+    get(target, prop, receiver) {
+      if (prop === 'query') {
+        const queryVal = Reflect.get(target, 'query', target);
+        return typeof queryVal === 'function' ? queryVal.bind(target) : queryVal;
+      }
+      if (prop !== 'connect') return Reflect.get(target, prop, receiver);
+
+      const origConnect = target.connect;
+
+      return async (...connectArgs: never[]) => {
+        const client = await origConnect.apply(target, connectArgs);
+        let inTx = false;
+        let sawInsertInTx = false;
+
+        return new Proxy(client, {
+          get(c, p, r) {
+            if (p !== 'query') {
+              const member = Reflect.get(c, p, c);
+              return typeof member === 'function' ? member.bind(c) : Reflect.get(c, p, r);
+            }
+            const origQuery = Reflect.get(c, 'query', c);
+            if (typeof origQuery !== 'function') return origQuery;
+
+            return async (...args: unknown[]) => {
+              const cmd = classifySqlCommand(extractSqlText(args[0]));
+              if (cmd === 'BEGIN') {
+                inTx = true;
+                sawInsertInTx = false;
+              }
+              const res: unknown = await (Reflect.apply(origQuery, c, args) as Promise<unknown>);
+              if (cmd === 'ROLLBACK') {
+                inTx = false;
+                sawInsertInTx = false;
+                return res;
+              }
+              if (cmd === 'INSERT' && inTx) {
+                sawInsertInTx = true;
+              }
+              if (cmd === 'COMMIT') {
+                const hadInsert = sawInsertInTx;
+                inTx = false;
+                sawInsertInTx = false;
+                const scope = lossyTransactionStorage.getStore();
+                if (
+                  control.enabled &&
+                  isEligibleMoveAdmissionScope(scope, control) &&
+                  (!control.requireInsertInTx || hadInsert) &&
+                  !seenInjectedOps.has(scope.operationId) &&
+                  (control.maxLost === undefined || counter.lost < control.maxLost)
+                ) {
+                  const shouldDrop =
+                    counter.lost < control.targetMinLost ||
+                    (control.rate > 0 && faultRnd() < control.rate);
+                  if (shouldDrop) {
+                    seenInjectedOps.add(scope.operationId);
+                    counter.lost++;
+                    const record: LostCommitInjectionRecord = {
+                      gameId: scope.gameId,
+                      operationId: scope.operationId,
+                      purpose: scope.purpose,
+                      commandKind: scope.commandKind,
+                      uci: scope.uci,
+                      basePly: scope.basePly,
+                      hadInsertInTx: hadInsert,
+                      injectedAtMs: performance.now(),
+                      routeOutcome: 'pending',
+                      durableVerified: false,
+                    };
+                    counter.injections?.push(record);
+                    scope.onInjected?.(record);
+                    counter.onInjected?.(record);
+                    throw new Error('connection lost after COMMIT');
+                  }
+                }
+              }
+              return res;
+            };
+          },
+        });
+      };
+    },
+  });
+}
+
+/**
+ * Verifies durable PostgreSQL evidence proving an injected lost-COMMIT move admission
+ * resulted in an uncertain route outcome and persisted the exact admitted operation's move
+ * in accordance with settlePrepared ([resolved, ...resolved.effects] written at startedSeq+1..finalSeq).
+ */
+export function verifyLostCommitDurableEvidence(
+  record: LostCommitInjectionRecord,
+  evidence: DurableLostCommitEvidence,
+): DurableLostCommitVerificationResult {
+  if (record.gameId !== evidence.gameId || record.operationId !== evidence.operationId) {
+    return { valid: false, reason: 'gameId or operationId mismatch between injection and durable evidence' };
+  }
+  if (record.routeOutcome !== 'uncertain_error') {
+    return {
+      valid: false,
+      reason: `routeOutcome was "${record.routeOutcome}", expected "uncertain_error"`,
+    };
+  }
+  if (evidence.executionState !== 'completed') {
+    return {
+      valid: false,
+      reason: `durable execution_state was "${evidence.executionState}", expected "completed"`,
+    };
+  }
+  if (
+    evidence.startedSeq === null ||
+    evidence.finalSeq === null ||
+    !Number.isSafeInteger(evidence.startedSeq) ||
+    !Number.isSafeInteger(evidence.finalSeq) ||
+    evidence.finalSeq <= evidence.startedSeq
+  ) {
+    return { valid: false, reason: 'missing or invalid startedSeq/finalSeq bounds on completed adjudication' };
+  }
+  if (evidence.finalSeq < evidence.startedSeq + 2) {
+    return {
+      valid: false,
+      reason: `completed move adjudication finalSeq=${evidence.finalSeq} must be >= startedSeq+2 (${evidence.startedSeq + 2})`,
+    };
+  }
+
+  const startedEvent = evidence.events.find((e) => e.seq === evidence.startedSeq);
+  if (!startedEvent || startedEvent.type !== 'AdjudicationStarted' || !isPlainRecord(startedEvent.payload)) {
+    return {
+      valid: false,
+      reason: `missing durable AdjudicationStarted event at startedSeq=${evidence.startedSeq} (found=${startedEvent?.type ?? 'none'})`,
+    };
+  }
+  if (
+    typeof startedEvent.payload['gameId'] === 'string' &&
+    startedEvent.payload['gameId'] !== record.gameId
+  ) {
+    return { valid: false, reason: 'AdjudicationStarted gameId does not match injected gameId' };
+  }
+  if (startedEvent.payload['operationId'] !== record.operationId) {
+    return { valid: false, reason: 'AdjudicationStarted operationId does not match injected operationId' };
+  }
+  const prepared = startedEvent.payload['prepared'];
+  const intent = isPlainRecord(prepared) && isPlainRecord(prepared['intent']) ? prepared['intent'] : undefined;
+  if (!intent || intent['kind'] !== 'move' || intent['uci'] !== record.uci) {
+    return { valid: false, reason: 'AdjudicationStarted prepared intent does not match admitted move UCI' };
+  }
+
+  // settlePrepared builds batch [resolved, ...resolved.effects]; appendSettlementBatch inserts resolved at startedSeq + 1
+  const resolvedSeq = evidence.startedSeq + 1;
+  const resolvedEvent = evidence.events.find((e) => e.seq === resolvedSeq);
+  if (!resolvedEvent || resolvedEvent.type !== 'AdjudicationResolved' || !isPlainRecord(resolvedEvent.payload)) {
+    return {
+      valid: false,
+      reason: `missing durable AdjudicationResolved event at startedSeq+1 (${resolvedSeq}, found=${resolvedEvent?.type ?? 'none'})`,
+    };
+  }
+  if (
+    typeof resolvedEvent.payload['gameId'] === 'string' &&
+    resolvedEvent.payload['gameId'] !== record.gameId
+  ) {
+    return { valid: false, reason: 'AdjudicationResolved gameId does not match injected gameId' };
+  }
+  if (
+    resolvedEvent.payload['operationId'] !== record.operationId ||
+    resolvedEvent.payload['startedSeq'] !== evidence.startedSeq
+  ) {
+    return { valid: false, reason: 'AdjudicationResolved operationId or startedSeq mismatch' };
+  }
+
+  const rawEffects = resolvedEvent.payload['effects'];
+  if (!Array.isArray(rawEffects) || rawEffects.length === 0) {
+    return { valid: false, reason: 'AdjudicationResolved missing non-empty declared effects array' };
+  }
+  if (evidence.finalSeq !== resolvedSeq + rawEffects.length) {
+    return {
+      valid: false,
+      reason: `finalSeq=${evidence.finalSeq} does not match resolvedSeq+effects.length (${resolvedSeq + rawEffects.length})`,
+    };
+  }
+
+  for (const [idx, effect] of rawEffects.entries()) {
+    if (!isPlainRecord(effect) || typeof effect['type'] !== 'string') {
+      return { valid: false, reason: `AdjudicationResolved declared effect[${idx}] missing valid type` };
+    }
+    if (effect['type'] === 'GameEnded' && idx !== rawEffects.length - 1) {
+      return { valid: false, reason: 'AdjudicationResolved declared GameEnded must be final effect' };
+    }
+    const effectSeq = resolvedSeq + 1 + idx;
+    const persisted = evidence.events.find((e) => e.seq === effectSeq);
+    if (!persisted || persisted.type !== effect['type'] || !isPlainRecord(persisted.payload)) {
+      return {
+        valid: false,
+        reason: `persisted event at seq=${effectSeq} (found=${persisted?.type ?? 'none'}) does not match declared effect[${idx}] type "${effect['type']}"`,
+      };
+    }
+  }
+
+  const declaredMoves = rawEffects
+    .map((effect, idx) => ({ effect, idx }))
+    .filter((entry): entry is { effect: Record<string, unknown>; idx: number } =>
+      isPlainRecord(entry.effect) && entry.effect['type'] === 'MovePlayed',
+    );
+  if (declaredMoves.length !== 1) {
+    return {
+      valid: false,
+      reason: `AdjudicationResolved declared effects contain ${declaredMoves.length} MovePlayed entries, expected 1`,
+    };
+  }
+
+  const { effect: declaredMove, idx: declaredMoveIdx } = declaredMoves[0]!;
+  if (declaredMove['uci'] !== record.uci) {
+    return {
+      valid: false,
+      reason: `declared MovePlayed UCI "${String(declaredMove['uci'])}" != "${record.uci}"`,
+    };
+  }
+  const declaredPly = declaredMove['ply'];
+  if (typeof declaredPly !== 'number' || !Number.isSafeInteger(declaredPly)) {
+    return { valid: false, reason: 'declared MovePlayed missing valid integer ply' };
+  }
+  if (record.basePly !== undefined && declaredPly !== record.basePly + 1) {
+    return { valid: false, reason: `declared MovePlayed ply ${declaredPly} != expected ${record.basePly + 1}` };
+  }
+
+  const moveSeq = resolvedSeq + 1 + declaredMoveIdx;
+  const moveEvent = evidence.events.find((e) => e.seq === moveSeq);
+  if (!moveEvent || moveEvent.type !== 'MovePlayed' || !isPlainRecord(moveEvent.payload)) {
+    return {
+      valid: false,
+      reason: `missing durable MovePlayed event at expected seq=${moveSeq} in (${resolvedSeq}..${evidence.finalSeq}]`,
+    };
+  }
+  if (moveEvent.payload['uci'] !== record.uci) {
+    return { valid: false, reason: `MovePlayed UCI "${String(moveEvent.payload['uci'])}" != "${record.uci}"` };
+  }
+  const resultPly = moveEvent.payload['ply'];
+  if (resultPly !== declaredPly) {
+    return { valid: false, reason: `persisted MovePlayed ply ${String(resultPly)} != declared ply ${declaredPly}` };
+  }
+  if (typeof declaredMove['san'] === 'string' && moveEvent.payload['san'] !== declaredMove['san']) {
+    return { valid: false, reason: 'persisted MovePlayed san does not match declared effect san' };
+  }
+  if (typeof declaredMove['by'] === 'string' && moveEvent.payload['by'] !== declaredMove['by']) {
+    return { valid: false, reason: 'persisted MovePlayed by does not match declared effect by' };
+  }
+
+  return {
+    valid: true,
+    resultPly: declaredPly,
+    startedSeq: evidence.startedSeq,
+    resolvedSeq,
+  };
+}
+
+/**
+ * Tracks correlated move-admission lost-COMMIT injections, enforces uncertain route outcomes,
+ * and counts committed moves only after matching durable PostgreSQL evidence is verified.
+ */
+export class LostCommitTracker {
+  readonly #records = new Map<string, LostCommitInjectionRecord>();
+  #uncertainRouteCount = 0;
+  #verifiedCommittedCount = 0;
+  #lastFailureReason: string | undefined;
+
+  recordInjection(record: LostCommitInjectionRecord): boolean {
+    if (this.#records.has(record.operationId)) {
+      return false;
+    }
+    this.#records.set(record.operationId, record);
+    return true;
+  }
+
+  recordRouteOutcome(
+    operationId: string,
+    outcome: Exclude<LostCommitRouteOutcome, 'pending'>,
+    errorName?: string,
+  ): void {
+    const existing = this.#records.get(operationId);
+    if (!existing) {
+      throw new Error(`Cannot record route outcome for unknown lost-COMMIT operation ${operationId}`);
+    }
+    if (existing.routeOutcome !== 'pending') {
+      return;
+    }
+    existing.routeOutcome = outcome;
+    existing.routeErrorName = errorName;
+    if (outcome === 'uncertain_error') {
+      this.#uncertainRouteCount++;
+    }
+  }
+
+  verifyDurableEvidenceDetailed(
+    operationId: string,
+    evidence: DurableLostCommitEvidence,
+  ): DurableLostCommitVerificationResult {
+    const existing = this.#records.get(operationId);
+    if (!existing) {
+      const reason = `unknown lost-COMMIT operationId ${operationId}`;
+      this.#lastFailureReason = reason;
+      return { valid: false, reason };
+    }
+    if (existing.durableVerified) {
+      return {
+        valid: true,
+        resultPly: existing.durableResultPly ?? (existing.basePly !== undefined ? existing.basePly + 1 : 0),
+        startedSeq: existing.durableStartedSeq ?? evidence.startedSeq ?? 0,
+        resolvedSeq: existing.durableResolvedSeq ?? (evidence.startedSeq !== null ? evidence.startedSeq + 1 : 0),
+      };
+    }
+    const check = verifyLostCommitDurableEvidence(existing, evidence);
+    if (!check.valid) {
+      this.#lastFailureReason = check.reason;
+      return check;
+    }
+    existing.durableVerified = true;
+    existing.durableResultPly = check.resultPly;
+    existing.durableStartedSeq = check.startedSeq;
+    existing.durableResolvedSeq = check.resolvedSeq;
+    this.#verifiedCommittedCount++;
+    this.#lastFailureReason = undefined;
+    return check;
+  }
+
+  verifyDurableEvidence(operationId: string, evidence: DurableLostCommitEvidence): boolean {
+    return this.verifyDurableEvidenceDetailed(operationId, evidence).valid;
+  }
+
+  get lastFailureReason(): string | undefined {
+    return this.#lastFailureReason;
+  }
+
+  get injectedCount(): number {
+    return this.#records.size;
+  }
+
+  get uncertainRouteCount(): number {
+    return this.#uncertainRouteCount;
+  }
+
+  get verifiedCommittedCount(): number {
+    return this.#verifiedCommittedCount;
+  }
+
+  getRecord(operationId: string): LostCommitInjectionRecord | undefined {
+    return this.#records.get(operationId);
+  }
+
+  getInjections(): readonly LostCommitInjectionRecord[] {
+    return [...this.#records.values()];
+  }
+}
+
+export interface ReplicaIdentity {
+  readonly executorId: string;
+}
+
+export interface ReplicaPublicationGuard {
+  markDisposed(): void;
+  readonly isDisposed: boolean;
+  readonly publishCount: number;
+  readonly staleBlockedCount: number;
+  wrapPublish<TChange extends { readonly gameId: string }>(
+    publish: (change: TChange) => Promise<void>,
+  ): (change: TChange) => Promise<void>;
+}
+
+/** Guards a replica's worker publication callback against stale/disposed execution. */
+export function createReplicaPublicationGuard<R extends ReplicaIdentity>(
+  slotIndex: number,
+  getActiveReplica: (slotIndex: number) => R | undefined,
+  getOwnReplica: () => R | undefined,
+): ReplicaPublicationGuard {
+  let disposed = false;
+  let publishCount = 0;
+  let staleBlockedCount = 0;
+
+  return {
+    markDisposed(): void {
+      disposed = true;
+    },
+    get isDisposed(): boolean {
+      return disposed;
+    },
+    get publishCount(): number {
+      return publishCount;
+    },
+    get staleBlockedCount(): number {
+      return staleBlockedCount;
+    },
+    wrapPublish<TChange extends { readonly gameId: string }>(
+      publish: (change: TChange) => Promise<void>,
+    ): (change: TChange) => Promise<void> {
+      return async (change: TChange): Promise<void> => {
+        const own = getOwnReplica();
+        if (disposed || own === undefined || getActiveReplica(slotIndex) !== own) {
+          staleBlockedCount++;
+          throw new Error(
+            `Stale replica ${own?.executorId ?? 'uninitialized'} (slot ${slotIndex}) blocked from publishing for game ${change.gameId}`,
+          );
+        }
+        publishCount++;
+        return publish(change);
+      };
+    },
+  };
 }

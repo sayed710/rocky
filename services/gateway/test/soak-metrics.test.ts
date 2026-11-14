@@ -2,21 +2,30 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   BoundedReservoir,
+  LostCommitTracker,
   createPrng,
+  createReplicaPublicationGuard,
   deriveFaultSeed,
   deriveGameSeed,
   derivePlyMovePrng,
   isFaultAssociated,
+  lossyCommits,
   parsePositiveInt,
   parseSeed,
   parseSoakConfig,
   parseTimeoutMs,
   plyBucket,
+  runWithLossyTransactionScope,
   SoakMetricsTracker,
   TopKCollector,
+  verifyLostCommitDurableEvidence,
   WorkerLossBarrier,
   assertStateViewMatchesReplay,
+  type DurableLostCommitEvidence,
   type DurableMoveLedgerEntry,
+  type LossyCommitControl,
+  type LossyCommitCounter,
+  type LostCommitInjectionRecord,
   type MovePositionContext,
   type ReplayedGameLike,
   type StateViewSnapshotLike,
@@ -1888,4 +1897,733 @@ test('SoakMetricsTracker preserves original bound entry when same-ID duplicate a
   assert.equal(sample.evidence.admissionStartMs, 1000, 'must preserve original bound entry startMs');
   assert.equal(sample.evidence.admissionDurationMs, 45, 'updates admissionDurationMs from duplicate response');
   assert.equal(sample.positionContext?.uci, 'e2e4', 'preserves original bound position context');
+});
+
+interface FakeTxQueryLog {
+  readonly sql: string;
+}
+
+interface FakeConnectedClient {
+  readonly queries: FakeTxQueryLog[];
+  readonly released: boolean;
+  query(sql: string | { text: string }): Promise<{ rows: unknown[]; rowCount: number }>;
+  release(): void;
+}
+
+function createFakePgPool(options?: {
+  failPredicate?: (sqlText: string, callIndex: number) => Error | undefined;
+}): {
+  pool: {
+    connect(): Promise<FakeConnectedClient>;
+    query(sql: string | { text: string }): Promise<{ rows: unknown[]; rowCount: number }>;
+  };
+  clients: FakeConnectedClient[];
+  allSql: string[];
+} {
+  const clients: FakeConnectedClient[] = [];
+  const allSql: string[] = [];
+  let callIndex = 0;
+
+  const extractSql = (sql: string | { text: string }): string =>
+    typeof sql === 'string' ? sql : sql.text;
+
+  const pool = {
+    async connect(): Promise<FakeConnectedClient> {
+      const queries: FakeTxQueryLog[] = [];
+      let released = false;
+      const client: FakeConnectedClient = {
+        queries,
+        get released() {
+          return released;
+        },
+        async query(sql: string | { text: string }) {
+          const sqlText = extractSql(sql);
+          const idx = ++callIndex;
+          queries.push({ sql: sqlText });
+          allSql.push(sqlText);
+          const failErr = options?.failPredicate?.(sqlText, idx);
+          if (failErr) {
+            throw failErr;
+          }
+          return { rows: [], rowCount: 1 };
+        },
+        release() {
+          released = true;
+        },
+      };
+      clients.push(client);
+      return client;
+    },
+    async query(sql: string | { text: string }) {
+      const sqlText = extractSql(sql);
+      const idx = ++callIndex;
+      allSql.push(sqlText);
+      const failErr = options?.failPredicate?.(sqlText, idx);
+      if (failErr) {
+        throw failErr;
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+
+  return { pool, clients, allSql };
+}
+
+test('lossyCommits forwards scoped move_admission COMMIT before throwing and deduplicates retries by operationId', async () => {
+  const { pool, clients } = createFakePgPool();
+  const control: LossyCommitControl = {
+    enabled: true,
+    targetMinLost: 2,
+    rate: 0,
+    targetGameId: 'game-target',
+    maxLost: 2,
+    requireInsertInTx: true,
+  };
+  const injections: LostCommitInjectionRecord[] = [];
+  const counter: LossyCommitCounter = {
+    lost: 0,
+    injectedOperationIds: new Set<string>(),
+    injections,
+  };
+  const proxyPool = lossyCommits(pool, control, counter, () => 0.99);
+
+  await assert.rejects(
+    async () =>
+      runWithLossyTransactionScope(
+        {
+          purpose: 'move_admission',
+          gameId: 'game-target',
+          operationId: 'op-admit-1',
+          commandKind: 'move',
+          uci: 'e2e4',
+          basePly: 0,
+        },
+        async () => {
+          const client = await proxyPool.connect();
+          try {
+            await client.query('BEGIN');
+            await client.query('INSERT INTO game_adjudications (game_id, operation_id) VALUES ($1, $2)');
+            await client.query('COMMIT');
+          } finally {
+            client.release();
+          }
+        },
+      ),
+    /connection lost after COMMIT/,
+  );
+
+  // Underlying COMMIT must have been forwarded to PostgreSQL before throwing to caller
+  assert.deepEqual(
+    clients[0]!.queries.map((q) => q.sql),
+    ['BEGIN', 'INSERT INTO game_adjudications (game_id, operation_id) VALUES ($1, $2)', 'COMMIT'],
+  );
+  assert.equal(clients[0]!.released, true);
+  assert.equal(counter.lost, 1);
+  assert.equal(injections.length, 1);
+  assert.equal(injections[0]!.gameId, 'game-target');
+  assert.equal(injections[0]!.operationId, 'op-admit-1');
+  assert.equal(injections[0]!.uci, 'e2e4');
+
+  // Duplicate retry for the same operationId must commit normally without stealing second injection slot
+  await runWithLossyTransactionScope(
+    {
+      purpose: 'move_admission',
+      gameId: 'game-target',
+      operationId: 'op-admit-1',
+      commandKind: 'move',
+      uci: 'e2e4',
+      basePly: 0,
+    },
+    async () => {
+      const client = await proxyPool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query('INSERT INTO game_adjudications (game_id, operation_id) VALUES ($1, $2)');
+        await client.query('COMMIT');
+      } finally {
+        client.release();
+      }
+    },
+  );
+  assert.equal(counter.lost, 1, 'duplicate retry of injected operationId must not inject again');
+  assert.equal(injections.length, 1);
+});
+
+test('lossyCommits leaves worker, out-of-scope, non-move, wrong-game, and non-insert COMMIT unaffected', async () => {
+  const { pool, clients } = createFakePgPool();
+  const control: LossyCommitControl = {
+    enabled: true,
+    targetMinLost: 1,
+    rate: 1,
+    targetGameId: 'game-target',
+    maxLost: 5,
+    requireInsertInTx: true,
+  };
+  const injections: LostCommitInjectionRecord[] = [];
+  const counter: LossyCommitCounter = {
+    lost: 0,
+    injectedOperationIds: new Set<string>(),
+    injections,
+  };
+  const proxyPool = lossyCommits(pool, control, counter, () => 0);
+
+  // 1) Ordinary worker / unscoped transaction (claim/renew/settle/release)
+  const workerClient = await proxyPool.connect();
+  await workerClient.query('BEGIN');
+  await workerClient.query('UPDATE game_adjudications SET lease_until = NOW()');
+  await workerClient.query('COMMIT');
+  workerClient.release();
+
+  // 2) Out-of-scope command (other_admission / resign) even with INSERT
+  await runWithLossyTransactionScope(
+    {
+      purpose: 'other_admission',
+      gameId: 'game-target',
+      operationId: 'op-resign-1',
+      commandKind: 'resign',
+    },
+    async () => {
+      const c = await proxyPool.connect();
+      await c.query('BEGIN');
+      await c.query('INSERT INTO game_events (game_id, seq) VALUES ($1, 1)');
+      await c.query('COMMIT');
+      c.release();
+    },
+  );
+
+  // 3) Wrong targetGameId for move_admission
+  await runWithLossyTransactionScope(
+    {
+      purpose: 'move_admission',
+      gameId: 'game-other',
+      operationId: 'op-other-game',
+      commandKind: 'move',
+      uci: 'd2d4',
+      basePly: 0,
+    },
+    async () => {
+      const c = await proxyPool.connect();
+      await c.query('BEGIN');
+      await c.query('INSERT INTO game_adjudications (game_id) VALUES ($1)');
+      await c.query('COMMIT');
+      c.release();
+    },
+  );
+
+  // 4) Scoped move_admission without any INSERT when requireInsertInTx=true (regression against blind COMMIT drop)
+  await runWithLossyTransactionScope(
+    {
+      purpose: 'move_admission',
+      gameId: 'game-target',
+      operationId: 'op-select-only',
+      commandKind: 'move',
+      uci: 'e2e4',
+      basePly: 0,
+    },
+    async () => {
+      const c = await proxyPool.connect();
+      await c.query('BEGIN');
+      await c.query('SELECT * FROM game_adjudications WHERE game_id = $1');
+      await c.query('COMMIT');
+      c.release();
+    },
+  );
+
+  assert.equal(counter.lost, 0, 'none of the out-of-scope/worker/wrong-game/read-only COMMITs may be dropped');
+  assert.equal(injections.length, 0);
+  assert.equal(clients.length, 4);
+
+  // 5) Now exact target game + move_admission + INSERT with object-form { text: 'COMMIT' } succeeds in injecting
+  await assert.rejects(
+    async () =>
+      runWithLossyTransactionScope(
+        {
+          purpose: 'move_admission',
+          gameId: 'game-target',
+          operationId: 'op-exact-1',
+          commandKind: 'move',
+          uci: 'e2e4',
+          basePly: 0,
+        },
+        async () => {
+          const c = await proxyPool.connect();
+          await c.query('BEGIN');
+          await c.query('INSERT INTO game_events (game_id, seq) VALUES ($1, 1)');
+          await c.query({ text: 'COMMIT' });
+          c.release();
+        },
+      ),
+    /connection lost after COMMIT/,
+  );
+  assert.equal(counter.lost, 1);
+  assert.equal(injections[0]!.operationId, 'op-exact-1');
+});
+
+test('lossyCommits does not misattribute underlying DB or COMMIT failures as injected successes', async () => {
+  let shouldFailCommit = true;
+  const { pool } = createFakePgPool({
+    failPredicate: (sqlText) => {
+      if (shouldFailCommit && sqlText === 'COMMIT') {
+        return new Error('PG serialization failure 40001');
+      }
+      if (sqlText.startsWith('INSERT INTO fail_insert')) {
+        return new Error('PG constraint error');
+      }
+      return undefined;
+    },
+  });
+
+  const control: LossyCommitControl = {
+    enabled: true,
+    targetMinLost: 1,
+    rate: 0,
+    targetGameId: 'game-1',
+    maxLost: 1,
+    requireInsertInTx: true,
+  };
+  const injections: LostCommitInjectionRecord[] = [];
+  const injectedOperationIds = new Set<string>();
+  const counter: LossyCommitCounter = {
+    lost: 0,
+    injectedOperationIds,
+    injections,
+  };
+  const proxyPool = lossyCommits(pool, control, counter, () => 0);
+
+  // Real DB failure on COMMIT must propagate raw PG error and MUST NOT count as injected
+  await assert.rejects(
+    async () =>
+      runWithLossyTransactionScope(
+        {
+          purpose: 'move_admission',
+          gameId: 'game-1',
+          operationId: 'op-db-fail',
+          commandKind: 'move',
+          uci: 'e2e4',
+          basePly: 0,
+        },
+        async () => {
+          const c = await proxyPool.connect();
+          await c.query('BEGIN');
+          await c.query('INSERT INTO game_adjudications (game_id) VALUES ($1)');
+          await c.query('COMMIT');
+        },
+      ),
+    /PG serialization failure 40001/,
+  );
+  assert.equal(counter.lost, 0, 'failed DB COMMIT must never increment lost count');
+  assert.equal(injections.length, 0);
+  assert.equal(injectedOperationIds.has('op-db-fail'), false, 'failed DB COMMIT must not burn operationId dedup');
+
+  // Reused client after ROLLBACK resets tx insert state so select-only COMMIT afterward stays unaffected
+  shouldFailCommit = false;
+  await runWithLossyTransactionScope(
+    {
+      purpose: 'move_admission',
+      gameId: 'game-1',
+      operationId: 'op-rollback-reuse',
+      commandKind: 'move',
+      uci: 'e2e4',
+      basePly: 0,
+    },
+    async () => {
+      const c = await proxyPool.connect();
+      await c.query('BEGIN');
+      await assert.rejects(
+        () => c.query('INSERT INTO fail_insert VALUES (1)'),
+        /PG constraint error/,
+      );
+      await c.query('ROLLBACK');
+      await c.query('BEGIN');
+      await c.query('SELECT 1');
+      await c.query('COMMIT');
+      c.release();
+    },
+  );
+  assert.equal(counter.lost, 0);
+
+  // Subsequent healthy move_admission COMMIT still gets injected once
+  await assert.rejects(
+    async () =>
+      runWithLossyTransactionScope(
+        {
+          purpose: 'move_admission',
+          gameId: 'game-1',
+          operationId: 'op-db-ok',
+          commandKind: 'move',
+          uci: 'g1f3',
+          basePly: 2,
+        },
+        async () => {
+          const c = await proxyPool.connect();
+          await c.query('BEGIN');
+          await c.query('INSERT INTO game_adjudications (game_id) VALUES ($1)');
+          await c.query('COMMIT');
+          c.release();
+        },
+      ),
+    /connection lost after COMMIT/,
+  );
+  assert.equal(counter.lost, 1);
+  assert.equal(injections[0]!.operationId, 'op-db-ok');
+});
+
+test('lossyCommits isolates concurrent AsyncLocalStorage transactions without stealing injection', async () => {
+  const { pool } = createFakePgPool();
+  const control: LossyCommitControl = {
+    enabled: true,
+    targetMinLost: 1,
+    rate: 0,
+    targetGameId: 'game-target',
+    maxLost: 1,
+    requireInsertInTx: true,
+  };
+  const injections: LostCommitInjectionRecord[] = [];
+  const counter: LossyCommitCounter = {
+    lost: 0,
+    injectedOperationIds: new Set<string>(),
+    injections,
+  };
+  const proxyPool = lossyCommits(pool, control, counter, () => 0);
+
+  const yieldTick = () => new Promise<void>((resolve) => setTimeout(resolve, 2));
+
+  const targetTask = assert.rejects(
+    async () =>
+      runWithLossyTransactionScope(
+        {
+          purpose: 'move_admission',
+          gameId: 'game-target',
+          operationId: 'op-conc-target',
+          commandKind: 'move',
+          uci: 'e2e4',
+          basePly: 0,
+        },
+        async () => {
+          const c = await proxyPool.connect();
+          await c.query('BEGIN');
+          await yieldTick();
+          await c.query('INSERT INTO game_adjudications (game_id) VALUES ($1)');
+          await yieldTick();
+          await c.query('COMMIT');
+          c.release();
+        },
+      ),
+    /connection lost after COMMIT/,
+  );
+
+  const workerTask = (async () => {
+    const c = await proxyPool.connect();
+    await c.query('BEGIN');
+    await c.query('INSERT INTO worker_claims VALUES ($1)');
+    await yieldTick();
+    await c.query('COMMIT');
+    c.release();
+  })();
+
+  const wrongGameTask = runWithLossyTransactionScope(
+    {
+      purpose: 'move_admission',
+      gameId: 'game-decoy',
+      operationId: 'op-conc-decoy',
+      commandKind: 'move',
+      uci: 'd2d4',
+      basePly: 0,
+    },
+    async () => {
+      const c = await proxyPool.connect();
+      await c.query('BEGIN');
+      await c.query('INSERT INTO game_adjudications (game_id) VALUES ($1)');
+      await yieldTick();
+      await c.query('COMMIT');
+      c.release();
+    },
+  );
+
+  await Promise.all([targetTask, workerTask, wrongGameTask]);
+  assert.equal(counter.lost, 1);
+  assert.equal(injections.length, 1);
+  assert.equal(injections[0]!.operationId, 'op-conc-target');
+});
+
+test('LostCommitTracker and verifyLostCommitDurableEvidence enforce uncertain route and matching durable persistence', () => {
+  const makeRecord = (overrides?: Partial<LostCommitInjectionRecord>): LostCommitInjectionRecord => ({
+    gameId: 'game-1',
+    operationId: 'op-1',
+    purpose: 'move_admission',
+    commandKind: 'move',
+    uci: 'e2e4',
+    basePly: 0,
+    hadInsertInTx: true,
+    injectedAtMs: 100,
+    routeOutcome: 'pending',
+    durableVerified: false,
+    ...overrides,
+  });
+
+  const makeDeclaredMoveEffect = (overrides?: Record<string, unknown>) => ({
+    type: 'MovePlayed',
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    ...overrides,
+  });
+
+  // Legal settlement ordering per settlePrepared ([resolved, ...resolved.effects]) and appendSettlementBatch (startedSeq+1..finalSeq)
+  const makeEvidence = (overrides?: Partial<DurableLostCommitEvidence>): DurableLostCommitEvidence => ({
+    gameId: 'game-1',
+    operationId: 'op-1',
+    executionState: 'completed',
+    startedSeq: 1,
+    finalSeq: 3,
+    events: [
+      {
+        seq: 1,
+        type: 'AdjudicationStarted',
+        payload: { gameId: 'game-1', operationId: 'op-1', prepared: { intent: { kind: 'move', uci: 'e2e4' } } },
+      },
+      {
+        seq: 2,
+        type: 'AdjudicationResolved',
+        payload: {
+          gameId: 'game-1',
+          operationId: 'op-1',
+          startedSeq: 1,
+          effects: [makeDeclaredMoveEffect()],
+        },
+      },
+      {
+        seq: 3,
+        type: 'MovePlayed',
+        payload: { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' },
+      },
+    ],
+    ...overrides,
+  });
+
+  // Positive case: uncertain_error + completed operation with [AdjudicationStarted (1), AdjudicationResolved (2), MovePlayed (3)]
+  const validRec = makeRecord({ routeOutcome: 'uncertain_error', routeErrorName: 'AuthorityCommitError' });
+  const validCheck = verifyLostCommitDurableEvidence(validRec, makeEvidence());
+  assert.equal(validCheck.valid, true);
+  if (validCheck.valid) {
+    assert.equal(validCheck.resultPly, 1);
+    assert.equal(validCheck.startedSeq, 1);
+    assert.equal(validCheck.resolvedSeq, 2);
+  }
+
+  // Positive terminal-move branch per deriveMoveEffects ([MovePlayed, GameEnded] -> seq 3 and seq 4)
+  const terminalMoveCheck = verifyLostCommitDurableEvidence(
+    validRec,
+    makeEvidence({
+      finalSeq: 4,
+      events: [
+        {
+          seq: 1,
+          type: 'AdjudicationStarted',
+          payload: { gameId: 'game-1', operationId: 'op-1', prepared: { intent: { kind: 'move', uci: 'e2e4' } } },
+        },
+        {
+          seq: 2,
+          type: 'AdjudicationResolved',
+          payload: {
+            gameId: 'game-1',
+            operationId: 'op-1',
+            startedSeq: 1,
+            effects: [
+              makeDeclaredMoveEffect(),
+              { type: 'GameEnded', result: '1-0', termination: 'checkmate', winner: 'w' },
+            ],
+          },
+        },
+        { seq: 3, type: 'MovePlayed', payload: { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' } },
+        { seq: 4, type: 'GameEnded', payload: { result: '1-0', termination: 'checkmate', winner: 'w' } },
+      ],
+    }),
+  );
+  assert.equal(terminalMoveCheck.valid, true);
+
+  // Tracker only increments verifiedCommittedCount once durable evidence matches and surfaces failure reasons
+  const tracker = new LostCommitTracker();
+  assert.equal(tracker.recordInjection(makeRecord()), true);
+  assert.equal(tracker.recordInjection(makeRecord()), false, 'duplicate operationId injection rejected');
+  assert.equal(tracker.injectedCount, 1);
+  assert.equal(tracker.verifiedCommittedCount, 0, 'must not count committed move before route uncertainty + durable proof');
+
+  // Regression: route unexpected_success or pending must prevent durable verification and expose rejection reason
+  const pendingDetail = tracker.verifyDurableEvidenceDetailed('op-1', makeEvidence());
+  assert.equal(pendingDetail.valid, false);
+  assert.match(tracker.lastFailureReason ?? '', /routeOutcome was "pending"/);
+
+  tracker.recordRouteOutcome('op-1', 'uncertain_error', 'CommandOutcomeUnknownError');
+  assert.equal(tracker.uncertainRouteCount, 1);
+  const verifiedDetail = tracker.verifyDurableEvidenceDetailed('op-1', makeEvidence());
+  assert.equal(verifiedDetail.valid, true);
+  assert.equal(tracker.lastFailureReason, undefined);
+  assert.equal(tracker.verifiedCommittedCount, 1);
+
+  // Inverted-order negative: MovePlayed before AdjudicationResolved violates [resolved, ...resolved.effects]
+  const invertedCheck = verifyLostCommitDurableEvidence(
+    validRec,
+    makeEvidence({
+      events: [
+        {
+          seq: 1,
+          type: 'AdjudicationStarted',
+          payload: { gameId: 'game-1', operationId: 'op-1', prepared: { intent: { kind: 'move', uci: 'e2e4' } } },
+        },
+        { seq: 2, type: 'MovePlayed', payload: { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' } },
+        {
+          seq: 3,
+          type: 'AdjudicationResolved',
+          payload: { gameId: 'game-1', operationId: 'op-1', startedSeq: 1, effects: [makeDeclaredMoveEffect()] },
+        },
+      ],
+    }),
+  );
+  assert.equal(invertedCheck.valid, false, 'inverted MovePlayed-before-AdjudicationResolved must be rejected');
+  if (!invertedCheck.valid) {
+    assert.match(invertedCheck.reason, /AdjudicationResolved.*startedSeq\+1/);
+  }
+
+  // Regressions proving prior weak checks fail:
+  // 1) unexpected_success fails even if durable move exists
+  assert.equal(
+    verifyLostCommitDurableEvidence(makeRecord({ routeOutcome: 'unexpected_success' }), makeEvidence()).valid,
+    false,
+  );
+  // 2) unsettled execution_state='proving' (or worker claim without completion) fails
+  assert.equal(
+    verifyLostCommitDurableEvidence(
+      validRec,
+      makeEvidence({ executionState: 'proving' }),
+    ).valid,
+    false,
+  );
+  // 3) mismatched persisted UCI vs declared MovePlayed fails
+  assert.equal(
+    verifyLostCommitDurableEvidence(
+      validRec,
+      makeEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: { gameId: 'game-1', operationId: 'op-1', prepared: { intent: { kind: 'move', uci: 'e2e4' } } },
+          },
+          {
+            seq: 2,
+            type: 'AdjudicationResolved',
+            payload: { gameId: 'game-1', operationId: 'op-1', startedSeq: 1, effects: [makeDeclaredMoveEffect()] },
+          },
+          { seq: 3, type: 'MovePlayed', payload: { ply: 1, uci: 'd2d4', san: 'd4', by: 'w' } },
+        ],
+      }),
+    ).valid,
+    false,
+  );
+  // 4) wrong basePly correlation fails (stale/different ply move cannot impersonate admitted move)
+  assert.equal(
+    verifyLostCommitDurableEvidence(
+      makeRecord({ routeOutcome: 'uncertain_error', basePly: 4 }),
+      makeEvidence(),
+    ).valid,
+    false,
+  );
+  // 5) root/base GameEnded resolution without MovePlayed fails (move did not execute)
+  assert.equal(
+    verifyLostCommitDurableEvidence(
+      validRec,
+      makeEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: { gameId: 'game-1', operationId: 'op-1', prepared: { intent: { kind: 'move', uci: 'e2e4' } } },
+          },
+          {
+            seq: 2,
+            type: 'AdjudicationResolved',
+            payload: {
+              gameId: 'game-1',
+              operationId: 'op-1',
+              startedSeq: 1,
+              effects: [{ type: 'GameEnded', result: '1/2-1/2', termination: 'dead_position', winner: null }],
+            },
+          },
+          { seq: 3, type: 'GameEnded', payload: { result: '1/2-1/2', termination: 'dead_position', winner: null } },
+        ],
+      }),
+    ).valid,
+    false,
+  );
+  // 6) non-move admission intent cannot pass as move admission
+  assert.equal(
+    verifyLostCommitDurableEvidence(
+      validRec,
+      makeEvidence({
+        events: [
+          {
+            seq: 1,
+            type: 'AdjudicationStarted',
+            payload: { gameId: 'game-1', operationId: 'op-1', prepared: { intent: { kind: 'resign' } } },
+          },
+          {
+            seq: 2,
+            type: 'AdjudicationResolved',
+            payload: { gameId: 'game-1', operationId: 'op-1', startedSeq: 1, effects: [makeDeclaredMoveEffect()] },
+          },
+          { seq: 3, type: 'MovePlayed', payload: { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' } },
+        ],
+      }),
+    ).valid,
+    false,
+  );
+});
+
+test('createReplicaPublicationGuard blocks stale and disposed replica publications after cold restart', async () => {
+  const active: Array<{ executorId: string } | undefined> = [{ executorId: 'exec-old' }];
+  const oldIdentity = active[0]!;
+  const newIdentity = { executorId: 'exec-cold-replacement' };
+  const publishedBy: string[] = [];
+
+  const oldGuard = createReplicaPublicationGuard(
+    0,
+    (idx) => active[idx],
+    () => oldIdentity,
+  );
+  const newGuard = createReplicaPublicationGuard(
+    0,
+    (idx) => active[idx],
+    () => newIdentity,
+  );
+
+  const oldPublish = oldGuard.wrapPublish(async (chg: { gameId: string }) => {
+    publishedBy.push(`old:${chg.gameId}`);
+  });
+  const newPublish = newGuard.wrapPublish(async (chg: { gameId: string }) => {
+    publishedBy.push(`new:${chg.gameId}`);
+  });
+
+  // Active undisposed old replica publishes cleanly
+  await oldPublish({ gameId: 'g-1' });
+  assert.equal(oldGuard.publishCount, 1);
+  assert.equal(oldGuard.staleBlockedCount, 0);
+
+  // Replacement takes slot 0 before old worker drains -> old publication is blocked even before markDisposed
+  active[0] = newIdentity;
+  await assert.rejects(() => oldPublish({ gameId: 'g-1' }), /Stale replica exec-old \(slot 0\) blocked/);
+  assert.equal(oldGuard.staleBlockedCount, 1);
+  assert.equal(oldGuard.publishCount, 1);
+
+  // markDisposed permanently blocks old replica
+  oldGuard.markDisposed();
+  assert.equal(oldGuard.isDisposed, true);
+  await assert.rejects(() => oldPublish({ gameId: 'g-2' }), /Stale replica exec-old \(slot 0\) blocked/);
+  assert.equal(oldGuard.staleBlockedCount, 2);
+
+  // Replacement replica publishes without interference
+  await newPublish({ gameId: 'g-1' });
+  assert.equal(newGuard.publishCount, 1);
+  assert.deepEqual(publishedBy, ['old:g-1', 'new:g-1']);
 });
