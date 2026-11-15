@@ -54,6 +54,8 @@ test('gateway service and acceptance infrastructure retain coverage', () => {
     'scripts/check-test-topology.mjs', 'scripts/test/gateway-signal-route.test.mjs',
     'scripts/nginx-trusted-edge-acceptance.mjs', 'scripts/nginx-web-delivery-acceptance.mjs',
     'scripts/lib/wait-for-health.mjs', 'Dockerfile.gateway-test', 'docker/web/nginx.conf.template',
+    // Direct helper of nginx-trusted-edge-acceptance.mjs, and its injected-fake test.
+    'scripts/lib/docker-probe.mjs', 'scripts/test/docker-probe.test.mjs',
   ]) assert.ok(matches.test(source), source);
 });
 

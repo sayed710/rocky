@@ -196,7 +196,7 @@ function normalizeLimit(limit?: number): number | undefined {
 
 async function lockCourse(client: PoolClient, courseId: string): Promise<void> {
   await client.query(
-    `SELECT pg_advisory_xact_lock(hashtextextended('course:' || $1::text, 0))`,
+    `SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('course:' || $1::text, 0::bigint))`,
     [courseId]
   );
 }

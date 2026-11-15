@@ -23,8 +23,8 @@ export async function lockPlayerPair(
   b: string
 ): Promise<void> {
   await client.query(
-    `SELECT pg_advisory_xact_lock(
-       hashtextextended(LEAST($1::text, $2::text) || '|' || GREATEST($1::text, $2::text), 0)
+    `SELECT pg_catalog.pg_advisory_xact_lock(
+       pg_catalog.hashtextextended(LEAST($1::text, $2::text) || '|' || GREATEST($1::text, $2::text), 0::bigint)
      )`,
     [a, b]
   );

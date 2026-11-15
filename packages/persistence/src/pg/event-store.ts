@@ -269,7 +269,7 @@ export class PostgresEventStore implements EventStore {
       }
       try {
         const result = await client.query<{ locked: boolean }>(
-          `SELECT pg_try_advisory_lock(hashtextextended('rocky:active-human-game:' || $1, 0)) AS locked`,
+          `SELECT pg_catalog.pg_try_advisory_lock(pg_catalog.hashtextextended('rocky:active-human-game:' || $1::text, 0::bigint)) AS locked`,
           [userId],
         );
         if (result.rows[0]?.locked) {
@@ -279,7 +279,7 @@ export class PostgresEventStore implements EventStore {
             released = true;
             try {
               await client.query(
-                `SELECT pg_advisory_unlock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+                `SELECT pg_catalog.pg_advisory_unlock(pg_catalog.hashtextextended('rocky:active-human-game:' || $1::text, 0::bigint))`,
                 [userId],
               );
               client.release();
@@ -315,7 +315,7 @@ export async function lockGameCreationPlayers(
   for (const playerId of players) {
     try {
       await client.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended('rocky:active-human-game:' || $1, 0))`,
+        `SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('rocky:active-human-game:' || $1::text, 0::bigint))`,
         [playerId],
       );
     } catch (error) {
