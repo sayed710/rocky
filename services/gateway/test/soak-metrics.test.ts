@@ -622,47 +622,119 @@ test('delayed admission return does not recreate completed op or corrupt active 
   assert.equal(sample.evidence.admissionDurationMs, 42, 'settled sample updated with true duration');
 });
 
-test('SoakMetricsTracker bounds and cleans up retained position context', () => {
+test('SoakMetricsTracker definite UCI failure releases that candidate without retaining proof context while preserving ambiguous different UCI at same ply', () => {
   const tracker = new SoakMetricsTracker(5);
-  assert.equal(tracker.positionContextsCount, 0);
+  const game = 'game-definite-uci-release';
 
-  const ctx: MovePositionContext = {
-    fen: 'fen-1',
+  const ctxAmbiguous: MovePositionContext = {
+    fen: 'fen-ply0',
     uci: 'e2e4',
     gameIndex: 0,
     gameSeed: 100,
     attempt: 0,
     basePly: 0,
   };
+  const ctxFailed: MovePositionContext = {
+    fen: 'fen-ply0',
+    uci: 'c2c4',
+    gameIndex: 0,
+    gameSeed: 100,
+    attempt: 1,
+    basePly: 0,
+  };
 
-  // 1. Pending adds context
-  tracker.onMovePending('game-clean', 0, 1000, ctx);
-  assert.equal(tracker.positionContextsCount, 1);
+  // 1. Ambiguous commit candidate e2e4 at basePly 0
+  tracker.onMovePending(game, 0, 1000, ctxAmbiguous);
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-e4-ambig',
+    basePly: 0,
+    atMs: 1000,
+    uci: 'e2e4',
+  });
+  tracker.onMoveFailed(game, 0, 'ambiguous_commit', 'e2e4');
+  assert.equal(tracker.unresolvedStartsCount, 1);
 
-  // 2. Failed move cleans up context
-  tracker.onMoveFailed('game-clean', 0);
-  assert.equal(tracker.positionContextsCount, 0);
+  // 2. Different UCI c2c4 at same ply suffers definite failure before admission commits
+  tracker.onMovePending(game, 0, 1100, ctxFailed);
+  tracker.onMoveFailed(game, 0, 'definite_failure', 'c2c4');
 
-  // 3. Settle cleans up context
-  tracker.onMovePending('game-clean', 0, 1050, ctx);
-  tracker.recordStartRequest({ gameId: 'game-clean', operationId: 'op-clean-1', basePly: 0, atMs: 1050, uci: 'e2e4' });
-  tracker.recordStartAdmitted('game-clean', 'op-clean-1', 0, 10);
-  tracker.recordSettleAttempt('op-clean-1', 5);
-  tracker.recordSettlementCommitted('op-clean-1');
-  assert.equal(tracker.positionContextsCount, 0, 'context must be evicted after settlement');
+  // 3. Released c2c4 candidate cannot match broadcasts or state ledgers
+  assert.equal(tracker.onMoveBroadcast(game, 1, 1150, 'c2c4'), undefined);
+  assert.equal(tracker.onStateBroadcast(game, 1, 1160, [{ ply: 1, uci: 'c2c4' }]), undefined);
+  assert.equal(tracker.matchedMovesCount, 0);
 
-  // 4. Bounded capacity (max 512)
-  for (let i = 0; i < 600; i++) {
-    tracker.onMovePending(`game-${i}`, 0, 2000 + i, {
-      fen: `fen-${i}`,
-      uci: 'e2e4',
-      gameIndex: i,
-      gameSeed: i,
-      attempt: 0,
-      basePly: 0,
-    });
-  }
-  assert.equal(tracker.positionContextsCount, 512, 'must be capped at bounded 512 entries');
+  // 4. Subsequent operation for c2c4 without a fresh pending registration does not retain failed context
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-c4-after-fail',
+    basePly: 0,
+    atMs: 1200,
+    uci: 'c2c4',
+  });
+  tracker.recordStartAdmitted(game, 'op-c4-after-fail', 0, 6);
+  tracker.recordSettleAttempt('op-c4-after-fail', 3);
+  tracker.recordSettlementCommitted('op-c4-after-fail');
+
+  const afterFailOpSample = tracker.getTopProvingWall().find((s) => s.operationId === 'op-c4-after-fail');
+  assert.ok(afterFailOpSample);
+  assert.equal(afterFailOpSample.positionContext, undefined, 'subsequent operation must not retain failed candidate context');
+
+  // 5. Preserved ambiguous e2e4 still retains exact proof context and move latency context
+  tracker.recordClaim({
+    gameId: game,
+    operationId: 'op-e4-ambig',
+    executorId: 'worker-0',
+    generation: '1',
+    leaseUntil: new Date(Date.now() + 5000),
+  });
+  assert.equal(tracker.unresolvedStartsCount, 0);
+  tracker.recordStep('op-e4-ambig', 25, 10, 200);
+  tracker.recordSettleAttempt('op-e4-ambig', 4);
+  tracker.recordSettlementCommitted('op-e4-ambig');
+
+  const ambigWallSample = tracker.getTopProvingWall().find((s) => s.operationId === 'op-e4-ambig');
+  const ambigCpuSample = tracker.getTopProofCpu().find((s) => s.operationId === 'op-e4-ambig');
+  assert.deepEqual(ambigWallSample?.positionContext, ctxAmbiguous);
+  assert.deepEqual(ambigCpuSample?.positionContext, ctxAmbiguous);
+
+  const latency = tracker.onMoveBroadcast(game, 1, 1350, 'e2e4');
+  assert.equal(latency, 350);
+  assert.equal(tracker.matchedMovesCount, 1);
+  assert.deepEqual(tracker.getTopMoveLatency()[0]?.positionContext, ctxAmbiguous);
+});
+
+test('SoakMetricsTracker never retains candidate context as proof context after ply-wide definite failure', () => {
+  const tracker = new SoakMetricsTracker(5);
+  const game = 'game-ply-fail-no-retain';
+  const ctx: MovePositionContext = {
+    fen: 'fen-ply2',
+    uci: 'g1f3',
+    gameIndex: 0,
+    gameSeed: 200,
+    attempt: 0,
+    basePly: 2,
+  };
+
+  tracker.onMovePending(game, 2, 1000, ctx);
+  tracker.onMoveFailed(game, 2, 'definite_failure');
+  assert.equal(tracker.onMoveBroadcast(game, 3, 1050, 'g1f3'), undefined);
+
+  // Subsequent start/admit/settle without a new pending move must not inherit failed context
+  tracker.recordStartRequest({
+    gameId: game,
+    operationId: 'op-next-ply2',
+    basePly: 2,
+    atMs: 1100,
+    uci: 'g1f3',
+  });
+  tracker.recordStartAdmitted(game, 'op-next-ply2', 2, 8);
+  tracker.recordSettleAttempt('op-next-ply2', 4);
+  tracker.recordSettlementCommitted('op-next-ply2');
+
+  const sample = tracker.getTopProvingWall().find((s) => s.operationId === 'op-next-ply2');
+  assert.ok(sample);
+  assert.equal(sample.positionContext, undefined);
 });
 
 test('TopKCollector re-ranks evicted sample when late admission increases duration (capacity 1)', () => {

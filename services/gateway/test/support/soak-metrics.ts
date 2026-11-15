@@ -668,7 +668,6 @@ export class SoakMetricsTracker {
   readonly #completedSamples = new Map<string, TailSample>();
   readonly #completedOps = new Set<string>();
   readonly #gameBasePly = new Map<string, number>();
-  readonly #gamePositionContexts = new Map<string, MovePositionContext>();
   readonly #provingSince = new Map<string, number>();
   readonly #stoppedSince = new Map<string, number>();
   readonly #faults: FaultEvent[] = [];
@@ -769,13 +768,6 @@ export class SoakMetricsTracker {
       isAmbiguous: retainsContext,
     });
     this.#gameBasePly.set(gameId, basePly);
-    if (context) {
-      if (this.#gamePositionContexts.size >= 512) {
-        const oldest = this.#gamePositionContexts.keys().next().value;
-        if (oldest) this.#gamePositionContexts.delete(oldest);
-      }
-      this.#gamePositionContexts.set(`${gameId}:${basePly}`, context);
-    }
   }
 
   #recordMatchedMove(
@@ -972,14 +964,6 @@ export class SoakMetricsTracker {
         } else if (!p.isAmbiguous) {
           this.#pendingMoves.delete(k);
         }
-      }
-    }
-    if (outcome === 'definite_failure') {
-      const hasAmbiguous = [...this.#pendingMoves.values()].some(
-        (p) => p.gameId === gameId && p.basePly === basePly && p.isAmbiguous,
-      );
-      if (!hasAmbiguous) {
-        this.#gamePositionContexts.delete(`${gameId}:${basePly}`);
       }
     }
   }
@@ -1278,7 +1262,6 @@ export class SoakMetricsTracker {
       if (oldestCompleted) this.#completedOps.delete(oldestCompleted);
     }
     this.#completedOps.add(operationId);
-    this.#gamePositionContexts.delete(`${op.gameId}:${op.basePly}`);
   }
 
   recordReleaseAttempt(durationMs: number): void {
@@ -1329,10 +1312,6 @@ export class SoakMetricsTracker {
 
   get successorTakeoversCount(): number {
     return this.#successorTakeoversCount;
-  }
-
-  get positionContextsCount(): number {
-    return this.#gamePositionContexts.size;
   }
 
   get moveLatencyProvenanceCounts(): MoveLatencyProvenanceCounts {
