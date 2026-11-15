@@ -881,6 +881,45 @@ export class GameAuthority {
     return ids;
   }
 
+  /**
+   * Read-only durable preflight for watched-room resync fallback (Qodo ce2f2b15).
+   * Returns true only when durable history after `observedRevision` contains explicit adjudication
+   * lifecycle events, or when current authoritative state is actively proving or stopped.
+   */
+  async needsAdjudicationResync(gameId: string, observedRevision?: number): Promise<boolean> {
+    if (observedRevision !== undefined) {
+      const floor = Math.max(-1, observedRevision - 2);
+      const logged = await this.withDeadline('load', this.durableReadTimeoutMs, (s) =>
+        this.store.loadSince ? this.store.loadSince(gameId, floor, s) : this.store.load(gameId, s),
+      );
+      let atObserved: GameEvent | undefined;
+      let preceding: GameEvent | undefined;
+      for (const entry of logged) {
+        if (entry.seq === observedRevision - 1) {
+          preceding = entry.event;
+        } else if (entry.seq === observedRevision) {
+          atObserved = entry.event;
+        } else if (
+          entry.seq > observedRevision &&
+          (entry.event.type === 'AdjudicationStarted' ||
+            entry.event.type === 'AdjudicationResolved' ||
+            entry.event.type === 'AdjudicationClocksStarted')
+        ) {
+          return true;
+        }
+      }
+      const lifecycleAtObserved =
+        atObserved?.type === 'AdjudicationStarted' || atObserved?.type === 'AdjudicationResolved';
+      const coveredByPrecedingResolved =
+        preceding?.type === 'AdjudicationResolved' && preceding.effects.length > 0;
+      if (!lifecycleAtObserved && !coveredByPrecedingResolved) {
+        return false;
+      }
+    }
+    const { state } = await this.readRecovery(gameId, 0);
+    return state.adjudication === 'proving' || state.adjudication === 'stopped';
+  }
+
   /** Current authoritative state view. Throws if the game is unknown. */
   getState(gameId: string): StateView {
     const record = this.require(gameId);

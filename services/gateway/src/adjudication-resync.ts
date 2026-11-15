@@ -25,12 +25,14 @@ import { ADJUDICATION_ACTOR, type CommandRouter, type GameAuthority, type StateV
 import type { Counter, Logger } from '@chess-platform/api';
 
 export interface AdjudicationResyncOptions {
-  readonly authority: Pick<GameAuthority, 'adjudicatingGames'>;
+  readonly authority: Pick<GameAuthority, 'adjudicatingGames' | 'needsAdjudicationResync'>;
   readonly router: CommandRouter;
   /** Bounded source of locally watched games (e.g. RealtimeGateway). */
   readonly watched?: {
     /** Required fallback source of locally watched rooms and join buffers. */
     localGameIds(): Iterable<string>;
+    /** Highest stateRevision observed by the local room, or undefined while join snapshot is pending. */
+    observedRevisionFor(gameId: string): number | undefined;
     /** Receiver of authoritative state recovered during resync passes. */
     sendStateToRoom(gameId: string, state: StateView): void;
     /** Optional fast hint of rooms observed in proving/stopped states. */
@@ -78,10 +80,13 @@ export class AdjudicationResync {
   async runPass(): Promise<number> {
     const fast = this.#fastCandidates();
     const fallback = this.#selectFallbackCandidates(fast);
-    const candidates = [...fast, ...fallback];
     let failed = 0;
-    for (const gameId of candidates) {
-      const ok = await this.#routeCandidate(gameId);
+    for (const gameId of fast) {
+      const ok = await this.#routeCandidate(gameId, false);
+      if (!ok) failed += 1;
+    }
+    for (const gameId of fallback) {
+      const ok = await this.#routeCandidate(gameId, true);
       if (!ok) failed += 1;
     }
     return failed;
@@ -139,8 +144,14 @@ export class AdjudicationResync {
     return selected;
   }
 
-  async #routeCandidate(gameId: string): Promise<boolean> {
+  async #routeCandidate(gameId: string, isFallback: boolean): Promise<boolean> {
     try {
+      if (isFallback) {
+        const observedRevision = this.options.watched?.observedRevisionFor(gameId);
+        if (!(await this.options.authority.needsAdjudicationResync(gameId, observedRevision))) {
+          return true;
+        }
+      }
       const result = await this.options.router.route(gameId, ADJUDICATION_ACTOR, { kind: 'adjudicationChanged' });
       this.options.watched?.sendStateToRoom(gameId, result.state);
       return true;
