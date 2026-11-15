@@ -17,6 +17,7 @@ import { lockPlayerPair } from '../src/pg/pair-lock';
 import { lockGameCreationPlayers } from '../src/pg/event-store';
 import { PgSessionsRepository } from '../src/pg/repositories';
 import { withTestDatabase } from '../src/test-support/database';
+import { runWithCleanup } from './run-with-cleanup';
 
 const migrationsDir = [
   join(__dirname, '../../migrations'),
@@ -41,7 +42,7 @@ test('planted public overloads never run through the adapters advisory locks', a
     const password = randomBytes(12).toString('hex');
     await pool.query(`CREATE ROLE ${role} LOGIN PASSWORD '${password}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`);
     let attacker: Pool | null = null;
-    try {
+    await runWithCleanup(async () => {
       await pool.query(`GRANT USAGE, CREATE ON SCHEMA public TO ${role}`);
       const url = new URL(connectionString);
       url.username = role;
@@ -86,10 +87,12 @@ test('planted public overloads never run through the adapters advisory locks', a
       await new PgSessionsRepository(pool).revokeAllForUser(W, new Date());
 
       assert.equal(await planted(), 0, 'no planted code ran through the adapters');
-    } finally {
-      await attacker?.end();
-      await pool.query(`DROP OWNED BY ${role}`);
-      await pool.query(`DROP ROLE ${role}`);
-    }
+    }, [
+      // Same order as before; each step is attempted even if an earlier one rejects, and every
+      // failure is reported (with the test's own failure first).
+      { name: 'close unprivileged client', run: async () => { await attacker?.end(); } },
+      { name: 'drop owned by role', run: () => pool.query(`DROP OWNED BY ${role}`) },
+      { name: 'drop role', run: () => pool.query(`DROP ROLE ${role}`) },
+    ]);
   });
 });
