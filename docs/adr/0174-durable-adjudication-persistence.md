@@ -124,6 +124,13 @@ in the releasing transaction, the queues against the recorded deadlines. Release
 request id, including after a lost COMMIT reply. Migrations run before `prepareAdjudicationGuard`
 (or it is re-run), because `CREATE OR REPLACE` needs the routines owned by the migration role.
 
+**Scope and authorization boundary (Issue #124 vs. isolated durable stack).** The public
+[Issue #124](https://github.com/sayed710/rocky/issues/124) body still describes a historical
+compatibility-only `0052` phase. This later isolated durable stack—explicitly identifying PR #151
+and migration `0054` (`packages/persistence/migrations/0054_adjudication_release.sql`)—was
+authorized separately by the user's implementation handoff, which reserves production application.
+No public `0054`-specific GitHub approval or production verification is claimed.
+
 ### 7. Exhausted proofs: fewer, continued, then the flag rule
 
 A proof question that exhausts its search (`resource_limit`) would otherwise leave the game proving
@@ -159,10 +166,12 @@ unsuccessful playouts cannot cut short the attempts that follow them.
 **Scope authorization.** This section changes live timeout and successor settlement (the
 `unresolved` branches of `deriveTimeoutOutcomeEnding` and `resolveSuccessorEvidenceEnding`) and
 broadens the bare-king lemma beyond the frozen king-and-pawns subclass. Both go beyond the frozen
-stage AUD-03a. The repository owner approved them explicitly for this stack on 2026-11-05, on PR
-#151: https://github.com/sayed710/rocky/pull/151#issuecomment-6655724172 ("I approve the scope
-exceptions in ADR 0174 §7 for this stack: settling unresolved timeouts by the flag rule (FIDE 6.9)
-and the general bare-king lemma."). An exhausted proof alone proves neither a loss nor a draw.
+stage AUD-03a. Public owner comment https://github.com/sayed710/rocky/pull/151#issuecomment-6655724172
+on 2026-11-05 explicitly covers **only** those two §7 exceptions for this stack ("I approve the
+scope exceptions in ADR 0174 §7 for this stack: settling unresolved timeouts by the flag rule (FIDE 6.9)
+and the general bare-king lemma."); both approved behaviors are preserved here, and that comment
+grants neither public `0054`-specific approval nor production rollout or verification authority.
+An exhausted proof alone proves neither a loss nor a draw.
 At this unwired layer, these packages export pure domain and search behavior without environment-dependent
 runtime flag checks; the bare-king lemma also directly serves ordinary pure analysis APIs.
 Deployment and activation remain on HOLD with no production rollout permission. Live timeout settlement
@@ -174,9 +183,10 @@ mate, whatever the other side has.
 
 ## Consequences
 
-- Rollout remains on HOLD (Issue #124): nothing constructs the store, no worker or client is wired,
-  and no migration is applied to production by this change. Applying 0053 requires the migration
-  owner to own the new SECURITY DEFINER functions; existing runtime grants are unchanged.
+- Rollout remains on HOLD ([Issue #124](https://github.com/sayed710/rocky/issues/124)): nothing
+  constructs the store, no worker or client is wired, and no migration (`0053` or `0054`) is
+  applied to or verified against production by this change. Applying `0053`/`0054` requires the
+  migration owner to own the new SECURITY DEFINER functions; existing runtime grants are unchanged.
 - A transaction touching a managed game pays for one whole-game validation at COMMIT, with
   event-level checks only for what it settled; legacy games pay one indexed existence check per
   insert.
