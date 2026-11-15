@@ -64,6 +64,34 @@ export function gamesProjectedEndedChannel(): string {
   return 'games:projected-ended';
 }
 
+/** Stable Node/ioredis transport codes safe to log verbatim (fixed allow-list). */
+const SAFE_PUBLISH_FAILURE_CAUSES: ReadonlySet<string> = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'NR_CLOSED',
+]);
+
+/**
+ * Bounded, log-safe classification of a publish failure. Only an allow-listed
+ * `code` is ever returned; the error object, message, stack, arbitrary
+ * name/code and payload are never exposed. Anything else is `unknown`.
+ */
+function classifyPublishFailure(err: unknown): string {
+  if (typeof err !== 'object' || err === null) return 'unknown';
+  try {
+    const code: unknown = (err as { code?: unknown }).code;
+    return typeof code === 'string' && SAFE_PUBLISH_FAILURE_CAUSES.has(code) ? code : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 /** In-process {@link PubSub}. Synchronous delivery, deterministic ordering. */
 export class InMemoryPubSub implements PubSub {
   private readonly channels = new Map<string, Set<(msg: Broadcast) => void>>();
@@ -389,8 +417,14 @@ export class RedisPubSub implements PubSub {
     //    best-effort; a failed publish is logged but does not throw (the game
     //    state is authoritative, not the pub/sub layer).
     const envelope: RedisEnvelope = { origin: this.nodeId, msg };
-    void Promise.resolve(this.pub.publish(channel, JSON.stringify(envelope))).catch(() => {
-      console.error(`[RedisPubSub] Publish failed on channel: ${channel}`);
+    let pending: Promise<unknown>;
+    try {
+      pending = Promise.resolve(this.pub.publish(channel, JSON.stringify(envelope)));
+    } catch (err) {
+      pending = Promise.reject(err);
+    }
+    void pending.catch((err: unknown) => {
+      console.error(`[RedisPubSub] Publish failed on channel: ${channel} (cause: ${classifyPublishFailure(err)})`);
       for (const listener of [...this.publishFailedListeners]) {
         try {
           listener(channel);
