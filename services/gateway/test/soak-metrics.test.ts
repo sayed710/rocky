@@ -779,10 +779,11 @@ test('TopKCollector re-ranks evicted sample when late admission increases durati
   const topAfterLateAdmission = tracker.getTopProvingWall();
   assert.equal(topAfterLateAdmission.length, 1);
   assert.equal(topAfterLateAdmission[0]?.operationId, opA, 'opA must become top operation after late admission');
-  assert.ok(topAfterLateAdmission[0]!.wallDurationMs >= 990);
+  assert.ok(topAfterLateAdmission[0]!.provingWallMs >= 990);
+  assert.ok(topAfterLateAdmission[0]!.lifecycleWallMs >= 990);
 });
 
-test('TopKCollector re-ranks evicted sample on late release without duplicating entries (capacity 1)', () => {
+test('TopKCollector re-ranks evicted sample on late release in lifecycle top-K without reranking proving tails or duplicating entries (capacity 1)', () => {
   const tracker = new SoakMetricsTracker(1);
   const opA = 'op-rel-a';
   const opB = 'op-rel-b';
@@ -807,27 +808,36 @@ test('TopKCollector re-ranks evicted sample on late release without duplicating 
     tracker.recordSettlementCommitted(opB);
 
     assert.equal(tracker.getTopProvingWall()[0]?.operationId, opB);
+    assert.equal(tracker.getTopLifecycleWall()[0]?.operationId, opB);
 
     // 3. Late release arrives for opA with high duration (e.g. 500ms)
     currentNow += 500;
     tracker.recordReleaseAttempt(500);
     tracker.recordReleaseCommitted(opA, 500);
 
-    const top = tracker.getTopProvingWall();
-    assert.equal(top.length, 1, 'capacity must remain strictly 1 without duplication');
-    assert.equal(top[0]?.operationId, opA, 'opA must become top operation after late release');
-    assert.equal(top[0]?.evidence.releaseDurationMs, 500);
-    assert.ok(top[0]!.wallDurationMs >= 500);
+    // Proving tails must remain strictly ranked by provingWallMs (opB stays #1)
+    const topProving = tracker.getTopProvingWall();
+    assert.equal(topProving.length, 1, 'proving capacity must remain strictly 1');
+    assert.equal(topProving[0]?.operationId, opB, 'late release must not rerank proving tails');
+
+    // Lifecycle tails re-rank evicted opA to #1 without duplication
+    const topLifecycle = tracker.getTopLifecycleWall();
+    assert.equal(topLifecycle.length, 1, 'lifecycle capacity must remain strictly 1 without duplication');
+    assert.equal(topLifecycle[0]?.operationId, opA, 'opA must become top lifecycle operation after late release');
+    assert.equal(topLifecycle[0]?.evidence.releaseDurationMs, 500);
+    assert.ok(topLifecycle[0]!.lifecycleWallMs >= 500);
+    assert.ok(topLifecycle[0]!.wallDurationMs >= 500);
 
     // Re-invoking release or late updates on the same object must not duplicate
     tracker.recordReleaseCommitted(opA, 500);
-    assert.equal(tracker.getTopProvingWall().length, 1, 'repeated update must not duplicate entries');
+    assert.equal(tracker.getTopProvingWall().length, 1, 'repeated update must not duplicate proving entries');
+    assert.equal(tracker.getTopLifecycleWall().length, 1, 'repeated update must not duplicate lifecycle entries');
   } finally {
     performance.now = origNow;
   }
 });
 
-test('TopKCollector in-place re-ranks already-retained item without duplication (capacity 2)', () => {
+test('TopKCollector in-place re-ranks already-retained lifecycle item without reranking proving order or duplicating (capacity 2)', () => {
   const tracker = new SoakMetricsTracker(2);
   const opA = 'op-dup-a';
   const opB = 'op-dup-b';
@@ -852,26 +862,37 @@ test('TopKCollector in-place re-ranks already-retained item without duplication 
     tracker.recordSettlementCommitted(opB);
 
     // Both are retained in capacity 2, ordered [opB (50ms+), opA (10ms+)]
-    let top = tracker.getTopProvingWall();
-    assert.equal(top.length, 2, 'both opA and opB must be retained in capacity 2');
-    assert.deepEqual(top.map((s) => s.operationId), [opB, opA]);
+    let topProving = tracker.getTopProvingWall();
+    let topLifecycle = tracker.getTopLifecycleWall();
+    assert.equal(topProving.length, 2, 'both opA and opB must be retained in capacity 2');
+    assert.deepEqual(topProving.map((s) => s.operationId), [opB, opA]);
+    assert.deepEqual(topLifecycle.map((s) => s.operationId), [opB, opA]);
 
     // 3. Late release for already-retained opA with 200ms elapsed
     currentNow += 200;
     tracker.recordReleaseAttempt(200);
     tracker.recordReleaseCommitted(opA, 200);
 
-    // opA outranks opB in-place; ordered [opA (200ms+), opB (50ms+)], no dropped opB, no duplicate opA
-    top = tracker.getTopProvingWall();
-    assert.equal(top.length, 2, 'must preserve exact capacity 2 without duplication');
-    assert.deepEqual(top.map((s) => s.operationId), [opA, opB], 'opA must outrank opB without dropping opB');
-    assert.equal(top[0]?.evidence.releaseDurationMs, 200);
+    // Proving order stays [opB, opA] while release attribution is still visible on opA
+    topProving = tracker.getTopProvingWall();
+    assert.equal(topProving.length, 2);
+    assert.deepEqual(topProving.map((s) => s.operationId), [opB, opA], 'release must not rerank proving order');
+    assert.equal(topProving[1]?.evidence.releaseDurationMs, 200);
+
+    // Lifecycle order re-ranks in-place to [opA (200ms+), opB (50ms+)] without dropping opB or duplicating opA
+    topLifecycle = tracker.getTopLifecycleWall();
+    assert.equal(topLifecycle.length, 2, 'must preserve exact capacity 2 without duplication');
+    assert.deepEqual(topLifecycle.map((s) => s.operationId), [opA, opB], 'opA must outrank opB in lifecycle without dropping opB');
+    assert.equal(topLifecycle[0]?.evidence.releaseDurationMs, 200);
 
     // Re-invoking release on already-retained opA must not duplicate entries or drop opB
     tracker.recordReleaseCommitted(opA, 200);
-    top = tracker.getTopProvingWall();
-    assert.equal(top.length, 2, 'repeated update must not duplicate entries or drop existing items');
-    assert.deepEqual(top.map((s) => s.operationId), [opA, opB]);
+    topProving = tracker.getTopProvingWall();
+    topLifecycle = tracker.getTopLifecycleWall();
+    assert.equal(topProving.length, 2);
+    assert.deepEqual(topProving.map((s) => s.operationId), [opB, opA]);
+    assert.equal(topLifecycle.length, 2, 'repeated update must not duplicate entries or drop existing items');
+    assert.deepEqual(topLifecycle.map((s) => s.operationId), [opA, opB]);
   } finally {
     performance.now = origNow;
   }
@@ -1728,11 +1749,14 @@ test('SoakMetricsTracker preserves proving wall duration from request entry when
   assert.equal(sample.evidence.admissionStartMs, 1000, 'admissionStartMs must be request entry monotonic time');
   assert.equal(sample.evidence.firstClaimAtMs, 2500, 'firstClaimAtMs must record claim time');
 
-  const expectedDurationFromEntry = 3000 - 1000; // 2000
-  const durationFromClaim = 3000 - 2500; // 500
-  assert.equal(sample.wallDurationMs, expectedDurationFromEntry, 'wall duration measured from entry');
-  assert.notEqual(sample.wallDurationMs, durationFromClaim, 'using claim time as start must fail');
-  assert.ok(sample.wallDurationMs > durationFromClaim, 'proving wall from entry exceeds proving wall from claim');
+  const expectedProvingFromEntry = 2985 - 1000; // 1985 (entry to first settle attempt start)
+  const provingFromClaim = 2985 - 2500; // 485
+  const expectedLifecycleFromEntry = 3000 - 1000; // 2000 (entry through settle commit)
+  assert.equal(sample.provingWallMs, expectedProvingFromEntry, 'proving wall measured from entry to first settle start');
+  assert.notEqual(sample.provingWallMs, provingFromClaim, 'using claim time as start must fail');
+  assert.ok(sample.provingWallMs > provingFromClaim, 'proving wall from entry exceeds proving wall from claim');
+  assert.equal(sample.lifecycleWallMs, expectedLifecycleFromEntry, 'lifecycle wall measured from entry through settle commit');
+  assert.equal(sample.wallDurationMs, expectedLifecycleFromEntry, 'legacy lifecycle wall alias matches lifecycleWallMs');
   assert.equal(sample.positionContext?.uci, 'g1f3');
 });
 
@@ -3419,4 +3443,236 @@ test('selectSeededMoveUci keeps non-pawn back-rank rook moves unpromoted when pa
   const blackPromoUci = selectSeededMoveUci(() => blackPos, blackLegal, () => (blackPromoIdx + 0.5) / blackLegal.length);
   assert.equal(blackPromoUci, 'c2c1q');
   assert.doesNotThrow(() => blackPos.play(blackPromoUci));
+});
+
+test('SoakMetricsTracker ranks topProvingWall strictly by proving interval so slow DB settlement and release cannot outrank a longer proof', (t) => {
+  let currentNow = 1000;
+  t.mock.method(performance, 'now', () => currentNow);
+
+  const cap1Tracker = new SoakMetricsTracker(1);
+  const cap2Tracker = new SoakMetricsTracker(2);
+  const trackers = [cap1Tracker, cap2Tracker];
+  const opShort = 'op-short-proof-slow-db';
+  const opLong = 'op-longer-proof-fast-db';
+
+  // 1. Short proof (20ms proving wall) followed by slow retried DB settlement (700ms) and slow release (800ms)
+  for (const tracker of trackers) {
+    tracker.recordStartRequest({ gameId: 'g-1', operationId: opShort, basePly: 0, atMs: 1000 });
+  }
+  currentNow = 1010;
+  for (const tracker of trackers) {
+    tracker.recordStartAttempt(10, 0);
+    tracker.recordStartAdmitted('g-1', opShort, 0, 10);
+  }
+  currentNow = 1015;
+  for (const tracker of trackers) {
+    tracker.recordClaim({
+      gameId: 'g-1',
+      operationId: opShort,
+      executorId: 'worker-0',
+      generation: '1',
+      leaseUntil: new Date(10_000),
+    });
+  }
+  currentNow = 1020;
+  for (const tracker of trackers) {
+    tracker.recordStep(opShort, 5, 2, 100);
+    tracker.recordProofCompleted(opShort, currentNow);
+    // Actual monotonic boundary captured before awaiting store.settleAdjudication
+    tracker.recordSettleAttemptStart(opShort, currentNow);
+  }
+  // Attempt 1 stalls 400ms in DB and fails
+  currentNow = 1420;
+  for (const tracker of trackers) {
+    tracker.recordSettleAttempt(opShort, 400);
+  }
+  // Retry attempt 2 starts at 1450 and commits after 300ms (must not overwrite firstSettleAttemptAtMs=1020)
+  currentNow = 1450;
+  for (const tracker of trackers) {
+    tracker.recordSettleAttemptStart(opShort, currentNow);
+  }
+  currentNow = 1750;
+  for (const tracker of trackers) {
+    tracker.recordSettleAttempt(opShort, 300);
+    tracker.recordSettlementCommitted(opShort);
+  }
+
+  // 2. Longer proof (150ms proving wall) followed by fast DB settlement (5ms) and fast release (5ms)
+  currentNow = 3000;
+  for (const tracker of trackers) {
+    tracker.recordStartRequest({ gameId: 'g-2', operationId: opLong, basePly: 2, atMs: 3000 });
+  }
+  currentNow = 3010;
+  for (const tracker of trackers) {
+    tracker.recordStartAttempt(10, 2);
+    tracker.recordStartAdmitted('g-2', opLong, 2, 10);
+    tracker.recordClaim({
+      gameId: 'g-2',
+      operationId: opLong,
+      executorId: 'worker-1',
+      generation: '1',
+      leaseUntil: new Date(15_000),
+    });
+  }
+  currentNow = 3150;
+  for (const tracker of trackers) {
+    tracker.recordStep(opLong, 130, 90, 2000);
+    tracker.recordProofCompleted(opLong, currentNow);
+    tracker.recordSettleAttemptStart(opLong, currentNow);
+  }
+  currentNow = 3155;
+  for (const tracker of trackers) {
+    tracker.recordSettleAttempt(opLong, 5);
+    tracker.recordSettlementCommitted(opLong);
+  }
+  currentNow = 3160;
+  for (const tracker of trackers) {
+    tracker.recordReleaseAttempt(5);
+    tracker.recordReleaseCommitted(opLong, 5);
+  }
+
+  // 3. Delayed slow release (800ms) for opShort arrives AFTER opLong already settled and claimed #1
+  currentNow = 3960;
+  for (const tracker of trackers) {
+    tracker.recordReleaseAttempt(800);
+    tracker.recordReleaseCommitted(opShort, 800);
+  }
+
+  // Capacity 1: longer proof wins topProvingWall; slow DB + release opShort wins topLifecycleWall
+  const cap1Proving = cap1Tracker.getTopProvingWall();
+  assert.equal(cap1Proving.length, 1);
+  assert.equal(cap1Proving[0]?.operationId, opLong, 'slow settle DB and release must not outrank longer proof');
+  assert.equal(cap1Proving[0]?.provingWallMs, 150);
+  assert.equal(cap1Proving[0]?.lifecycleWallMs, 160);
+
+  const cap1Lifecycle = cap1Tracker.getTopLifecycleWall();
+  assert.equal(cap1Lifecycle.length, 1);
+  assert.equal(cap1Lifecycle[0]?.operationId, opShort, 'lifecycle top-K reflects opposite ranking from slow settle/release');
+  assert.equal(cap1Lifecycle[0]?.provingWallMs, 20);
+  assert.equal(cap1Lifecycle[0]?.lifecycleWallMs, 2960);
+  assert.equal(cap1Lifecycle[0]?.wallDurationMs, 2960);
+
+  // Capacity 2: opposite ordering and exact interval/attribution preservation
+  const cap2Proving = cap2Tracker.getTopProvingWall();
+  assert.deepEqual(cap2Proving.map((s) => s.operationId), [opLong, opShort]);
+  const shortSample = cap2Proving[1]!;
+  assert.equal(shortSample.provingWallMs, 20);
+  assert.equal(shortSample.evidence.admissionStartMs, 1000);
+  assert.equal(shortSample.evidence.proofCompletedAtMs, 1020);
+  assert.equal(shortSample.evidence.firstSettleAttemptAtMs, 1020);
+  assert.equal(shortSample.evidence.provingEndAtMs, 1020);
+  assert.equal(shortSample.evidence.provingWallMs, 20);
+  assert.equal(shortSample.evidence.settleAttempts, 2);
+  assert.equal(shortSample.evidence.settleDbWallMs, 700);
+  assert.equal(shortSample.evidence.releaseDurationMs, 800);
+  assert.equal(shortSample.evidence.lifecycleWallMs, 2960);
+  assert.equal(shortSample.evidence.totalWallMs, 2960);
+
+  const cap2Lifecycle = cap2Tracker.getTopLifecycleWall();
+  assert.deepEqual(cap2Lifecycle.map((s) => s.operationId), [opShort, opLong]);
+});
+
+test('SoakMetricsTracker protects late admission binding and active proving interval boundaries', (t) => {
+  let currentNow = 5000;
+  t.mock.method(performance, 'now', () => currentNow);
+
+  const tracker = new SoakMetricsTracker(5);
+
+  // Case A: Early provisional claim (hasBoundStart=false), slow settle + slow release, then late admission
+  const opLate = 'op-late-bound-after-release';
+  tracker.recordClaim({
+    gameId: 'g-late',
+    operationId: opLate,
+    executorId: 'worker-0',
+    generation: '1',
+    leaseUntil: new Date(20_000),
+  });
+  currentNow = 5025;
+  tracker.recordStep(opLate, 20, 15, 250);
+  tracker.recordProofCompleted(opLate, currentNow);
+  tracker.recordSettleAttemptStart(opLate, currentNow);
+  currentNow = 5525;
+  tracker.recordSettleAttempt(opLate, 500);
+  tracker.recordSettlementCommitted(opLate);
+  currentNow = 6325;
+  tracker.recordReleaseAttempt(800);
+  tracker.recordReleaseCommitted(opLate, 800);
+
+  // Before late admission: provisional start was claim time 5000, provingWallMs = 5025 - 5000 = 25ms
+  let lateSample = tracker.getTopProvingWall().find((s) => s.operationId === opLate)!;
+  assert.equal(lateSample.evidence.hasBoundStart, false);
+  assert.equal(lateSample.provingWallMs, 25);
+  assert.equal(lateSample.lifecycleWallMs, 1325);
+
+  // Delayed admission arrives at t=6325 with duration 1365ms (started at 6325 - 1365 = 4960, 40ms before claim)
+  tracker.recordStartAdmitted('g-late', opLate, 0, 1365);
+  lateSample = tracker.getTopProvingWall().find((s) => s.operationId === opLate)!;
+  assert.equal(lateSample.evidence.hasBoundStart, true);
+  assert.equal(lateSample.evidence.admissionStartMs, 4960);
+  // provingWallMs must end at provingEndAtMs (5025), NOT releaseCommittedAtMs (6325): 5025 - 4960 = 65ms
+  assert.equal(lateSample.provingWallMs, 65);
+  assert.equal(lateSample.lifecycleWallMs, 1365);
+
+  // Subsequent duplicate admission must NOT overwrite already-bound admissionStartMs
+  currentNow = 9000;
+  tracker.recordStartAdmitted('g-late', opLate, 0, 8000);
+  assert.equal(lateSample.evidence.admissionStartMs, 4960);
+  assert.equal(lateSample.provingWallMs, 65);
+
+  // Case B: Already-bound start via recordStartRequest is protected against duplicate late admission
+  const opBound = 'op-already-bound';
+  currentNow = 10_000;
+  tracker.recordStartRequest({ gameId: 'g-bound', operationId: opBound, basePly: 4, atMs: 10_000 });
+  currentNow = 10_040;
+  tracker.recordClaim({
+    gameId: 'g-bound',
+    operationId: opBound,
+    executorId: 'worker-0',
+    generation: '1',
+    leaseUntil: new Date(30_000),
+  });
+  currentNow = 10_100;
+  tracker.recordStep(opBound, 60, 45, 500);
+  tracker.recordProofCompleted(opBound, currentNow);
+  tracker.recordSettleAttemptStart(opBound, currentNow);
+  currentNow = 10_400;
+  tracker.recordSettleAttempt(opBound, 300);
+  tracker.recordSettlementCommitted(opBound);
+  // Late/duplicate admission arrives after settle with large duration; bound start 10000 must remain intact
+  currentNow = 15_000;
+  tracker.recordStartAdmitted('g-bound', opBound, 4, 5000);
+
+  const boundSample = tracker.getTopProvingWall().find((s) => s.operationId === opBound)!;
+  assert.equal(boundSample.evidence.admissionStartMs, 10_000);
+  assert.equal(boundSample.provingWallMs, 100);
+  assert.equal(boundSample.lifecycleWallMs, 400);
+
+  // Case C: Provisional active op receives recordStartAdmitted while active, plus late retry protection
+  const opActiveLate = 'op-active-late-bind';
+  currentNow = 20_000;
+  tracker.recordClaim({
+    gameId: 'g-active',
+    operationId: opActiveLate,
+    executorId: 'worker-1',
+    generation: '1',
+    leaseUntil: new Date(40_000),
+  });
+  // Admission returns at 20030 with duration 60ms -> binds start at 19970
+  currentNow = 20_030;
+  tracker.recordStartAdmitted('g-active', opActiveLate, 6, 60);
+  // Duplicate admission at 20080 with duration 500ms must NOT overwrite bound 19970
+  currentNow = 20_080;
+  tracker.recordStartAdmitted('g-active', opActiveLate, 6, 500);
+  tracker.recordStep(opActiveLate, 50, 40, 300);
+  tracker.recordProofCompleted(opActiveLate, currentNow);
+  // Omit explicit recordSettleAttemptStart; settle at 20280 with 200ms DB duration recovers start=20080
+  currentNow = 20_280;
+  tracker.recordSettleAttempt(opActiveLate, 200);
+  tracker.recordSettlementCommitted(opActiveLate);
+
+  const activeLateSample = tracker.getTopProvingWall().find((s) => s.operationId === opActiveLate)!;
+  assert.equal(activeLateSample.evidence.admissionStartMs, 19_970);
+  assert.equal(activeLateSample.evidence.firstSettleAttemptAtMs, 20_080);
+  assert.equal(activeLateSample.provingWallMs, 110);
+  assert.equal(activeLateSample.lifecycleWallMs, 310);
 });

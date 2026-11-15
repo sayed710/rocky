@@ -301,10 +301,14 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           const cpu0 = process.cpuUsage();
           try {
             const res = origStep(operationId, totalWorkBudget);
-            const wallMs = performance.now() - t0;
+            const stepEnd = performance.now();
+            const wallMs = stepEnd - t0;
             const cpuDiff = process.cpuUsage(cpu0);
             const cpuMs = (cpuDiff.user + cpuDiff.system) / 1000;
             tracker.recordStep(operationId, wallMs, cpuMs, res.deltaWork);
+            if (res.status === 'ready') {
+              tracker.recordProofCompleted(operationId, stepEnd);
+            }
             try {
               const view = store.getProofJob(operationId);
               if (view) {
@@ -321,9 +325,19 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           }
         };
 
+        const origConclude = store.concludeUnresolvedProofJob.bind(store);
+        store.concludeUnresolvedProofJob = (operationId: string) => {
+          const res = origConclude(operationId);
+          if (res.status === 'ready') {
+            tracker.recordProofCompleted(operationId, performance.now());
+          }
+          return res;
+        };
+
         const origSettle = store.settleAdjudication.bind(store);
         store.settleAdjudication = async (params: SettleAdjudicationParams) => {
           const t0 = performance.now();
+          tracker.recordSettleAttemptStart(params.operationId, t0);
           try {
             const receipt = await origSettle(params);
             const duration = performance.now() - t0;
@@ -1279,11 +1293,16 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
         tailSamples: {
           slowestMoveLatency: tracker.getTopMoveLatency(),
           slowestProvingWall: tracker.getTopProvingWall(),
+          slowestLifecycleWall: tracker.getTopLifecycleWall(),
           highestProofCpu: tracker.getTopProofCpu(),
         },
       };
       console.log('SOAK', JSON.stringify(report));
       assert.ok(totalDurableMoves >= GAMES * Math.min(PLIES, 4), 'games made progress');
+      for (const sample of report.tailSamples.slowestProvingWall) {
+        assert.ok(sample.provingWallMs >= 0, 'slowestProvingWall provingWallMs must be non-negative');
+        assert.ok(sample.lifecycleWallMs >= sample.provingWallMs, 'lifecycleWallMs must be >= provingWallMs');
+      }
       assert.ok(report.moveLatencyMs.n > 0, 'moveLatency samples must not be empty');
       assert.equal(report.moveLatencyMs.n, report.durableMoves, 'moveLatency sample count must equal durable committed moves');
       assert.equal(report.durableMoves, report.actualPlies, 'durable committed moves must equal replayed actual plies');

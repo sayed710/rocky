@@ -103,11 +103,17 @@ export interface PhaseEvidence {
   readonly activeProofCpuMs: number;
   readonly proofSteps: number;
   readonly proofSlices: number;
+  proofCompletedAtMs?: number;
+  firstSettleAttemptAtMs?: number;
+  provingEndAtMs: number;
+  provingWallMs: number;
   readonly settleAttempts: number;
   readonly settleDbWallMs: number;
   readonly settleCommittedAtMs?: number;
   releaseDurationMs?: number;
   releaseCommittedAtMs?: number;
+  lifecycleWallMs: number;
+  /** Legacy lifecycle wall duration (admission start through settle commit / clock release), not proof-only. */
   totalWallMs: number;
 }
 
@@ -125,6 +131,11 @@ export interface TailSample {
   readonly gameId: string;
   readonly basePly: number;
   readonly resultPly: number;
+  /** Bounded proving wall duration (admission start through first settlement attempt start / proof completion). */
+  provingWallMs: number;
+  /** Full lifecycle wall duration (admission start through settlement commit and optional clock release). */
+  lifecycleWallMs: number;
+  /** Legacy lifecycle wall duration alias (admission start through settle commit / clock release), not proof-only. */
   wallDurationMs: number;
   readonly activeProofCpuMs: number;
   readonly activeProofSliceWallMs: number;
@@ -406,6 +417,8 @@ interface ActiveOperation {
   slices: number;
   roles: readonly string[];
   questionKind: string;
+  proofCompletedAtMs?: number;
+  firstSettleAttemptAtMs?: number;
   settleAttempts: number;
   settleDbWallMs: number;
   settleCommittedAtMs?: number;
@@ -683,6 +696,7 @@ export class SoakMetricsTracker {
   readonly #storeMetrics = new Map<string, BoundedReservoir>();
 
   readonly #topProvingWall: TopKCollector<TailSample>;
+  readonly #topLifecycleWall: TopKCollector<TailSample>;
   readonly #topProofCpu: TopKCollector<TailSample>;
   readonly #topMoveLatencies: TopKCollector<MoveTailSample>;
 
@@ -703,7 +717,12 @@ export class SoakMetricsTracker {
     }
     this.#topProvingWall = new TopKCollector<TailSample>(
       topKCapacity,
-      (item) => item.wallDurationMs,
+      (item) => item.provingWallMs,
+      (item) => item.operationId,
+    );
+    this.#topLifecycleWall = new TopKCollector<TailSample>(
+      topKCapacity,
+      (item) => item.lifecycleWallMs,
       (item) => item.operationId,
     );
     this.#topProofCpu = new TopKCollector<TailSample>(
@@ -993,7 +1012,11 @@ export class SoakMetricsTracker {
   }
 
   recordStartRequest(req: StartAdjudicationRequestInput): void {
-    if (this.#unresolvedStarts.has(req.operationId)) {
+    if (
+      this.#unresolvedStarts.has(req.operationId) ||
+      this.#activeOps.has(req.operationId) ||
+      this.isOperationSettled(req.operationId)
+    ) {
       return;
     }
 
@@ -1053,6 +1076,11 @@ export class SoakMetricsTracker {
       if (!op.positionContext && unresolved?.positionContext) {
         op.positionContext = unresolved.positionContext;
       }
+      if (!op.hasBoundStart) {
+        const candidateStart = unresolved ? unresolved.entryAtMs : performance.now() - durationMs;
+        op.admissionStartAt = Math.min(op.admissionStartAt, candidateStart);
+        op.hasBoundStart = true;
+      }
       return;
     }
 
@@ -1062,22 +1090,38 @@ export class SoakMetricsTracker {
       this.#completedSamples.has(operationId)
     ) {
       const settledSample = this.#completedSamples.get(operationId) ?? this.#settledAwaitingRelease.get(operationId);
-      if (settledSample && settledSample.evidence.admissionDurationMs === 0) {
-        settledSample.evidence.admissionDurationMs = +(durationMs.toFixed(1));
-        const startMs = settledSample.evidence.hasBoundStart
-          ? settledSample.evidence.admissionStartMs
-          : (unresolved ? unresolved.entryAtMs : performance.now() - durationMs);
-        settledSample.evidence.admissionStartMs = +(startMs.toFixed(1));
-        settledSample.evidence.hasBoundStart = true;
-        const endWall = settledSample.evidence.releaseCommittedAtMs ?? settledSample.evidence.settleCommittedAtMs;
-        if (endWall !== undefined) {
-          settledSample.wallDurationMs = +(
-            Math.max(settledSample.wallDurationMs, endWall - startMs).toFixed(1)
-          );
-          settledSample.evidence.totalWallMs = settledSample.wallDurationMs;
+      if (settledSample) {
+        if (settledSample.evidence.admissionDurationMs === 0) {
+          settledSample.evidence.admissionDurationMs = +(durationMs.toFixed(1));
         }
-        this.#topProvingWall.record(settledSample);
-        this.#topProofCpu.record(settledSample);
+        if (!settledSample.evidence.hasBoundStart) {
+          const candidateStartMs = unresolved ? unresolved.entryAtMs : performance.now() - durationMs;
+          const boundStartMs = Math.min(settledSample.evidence.admissionStartMs, candidateStartMs);
+          settledSample.evidence.admissionStartMs = +(boundStartMs.toFixed(1));
+          settledSample.evidence.hasBoundStart = true;
+
+          const provingEndMs = settledSample.evidence.provingEndAtMs;
+          const updatedProvingWall = +(
+            Math.max(settledSample.provingWallMs, provingEndMs - boundStartMs).toFixed(1)
+          );
+          settledSample.provingWallMs = updatedProvingWall;
+          settledSample.evidence.provingWallMs = updatedProvingWall;
+
+          const lifecycleEndMs = settledSample.evidence.releaseCommittedAtMs ?? settledSample.evidence.settleCommittedAtMs;
+          if (lifecycleEndMs !== undefined) {
+            const updatedLifecycleWall = +(
+              Math.max(settledSample.lifecycleWallMs, lifecycleEndMs - boundStartMs).toFixed(1)
+            );
+            settledSample.lifecycleWallMs = updatedLifecycleWall;
+            settledSample.wallDurationMs = updatedLifecycleWall;
+            settledSample.evidence.lifecycleWallMs = updatedLifecycleWall;
+            settledSample.evidence.totalWallMs = updatedLifecycleWall;
+          }
+
+          this.#topProvingWall.record(settledSample);
+          this.#topLifecycleWall.record(settledSample);
+          this.#topProofCpu.record(settledSample);
+        }
       }
       return;
     }
@@ -1153,6 +1197,7 @@ export class SoakMetricsTracker {
           this.#successorTakeoversCount++;
         }
         op.isTakeover = true;
+        op.proofCompletedAtMs = undefined;
         op.claimGapWallMs += Math.max(0, now - prevClaim.claimedAtMonotonicMs);
       }
     }
@@ -1169,6 +1214,14 @@ export class SoakMetricsTracker {
     }
   }
 
+  /** Captures the monotonic completion timestamp when proof work reaches a terminal ready/unresolved state. */
+  recordProofCompleted(operationId: string, atMs = performance.now()): void {
+    const op = this.#activeOps.get(operationId);
+    if (op) {
+      op.proofCompletedAtMs = atMs;
+    }
+  }
+
   recordRoles(operationId: string, roles: readonly string[], questionKind: string): void {
     const op = this.#activeOps.get(operationId);
     if (op) {
@@ -1177,13 +1230,31 @@ export class SoakMetricsTracker {
     }
   }
 
+  /** Captures the monotonic timestamp immediately before awaiting the first settlement store call. */
+  recordSettleAttemptStart(operationId: string, atMs = performance.now()): void {
+    const op = this.#activeOps.get(operationId);
+    if (op && op.firstSettleAttemptAtMs === undefined) {
+      op.firstSettleAttemptAtMs = atMs;
+    }
+  }
+
   recordSettleAttempt(operationId: string, durationMs: number): void {
+    const now = performance.now();
     const op = this.#activeOps.get(operationId);
     const basePly = op ? op.basePly : 0;
     const bucket = plyBucket(basePly);
     this.#settleDurationsByBucket.get(bucket)!.record(durationMs);
     this.#getStoreMetric('settleAdjudication').record(durationMs);
     if (op) {
+      if (op.firstSettleAttemptAtMs === undefined) {
+        const lastClaimAtMs = op.claims[op.claims.length - 1]?.claimedAtMonotonicMs;
+        const minBound = Math.max(
+          op.admissionStartAt,
+          op.proofCompletedAtMs ?? -Infinity,
+          lastClaimAtMs ?? -Infinity,
+        );
+        op.firstSettleAttemptAtMs = Math.max(minBound, now - durationMs);
+      }
       op.settleAttempts++;
       op.settleDbWallMs += durationMs;
     }
@@ -1193,7 +1264,9 @@ export class SoakMetricsTracker {
     const op = this.#activeOps.get(operationId);
     if (!op) return;
     const endMs = performance.now();
-    const totalWall = endMs - op.admissionStartAt;
+    const provingEndAtMs = op.firstSettleAttemptAtMs ?? op.proofCompletedAtMs ?? endMs;
+    const provingWallMs = Math.max(0, provingEndAtMs - op.admissionStartAt);
+    const lifecycleWallMs = Math.max(provingWallMs, endMs - op.admissionStartAt);
     op.settleCommittedAtMs = endMs;
     this.#activeProofCpu.record(op.activeProofCpuMs);
     this.#activeProofSliceWall.record(op.activeProofSliceWallMs);
@@ -1201,13 +1274,17 @@ export class SoakMetricsTracker {
     const faultCheck = isFaultAssociated(op.admissionStartAt, endMs, this.#faults, op.isTakeover);
     const firstClaim = op.claims[0];
     const lastClaim = op.claims[op.claims.length - 1];
+    const roundedProvingWall = +(provingWallMs.toFixed(1));
+    const roundedLifecycleWall = +(lifecycleWallMs.toFixed(1));
 
     const tailSample: TailSample = {
       operationId: op.operationId,
       gameId: op.gameId,
       basePly: op.basePly,
       resultPly: op.resultPly,
-      wallDurationMs: +(totalWall.toFixed(1)),
+      provingWallMs: roundedProvingWall,
+      lifecycleWallMs: roundedLifecycleWall,
+      wallDurationMs: roundedLifecycleWall,
       activeProofCpuMs: +(op.activeProofCpuMs.toFixed(1)),
       activeProofSliceWallMs: +(op.activeProofSliceWallMs.toFixed(1)),
       proofSteps: op.steps,
@@ -1233,15 +1310,22 @@ export class SoakMetricsTracker {
         activeProofCpuMs: +(op.activeProofCpuMs.toFixed(1)),
         proofSteps: op.steps,
         proofSlices: op.slices,
+        proofCompletedAtMs: op.proofCompletedAtMs !== undefined ? +(op.proofCompletedAtMs.toFixed(1)) : undefined,
+        firstSettleAttemptAtMs:
+          op.firstSettleAttemptAtMs !== undefined ? +(op.firstSettleAttemptAtMs.toFixed(1)) : undefined,
+        provingEndAtMs: +(provingEndAtMs.toFixed(1)),
+        provingWallMs: roundedProvingWall,
         settleAttempts: op.settleAttempts,
         settleDbWallMs: +(op.settleDbWallMs.toFixed(1)),
         settleCommittedAtMs: +(endMs.toFixed(1)),
-        totalWallMs: +(totalWall.toFixed(1)),
+        lifecycleWallMs: roundedLifecycleWall,
+        totalWallMs: roundedLifecycleWall,
       },
       positionContext: op.positionContext,
     };
 
     this.#topProvingWall.record(tailSample);
+    this.#topLifecycleWall.record(tailSample);
     this.#topProofCpu.record(tailSample);
     this.#settledCommittedCount++;
     this.#activeOps.delete(operationId);
@@ -1274,14 +1358,18 @@ export class SoakMetricsTracker {
     if (tailSample) {
       const releaseDuration = +(durationMs.toFixed(1));
       const releaseCommittedAt = +(now.toFixed(1));
-      const updatedTotalWall = +(Math.max(tailSample.wallDurationMs, now - tailSample.evidence.admissionStartMs).toFixed(1));
+      const updatedLifecycleWall = +(
+        Math.max(tailSample.lifecycleWallMs, now - tailSample.evidence.admissionStartMs).toFixed(1)
+      );
       tailSample.evidence.releaseDurationMs = releaseDuration;
       tailSample.evidence.releaseCommittedAtMs = releaseCommittedAt;
-      tailSample.evidence.totalWallMs = updatedTotalWall;
-      tailSample.wallDurationMs = updatedTotalWall;
+      tailSample.evidence.lifecycleWallMs = updatedLifecycleWall;
+      tailSample.evidence.totalWallMs = updatedLifecycleWall;
+      tailSample.lifecycleWallMs = updatedLifecycleWall;
+      tailSample.wallDurationMs = updatedLifecycleWall;
       this.#settledAwaitingRelease.delete(stopOperationId);
-      this.#topProvingWall.record(tailSample);
-      this.#topProofCpu.record(tailSample);
+      // Release updates lifecycle attribution only; it must not rerank proving tails.
+      this.#topLifecycleWall.record(tailSample);
     }
   }
 
@@ -1355,6 +1443,7 @@ export class SoakMetricsTracker {
     };
   }
 
+  /** PubSub-observed game `adjudication === 'proving'` state duration (includes settlement DB and publish, not proof-only). */
   getProvingWallQuantiles(): MetricSummary {
     return this.#provingDurations.summary;
   }
@@ -1394,6 +1483,10 @@ export class SoakMetricsTracker {
 
   getTopProvingWall(): readonly TailSample[] {
     return this.#topProvingWall.items;
+  }
+
+  getTopLifecycleWall(): readonly TailSample[] {
+    return this.#topLifecycleWall.items;
   }
 
   getTopProofCpu(): readonly TailSample[] {
