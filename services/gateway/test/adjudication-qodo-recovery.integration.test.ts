@@ -20,6 +20,7 @@ import {
   InMemoryEventLog,
   InMemoryPubSub,
   RealtimeGateway,
+  gameChannel,
   type ApplyResult,
   type CommandRouter,
   type TokenVerifier,
@@ -605,10 +606,14 @@ test('AdjudicationResync enforces fallbackBatchSize budget and fair round-robin 
   };
   let localGames = ['g1', 'g2', 'g3', 'g4', 'g5', 'g6'];
   const resync = new AdjudicationResync({
-    authority: { adjudicatingGames: () => [] },
+    authority: {
+      adjudicatingGames: () => [],
+      needsAdjudicationResync: async (_gameId, rev) => rev !== undefined,
+    },
     router,
     watched: {
       localGameIds: () => localGames,
+      observedRevisionFor: () => 0,
       sendStateToRoom: () => {},
     },
     fallbackBatchSize: 2,
@@ -658,11 +663,15 @@ test('AdjudicationResync prioritizes fast candidates and avoids fallback duplica
   const fastCandidates = ['g2'];
   const localGames = ['g1', 'g2', 'g3'];
   const resync = new AdjudicationResync({
-    authority: { adjudicatingGames: () => [] },
+    authority: {
+      adjudicatingGames: () => [],
+      needsAdjudicationResync: async (_gameId, rev) => rev !== undefined,
+    },
     router,
     watched: {
       watchedAdjudicatingGames: () => fastCandidates,
       localGameIds: () => localGames,
+      observedRevisionFor: () => 0,
       sendStateToRoom: () => {},
     },
     fallbackBatchSize: 1,
@@ -685,7 +694,7 @@ test('AdjudicationResync validates constructor parameters', async () => {
   };
   assert.throws(
     () => new AdjudicationResync({
-      authority: { adjudicatingGames: () => [] },
+      authority: { adjudicatingGames: () => [], needsAdjudicationResync: async () => false },
       router,
       fallbackBatchSize: 0,
     }),
@@ -693,7 +702,7 @@ test('AdjudicationResync validates constructor parameters', async () => {
   );
   assert.throws(
     () => new AdjudicationResync({
-      authority: { adjudicatingGames: () => [] },
+      authority: { adjudicatingGames: () => [], needsAdjudicationResync: async () => false },
       router,
       fallbackBatchSize: -1,
     }),
@@ -701,7 +710,7 @@ test('AdjudicationResync validates constructor parameters', async () => {
   );
   assert.throws(
     () => new AdjudicationResync({
-      authority: { adjudicatingGames: () => [] },
+      authority: { adjudicatingGames: () => [], needsAdjudicationResync: async () => false },
       router,
       intervalMs: 0,
     }),
@@ -726,10 +735,14 @@ test('AdjudicationResync guarantees liveness for retained rooms under bounded ch
 
   let currentRooms: string[] = [];
   const resync = new AdjudicationResync({
-    authority: { adjudicatingGames: () => [] },
+    authority: {
+      adjudicatingGames: () => [],
+      needsAdjudicationResync: async (_gameId, rev) => rev !== undefined,
+    },
     router,
     watched: {
       localGameIds: () => currentRooms,
+      observedRevisionFor: () => 0,
       sendStateToRoom: () => {},
     },
     fallbackBatchSize: 8,
@@ -1208,7 +1221,7 @@ stackTest('valid pending join coverage: resync overlapping real join preserves v
     const node = createNode(redis, store, adjudicationStore, clock);
 
     try {
-      const { gameId, black } = await seedGame(pool);
+      const { gameId, white, black } = await seedGame(pool);
 
       // Client initiates join for real game, entering joinBuffers
       const clientConn = node.connect();
@@ -1217,7 +1230,7 @@ stackTest('valid pending join coverage: resync overlapping real join preserves v
       // Verify real game is in localGameIds via pending join buffer
       assert.equal(node.gateway.localGameIds().has(gameId), true);
 
-      // Concurrent resync runs: authority.knows(gameId) validates true, route succeeds
+      // Concurrent resync runs: valid pending idle join succeeds without acquiring an idle lease
       const failed = await node.resync.runPass();
       assert.equal(failed, 0, 'Resync must succeed for valid pending game');
 
@@ -1226,9 +1239,15 @@ stackTest('valid pending join coverage: resync overlapping real join preserves v
       const joinedMsg = clientConn.sent.find((m) => m.t === 'joined');
       assert.ok(joinedMsg !== undefined && joinedMsg.t === 'joined');
 
-      // Room is active and lease is safely maintained
+      // Room is active; idle resync did not claim ownership or create a Redis owner key
       assert.equal(node.gateway.hasLocalSessions(gameId), true);
+      assert.equal(node.registry.holdsValidLease(gameId), false);
+      assert.equal(await redis.get(ownerKey(gameId)), null);
+
+      // Legitimate actor command through router acquires the ownership lease
+      await node.router.route(gameId, white, { kind: 'move', uci: 'e2e4' });
       assert.equal(node.registry.holdsValidLease(gameId), true);
+      assert.equal(await redis.get(ownerKey(gameId)), node.nodeId);
     } finally {
       await node.close();
       await redis.quit().catch(() => undefined);
@@ -1286,6 +1305,132 @@ stackTest('cleanup failure during missing-game handling propagates error with ca
       node.registry.release = originalRelease;
       node.authority.apply = originalApply;
       await routePromise?.catch(() => undefined);
+      await node.close();
+      await redis.quit().catch(() => undefined);
+    }
+  });
+});
+
+stackTest('idle watched spectator room does not acquire persistent ownership across resync passes or ordinary durable moves', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const redis = new Redis(REDIS_URL!, { maxRetriesPerRequest: null });
+    const store = new PostgresEventStore(pool);
+    const adjudicationStore = new PgAdjudicationStore(pool);
+    const clock = { now: 2000 };
+    const node = createNode(redis, store, adjudicationStore, clock);
+
+    try {
+      const { gameId } = await seedGame(pool);
+
+      const spectatorConn = node.connect();
+      spectatorConn.deliver({ t: 'join', gameId });
+      await waitForCondition('Spectator joined', () => spectatorConn.sent.some((m) => m.t === 'joined'));
+
+      assert.equal(node.gateway.hasLocalSessions(gameId), true);
+      assert.equal(node.gateway.localGameIds().has(gameId), true);
+      assert.equal(node.gateway.observedRevisionFor(gameId), 0);
+      assert.equal(await redis.get(ownerKey(gameId)), null);
+      assert.equal(node.registry.holdsValidLease(gameId), false);
+      assert.equal(node.registry.captureTicket(gameId), undefined);
+
+      // Pass 1: idle watched room at observedRevision 0 must not claim Redis ownership
+      const failed1 = await node.resync.runPass();
+      assert.equal(failed1, 0);
+      assert.equal(await redis.get(ownerKey(gameId)), null, 'Pass 1 must not create Redis owner key for idle room');
+      assert.equal(node.registry.holdsValidLease(gameId), false, 'Pass 1 must not acquire local lease for idle room');
+      assert.equal(node.registry.captureTicket(gameId), undefined, 'Pass 1 must not capture renewal ticket for idle room');
+      assert.equal(node.gateway.hasLocalSessions(gameId), true, 'Spectator room must remain joined');
+
+      // Append a genuine ordinary move directly to the durable store (revision advances without adjudication)
+      const baseEvents = await store.load(gameId);
+      const baseGame = Game.fromEvents(baseEvents.map((e) => e.event));
+      const played = baseGame.playMove('e2e4', 2100);
+      await store.append(gameId, 0, played.events);
+
+      // Pass 2: ordinary durable suffix after observedRevision 0 must still skip ownership claim
+      const failed2 = await node.resync.runPass();
+      assert.equal(failed2, 0);
+      assert.equal(await redis.get(ownerKey(gameId)), null, 'Pass 2 must not create Redis owner key after ordinary move');
+      assert.equal(node.registry.holdsValidLease(gameId), false, 'Pass 2 must not acquire local lease after ordinary move');
+      assert.equal(node.registry.captureTicket(gameId), undefined, 'Pass 2 must not capture renewal ticket after ordinary move');
+      assert.equal(node.gateway.hasLocalSessions(gameId), true, 'Spectator room must remain joined after Pass 2');
+    } finally {
+      await node.close();
+      await redis.quit().catch(() => undefined);
+    }
+  });
+});
+
+stackTest('resync recovers same-revision stopped state when room observed settled move but lost state broadcast', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    const redis = new Redis(REDIS_URL!, { maxRetriesPerRequest: null });
+    const store = new PostgresEventStore(pool);
+    const adjudicationStore = new PgAdjudicationStore(pool);
+    const clock = { now: 2000 };
+    const node = createNode(redis, store, adjudicationStore, clock);
+
+    try {
+      const { gameId } = await seedGame(pool, FEN_MATE1);
+
+      const spectatorConn = node.connect();
+      spectatorConn.deliver({ t: 'join', gameId });
+      await waitForCondition('Spectator joined', () => spectatorConn.sent.some((m) => m.t === 'joined'));
+
+      // Start adjudication for non-terminal move e7e4 in Postgres
+      await adjudicationStore.startAdjudication({
+        gameId,
+        command: { kind: 'move', uci: 'e7e4' },
+        context: {
+          operationId: randomUUID(),
+          color: 'w',
+          at: 2000,
+          rulesVersion: 'rocky-adjudication@1',
+          clockPolicy: 'observed-release-v1',
+        },
+      });
+
+      // Worker settles move into STOPPED state; publish throws to block immediate release and release sweep
+      const worker = new AdjudicationWorker({
+        store: adjudicationStore,
+        executorId: randomUUID(),
+        sliceBudget: 5_000,
+        releaseGraceMs: 1_000,
+        now: () => clock.now,
+        publish: async () => {
+          throw new Error('simulated settlement notice failure');
+        },
+      });
+      clock.now = 2500;
+      const pass = await worker.runPass();
+      assert.equal(pass.settled, 1);
+      assert.equal(pass.released, 0);
+
+      // Obtain the actual MovePlayed broadcast from detached recovery read and deliver ONLY the move frame
+      const detached = await node.authority.readRecovery(gameId, 0);
+      assert.equal(detached.state.adjudication, 'stopped');
+      const move = detached.missed.find((m) => m.t === 'move');
+      assert.ok(move !== undefined && move.t === 'move');
+
+      await redis.publish(gameChannel(gameId), JSON.stringify({ origin: 'other-node', msg: move }));
+      await waitForCondition('Spectator received move frame', () => spectatorConn.sent.some((m) => m.t === 'move'));
+
+      // Room observed the move's revision (head), but lost the same-revision stopped state and holds no lease
+      assert.equal(node.gateway.observedRevisionFor(gameId), move.stateRevision);
+      assert.equal(spectatorConn.sent.some((m) => m.t === 'state' && m.state.adjudication === 'stopped'), false);
+      assert.deepEqual(node.gateway.watchedAdjudicatingGames(), []);
+      assert.equal(await redis.get(ownerKey(gameId)), null);
+      assert.equal(node.registry.holdsValidLease(gameId), false);
+
+      // Resync detects preceding AdjudicationResolved covering observed MovePlayed, recovers STOPPED state and claims lease
+      const failed = await node.resync.runPass();
+      assert.equal(failed, 0);
+      assert.equal(node.registry.holdsValidLease(gameId), true);
+      assert.equal(await redis.get(ownerKey(gameId)), node.nodeId);
+      assert.ok(
+        spectatorConn.sent.some((m) => m.t === 'state' && m.state.adjudication === 'stopped'),
+        'Room must receive the recovered stopped state at the same revision',
+      );
+    } finally {
       await node.close();
       await redis.quit().catch(() => undefined);
     }

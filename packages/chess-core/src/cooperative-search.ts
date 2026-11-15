@@ -223,6 +223,7 @@ export function isPawnFreeMaterialUnwinnable(state: PositionState, winner: Color
   // A side with nothing but its king can never give check, so it can never mate, whatever the other
   // side has: the opponent's pawns only ever promote to the opponent's own pieces. It needs no pawn of
   // its own (one could promote), and holds in every variant this search admits (no drops).
+  // General bare-king shortcut used by pure analysis and durable adjudication; approved scope exception per ADR0174 §7 (https://github.com/sayed710/rocky/pull/151#issuecomment-6655724172).
   if (inv.winnerPawns === 0 && isBareKing(inv)) return true;
   if (inv.totalPawns > 0) return false;
   return isBareKing(inv) || isLemma5Unwinnable(inv) || isLemma6Unwinnable(inv);

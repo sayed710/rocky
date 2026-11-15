@@ -167,8 +167,12 @@ export class PgAdjudicationStore {
     return this.#seam.createProofJob(pending.prepared, durableGame);
   }
 
-  stepProofJob(operationId: string, totalWorkBudget: number): JobStepResult {
-    return this.#seam.stepProofJob(operationId, totalWorkBudget);
+  stepProofJob(
+    operationId: string,
+    totalWorkBudget: number,
+    shouldYield?: () => boolean,
+  ): JobStepResult {
+    return this.#seam.stepProofJob(operationId, totalWorkBudget, shouldYield);
   }
 
   stepAllProofJobs(totalWorkBudget: number): AllStepResult {
@@ -450,13 +454,19 @@ export class PgAdjudicationStore {
     readonly gameId: string;
     readonly releaseRequestId: string;
     readonly at: number;
+    readonly expectedStopOperationId?: string;
   }): Promise<AdjudicationReleaseReceipt> {
     if (typeof params.releaseRequestId !== 'string' || params.releaseRequestId.length === 0 || params.releaseRequestId.length > 200) {
       throw new AdjudicationConflictError('releaseRequestId must be a non-empty string of at most 200 characters');
     }
     return this.#inGameTransaction(params.gameId, async (client) => {
       const existing = await loadRelease(client, params.gameId, params.releaseRequestId);
-      if (existing) return existing;
+      if (existing) {
+        if (params.expectedStopOperationId !== undefined && params.expectedStopOperationId !== existing.stopOperationId) {
+          throw new AdjudicationConflictError('The recorded release is for a different stop than expected');
+        }
+        return existing;
+      }
       const events = await loadDurableEvents(client, params.gameId);
       if (events.length === 0) throw new PersistenceError(`Game ${params.gameId} not found`);
       return writeRelease(client, Game.fromEvents(events.map((e) => e.event)), params);

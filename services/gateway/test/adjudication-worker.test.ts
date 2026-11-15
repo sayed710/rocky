@@ -41,11 +41,12 @@ class FakeStore implements AdjudicationWorkStore {
   readonly calls: string[] = [];
   readonly claims: ClaimAdjudicationParams[] = [];
   readonly settles: SettleAdjudicationParams[] = [];
-  readonly releases: Array<{ gameId: string; releaseRequestId: string; at: number }> = [];
+  readonly releases: Array<{ gameId: string; releaseRequestId: string; at: number; expectedStopOperationId?: string }> = [];
   readonly renewals: RenewAdjudicationParams[] = [];
   claimFailures: Array<'conflict' | 'network'> = [];
   settleFailures: Array<'conflict' | 'network'> = [];
   releaseFailures = 0;
+  releaseLostReplies = 0;
   /** The clock completion the settlement records: `stopped` when the game goes on. */
   completion: 'stopped' | 'terminal' | undefined;
   retained: number | undefined;
@@ -127,11 +128,17 @@ class FakeStore implements AdjudicationWorkStore {
     this.calls.push('evict');
     return true;
   }
-  async releaseClocks(params: { gameId: string; releaseRequestId: string; at: number }): Promise<AdjudicationReleaseReceipt> {
+  async releaseClocks(params: { gameId: string; releaseRequestId: string; at: number; expectedStopOperationId?: string }): Promise<AdjudicationReleaseReceipt> {
     this.releases.push(params);
     if (this.releaseFailures > 0) {
       this.releaseFailures -= 1;
       throw new Error('database unreachable');
+    }
+    if (this.releaseLostReplies > 0) {
+      // The release commits (the stop leaves discovery) but the reply is lost.
+      this.releaseLostReplies -= 1;
+      this.stops = this.stops.filter((s) => !(s.gameId === params.gameId && stopReleaseRequestId(s.stopOperationId) === params.releaseRequestId));
+      throw new Error('connection reset after COMMIT');
     }
     this.stops = this.stops.filter((s) => !(s.gameId === params.gameId && stopReleaseRequestId(s.stopOperationId) === params.releaseRequestId));
     return { gameId: params.gameId, releaseRequestId: params.releaseRequestId, releaseSeq: 6 } as unknown as AdjudicationReleaseReceipt;
@@ -192,7 +199,7 @@ test('claims, proves in slices, settles at now, publishes, then releases the pub
   assert.equal(store.settles.length, 1);
   assert.equal(store.settles[0]!.resolutionAt, 1_040_000, 'resolution at the instant the proof finished');
   assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
-  assert.deepEqual(store.releases, [{ gameId: GAME, releaseRequestId: stopReleaseRequestId(OP), at: clock.now }]);
+  assert.deepEqual(store.releases, [{ gameId: GAME, releaseRequestId: stopReleaseRequestId(OP), at: clock.now, expectedStopOperationId: OP }]);
 });
 
 test('the lease is renewed before it can lapse during a long proof', async () => {
@@ -203,6 +210,42 @@ test('the lease is renewed before it can lapse during a long proof', async () =>
   assert.ok(store.renewals.length >= 1, 'renewed at least once');
   for (const r of store.renewals) assert.equal(r.extensionMs, 30_000);
   assert.equal(store.settles.length, 1);
+});
+
+test('a proof slice yields at half the remaining lease and skips settlement if an indivisible unit returns after expiry', async () => {
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  store.leaseUntil = clock.now + 1_000;
+  let mono = 0;
+  store.stepProofJob = (_op: string, budget: number, shouldYield?: () => boolean) => {
+    if (budget === 0) return step('active');
+    assert.ok(shouldYield);
+    assert.equal(shouldYield(), false);
+    mono = 500;
+    assert.equal(shouldYield(), true);
+    mono = 600;
+    assert.equal(shouldYield(), true);
+    assert.ok(clock.now < store.leaseUntil);
+    clock.now = store.leaseUntil + 1;
+    return step('ready');
+  };
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    leaseMs: 1_000,
+    proofSliceMs: 10_000,
+    publish: async () => {},
+    monotonic: () => mono,
+    now: () => clock.now,
+  });
+  try {
+    const pass = await worker.runPass();
+    assert.equal(pass.skipped, 1);
+    assert.equal(pass.settled, 0);
+    assert.equal(store.settles.length, 0);
+  } finally {
+    await worker.stop();
+  }
 });
 
 test('a proof that exhausts its resource limit settles as unresolved', async () => {
@@ -303,12 +346,13 @@ test('an uncertain settlement is retried with the same grant; a superseded one i
 });
 
 test('a failed release is counted and retried on a later pass with the same request id', async () => {
-  const { store, worker } = harness((s) => {
+  const { store, worker, clock } = harness((s) => {
     s.claimable = [];
     s.stops = [{ gameId: GAME, stopOperationId: OP }];
     s.releaseFailures = 1;
   });
   assert.deepEqual(await worker.runPass(), { settled: 0, released: 0, skipped: 0, failed: 1, pending: 0, more: false });
+  clock.now += 1_000; // the retry waits out its backoff
   assert.deepEqual(await worker.runPass(), { settled: 0, released: 1, skipped: 0, failed: 0, pending: 0, more: false });
   assert.equal(store.releases.length, 2);
   assert.equal(store.releases[0]!.releaseRequestId, store.releases[1]!.releaseRequestId);
@@ -458,14 +502,226 @@ test('no immediate release over an undelivered notice; the sweep releases after 
   assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
 });
 
-test('a failed immediate release is left to the sweep', async () => {
-  const { store, published, worker } = harness((s) => { s.completion = 'stopped'; s.releaseFailures = 1; });
+test('a failed immediate release is retried after its backoff', async () => {
+  const { store, published, worker, clock } = harness((s) => { s.completion = 'stopped'; s.releaseFailures = 1; });
   const first = await worker.runPass();
   assert.equal(first.settled, 1);
-  // The same pass's sweep retries it with the same request id.
-  assert.equal(first.released, 1);
+  assert.equal(first.released, 0);
+  clock.now += 1_000;
+  const second = await worker.runPass();
+  assert.equal(second.released, 1);
   assert.deepEqual(store.releases.map((r) => r.releaseRequestId), [stopReleaseRequestId(OP), stopReleaseRequestId(OP)]);
   assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
+});
+
+test('a release whose COMMIT reply is lost twice is recovered by exact stop though discovery lost it, once through FIFO', async () => {
+  const { store, published, worker, clock } = harness((s) => { s.completion = 'stopped'; s.releaseLostReplies = 2; });
+  assert.equal((await worker.runPass()).settled, 1); // immediate release: reply lost, stop gone from discovery
+  assert.deepEqual(store.stops, []);
+  for (let i = 0; i < 3; i++) {
+    await worker.runPass();
+    assert.equal(store.releases.length, 1, 'no hot loop: nothing is due before the backoff');
+  }
+  clock.now += 1_000;
+  assert.equal((await worker.runPass()).released, 0); // second lost reply
+  assert.equal(published.filter((c) => c.kind === 'released').length, 0);
+  clock.now += 2_000;
+  assert.equal((await worker.runPass()).released, 1);
+  clock.now += 60_000;
+  await worker.runPass();
+  assert.deepEqual(published.map((c) => c.kind), ['settled', 'released']);
+  assert.equal(store.releases.length, 3);
+  assert.ok(store.releases.every((r) => r.expectedStopOperationId === OP && r.releaseRequestId === stopReleaseRequestId(OP)));
+  assert.ok(new Set(store.releases.map((r) => r.at)).size > 1, 'each retry carries a fresh at');
+});
+
+test('a swept release whose COMMIT reply is lost is recovered after discovery drops the stop', async () => {
+  const { store, published, worker, clock } = harness((s) => { s.claimable = []; s.stops = [{ gameId: GAME, stopOperationId: OP }]; s.releaseLostReplies = 1; });
+  assert.equal((await worker.runPass()).failed, 1);
+  assert.deepEqual(store.stops, []);
+  clock.now += 1_000;
+  assert.equal((await worker.runPass()).released, 1);
+  await worker.runPass();
+  assert.deepEqual(published.map((c) => c.kind), ['released']);
+  assert.equal(store.releases.length, 2);
+});
+
+test('a definitive release conflict abandons that attempt only', async () => {
+  const { store, worker, clock } = harness((s) => { s.claimable = []; s.stops = [{ gameId: GAME, stopOperationId: OP }]; });
+  const original = store.releaseClocks.bind(store);
+  let conflicts = 1;
+  store.releaseClocks = async (p) => {
+    if (conflicts-- > 0) throw new AdjudicationConflictError('stale stop');
+    return original(p);
+  };
+  assert.equal((await worker.runPass()).failed, 1);
+  clock.now += 1_000;
+  assert.equal((await worker.runPass()).released, 1, 'the same valid stop proceeds after the abandoned attempt');
+});
+
+test('an uncertain immediate release survives stop/start and failed release publication before a newer settlement notice can publish', async () => {
+  const OP_2 = '018f2780-0000-7000-8000-000000000012';
+  const { store, published, worker, clock } = harness(
+    (s) => {
+      s.completion = 'stopped';
+      s.releaseLostReplies = 1;
+    },
+    ['released'],
+  );
+  const describePublished = () =>
+    published.map((c) =>
+      c.kind === 'settled'
+        ? `settled:${c.receipt.operationId}`
+        : `released:${c.receipt.releaseRequestId}`,
+    );
+
+  try {
+    const first = await worker.runPass();
+    assert.equal(first.settled, 1);
+    assert.equal(first.released, 0);
+    assert.deepEqual(describePublished(), [`settled:${OP}`]);
+    assert.deepEqual(store.stops, []);
+
+    store.claimable = [{ gameId: GAME, operationId: OP_2, generation: '2' }];
+    store.completion = 'terminal';
+    store.stepProofJob = () => step('ready');
+
+    const second = await worker.runPass();
+    store.stops = [];
+    assert.equal(second.settled, 1);
+    assert.deepEqual(describePublished(), [`settled:${OP}`]);
+
+    await worker.stop();
+    mock.timers.enable({ apis: ['setTimeout'] });
+    worker.start();
+
+    clock.now += 1_000;
+    const third = await worker.runPass();
+    assert.equal(third.released, 1);
+    assert.deepEqual(describePublished(), [`settled:${OP}`]);
+
+    await worker.runPass();
+    assert.deepEqual(describePublished(), [
+      `settled:${OP}`,
+      `released:${stopReleaseRequestId(OP)}`,
+      `settled:${OP_2}`,
+    ]);
+  } finally {
+    try {
+      await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
+
+test('release sweep with pageSize 1 excludes a backed-off game before the SQL limit so the next game releases immediately', async () => {
+  const GAME_2 = '018f2780-0000-7000-8000-000000000011';
+  const OP_2 = '018f2780-0000-7000-8000-000000000012';
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  store.claimable = [];
+  store.stops = [
+    { gameId: GAME, stopOperationId: OP },
+    { gameId: GAME_2, stopOperationId: OP_2 },
+  ];
+  store.releaseFailures = 1;
+  store.listReleasableStops = async (limit, minAgeMs, exclude) => {
+    store.releaseQueries.push({ minAgeMs, exclude: [...exclude] });
+    return store.stops.filter((s) => !exclude.includes(s.gameId)).slice(0, limit);
+  };
+  const published: AdjudicationChange[] = [];
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    pageSize: 1,
+    publish: async (change) => {
+      published.push(change);
+    },
+    now: () => clock.now,
+  });
+
+  const first = await worker.runPass();
+  assert.equal(first.failed, 1);
+  assert.equal(first.released, 0);
+
+  const second = await worker.runPass();
+  assert.equal(second.failed, 0);
+  assert.equal(second.released, 1);
+  assert.deepEqual(store.releaseQueries, [
+    { minAgeMs: 1_000, exclude: [] },
+    { minAgeMs: 1_000, exclude: [GAME] },
+  ]);
+  assert.deepEqual(store.releases.map((r) => r.gameId), [GAME, GAME_2]);
+  assert.deepEqual(published.map((c) => c.gameId), [GAME_2]);
+});
+
+test('release sweep with pageSize 1 rotates due pending retries so a repeatedly failing stop moves to tail behind other due retries', async () => {
+  const GAME_A = GAME;
+  const OP_A = OP;
+  const GAME_B = '018f2780-0000-7000-8000-000000000011';
+  const OP_B = '018f2780-0000-7000-8000-000000000012';
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  store.claimable = [];
+  store.stops = [
+    { gameId: GAME_A, stopOperationId: OP_A },
+    { gameId: GAME_B, stopOperationId: OP_B },
+  ];
+  store.listReleasableStops = async (limit, minAgeMs, exclude) => {
+    store.releaseQueries.push({ minAgeMs, exclude: [...exclude] });
+    return store.stops.filter((s) => !exclude.includes(s.gameId)).slice(0, limit);
+  };
+  const origReleaseClocks = store.releaseClocks.bind(store);
+  const attempts: string[] = [];
+  let bFailedOnce = false;
+  store.releaseClocks = async (params) => {
+    attempts.push(params.gameId);
+    if (params.gameId === GAME_A) {
+      store.releases.push(params);
+      throw new Error('database unreachable');
+    }
+    if (!bFailedOnce) {
+      bFailedOnce = true;
+      store.releases.push(params);
+      throw new Error('database unreachable');
+    }
+    return origReleaseClocks(params);
+  };
+  const published: AdjudicationChange[] = [];
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    pageSize: 1,
+    publish: async (change) => {
+      published.push(change);
+    },
+    now: () => clock.now,
+  });
+
+  const pass1 = await worker.runPass();
+  assert.equal(pass1.failed, 1);
+  assert.equal(pass1.released, 0);
+
+  const pass2 = await worker.runPass();
+  assert.equal(pass2.failed, 1);
+  assert.equal(pass2.released, 0);
+
+  clock.now += 1_000;
+  const pass3 = await worker.runPass();
+  assert.equal(pass3.failed, 1);
+  assert.equal(pass3.released, 0);
+
+  clock.now += 30_000;
+  const pass4 = await worker.runPass();
+  assert.equal(pass4.failed, 0);
+  assert.equal(pass4.released, 1);
+
+  assert.deepEqual(attempts, [GAME_A, GAME_B, GAME_A, GAME_B]);
+  assert.deepEqual(store.releases.map((r) => r.gameId), [GAME_A, GAME_B, GAME_A, GAME_B]);
+  assert.deepEqual(published.map((c) => ({ gameId: c.gameId, kind: c.kind })), [
+    { gameId: GAME_B, kind: 'released' },
+  ]);
 });
 
 async function pumpUntil(predicate: () => boolean, maxFlushes = 20): Promise<boolean> {
@@ -475,6 +731,53 @@ async function pumpUntil(predicate: () => boolean, maxFlushes = 20): Promise<boo
   }
   return predicate();
 }
+
+test('manual runPass schedules background lease renewal before expiry and stop cancels further renewals', async () => {
+  mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  let worker: AdjudicationWorker | undefined;
+  try {
+    const clock = { get now() { return Date.now(); } };
+    const store = new FakeStore(clock);
+    const originalLeaseUntil = Date.now() + 1_000;
+    store.leaseUntil = originalLeaseUntil;
+    let mono = 0;
+    store.stepProofJob = (_op: string, budget: number) => {
+      if (budget > 0) mono += 100;
+      return step('active');
+    };
+
+    worker = new AdjudicationWorker({
+      store,
+      executorId: EXECUTOR,
+      leaseMs: 1_000,
+      proofSliceMs: 50,
+      publish: async () => {},
+      monotonic: () => mono,
+      now: () => Date.now(),
+    });
+
+    const pass = await worker.runPass();
+    assert.equal(pass.pending, 1);
+    assert.equal(store.renewals.length, 0);
+
+    mock.timers.tick(600);
+    await pumpUntil(() => store.renewals.length === 1);
+    assert.equal(store.renewals.length, 1);
+    assert.equal(store.renewals[0]!.grant.operationId, OP);
+    assert.ok(Date.now() < originalLeaseUntil);
+
+    await worker.stop();
+    mock.timers.tick(1_000);
+    await pumpUntil(() => store.renewals.length > 1, 5);
+    assert.equal(store.renewals.length, 1);
+  } finally {
+    try {
+      if (worker) await worker.stop();
+    } finally {
+      mock.timers.reset();
+    }
+  }
+});
 
 test('scheduled worker bounds next pass delay by held lease when pollMs >= leaseMs, progressing without expired lease or restart', async () => {
   mock.timers.enable({ apis: ['setTimeout', 'Date'] });
@@ -725,6 +1028,7 @@ test('concurrency overlaps operations, enforces configured ceiling, and concurre
   {
     const clock = { now: 1_000_000 };
     const store = new FakeStore(clock);
+    store.stepProofJob = () => step('ready');
     const OP1 = '018f2780-0000-7000-8000-0000000000c1';
     const OP2 = '018f2780-0000-7000-8000-0000000000c2';
     store.claimable = [
@@ -1911,6 +2215,7 @@ test('caller-handled reporting failure leaves no orphan cleanup rejection throug
   const worker = new AdjudicationWorker({
     store,
     executorId: EXECUTOR,
+    now: () => 0,
     publish: () => {
       throw new Error('publication failed');
     },
@@ -3107,6 +3412,135 @@ test('slot remains usable after failed or interrupted claims', async () => {
       } finally {
         mock.timers.reset();
       }
+    }
+  }
+});
+
+test('publishWaitMs bounds hung per-game notice drain while other games publish, retains active drainer across passes, and detached drainer does not start queued notice after stop/restart', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] });
+  const OTHER_GAME = '018f2780-0000-7000-8000-0000000000a1';
+  const OTHER_OP = '018f2780-0000-7000-8000-0000000000a2';
+  const OP_2 = '018f2780-0000-7000-8000-000000000012';
+  const clock = { now: 1_000_000 };
+  const store = new FakeStore(clock);
+  store.completion = 'terminal';
+  store.claimable = [
+    { gameId: GAME, operationId: OP, generation: '0' },
+    { gameId: OTHER_GAME, operationId: OTHER_OP, generation: '0' },
+  ];
+  store.stepProofJob = () => step('ready');
+
+  const firstGamePublishBarrier = createBarrier();
+  const invokedOps: string[] = [];
+  const completedOps: string[] = [];
+  const gameInvokedOps: string[] = [];
+  const gameCompletedOps: string[] = [];
+
+  const worker = new AdjudicationWorker({
+    store,
+    executorId: EXECUTOR,
+    concurrency: 2,
+    publishWaitMs: 20,
+    publish: async (change) => {
+      if (change.kind !== 'settled') return;
+      const opId = change.receipt.operationId;
+      invokedOps.push(opId);
+      if (change.gameId === GAME) {
+        gameInvokedOps.push(opId);
+      }
+      if (change.gameId === GAME && opId === OP) {
+        await firstGamePublishBarrier.promise;
+      }
+      completedOps.push(opId);
+      if (change.gameId === GAME) {
+        gameCompletedOps.push(opId);
+      }
+    },
+    now: () => clock.now,
+  });
+
+  let pass1Promise: ReturnType<AdjudicationWorker['runPass']> | undefined;
+  let pass2Promise: ReturnType<AdjudicationWorker['runPass']> | undefined;
+  try {
+    let pass1Done = false;
+    pass1Promise = worker.runPass().then((res) => {
+      pass1Done = true;
+      return res;
+    });
+
+    const otherPublishedBeforeTimeout = await pumpUntil(
+      () => gameInvokedOps.includes(OP) && completedOps.includes(OTHER_OP),
+    );
+    assert.equal(
+      otherPublishedBeforeTimeout,
+      true,
+      'first GAME notice is invoked and OTHER_GAME notice completes before publishWaitMs timer expires',
+    );
+    assert.equal(pass1Done, false, 'pass 1 waits up to publishWaitMs while first GAME notice is hung');
+
+    mock.timers.tick(20);
+    const pass1ResolvedAfterTick = await pumpUntil(() => pass1Done);
+    assert.equal(pass1ResolvedAfterTick, true, 'first pass resolves after publishWaitMs despite hung barrier');
+    const pass1 = await pass1Promise;
+    assert.equal(pass1.settled, 2);
+    assert.equal(pass1.failed, 0);
+    assert.equal(pass1.pending, 0);
+    assert.equal(worker.unpublishedCount, 1);
+
+    // Queue another distinct GAME operation while the first notice drainer remains hung.
+    store.claimable = [{ gameId: GAME, operationId: OP_2, generation: '2' }];
+    let pass2Done = false;
+    pass2Promise = worker.runPass().then((res) => {
+      pass2Done = true;
+      return res;
+    });
+    const pass2Resolved = await pumpUntil(() => pass2Done);
+    assert.equal(pass2Resolved, true, 'second pass resolves without starting a duplicate drainer wait');
+    const pass2 = await pass2Promise;
+    assert.equal(pass2.settled, 1);
+    assert.equal(pass2.failed, 1);
+    assert.equal(pass2.pending, 0);
+    assert.equal(worker.unpublishedCount, 2);
+    assert.deepEqual(
+      gameInvokedOps,
+      [OP],
+      'active drainer is retained without duplicating the hung callback or invoking the newer notice',
+    );
+    assert.deepEqual(invokedOps, [OP, OTHER_OP]);
+
+    // Stop while the first barrier is still unresolved, then restart without ticking the scheduled timer.
+    await worker.stop();
+    worker.start();
+
+    // Resolve the first barrier after restart and drain microtasks.
+    firstGamePublishBarrier.resolve();
+    const firstCompleted = await pumpUntil(() => gameCompletedOps.includes(OP) && worker.unpublishedCount === 1);
+    assert.equal(firstCompleted, true, 'detached drainer finishes in-flight first notice and removes it');
+    await pumpUntil(() => gameInvokedOps.includes(OP_2), 5);
+    assert.deepEqual(
+      gameInvokedOps,
+      [OP],
+      'detached drainer does not start the second queued notice after restart',
+    );
+    assert.deepEqual(gameCompletedOps, [OP]);
+
+    // Explicit next live runPass delivers only the second notice in order.
+    const pass3 = await worker.runPass();
+    assert.equal(pass3.settled, 0);
+    assert.equal(pass3.failed, 0);
+    assert.equal(pass3.pending, 0);
+    assert.equal(worker.unpublishedCount, 0);
+    assert.deepEqual(gameInvokedOps, [OP, OP_2], 'live pass delivers only the second notice in order');
+    assert.deepEqual(gameCompletedOps, [OP, OP_2]);
+    assert.deepEqual(invokedOps, [OP, OTHER_OP, OP_2]);
+  } finally {
+    try {
+      firstGamePublishBarrier.resolve();
+      try { await pass1Promise; } catch {}
+      try { await pass2Promise; } catch {}
+      await worker.stop();
+    } finally {
+      mock.timers.reset();
     }
   }
 });

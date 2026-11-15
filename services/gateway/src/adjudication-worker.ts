@@ -46,14 +46,14 @@ export interface AdjudicationWorkStore {
   claimAdjudication(params: ClaimAdjudicationParams): Promise<AdjudicationClaimGrant>;
   renewAdjudication(params: RenewAdjudicationParams): Promise<AdjudicationClaimGrant>;
   createProofJob(gameId: string, operationId: string): Promise<string>;
-  stepProofJob(operationId: string, totalWorkBudget: number): JobStepResult;
+  stepProofJob(operationId: string, totalWorkBudget: number, shouldYield?: () => boolean): JobStepResult;
   escalateProofJob(operationId: string): boolean;
   concludeUnresolvedProofJob(operationId: string): JobStepResult;
   retainedResolutionAt(gameId: string, operationId: string): number | undefined;
   settleAdjudication(params: SettleAdjudicationParams): Promise<AdjudicationSettlementReceipt>;
   cancelProofJob(operationId: string): void;
   evictProofJob(operationId: string): boolean;
-  releaseClocks(params: { gameId: string; releaseRequestId: string; at: number }): Promise<AdjudicationReleaseReceipt>;
+  releaseClocks(params: { gameId: string; releaseRequestId: string; at: number; expectedStopOperationId?: string }): Promise<AdjudicationReleaseReceipt>;
 }
 
 /** What changed in a game's durable log, so the owner can reload and publish it. */
@@ -106,6 +106,8 @@ export interface AdjudicationWorkerOptions {
    * itself does not wait: it releases right after its notice is delivered.
    */
   readonly releaseGraceMs?: number;
+  /** Maximum wait for a newly started per-game publication drain before detaching (default 1 s). */
+  readonly publishWaitMs?: number;
 
   readonly newIntent?: () => ClaimIntent;
   readonly now?: () => number;
@@ -174,16 +176,19 @@ export class AdjudicationWorker {
   readonly #activeRenewals = new Set<Promise<unknown>>();
   #consecutiveErrors = 0;
   readonly #releaseGraceMs: number;
+  readonly #publishWaitMs: number;
   readonly #proofSliceMs: number;
   readonly #monotonic: () => number;
   /** Operations this worker holds a claim on whose proof needs more time, in claim order. */
   readonly #inFlight = new Map<string, InFlightJob>();
   /** Publications that failed, by game; retried in strict FIFO order every pass. */
   readonly #unpublished = new Map<string, GameNoticeQueue>();
+  /** Releases whose outcome is unknown (possibly committed), by game and exact stop; survive stop/start. */
+  readonly #pendingReleases = new Map<string, { gameId: string; stopOperationId: string; attempts: number; dueAt: number }>();
   /** Stops released right after their own settlement during the current pass. */
   #releasedNow = 0;
 
-  // Clean-code-guard narrow intentional exception: Constructor contains 13 decisions (12 declarative ?? defaults
+  // Clean-code-guard narrow intentional exception: Constructor contains 14 decisions (13 declarative ?? defaults
   // plus baseline configuration assignment without behavioral branching). Preserves standard configuration pattern.
   // Revisit trigger: extract an options-resolution record if options exceed 15 or behavioral branching is introduced.
   constructor(private readonly options: AdjudicationWorkerOptions) {
@@ -202,6 +207,7 @@ export class AdjudicationWorker {
     this.#newIntent = options.newIntent ?? (() => PgAdjudicationStore.newClaimIntent());
     this.#now = options.now ?? (() => Date.now());
     this.#releaseGraceMs = nonnegative(options.releaseGraceMs ?? 1_000, 'releaseGraceMs');
+    this.#publishWaitMs = positive(options.publishWaitMs ?? 1_000, 'publishWaitMs');
     this.#proofSliceMs = positive(options.proofSliceMs ?? 200, 'proofSliceMs');
     this.#monotonic = options.monotonic ?? (() => performance.now());
   }
@@ -320,35 +326,29 @@ export class AdjudicationWorker {
     this.#releasedNow = 0;
 
     this.#scheduleRenewal();
-    try {
-      failed += await this.#flushPublications();
-      const tally = (outcome: 'settled' | 'skipped' | 'pending'): void => {
-        if (outcome === 'settled') settled += 1;
-        else if (outcome === 'skipped') skipped += 1;
-      };
+    failed += await this.#flushPublications();
+    failed += await this.#retryPendingReleases();
+    const tally = (outcome: 'settled' | 'skipped' | 'pending'): void => {
+      if (outcome === 'settled') settled += 1;
+      else if (outcome === 'skipped') skipped += 1;
+    };
 
-      failed += await this.#sweepHeld(tally);
-      const capacityBound = Math.min(this.#maxHeldProofs, MAX_CONTROLLER_CAPACITY);
-      const freeCapacity = Math.max(0, capacityBound - this.#inFlight.size);
-      const freshResult = await this.#admitFresh(freeCapacity, capacityBound, tally);
-      failed += freshResult.failed;
+    failed += await this.#sweepHeld(tally);
+    const capacityBound = Math.min(this.#maxHeldProofs, MAX_CONTROLLER_CAPACITY);
+    const freeCapacity = Math.max(0, capacityBound - this.#inFlight.size);
+    const freshResult = await this.#admitFresh(freeCapacity, capacityBound, tally);
+    failed += freshResult.failed;
 
-      const stopsResult = await this.#sweepStops();
-      failed += stopsResult.failed;
-      const released = stopsResult.released + this.#releasedNow;
+    const stopsResult = await this.#sweepStops();
+    failed += stopsResult.failed;
+    const released = stopsResult.released + this.#releasedNow;
 
-      const pending = this.#inFlight.size;
-      const more =
-        (freshResult.claimLimit > 0 && freshResult.claimableCount === freshResult.claimLimit) ||
-        stopsResult.stopsCount === this.#pageSize ||
-        pending > 0;
-      return { settled, released, skipped, failed, pending, more };
-    } finally {
-      if (this.#stopped && this.#renewalTimer) {
-        clearTimeout(this.#renewalTimer);
-        this.#renewalTimer = undefined;
-      }
-    }
+    const pending = this.#inFlight.size;
+    const more =
+      (freshResult.claimLimit > 0 && freshResult.claimableCount === freshResult.claimLimit) ||
+      stopsResult.stopsCount === this.#pageSize ||
+      pending > 0;
+    return { settled, released, skipped, failed, pending, more };
   }
 
   async #sweepHeld(onOutcome: (outcome: 'settled' | 'skipped' | 'pending') => void): Promise<number> {
@@ -413,11 +413,14 @@ export class AdjudicationWorker {
   }
 
   async #sweepStops(): Promise<{ released: number; failed: number; stopsCount: number }> {
-    const stops = await this.#store.listReleasableStops(this.#pageSize, this.#releaseGraceMs, [...this.#unpublished.keys()]);
+    const excludedGameIds = [...new Set([...this.#unpublished.keys(), ...this.#pendingReleases.keys()])];
+    const stops = await this.#store.listReleasableStops(this.#pageSize, this.#releaseGraceMs, excludedGameIds);
     let released = 0;
     let failed = 0;
     for (const stop of stops) {
       if (this.#halting) break;
+      // An ambiguous attempt for this game is retried by the dedicated pending-release routine, not here.
+      if (this.#pendingReleases.has(stop.gameId)) continue;
       try {
         await this.#release(stop.gameId, stop.stopOperationId);
         released += 1;
@@ -479,7 +482,7 @@ export class AdjudicationWorker {
 
   #canReleaseImmediately(gameId: string, receipt: AdjudicationSettlementReceipt, published: boolean): boolean {
     if (this.#halting || !published) return false;
-    if (this.#unpublished.has(gameId)) return false;
+    if (this.#unpublished.has(gameId) || this.#pendingReleases.has(gameId)) return false;
     return receipt.resolvedEvent.clockCompletion?.kind === 'stopped';
   }
 
@@ -539,7 +542,9 @@ export class AdjudicationWorker {
         }
         grant = proved.grant;
       }
-      if (this.#halting) return 'skipped';
+      if (!this.#isHeldJobEligible(heldJob) || heldJob.grant.leaseUntil.getTime() <= this.#now()) {
+        return 'skipped';
+      }
       await this.#settleAndRelease(gameId, operationId, grant, retained);
       return 'settled';
     } catch (error) {
@@ -568,11 +573,17 @@ export class AdjudicationWorker {
       await this.#store.createProofJob(gameId, operationId);
       heldJob.jobInitialized = true;
     }
+    if (!this.#isHeldJobEligible(heldJob) || heldJob.grant.leaseUntil.getTime() <= this.#now()) {
+      return null;
+    }
     let step = this.#store.stepProofJob(operationId, 0);
     while (step.status === 'active' || step.status === 'resource_limit') {
       if (this.#halting) return null;
       grant = await this.#renewHeldJob(heldJob);
       if (step.status === 'resource_limit') {
+        if (!this.#isHeldJobEligible(heldJob) || heldJob.grant.leaseUntil.getTime() <= this.#now()) {
+          return null;
+        }
         step = this.#store.escalateProofJob(operationId)
           ? this.#store.stepProofJob(operationId, 0)
           : this.#store.concludeUnresolvedProofJob(operationId);
@@ -580,7 +591,21 @@ export class AdjudicationWorker {
       }
       if (this.#monotonic() - started >= this.#proofSliceMs) return { status: 'pending', grant };
       await yieldToLoop();
-      step = this.#store.stepProofJob(operationId, this.#sliceBudget);
+      if (!this.#isHeldJobEligible(heldJob) || heldJob.grant.leaseUntil.getTime() <= this.#now()) {
+        return null;
+      }
+      const stopAt = Math.min(
+        started + this.#proofSliceMs,
+        this.#monotonic() + (heldJob.grant.leaseUntil.getTime() - this.#now()) / 2,
+      );
+      step = this.#store.stepProofJob(
+        operationId,
+        this.#sliceBudget,
+        () => this.#monotonic() >= stopAt || heldJob.grant.leaseUntil.getTime() <= this.#now(),
+      );
+      if (!this.#isHeldJobEligible(heldJob) || heldJob.grant.leaseUntil.getTime() <= this.#now()) {
+        return null;
+      }
     }
     if (step.status !== 'ready') {
       throw new Error(`proof job ended ${step.status}, not ready`);
@@ -609,47 +634,86 @@ export class AdjudicationWorker {
       this.#unpublished.set(change.gameId, queue);
     }
     queue.items.push(change);
+    if (this.#pendingReleases.has(change.gameId)) return false;
     return this.#drainGame(change.gameId, queue);
   }
 
   /** Drain a single game's FIFO queue of unpublished changes; returns true if the queue is now empty. */
   async #drainGame(gameId: string, queue: GameNoticeQueue): Promise<boolean> {
-    if (queue.drainer) {
-      return queue.drainer;
+    if (this.#halting || queue.drainer) {
+      return false;
     }
-    let task: Promise<boolean>;
-    queue.drainer = task = Promise.resolve()
-      .then(async () => {
-        while (queue.items.length > 0) {
-          if (this.#halting) return false;
+    let expired = false;
+    let task!: Promise<boolean>;
+    queue.drainer = task = Promise.resolve().then(async () => {
+      try {
+        while (queue.items.length > 0 && !expired) {
+          if (this.#halting || this.#pendingReleases.has(gameId)) return false;
           const next = queue.items[0]!;
           try {
             await this.options.publish(next);
-            queue.items.shift();
           } catch (error) {
             this.#fail('Publication of an adjudication change failed; it is retried every pass', error, { gameId });
             return false;
           }
+          const index = queue.items.indexOf(next);
+          if (index !== -1) {
+            queue.items.splice(index, 1);
+          }
         }
-        this.#unpublished.delete(gameId);
-        return true;
-      })
-      .finally(() => {
+        if (queue.items.length === 0) {
+          this.#unpublished.delete(gameId);
+          return true;
+        }
+        return false;
+      } finally {
         if (queue.drainer === task) {
           queue.drainer = undefined;
         }
-      });
-    return task;
+      }
+    });
+    return this.#awaitDrain(gameId, task, () => {
+      expired = true;
+    });
+  }
+
+  async #awaitDrain(gameId: string, task: Promise<boolean>, onExpire: () => void): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        timer = undefined;
+        timedOut = true;
+        onExpire();
+        resolve(false);
+      }, this.#publishWaitMs);
+      timer.unref?.();
+    });
+    try {
+      const result = await Promise.race([task, timeout]);
+      if (timedOut) {
+        this.options.logger?.error(
+          'Publication of an adjudication change timed out; it is retried on a later pass',
+          { gameId, publishWaitMs: this.#publishWaitMs },
+        );
+      }
+      return result;
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   /** Retry every outstanding publication in per-game FIFO order; returns how many still failed. */
   async #flushPublications(): Promise<number> {
     let failed = 0;
-    for (const [gameId, queue] of [...this.#unpublished.entries()]) {
-      if (this.#halting) break;
+    const entries = [...this.#unpublished.entries()];
+    await this.#eachBounded(entries, async ([gameId, queue]) => {
+      if (this.#pendingReleases.has(gameId)) return;
       const ok = await this.#drainGame(gameId, queue);
       if (!ok) failed += 1;
-    }
+    });
     return failed;
   }
 
@@ -766,8 +830,11 @@ export class AdjudicationWorker {
   }
 
   #scheduleRenewal(): void {
-    if (this.#stopped || this.#inFlight.size === 0) return;
-    if (this.#renewalTimer) clearTimeout(this.#renewalTimer);
+    if (this.#renewalTimer) {
+      clearTimeout(this.#renewalTimer);
+      this.#renewalTimer = undefined;
+    }
+    if (this.#halting || this.#inFlight.size === 0) return;
     const now = this.#now();
     let earliestWait = Number.POSITIVE_INFINITY;
     for (const held of this.#inFlight.values()) {
@@ -786,6 +853,7 @@ export class AdjudicationWorker {
       this.#renewAllDueHeldJobs();
       this.#scheduleRenewal();
     }, delay);
+    this.#renewalTimer.unref?.();
   }
 
   #boundDelayForHeld(delayMs: number): number {
@@ -811,11 +879,56 @@ export class AdjudicationWorker {
   }
 
   async #release(gameId: string, stopOperationId: string): Promise<void> {
-    const receipt = await this.#store.releaseClocks({
-      gameId, releaseRequestId: stopReleaseRequestId(stopOperationId), at: this.#now(),
-    });
+    const entry = this.#pendingReleases.get(gameId) ?? { gameId, stopOperationId, attempts: 0, dueAt: 0 };
+    this.#pendingReleases.set(gameId, entry);
+    let receipt: AdjudicationReleaseReceipt;
+    try {
+      receipt = await this.#store.releaseClocks({
+        gameId, releaseRequestId: stopReleaseRequestId(stopOperationId), at: this.#now(), expectedStopOperationId: stopOperationId,
+      });
+    } catch (error) {
+      if (error instanceof AdjudicationConflictError) {
+        this.#pendingReleases.delete(gameId); // definitive: this attempt can never succeed
+      } else {
+        // Possibly committed with a lost reply: keep retrying this exact stop, even once it leaves discovery.
+        entry.attempts += 1;
+        entry.dueAt = this.#now() + Math.min(this.#maxBackoffMs, this.#pollMs * 2 ** Math.min(entry.attempts, 20));
+        this.#pendingReleases.delete(gameId);
+        this.#pendingReleases.set(gameId, entry);
+      }
+      throw error;
+    }
     this.options.releasedCounter?.inc();
-    await this.#publish({ kind: 'released', gameId, receipt });
+    let queue = this.#unpublished.get(gameId);
+    if (!queue) {
+      queue = { items: [] };
+      this.#unpublished.set(gameId, queue);
+    }
+    queue.items.unshift({ kind: 'released', gameId, receipt });
+    this.#pendingReleases.delete(gameId);
+    await this.#drainGame(gameId, queue);
+  }
+
+  /** Retry due ambiguous releases by exact stop, before any newer release or publication for the game. */
+  async #retryPendingReleases(): Promise<number> {
+    const now = this.#now();
+    const due: Array<{ gameId: string; stopOperationId: string }> = [];
+    for (const entry of this.#pendingReleases.values()) {
+      if (due.length >= this.#pageSize) break;
+      if (entry.dueAt > now) continue;
+      due.push(entry);
+    }
+    let failed = 0;
+    await this.#eachBounded(due, async (entry) => {
+      try {
+        await this.#release(entry.gameId, entry.stopOperationId);
+        this.#releasedNow += 1;
+      } catch (error) {
+        failed += 1;
+        this.#fail('Retry of an ambiguous clock release failed', error, entry);
+      }
+    });
+    return failed;
   }
 
   #fail(message: string, error: unknown, context: object): void {

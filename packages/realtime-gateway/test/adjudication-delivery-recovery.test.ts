@@ -933,3 +933,149 @@ test('gateway sendStateToRoom delivers state to local room and deduplicates by s
 
   conn1.close();
 });
+
+test('authority takeover reload does not re-send already-delivered live move to connected room client while delivering newer unseen move and authoritative state', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const admission = new FakeAdmission(store);
+  const authority = new GameAuthority(pubsub, () => 1000, store, { adjudication: admission });
+  const verifier = new StaticTokenVerifier();
+  const gateway = new RealtimeGateway(authority, pubsub, verifier, () => 1000);
+
+  const gameId = 'takeover-move-dedup-1';
+  const whiteId = 'user-white';
+  const blackId = 'user-black';
+
+  await authority.createGame({
+    gameId,
+    players: { white: whiteId, black: blackId },
+    timeControl: TC,
+    rated: false,
+    at: 1000,
+  });
+
+  // Client Bob connects and joins at revision 0 (authority resident is at seq 0)
+  const bobConn = new InMemoryConnection('conn-bob');
+  gateway.handleConnection(bobConn);
+  bobConn.deliver({ t: 'join', gameId, token: `token:${blackId}` });
+  await waitForMessage(bobConn, 'joined');
+  assert.equal(authority.getState(gameId).stateRevision, 0);
+
+  // Simulate previous owner committing move 1 (e2e4, ply 1) to durable store and publishing live MOVE over pubsub,
+  // while this node's resident authority remains stale at seq 0.
+  const logged0 = await store.load(gameId);
+  const game0 = Game.fromEvents(logged0.map((e) => e.event));
+  const move1Res = game0.playMove('e2e4', 1050);
+  await store.append(gameId, 0, move1Res.events);
+
+  // Previous owner publishes the committed move 1 broadcast to the channel; Bob receives it live
+  pubsub.publish(gameChannel(gameId), {
+    t: 'move',
+    gameId,
+    stateRevision: 1,
+    ply: 1,
+    uci: 'e2e4',
+    san: 'e4',
+    by: 'w',
+    fenHash: 'hash-1',
+    clock: { w: 182_000, b: 180_000 },
+    serverTs: 1050,
+    legalMoves: {},
+  });
+
+  assert.equal(bobConn.sent.filter((m) => m.t === 'move').length, 1, 'Bob received live move 1 from previous owner');
+
+  // Now move 2 (e7e5, ply 2) is committed via adjudication in the durable store while still unseen by Bob
+  const logged1 = await store.load(gameId);
+  const game1 = Game.fromEvents(logged1.map((e) => e.event));
+  const adm2 = prepareAuthoritativeCommand(game1, { kind: 'move', uci: 'e7e5' }, {
+    color: 'b',
+    at: 1100,
+    rulesVersion: 'rocky-adjudication@1',
+    clockPolicy: 'observed-release-v1',
+    operationId: 'op-move-2',
+  });
+  assert.equal(adm2.kind, 'prepared');
+  await store.append(gameId, 1, [startedFor(adm2.operation)]);
+  await settleAndRelease(store, gameId, 1200, 1300);
+
+  try {
+    // Takeover reload on this node: resident was stale at seq 0, durable log now has ply 1 (already seen) and ply 2 (unseen)
+    const reloaded = await authority.reloadFromLog(gameId);
+    assert.equal(reloaded, true);
+    assert.equal(authority.getState(gameId).ply, 2);
+
+    const moves = bobConn.sent.filter((m): m is MoveBroadcast => m.t === 'move');
+    assert.deepEqual(
+      moves.map((m) => ({ ply: m.ply, uci: m.uci })),
+      [
+        { ply: 1, uci: 'e2e4' },
+        { ply: 2, uci: 'e7e5' },
+      ],
+      'Already-delivered move (ply 1) must be deduplicated on takeover while unseen move (ply 2) is delivered once',
+    );
+
+    const states = bobConn.sent.filter((m) => m.t === 'state');
+    assert.equal(states.length, 1, 'Authoritative state on takeover must still be delivered');
+    if (states[0]?.t === 'state') {
+      assert.equal(states[0].state.ply, 2);
+    }
+  } finally {
+    bobConn.close();
+  }
+});
+
+test('pending join flushes duplicate newer STATE revisions once while preserving same-revision MOVE and distinct STATE order', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => 1000, store);
+  const gateway = new RealtimeGateway(authority, pubsub, new StaticTokenVerifier(), () => 1000);
+  const gameId = 'pending-join-state-dedup-1';
+
+  await authority.createGame({
+    gameId,
+    players: { white: 'user-white', black: 'user-black' },
+    timeControl: TC,
+    rated: false,
+    at: 1000,
+  });
+
+  const origReadRecovery = authority.readRecovery.bind(authority);
+  let snapshotEntered!: () => void;
+  let releaseSnapshot!: () => void;
+  const entered = new Promise<void>((r) => { snapshotEntered = r; });
+  const gate = new Promise<void>((r) => { releaseSnapshot = r; });
+  authority.readRecovery = async (gId, fromPly) => {
+    const res = await origReadRecovery(gId, fromPly);
+    snapshotEntered();
+    await gate;
+    return res;
+  };
+
+  const specConn = new InMemoryConnection('conn-spec');
+  gateway.handleConnection(specConn);
+  try {
+    specConn.deliver({ t: 'join', gameId, token: undefined });
+    await entered;
+
+    const move1 = await authority.apply(gameId, 'user-white', { kind: 'move', uci: 'e2e4' });
+    pubsub.publish(gameChannel(gameId), { t: 'state', gameId, state: move1.state });
+    gateway.sendStateToRoom(gameId, move1.state);
+    const stateRev2 = { ...move1.state, stateRevision: 2 };
+    pubsub.publish(gameChannel(gameId), { t: 'state', gameId, state: stateRev2 });
+    gateway.sendStateToRoom(gameId, stateRev2);
+
+    releaseSnapshot();
+    await waitForMessage(specConn, 'presence');
+
+    const moves = specConn.sent.filter((m): m is MoveBroadcast => m.t === 'move');
+    assert.equal(moves.length, 1);
+    assert.equal(moves[0]?.stateRevision, 1);
+
+    const stateRevs = specConn.sent.filter((m) => m.t === 'state').map((m) => m.state.stateRevision);
+    assert.deepEqual(stateRevs, [1, 2]);
+  } finally {
+    releaseSnapshot();
+    specConn.close();
+  }
+});
