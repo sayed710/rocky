@@ -386,6 +386,7 @@ function deriveTimeoutOutcomeEnding(
   prepared: PreparedOperation,
   at: number,
 ): GameEndedEvent {
+  // Approved scope exception for unresolved timeouts (FIDE 6.9 flag-rule fallback) per ADR0174 §7 (https://github.com/sayed710/rocky/pull/151#issuecomment-6655724172).
   // An exhausted proof falls back to exactly the unmanaged flag rule: a loss on time unless the
   // winner's material cannot mate at all. It never decides more than that rule would.
   const unresolvedDraw = timeout.outcome.status === 'unresolved' && !canMate(prepared.baseFen, timeout.winner, prepared.variant);
