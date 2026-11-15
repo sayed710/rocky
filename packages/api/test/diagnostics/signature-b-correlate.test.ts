@@ -1342,6 +1342,52 @@ test('pass runner: a diagnostic report separates a real V8 fatal from a status t
   }
 });
 
+test('pass runner: node reports generated under the pass exclude the environment', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sigb-report-env-'));
+  try {
+    const keepDir = path.join(dir, 'keep');
+    fs.mkdirSync(keepDir, { recursive: true });
+    const marker = 'SIGB_DUMMY_ENV_MARKER_VALUE_7f3a';
+    const fixture = path.join(dir, 'env.test.cjs');
+    const reportPath = path.join(keepDir, 'report.json');
+    fs.writeFileSync(
+      fixture,
+      `const fs = require('node:fs');\n` +
+        `if (process.env.SIGB_DUMMY_MARKER !== ${JSON.stringify(marker)}) throw new Error('marker missing in child');\n` +
+        `fs.writeFileSync(${JSON.stringify(reportPath)}, JSON.stringify(process.report.getReport()));\n`,
+    );
+    const out = path.join(dir, 'out');
+    const syntheticEnv: NodeJS.ProcessEnv = {
+      SIGB_DUMMY_MARKER: marker,
+      ...(process.platform === 'win32'
+        ? {
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.TEMP ? { TEMP: process.env.TEMP } : {}),
+            ...(process.env.TMP ? { TMP: process.env.TMP } : {}),
+          }
+        : {}),
+    };
+    const result = spawnSync(
+      process.execPath,
+      [path.join(DIAGNOSTICS_DIR, 'run-signature-b-pass.mjs'), '--runs', '1', '--max-minutes', '1', '--out', out, '--target', fixture],
+      { cwd: dir, encoding: 'utf8', env: syntheticEnv },
+    );
+    assert.equal(result.status, 0, `the pass must complete cleanly:\n${result.stdout}${result.stderr}`);
+    assert.ok(fs.existsSync(reportPath), `the fixture must have run and written a report:\n${result.stdout}${result.stderr}`);
+    const raw = fs.readFileSync(reportPath, 'utf8');
+    assert.ok(!raw.includes(marker), 'the dummy env value must be absent from the Node report');
+    assert.ok(!raw.includes('SIGB_DUMMY_MARKER'), 'the dummy env name must be absent from the Node report');
+    const report = JSON.parse(raw) as { environmentVariables?: Record<string, unknown> };
+    assert.deepEqual(
+      Object.keys(report.environmentVariables ?? {}),
+      [],
+      'the report environmentVariables object must be absent or empty',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('pass runner: exit 134 alone names nothing, and the capture carries what separates the two', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sigb-capture-reports-'));
   try {
@@ -1692,6 +1738,71 @@ test('pass runner: an --out that already holds a capture is refused, not quietly
       'the capture must still have the child logs it refers to; refusing early is what protects them',
     );
   } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pass runner: cleanup tool failure on ceiling is not masked and halts without retrying', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sigb-cleanup-err-'));
+  let workerPid: number | null = null;
+  let runnerPid: number | null = null;
+  try {
+    const pidFile = path.join(dir, 'worker.pid');
+    const runnerPidFile = path.join(dir, 'runner.pid');
+    const target = path.join(dir, 'blocks.test.cjs');
+    fs.writeFileSync(
+      target,
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        "require('node:test').test('blocks', async () => {\n" +
+        '  await new Promise((r) => setTimeout(r, 30000));\n' +
+        '});\n',
+    );
+    const spy = path.join(dir, 'fail-kill-spy.cjs');
+    fs.writeFileSync(
+      spy,
+      "const cp = require('node:child_process'), fs = require('node:fs');\n" +
+        "const { syncBuiltinESMExports } = require('node:module');\n" +
+        `const runnerPidFile = ${JSON.stringify(runnerPidFile)};\n` +
+        'const origSpawn = cp.spawn, origSpawnSync = cp.spawnSync, origKill = process.kill.bind(process);\n' +
+        'cp.spawn = function patchedSpawn(cmd, args, opts) {\n' +
+        '  const child = origSpawn.call(this, cmd, args, opts);\n' +
+        '  if (child.pid) fs.writeFileSync(runnerPidFile, String(child.pid));\n' +
+        '  return child;\n' +
+        '};\n' +
+        'cp.spawnSync = function patchedSpawnSync(cmd, args, opts) {\n' +
+        "  if (process.platform === 'win32' && cmd === 'taskkill') {\n" +
+        "    return { pid: 0, output: [null, '', 'Access is denied.'], stdout: '', stderr: 'Access is denied.', status: 1, signal: null };\n" +
+        '  }\n' +
+        '  return origSpawnSync.call(this, cmd, args, opts);\n' +
+        '};\n' +
+        'process.kill = (pid, sig) => {\n' +
+        "  if (process.platform !== 'win32' && typeof pid === 'number' && pid < 0 && sig === 'SIGKILL') {\n" +
+        "    throw Object.assign(new Error('Operation not permitted'), { code: 'EPERM' });\n" +
+        '  }\n' +
+        '  return origKill(pid, sig);\n' +
+        '};\n' +
+        'syncBuiltinESMExports();\n',
+    );
+    const out = path.join(dir, 'out');
+    const pass = spawn(
+      process.execPath,
+      ['--require', spy, path.join(DIAGNOSTICS_DIR, 'run-signature-b-pass.mjs'), '--runs', '2', '--max-minutes', '0.03', '--target', target, '--out', out],
+      { cwd: path.resolve(DIAGNOSTICS_DIR, '../..'), env: { ...process.env, NODE_TEST_CONTEXT: undefined }, stdio: 'ignore' },
+    );
+    const exitCode = await new Promise<number | null>((resolve) => pass.on('close', resolve));
+
+    assert.notEqual(exitCode, 0, 'a cleanup failure must fail the pass');
+    const summary = JSON.parse(fs.readFileSync(path.join(out, 'summary.json'), 'utf8')) as {
+      runs: Array<{ timedOut: boolean; collectionError: string | null }>;
+    };
+    assert.equal(summary.runs.length, 1, 'must stop immediately without retrying');
+    assert.equal(summary.runs[0]?.timedOut, true);
+    assert.match(String(summary.runs[0]?.collectionError), /taskkill|EPERM/);
+  } finally {
+    workerPid = await readWorkerPid(path.join(dir, 'worker.pid'), 500);
+    runnerPid = await readWorkerPid(path.join(dir, 'runner.pid'), 500);
+    reap(workerPid);
+    reap(runnerPid);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

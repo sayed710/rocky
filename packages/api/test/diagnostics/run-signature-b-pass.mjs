@@ -109,15 +109,7 @@ function positiveNumber(name, raw, fallback, { integer = false } = {}) {
 // a duration and are legitimately fractional, so the integer rule belongs to the count alone.
 const maxRuns = positiveNumber('runs', flag('runs', 20), 20, { integer: true });
 const maxMs = positiveNumber('max-minutes', flag('max-minutes', 45), 45) * 60_000;
-// The fallback is computed only when --out is absent: an argument is evaluated before the call,
-// so an eager mkdtemp would create an unused directory on every run that supplies its own.
-//
-// Resolved against THIS process's working directory, because the paths derived from it are used by
-// two processes with different ones: this process creates and reads them, while the spawned runner
-// resolves the same strings against the package it was pointed at. Left relative, `--out artifacts`
-// with `--package ../persistence` would have the child write its report into the other package and
-// this process look for it here — a pass that cannot read its own run.
-const outDir = path.resolve(flag('out', null) ?? fs.mkdtempSync(path.join(tmpdir(), 'sigb-pass-')));
+const rawOut = flag('out', null);
 
 // What each run executes. The default is the whole compiled suite, which is what reproducing
 // Signature B requires; `--target` exists so this script's own tests can point a run at one trivial
@@ -129,6 +121,24 @@ const target = flag('target', 'dist-test/test/**/*.test.js');
 // other. Resolved against `packages/api` so `--package ../persistence` reads the way it is written,
 // and defaulting to this package so every existing invocation means exactly what it meant before.
 const packageDir = path.resolve(API_DIR, String(flag('package', '.')));
+
+// Fail closed before any artifact is created: without this flag Node writes the whole environment
+// into every diagnostic report.
+if (!process.allowedNodeEnvironmentFlags.has('--report-exclude-env')) {
+  usageError(
+    `refusing to run: Node ${process.version} lacks --report-exclude-env, so diagnostic reports would leak the environment. Update to the latest Node 22.x or 24.x.`,
+  );
+}
+
+// The fallback is computed only when --out is absent: an argument is evaluated before the call,
+// so an eager mkdtemp would create an unused directory on every run that supplies its own.
+//
+// Resolved against THIS process's working directory, because the paths derived from it are used by
+// two processes with different ones: this process creates and reads them, while the spawned runner
+// resolves the same strings against the package it was pointed at. Left relative, `--out artifacts`
+// with `--package ../persistence` would have the child write its report into the other package and
+// this process look for it here — a pass that cannot read its own run.
+const outDir = path.resolve(rawOut ?? fs.mkdtempSync(path.join(tmpdir(), 'sigb-pass-')));
 
 /**
  * Make the artifact directory owner-only, or refuse to write into it.
@@ -175,30 +185,121 @@ console.log(`Signature B bounded pass — ceiling ${maxRuns} runs or ${maxMs / 6
 console.log(`Artifacts: ${outDir}\n`);
 
 /**
- * Kill a run and everything it started, bounded, on either platform.
+ * Inspect POSIX process group members via `ps -axo pgid=,stat=` to separate active writers from
+ * unreaped zombies (e.g. in containers without an init reaper). Returns `'zombies-only'` only
+ * when `ps` succeeds, positively observes at least one member of `pgid`, and every observed member
+ * is in `Z`/`X` state; tool errors or missing entries return `'unverified'` so cleanup fails closed.
  *
- * This matters because `node:test` spawns one child process per test file, so the process this
- * script starts is never the only one. Measured on Windows (Node v24.15.0): killing the runner
- * leaves the per-file child already **gone**, because libuv puts spawned processes in a job object
- * that terminates with the parent. POSIX offers no such guarantee — `SIGKILL` to a parent is not
- * delivered to its children, which are reparented and keep running — so the group has to be killed
- * explicitly. `taskkill /T` covers the Windows case anyway rather than relying on the job object.
+ * @param {number} pgid
+ * @returns {{ status: 'active' | 'zombies-only' | 'unverified', detail?: string }}
+ */
+function inspectPosixGroup(pgid) {
+  const res = spawnSync('ps', ['-axo', 'pgid=,stat='], {
+    encoding: 'utf8',
+    timeout: 2_000,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  if (res.error || res.status !== 0) {
+    return { status: 'unverified', detail: res.error?.code ?? res.error?.message ?? `ps exited ${res.status}` };
+  }
+  let zombies = 0;
+  for (const rawLine of String(res.stdout).split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\S+)/.exec(rawLine);
+    if (!match || Number(match[1]) !== pgid) continue;
+    if (!match[2].startsWith('Z') && !match[2].startsWith('X')) return { status: 'active' };
+    zombies += 1;
+  }
+  return zombies > 0
+    ? { status: 'zombies-only' }
+    : { status: 'unverified', detail: `no ps entry for pgid ${pgid}` };
+}
+
+/**
+ * Send termination signals to a run and its reachable process tree/group.
+ *
+ * On POSIX, `child` is spawned detached so `SIGKILL` to `-pid` reaches every descendant in its
+ * process group (descendants that call `setsid`/`setpgid` leave the group and are outside group
+ * reach). On Windows, `taskkill /F /T` can only walk a tree while `child` is still alive; once
+ * `child` has already closed, Windows offers no process-group handle and probing `child.pid`
+ * would risk touching a reused PID.
  *
  * @param {import('node:child_process').ChildProcess} child
+ * @returns {string | null} Error message if signaling failed, or `null` if signaled or already gone.
  */
 function killTree(child) {
   const pid = child.pid;
-  if (pid === undefined) return;
-  try {
-    if (process.platform === 'win32') {
-      spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore', timeout: 10_000 });
-    } else {
-      // Spawned detached, so the child leads its own process group and the negated pid reaches
-      // every descendant in it, not just the runner.
-      process.kill(-pid, 'SIGKILL');
+  if (pid === undefined) return null;
+  if (process.platform === 'win32') {
+    if (child.exitCode !== null || child.signalCode !== null) return null;
+    const res = spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: 10_000,
+    });
+    if (res.error) return `taskkill failed for PID ${pid}: ${res.error.code ?? res.error.message}`;
+    if (res.status !== 0) {
+      const stderrText = (res.stderr ?? '').trim();
+      let alive = false;
+      try {
+        process.kill(pid, 0);
+        alive = true;
+      } catch (error) {
+        alive = Boolean(error && error.code === 'EPERM');
+      }
+      if (alive) {
+        return `taskkill exited ${res.status} while PID ${pid} was still alive${stderrText ? `: ${stderrText}` : ''}`;
+      }
     }
-  } catch {
-    /* already gone, which is the outcome this wanted */
+    return null;
+  }
+  try {
+    // Spawned detached, so the child leads its own process group and the negated pid reaches
+    // every descendant in it, not just the runner.
+    process.kill(-pid, 'SIGKILL');
+    return null;
+  } catch (error) {
+    if (error && error.code === 'ESRCH') return null;
+    return `failed to signal process group -${pid}: ${error?.code ?? error?.message ?? String(error)}`;
+  }
+}
+
+/**
+ * Bounded awaited cleanup boundary before handing control to directory operations or a retry.
+ *
+ * Signals once (unless already signaled) and on POSIX verifies that `-pid` has exited (`ESRCH`)
+ * or consists solely of positively identified zombies before returning. Fails closed on timeout
+ * or signaling/inspection errors.
+ *
+ * @param {import('node:child_process').ChildProcess} child
+ * @param {{ alreadySignaled?: boolean, timeoutMs?: number }} [options]
+ * @returns {Promise<string | null>}
+ */
+async function awaitCleanupTree(child, { alreadySignaled = false, timeoutMs = 10_000 } = {}) {
+  const pid = child.pid;
+  if (pid === undefined) return null;
+  if (!alreadySignaled) {
+    const killErr = killTree(child);
+    if (killErr !== null) return killErr;
+  }
+  if (process.platform === 'win32') return null;
+
+  const deadline = Date.now() + timeoutMs;
+  let lastDetail = 'still active';
+  for (;;) {
+    try {
+      process.kill(-pid, 0);
+    } catch (error) {
+      if (error && error.code === 'ESRCH') return null;
+      return `failed to probe process group -${pid}: ${error?.code ?? error?.message ?? String(error)}`;
+    }
+    const check = inspectPosixGroup(pid);
+    if (check.status === 'zombies-only') return null;
+    lastDetail = check.status === 'active' ? 'active process still in group' : (check.detail ?? 'unverified');
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      return `process group -${pid} did not exit within ${timeoutMs}ms (${lastDetail})`;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining)));
   }
 }
 
@@ -213,22 +314,18 @@ function killTree(child) {
  * @param {string} logDir
  * @param {string} reportDir
  * @param {number} budgetMs
- * @returns {Promise<{ status: number|null, signal: string|null, timedOut: boolean, error: Error|null, stderr: string }>}
+ * @returns {Promise<{ status: number|null, signal: string|null, timedOut: boolean, error: Error|null, cleanupError: string|null, stderr: string }>}
  */
 /**
- * The run currently in flight, so an interrupted pass can take its process tree with it.
+ * Shared cleanup owner for the run currently in flight, so normal close, deadline timeout, and
+ * `SIGINT`/`SIGTERM` converge on one awaited cleanup boundary without signaling twice or racing.
  *
- * Detaching the child is what makes the group killable on POSIX, and it is also what stops a
- * terminal `SIGINT` reaching it: Ctrl-C goes to the foreground process group, which the detached
- * runner is no longer in. Without these handlers, interrupting the pass would leave `node --test`
- * and every per-file worker running against the suite database.
- *
- * @type {import('node:child_process').ChildProcess | null}
+ * @type {{ cleanup: () => Promise<string | null> } | null}
  */
-let activeChild = null;
+let activeRun = null;
 
 /**
- * The report directory of the run in flight, for the same reason `activeChild` exists.
+ * The report directory of the run in flight, for the same reason `activeRun` exists.
  *
  * An interrupt reaches this process between a child writing a report and this script reading and
  * deleting it, and a report body carries the whole command line and every environment variable.
@@ -237,13 +334,27 @@ let activeChild = null;
  * @type {string | null}
  */
 let activeReportDir = null;
+let interrupted = false;
+let interruptedExitCode = null;
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    if (activeChild !== null) killTree(activeChild);
-    if (activeReportDir !== null) fs.rmSync(activeReportDir, { recursive: true, force: true });
-    // 128 + signal number, the conventional shell encoding for "terminated by this signal".
-    process.exit(signal === 'SIGINT' ? 130 : 143);
+    if (interrupted) return;
+    interrupted = true;
+    interruptedExitCode = signal === 'SIGINT' ? 130 : 143;
+    void (async () => {
+      let cleanupErr = null;
+      if (activeRun !== null) {
+        cleanupErr = await activeRun.cleanup();
+        if (cleanupErr !== null) console.error(cleanupErr);
+      }
+      if (cleanupErr === null && activeReportDir !== null) {
+        fs.rmSync(activeReportDir, { recursive: true, force: true });
+        activeReportDir = null;
+      }
+      // 128 + signal number, the conventional shell encoding for "terminated by this signal".
+      process.exit(interruptedExitCode);
+    })();
   });
 }
 
@@ -259,7 +370,9 @@ function runOnce(tapPath, logDir, reportDir, budgetMs) {
         // can leave exit code 134. The report is therefore what separates a fault Node suffered
         // from a status something else chose, and unlike the printed banner it is attributable to
         // an exact process rather than to a position in the report stream.
-        '--report-on-fatalerror', `--report-directory=${reportDir}`,
+        // Reports embed the full environment by default; exclude it so inherited secrets never land
+        // in these artifacts.
+        '--report-on-fatalerror', '--report-exclude-env', `--report-directory=${reportDir}`,
         '--test-reporter=spec', '--test-reporter-destination=stdout',
         '--test-reporter=tap', `--test-reporter-destination=${tapPath}`,
         '--test', '--test-concurrency=1', target,
@@ -275,28 +388,71 @@ function runOnce(tapPath, logDir, reportDir, budgetMs) {
       },
     );
 
-    activeChild = child;
     let stderr = '';
     let timedOut = false;
+    let finishing = false;
+    let treeSignaled = false;
+    let signalKillError = null;
+    /** @type {Promise<string | null> | null} */
+    let cleanupPromise = null;
+
+    function ensureCleanup() {
+      if (cleanupPromise === null) {
+        const alreadySignaled = treeSignaled;
+        treeSignaled = true;
+        cleanupPromise = (async () => {
+          const treeError = await awaitCleanupTree(child, { alreadySignaled });
+          return [signalKillError, treeError].filter(Boolean).join('; ') || null;
+        })();
+      }
+      return cleanupPromise;
+    }
+
+    activeRun = { cleanup: ensureCleanup };
+
     child.stderr?.on('data', (chunk) => {
       // Bounded: only the tail can carry a fatal marker, and the suite's own output is unbounded.
       stderr = `${stderr}${chunk}`.slice(-64 * 1024);
     });
 
+    async function finish(status, signal, error) {
+      if (finishing) return;
+      finishing = true;
+      clearTimeout(deadline);
+      const cleanupError = await ensureCleanup();
+      activeRun = null;
+      resolve({ status, signal, timedOut, error, cleanupError, stderr });
+    }
+
     const deadline = setTimeout(() => {
       timedOut = true;
-      killTree(child);
+      if (!treeSignaled) {
+        treeSignaled = true;
+        const err = killTree(child);
+        if (err !== null) {
+          signalKillError = err;
+          void finish(null, null, null);
+        }
+      }
     }, budgetMs);
 
+    child.on('exit', () => {
+      if (process.platform !== 'win32' && !treeSignaled) {
+        treeSignaled = true;
+        const err = killTree(child);
+        if (err !== null) signalKillError = err;
+      }
+    });
     child.on('error', (error) => {
-      clearTimeout(deadline);
-      activeChild = null;
-      resolve({ status: null, signal: null, timedOut, error, stderr });
+      void finish(null, null, error);
     });
     child.on('close', (status, signal) => {
-      clearTimeout(deadline);
-      activeChild = null;
-      resolve({ status, signal, timedOut, error: null, stderr });
+      // The runner can exit before its per-file child does (it fails fast when it cannot write its
+      // report), and that child, in the same process group, keeps writing logs into the output
+      // directory. Reap and await the group so nothing from this run outlives it: a caller that
+      // removes the directory next would otherwise race those writes (ENOTEMPTY), and the next
+      // run's logs could be mixed with this one's.
+      void finish(status, signal, null);
     });
   });
 }
@@ -306,6 +462,7 @@ const runs = [];
 let capture = null;
 
 for (let run = 1; run <= maxRuns; run++) {
+  if (interrupted) break;
   const elapsed = Date.now() - startedAt;
   if (elapsed >= maxMs) {
     console.log(`ceiling reached: ${Math.round(elapsed / 1000)}s elapsed`);
@@ -330,12 +487,17 @@ for (let run = 1; run <= maxRuns; run++) {
   const startedRun = Date.now();
   const result = await runOnce(tapPath, logDir, reportDir, Math.max(1, maxMs - elapsed));
   const durationMs = Date.now() - startedRun;
+  if (interrupted) break;
 
-  // A run whose report cannot be read has not answered the question, and must not be filed next to
-  // the runs that did. Reporting it as "zero captures" would let a broken pass look like a quiet one.
+  // A run whose report cannot be read — or whose process tree failed bounded cleanup — has not
+  // answered the question cleanly, and must not be filed next to the runs that did or proceed to a
+  // retry. Reporting it as "zero captures" would let a broken pass look like a quiet one.
   let records = [];
-  let collectionError = result.error ? `${result.error.name}: ${result.error.message}` : null;
-  if (collectionError === null && result.timedOut) collectionError = 'run exceeded the wall-clock ceiling';
+  const errors = [];
+  if (result.error) errors.push(`${result.error.name}: ${result.error.message}`);
+  if (result.timedOut) errors.push('run exceeded the wall-clock ceiling');
+  if (result.cleanupError) errors.push(result.cleanupError);
+  let collectionError = errors.length > 0 ? errors.join('; ') : null;
   if (collectionError === null) {
     try {
       const isWin = process.platform === 'win32';
@@ -362,7 +524,10 @@ for (let run = 1; run <= maxRuns; run++) {
   }
   // Deleted here rather than on the way out of a branch, so that a run which is captured, a run
   // which is clean and a run whose report could not be read all leave the same nothing behind.
-  fs.rmSync(reportDir, { recursive: true, force: true });
+  // Skip removal if tree cleanup itself failed so we do not race surviving writers.
+  if (result.cleanupError === null) {
+    fs.rmSync(reportDir, { recursive: true, force: true });
+  }
   activeReportDir = null;
 
   // Attributed to the failure whose child wrote it. A run can hold several failures, and a single
@@ -427,29 +592,33 @@ for (let run = 1; run <= maxRuns; run++) {
   fs.rmSync(tapPath, { force: true });
 }
 
-const minutes = Math.round((Date.now() - startedAt) / 60_000);
-const unreadable = runs.filter((entry) => entry.collectionError !== null).length;
-const readable = runs.length - unreadable;
-console.log(`\n${runs.length} run(s), ${minutes} minute(s), ${capture ? 1 : 0} capture(s), ${unreadable} unreadable.`);
-
-// Only a pass that actually observed something may say the defect was not observed. Counting the
-// runs that produced a readable report — rather than the runs that were started — covers an empty
-// experiment and a wholly unreadable one with the same test, and neither is a clean result.
-if (capture) {
-  // Only a record whose exit status names something may be described as naming something. An
-  // `unclassified` or `inconclusive` capture is still worth having, but saying it names a mechanism
-  // would overstate exactly the evidence this diagnostic exists to report precisely.
-  const named = capture.records.filter((record) => record.specific);
-  console.log(
-    named.length > 0
-      ? `See capture.json. ${named.length} of ${capture.records.length} record(s) name a candidate mechanism; a candidate is not a cause.`
-      : 'See capture.json. No record names a mechanism — the exit status is one no measurement here identifies.',
-  );
-} else if (readable === 0) {
-  console.error('No run produced a readable result, so this pass observed nothing. It is not a clean result.');
-  process.exitCode = 1;
-} else if (unreadable > 0) {
-  console.log('This pass is inconclusive: at least one run produced no readable diagnostic result.');
+if (interrupted) {
+  process.exitCode = interruptedExitCode ?? 143;
 } else {
-  console.log('Signature B was not observed in this pass. That bounds its rate; it does not mean it is fixed.');
+  const minutes = Math.round((Date.now() - startedAt) / 60_000);
+  const unreadable = runs.filter((entry) => entry.collectionError !== null).length;
+  const readable = runs.length - unreadable;
+  console.log(`\n${runs.length} run(s), ${minutes} minute(s), ${capture ? 1 : 0} capture(s), ${unreadable} unreadable.`);
+
+  // Only a pass that actually observed something may say the defect was not observed. Counting the
+  // runs that produced a readable report — rather than the runs that were started — covers an empty
+  // experiment and a wholly unreadable one with the same test, and neither is a clean result.
+  if (capture) {
+    // Only a record whose exit status names something may be described as naming something. An
+    // `unclassified` or `inconclusive` capture is still worth having, but saying it names a mechanism
+    // would overstate exactly the evidence this diagnostic exists to report precisely.
+    const named = capture.records.filter((record) => record.specific);
+    console.log(
+      named.length > 0
+        ? `See capture.json. ${named.length} of ${capture.records.length} record(s) name a candidate mechanism; a candidate is not a cause.`
+        : 'See capture.json. No record names a mechanism — the exit status is one no measurement here identifies.',
+    );
+  } else if (readable === 0) {
+    console.error('No run produced a readable result, so this pass observed nothing. It is not a clean result.');
+    process.exitCode = 1;
+  } else if (unreadable > 0) {
+    console.log('This pass is inconclusive: at least one run produced no readable diagnostic result.');
+  } else {
+    console.log('Signature B was not observed in this pass. That bounds its rate; it does not mean it is fixed.');
+  }
 }
