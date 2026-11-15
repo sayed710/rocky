@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { IllegalMoveError, Position } from '@chess-platform/core';
 import {
   BoundedReservoir,
   LostCommitTracker,
@@ -17,6 +18,7 @@ import {
   parseTimeoutMs,
   plyBucket,
   runWithLossyTransactionScope,
+  selectSeededMoveUci,
   SoakMetricsTracker,
   TopKCollector,
   verifyLostCommitAdmissionStarted,
@@ -3265,4 +3267,84 @@ test('ReplicaRouteGate.abort unblocks paused callers on failing cutover, drains 
   assert.equal(drainedResult[1]?.status, 'rejected');
   assert.equal(pausedDispatchCount, 0);
   assert.equal(futureDispatchCount, 0);
+});
+
+test('selectSeededMoveUci keeps non-pawn back-rank rook moves unpromoted when pawns exist, promotes pawns to queen, and skips lazy position read for ordinary moves', () => {
+  const collapseLegalEntries = (pos: Position): readonly string[] => {
+    const seen = new Set<string>();
+    for (const move of pos.legalMoves()) {
+      seen.add(pos.toUci(move).slice(0, 4));
+    }
+    return [...seen];
+  };
+
+  // White: back-rank rook move a7a8, legal pawn promotion c7c8, ordinary moves (e.g. e2e4), plus unrelated pawn on e2
+  const whitePos = Position.fromFen('8/R1P5/7k/8/8/8/4P3/4K3 w - - 0 1');
+  const whiteLegal = collapseLegalEntries(whitePos);
+  const whiteRookIdx = whiteLegal.indexOf('a7a8');
+  const whitePromoIdx = whiteLegal.indexOf('c7c8');
+  const whiteOrdinaryIdx = whiteLegal.indexOf('e2e4');
+  assert.ok(whiteRookIdx >= 0, 'a7a8 must be present in legal entries');
+  assert.ok(whitePromoIdx >= 0, 'c7c8 must be present in legal entries');
+  assert.ok(whiteOrdinaryIdx >= 0, 'e2e4 must be present in legal entries');
+
+  let lazyReads = 0;
+  const readWhitePos = (): Position => {
+    lazyReads++;
+    return whitePos;
+  };
+
+  // Ordinary move must skip the lazy position read completely
+  const ordinaryUci = selectSeededMoveUci(readWhitePos, whiteLegal, () => (whiteOrdinaryIdx + 0.5) / whiteLegal.length);
+  assert.equal(ordinaryUci, 'e2e4');
+  assert.equal(lazyReads, 0, 'ordinary move selection must not trigger lazy position read');
+  assert.doesNotThrow(() => whitePos.play(ordinaryUci));
+
+  // Promotion-shaped back-rank rook move reads lazily and stays unpromoted
+  const whiteRookUci = selectSeededMoveUci(readWhitePos, whiteLegal, () => (whiteRookIdx + 0.5) / whiteLegal.length);
+  assert.equal(whiteRookUci, 'a7a8');
+  assert.equal(lazyReads, 1);
+  assert.doesNotThrow(() => whitePos.play(whiteRookUci));
+  assert.throws(() => whitePos.play('a7a8q'), IllegalMoveError);
+
+  // Promotion-shaped pawn move reads lazily and promotes to queen
+  const whitePromoUci = selectSeededMoveUci(readWhitePos, whiteLegal, () => (whitePromoIdx + 0.5) / whiteLegal.length);
+  assert.equal(whitePromoUci, 'c7c8q');
+  assert.equal(lazyReads, 2);
+  assert.doesNotThrow(() => whitePos.play(whitePromoUci));
+
+  for (let i = 0; i < whiteLegal.length; i++) {
+    const uci = selectSeededMoveUci(() => whitePos, whiteLegal, () => (i + 0.5) / whiteLegal.length);
+    assert.doesNotThrow(() => whitePos.play(uci), `expected legal UCI for white index ${i}: ${uci}`);
+  }
+
+  // White back-rank rook move a7a8 with only an unrelated black pawn on e2 (no promoting pawn)
+  const unrelatedPawnPos = Position.fromFen('8/R7/7k/8/8/8/4p3/4K3 w - - 0 1');
+  const unrelatedLegal = collapseLegalEntries(unrelatedPawnPos);
+  const unrelatedRookIdx = unrelatedLegal.indexOf('a7a8');
+  assert.ok(unrelatedRookIdx >= 0);
+  const unrelatedRookUci = selectSeededMoveUci(
+    () => unrelatedPawnPos,
+    unrelatedLegal,
+    () => (unrelatedRookIdx + 0.5) / unrelatedLegal.length,
+  );
+  assert.equal(unrelatedRookUci, 'a7a8');
+  assert.doesNotThrow(() => unrelatedPawnPos.play(unrelatedRookUci));
+
+  // Black: back-rank rook move a2a1, legal pawn promotion c2c1, plus unrelated pawn on e7
+  const blackPos = Position.fromFen('4k3/4p3/8/8/8/7K/r1p5/8 b - - 0 1');
+  const blackLegal = collapseLegalEntries(blackPos);
+  const blackRookIdx = blackLegal.indexOf('a2a1');
+  const blackPromoIdx = blackLegal.indexOf('c2c1');
+  assert.ok(blackRookIdx >= 0, 'a2a1 must be present in legal entries');
+  assert.ok(blackPromoIdx >= 0, 'c2c1 must be present in legal entries');
+
+  const blackRookUci = selectSeededMoveUci(() => blackPos, blackLegal, () => (blackRookIdx + 0.5) / blackLegal.length);
+  assert.equal(blackRookUci, 'a2a1');
+  assert.doesNotThrow(() => blackPos.play(blackRookUci));
+  assert.throws(() => blackPos.play('a2a1q'), IllegalMoveError);
+
+  const blackPromoUci = selectSeededMoveUci(() => blackPos, blackLegal, () => (blackPromoIdx + 0.5) / blackLegal.length);
+  assert.equal(blackPromoUci, 'c2c1q');
+  assert.doesNotThrow(() => blackPos.play(blackPromoUci));
 });

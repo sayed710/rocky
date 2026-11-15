@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
+import { Position } from '@chess-platform/core';
 import { Game, type GameEvent, type MovePlayedEvent } from '@chess-platform/game';
 import {
   ADJUDICATION_ACTOR,
@@ -58,6 +59,7 @@ import {
   parseSoakConfig,
   runWithLossyTransactionScope,
   runWithMoveRouteCorrelation,
+  selectSeededMoveUci,
   type LossyCommitControl,
   type LossyTransactionPurpose,
   type MovePositionContext,
@@ -582,10 +584,7 @@ soakTest('adjudicated play under load survives worker death, lost replies and an
           const basePly = state.ply;
           tracker.setGameBasePly(g.id, basePly);
           const moveChoiceRnd = derivePlyMovePrng(gameSeed, basePly, attempt);
-          let uci = legal[Math.floor(moveChoiceRnd() * legal.length)]!;
-          if (/^[a-h]7[a-h]8$|^[a-h]2[a-h]1$/.test(uci) && /p/i.test(state.fen.split(' ')[0]!)) {
-            uci += 'q';
-          }
+          const uci = selectSeededMoveUci(() => Position.fromFen(state.fen, state.variant), legal, moveChoiceRnd);
           const user = state.turn === 'w' ? g.white : g.black;
           const positionContext: MovePositionContext = {
             fen: state.fen,

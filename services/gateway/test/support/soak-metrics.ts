@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
+import type { Move, Position } from '@chess-platform/core';
 
 export interface SoakConfig {
   readonly seed: number;
@@ -221,6 +222,46 @@ export function deriveGameSeed(masterSeed: number, gameIndex: number): number {
 export function derivePlyMovePrng(gameSeed: number, basePly: number, attempt = 0): Prng {
   const plySeed = (Math.imul(gameSeed ^ (basePly + 1), 0x3c6ef35f) + Math.imul(attempt, 0x1b873593)) >>> 0;
   return createPrng(plySeed);
+}
+
+const PROMOTION_SHAPED_UCI_RE = /^[a-h]7[a-h]8$|^[a-h]2[a-h]1$/;
+
+/**
+ * Select a legal UCI move from collapsed `legalEntries` using `moveChoiceRnd`.
+ * Ordinary selections return unchanged without reading `getPosition()`; only
+ * promotion-shaped 4-character selections lazily inspect `position.legalMoves()`
+ * (preferring queen promotion) rather than guessing promotions from FEN text.
+ */
+export function selectSeededMoveUci(
+  getPosition: () => Position,
+  legalEntries: readonly string[],
+  moveChoiceRnd: Prng,
+): string {
+  if (legalEntries.length === 0) {
+    throw new RangeError('selectSeededMoveUci requires at least one legal move entry');
+  }
+  const index = Math.min(legalEntries.length - 1, Math.max(0, Math.floor(moveChoiceRnd() * legalEntries.length)));
+  const chosen = legalEntries[index]!;
+  if (!PROMOTION_SHAPED_UCI_RE.test(chosen)) {
+    return chosen;
+  }
+  const position = getPosition();
+  const matching: Array<{ readonly move: Move; readonly uci: string }> = [];
+  for (const move of position.legalMoves()) {
+    const uci = position.toUci(move);
+    const matches =
+      move.promotion !== undefined
+        ? uci.slice(0, 4) === chosen
+        : uci === chosen;
+    if (matches) {
+      matching.push({ move, uci });
+    }
+  }
+  const selected = matching.find(({ move }) => move.promotion === 'q') ?? matching[0];
+  if (!selected) {
+    throw new Error(`Selected move entry "${chosen}" is not legal in position "${position.fen()}"`);
+  }
+  return selected.uci;
 }
 
 export function plyBucket(ply: number): PlyBucket {
