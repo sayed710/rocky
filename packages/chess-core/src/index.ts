@@ -73,11 +73,13 @@ export {
   isCanonicalMoveMatch,
   MAX_WITNESS_LENGTH,
   DEFAULT_MAX_RETAINED_FRAMES,
+  DEFAULT_PLAYOUTS,
 } from './witness-search';
 export type {
   WitnessCounters,
   WitnessPendingReason,
   WitnessSearchResult,
+  PlayoutConfig,
   WitnessAttemptConfig,
   WitnessSearchOptions,
   WitnessVerificationResult,

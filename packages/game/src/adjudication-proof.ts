@@ -25,6 +25,7 @@ import {
   type AnalysisOptions,
   type Color,
   type Move,
+  type PlayoutConfig,
   type ProofProvenance,
   type Variant,
 } from '@chess-platform/core';
@@ -81,7 +82,8 @@ export type VerifiedEvidenceOutcome =
   | VerifiedDeadOutcome
   | { readonly kind: 'winnable'; readonly winner: Color; readonly witnessUci: readonly string[] }
   | { readonly kind: 'impossible'; readonly winner: Color; readonly provenance: ProofProvenance }
-  | { readonly kind: 'terminal_authorization'; readonly termination: string };
+  | { readonly kind: 'terminal_authorization'; readonly termination: string }
+  | { readonly kind: 'unresolved'; readonly reason: 'resource_limit' };
 
 /** Verified evidence outcome held securely in the private WeakMap. */
 export interface VerifiedEvidenceRecord {
@@ -99,6 +101,8 @@ export type JobStatus = 'active' | 'ready' | 'cancelled' | 'resource_limit' | 's
 
 export interface ControllerOptions {
   readonly maxJobs?: number;
+  /** Timeout escalation tiers (default {@link TIMEOUT_ESCALATION_PLAYOUTS}); an empty list disables escalation. */
+  readonly escalationPlayouts?: readonly PlayoutConfig[];
 }
 
 const DEFAULT_MAX_JOBS = 100;
@@ -177,6 +181,9 @@ function deepFreezeOutcome(outcome: VerifiedEvidenceRecord['outcome']): Verified
       winner: outcome.winner,
       provenance: outcome.provenance,
     });
+  }
+  if (outcome.kind === 'unresolved') {
+    return Object.freeze({ kind: 'unresolved', reason: outcome.reason });
   }
   return Object.freeze({
     kind: 'terminal_authorization',
@@ -451,7 +458,7 @@ interface SlicedLanes {
 interface TimeoutLanes {
   readonly pos: Position;
   readonly winner: Color;
-  readonly finder: FinderLaneState;
+  finder: FinderLaneState;
   readonly exact: ExactLaneState;
   exactProv?: ProofProvenance;
   finderRetired?: boolean;
@@ -490,6 +497,8 @@ interface JobRecord {
   baseOutcome: 'dead' | 'not_dead' | null;
 
   nextLaneIndex: number;
+  /** Effort tier of the timeout question (Issue #124): raised by `escalate`, never lowered. */
+  tier: number;
   workCompleted: number;
   slicesExecuted: number;
   generationWork: number;
@@ -559,9 +568,19 @@ function assertIdenticalPrepared(a: PreparedOperation, b: PreparedOperation): vo
   assertIdenticalPreparedContext(a, b);
 }
 
-function initFinderLane(pos: Position, winner: Color): FinderLaneState {
+/**
+ * Effort tiers for a timeout question that exhausted its search (Issue #124). Each raises only the
+ * guided playouts, whose memory is one game line: the exact search keeps its default capacity, so an
+ * escalated job never needs more memory than a fresh one.
+ */
+export const TIMEOUT_ESCALATION_PLAYOUTS: readonly PlayoutConfig[] = Object.freeze([
+  Object.freeze({ count: 400, maxPlies: 200 }),
+  Object.freeze({ count: 2000, maxPlies: 300 }),
+]);
+
+function initFinderLane(pos: Position, winner: Color, playouts?: PlayoutConfig): FinderLaneState {
   return {
-    finder: new CooperativeWitnessSession(pos.snapshot(), winner),
+    finder: new CooperativeWitnessSession(pos.snapshot(), winner, playouts ? { playouts } : undefined),
     prevWorkUnits: 0,
     prevLegalGenerations: 0,
     prevScoringWork: 0,
@@ -745,11 +764,20 @@ function assertGameMatchesJobPrepared(game: Game, job: JobRecord): void {
 
 export class AdjudicationJobController {
   readonly #maxJobs: number;
+  readonly #escalationPlayouts: readonly PlayoutConfig[];
   readonly #jobs = new Map<string, JobRecord>();
   readonly #jobHandles = new Map<string, AdjudicationEvidenceBundle>();
   #jobCursor = 0;
 
   constructor(options?: ControllerOptions) {
+    this.#escalationPlayouts = options?.escalationPlayouts === undefined
+      ? TIMEOUT_ESCALATION_PLAYOUTS
+      : Object.freeze(options.escalationPlayouts.map((tier, i) => {
+        if (!Number.isSafeInteger(tier?.count) || tier.count <= 0 || !Number.isSafeInteger(tier?.maxPlies) || tier.maxPlies <= 0) {
+          throw new RangeError(`escalationPlayouts[${i}] must have positive integer count and maxPlies`);
+        }
+        return Object.freeze({ count: tier.count, maxPlies: tier.maxPlies });
+      }));
     if (options?.maxJobs !== undefined) {
       const val = options.maxJobs;
       if (typeof val !== 'number' || !Number.isSafeInteger(val) || val <= 0) {
@@ -794,6 +822,7 @@ export class AdjudicationJobController {
       completionCursor: null,
       baseOutcome: null,
       nextLaneIndex: 0,
+      tier: 0,
       workCompleted: 0,
       slicesExecuted: 0,
       generationWork: 0,
@@ -1372,6 +1401,62 @@ export class AdjudicationJobController {
       ...(job.terminalHandle ? { terminal: job.terminalHandle } : {}),
     });
     this.#jobHandles.set(job.operationId, bundle);
+  }
+
+  /**
+   * Continue an exhausted timeout question at the next effort tier (Issue #124): a fresh witness
+   * finder with more and longer guided playouts, while the exact search keeps what it has explored.
+   * Returns false when there is no further tier or the exhausted question is not a timeout question;
+   * the caller then concludes it unresolved. Exhaustion alone never decides a timeout.
+   */
+  escalate(operationId: string): boolean {
+    const job = this.#jobs.get(operationId);
+    if (!job) throw new GameError(`Job not found: ${operationId}`);
+    if (job.status !== 'resource_limit') return false;
+    const lanes = job.timeoutLanes;
+    const timeoutPending = lanes !== null && !job.timeoutHandle && job.completionCursor === null
+      && job.requiredRoles.some((r) => r.role === 'timeout');
+    if (!timeoutPending || job.tier >= this.#escalationPlayouts.length) return false;
+    const playouts = this.#escalationPlayouts[job.tier]!;
+    job.tier++;
+    lanes!.finder.finder.cancel();
+    lanes!.finder = initFinderLane(lanes!.pos, lanes!.winner, playouts);
+    lanes!.finderRetired = false;
+    job.status = 'active';
+    return true;
+  }
+
+  /**
+   * Conclude the question a job ran out of resources on as unresolved (Issue #124). The job then
+   * resumes any remaining question, or becomes ready. An unresolved outcome never declares a dead
+   * position, so settlement applies the ordinary rules, as without proofs. Only a job whose search
+   * is exhausted (`resource_limit`) can be concluded this way.
+   */
+  concludeUnresolved(operationId: string): JobStepResult {
+    const job = this.#jobs.get(operationId);
+    if (!job) throw new GameError(`Job not found: ${operationId}`);
+    if (job.status !== 'resource_limit') {
+      throw new GameError(`Only an exhausted job can be concluded unresolved: ${job.status}`);
+    }
+    const unresolved = { kind: 'unresolved', reason: 'resource_limit' } as const;
+    if (!job.baseHandle) {
+      job.baseHandle = mintHandle(job.prepared, { kind: 'global_deadness' }, unresolved);
+      job.baseOutcome = 'not_dead';
+    } else if (job.requiredRoles.some(r => r.role === 'successor') && !job.succHandle) {
+      const successorFen = (job.prepared.intent as { successorFen: string }).successorFen;
+      job.succHandle = mintHandle(job.prepared, { kind: 'successor_deadness', successorFen }, unresolved);
+    } else {
+      // A timeout decides a result: it may be concluded unresolved only after every effort tier.
+      if (job.tier < this.#escalationPlayouts.length) {
+        throw new GameError('An exhausted timeout question must be escalated before it is concluded unresolved');
+      }
+      const timeout = job.requiredRoles.find(r => r.role === 'timeout');
+      if (!timeout || job.timeoutHandle) throw new GameError('Exhausted job has no unresolved question');
+      job.timeoutHandle = mintHandle(job.prepared, timeout.question, unresolved);
+    }
+    job.status = 'active';
+    this.#checkReadiness(job);
+    return this.#buildStepResult(job, 0);
   }
 
   settleJob(game: Game, operationId: string, at: number): SettlementResult {

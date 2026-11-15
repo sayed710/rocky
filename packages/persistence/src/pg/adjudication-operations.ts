@@ -7,7 +7,7 @@
  */
 
 import type { PoolClient } from 'pg';
-import type { SettlementResult } from '@chess-platform/game';
+import type { Game, SettlementResult } from '@chess-platform/game';
 import { CURRENT_EVENT_VERSION } from '../event-store';
 import { AdjudicationClaimExpiredError, AdjudicationConflictError, PersistenceError } from '../errors';
 import {
@@ -219,4 +219,99 @@ export async function writeSettlement(
   });
   await completeOperation(client, receipt, settlement);
   return receipt;
+}
+
+/** A committed release of a managed stop. */
+export interface AdjudicationReleaseReceipt {
+  readonly gameId: string;
+  readonly releaseRequestId: string;
+  readonly stopOperationId: string;
+  readonly releaseSeq: number;
+  readonly at: number;
+  /** The flag deadline the released clocks run towards, in epoch ms, or null. */
+  readonly flagDueMs: number | null;
+  /** The no-show deadline that resumes with the release, in epoch ms, or null. */
+  readonly pregameDueMs: number | null;
+}
+
+interface ReleaseRow {
+  game_id: string;
+  release_request_id: string;
+  stop_operation_id: string;
+  release_seq: number;
+  event_payload: { at: number };
+  flag_due_ms: string | null;
+  pregame_due_ms: string | null;
+}
+
+function receiptOf(row: ReleaseRow): AdjudicationReleaseReceipt {
+  return Object.freeze({
+    gameId: row.game_id,
+    releaseRequestId: row.release_request_id,
+    stopOperationId: row.stop_operation_id,
+    releaseSeq: row.release_seq,
+    at: row.event_payload.at,
+    flagDueMs: row.flag_due_ms === null ? null : Number(row.flag_due_ms),
+    pregameDueMs: row.pregame_due_ms === null ? null : Number(row.pregame_due_ms),
+  });
+}
+
+/** The receipt of a release already recorded under this request id, if any. */
+export async function loadRelease(
+  client: PoolClient,
+  gameId: string,
+  releaseRequestId: string,
+): Promise<AdjudicationReleaseReceipt | null> {
+  const row = (await client.query<ReleaseRow>(
+    'SELECT * FROM game_adjudication_releases WHERE game_id = $1 AND release_request_id = $2',
+    [gameId, releaseRequestId],
+  )).rows[0];
+  return row ? receiptOf(row) : null;
+}
+
+/** Whole milliseconds the queues hold: the first instant at or after the domain's deadline. */
+function wholeMs(value: number | null): number | null {
+  return value === null ? null : Math.ceil(value);
+}
+
+/**
+ * Release `game`'s current stop at `at`: the permit row (with the deadlines the released clocks
+ * imply), the exact event, and those deadlines in the queues. The database checks every part.
+ */
+export async function writeRelease(
+  client: PoolClient,
+  game: Game,
+  params: { readonly releaseRequestId: string; readonly at: number },
+): Promise<AdjudicationReleaseReceipt> {
+  const stop = (await client.query<{ operation_id: string }>(
+    'SELECT operation_id FROM game_adjudications WHERE game_id = $1 AND is_current_stop',
+    [game.id],
+  )).rows[0];
+  if (!stop) throw new AdjudicationConflictError('The game has no current managed stop to release');
+  const { event, game: released } = game.prepareClockRelease(params);
+  const releaseSeq = game.eventSequence + 1;
+  const flagDueMs = wholeMs(released.flagDeadline);
+  const pregameDueMs = released.ply === 0 ? wholeMs(released.noShowDeadline) : null;
+  const row = (await client.query<ReleaseRow>(
+    `INSERT INTO game_adjudication_releases
+       (game_id, release_request_id, stop_operation_id, release_seq, event_payload, flag_due_ms, pregame_due_ms)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) RETURNING *`,
+    [game.id, params.releaseRequestId, stop.operation_id, releaseSeq, JSON.stringify(event), flagDueMs, pregameDueMs],
+  )).rows[0]!;
+  await client.query(
+    'INSERT INTO game_events (game_id, seq, type, event_version, payload) VALUES ($1, $2, $3, $4, $5::jsonb)',
+    [game.id, releaseSeq, event.type, CURRENT_EVENT_VERSION, JSON.stringify(event)],
+  );
+  await client.query('DELETE FROM flag_deadlines WHERE game_id = $1', [game.id]);
+  await client.query('DELETE FROM pregame_deadlines WHERE game_id = $1', [game.id]);
+  if (flagDueMs !== null) {
+    await client.query('INSERT INTO flag_deadlines (game_id, seq, due_ms) VALUES ($1, $2, $3)', [game.id, releaseSeq, flagDueMs]);
+  }
+  if (pregameDueMs !== null) {
+    await client.query(
+      'INSERT INTO pregame_deadlines (game_id, due_at, seq) VALUES ($1, to_timestamp($2::double precision / 1000), $3)',
+      [game.id, pregameDueMs, releaseSeq],
+    );
+  }
+  return receiptOf(row);
 }

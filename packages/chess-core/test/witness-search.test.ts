@@ -116,6 +116,7 @@ test('CooperativeWitnessSession: path cycle rejection detects and skips repeated
   // Knight cycles back and forth
   const pos = Position.fromFen('8/8/8/8/8/4k3/4N3/4K3 w - - 0 1');
   const session = new CooperativeWitnessSession(pos.snapshot(), 'w', {
+    playouts: false,
     attempts: [{ maxDepth: 8, maxBranching: 4, attemptWorkLimit: 600 }],
   });
   const res = session.resume(1000);
@@ -126,6 +127,7 @@ test('CooperativeWitnessSession: path cycle rejection detects and skips repeated
 test('CooperativeWitnessSession: resume after exhausted attempt is latched and never throws', () => {
   const pos = Position.fromFen('7k/8/5K2/8/8/8/8/R7 w - - 0 1');
   const session = new CooperativeWitnessSession(pos.snapshot(), 'w', {
+    playouts: false,
     attempts: [{ maxDepth: 6, maxBranching: 4, attemptWorkLimit: 1 }],
   });
 
@@ -174,6 +176,7 @@ test('CooperativeWitnessSession: respects maxWitnessLength limit', () => {
   // Mate requires 3 plies. Set maxWitnessLength: 2 -> must return resource_limit
   const pos = Position.fromFen('7k/8/5K2/8/8/8/8/R7 w - - 0 1');
   const session = new CooperativeWitnessSession(pos.snapshot(), 'w', {
+    playouts: false,
     maxWitnessLength: 2,
     attempts: [{ maxDepth: 6, maxBranching: 4, attemptWorkLimit: 500 }],
   });
@@ -244,7 +247,7 @@ test('CooperativeWitnessSession: deep immutability protects cached results and i
 
 test('CooperativeWitnessSession: 1-unit preparation debits legal generation, scoring, and insertion comparison', () => {
   const pos = Position.fromFen('7k/4Q3/6K1/8/8/8/8/8 w - - 0 1');
-  const session = new CooperativeWitnessSession(pos.snapshot(), 'w');
+  const session = new CooperativeWitnessSession(pos.snapshot(), 'w', { playouts: false });
 
   // Step 1: Legal move generation (1 unit)
   session.resume(1);
@@ -434,9 +437,11 @@ test('CooperativeWitnessSession: retained ordering shifting transitions smoothly
   // Verify that slicing finely (1 unit) through the entire ordering phase yields identical candidate order
   // as coarser slices (2 and 7 units)
   const session1 = new CooperativeWitnessSession(pos.snapshot(), 'w', {
+    playouts: false,
     attempts: [{ maxDepth: 4, maxBranching: 6, attemptWorkLimit: 200 }],
   });
   const session7 = new CooperativeWitnessSession(pos.snapshot(), 'w', {
+    playouts: false,
     attempts: [{ maxDepth: 4, maxBranching: 6, attemptWorkLimit: 200 }],
   });
 
@@ -453,4 +458,66 @@ test('CooperativeWitnessSession: retained ordering shifting transitions smoothly
   assert.ok(session7.counters.scoringWork > 0);
   assert.ok(session1.counters.legalGenerations >= 1);
   assert.ok(session7.counters.legalGenerations >= 1);
+});
+
+// ── Guided playouts (Issue #124) ────────────────────────────────────────────
+
+function runToEnd(session: CooperativeWitnessSession): WitnessSearchResult {
+  let res = session.getStatus();
+  for (let i = 0; i < 100_000; i++) {
+    res = session.resume(5000);
+    if (res.status !== 'pending' || res.reason !== 'slice_exhausted') break;
+  }
+  return res;
+}
+
+test('playouts: find a verified witness where the depth-first attempts alone exhaust', () => {
+  // A middlegame position with mating material for White but no short forced helpmate.
+  const pos = Position.fromFen('r1bqk2r/pp2bppp/2n1pn2/3p4/3P4/2NBPN2/PP3PPP/R1BQ1RK1 w kq - 0 9');
+  const without = runToEnd(new CooperativeWitnessSession(pos.snapshot(), 'w', { playouts: false }));
+  assert.equal(without.status, 'pending', 'the bounded depth-first attempts do not reach a mate');
+  const withPlayouts = runToEnd(new CooperativeWitnessSession(pos.snapshot(), 'w'));
+  assert.equal(withPlayouts.status, 'reachable');
+  if (withPlayouts.status !== 'reachable') return;
+  assert.ok(withPlayouts.witness.length > 0 && withPlayouts.witness.length <= MAX_WITNESS_LENGTH);
+  assert.equal(verifyWitnessPath(pos.snapshot(), 'w', withPlayouts.witness).valid, true);
+});
+
+test('playouts: are deterministic for a position, and resumable across any slicing', () => {
+  const pos = Position.fromFen('r1bqk2r/pp2bppp/2n1pn2/3p4/3P4/2NBPN2/PP3PPP/R1BQ1RK1 w kq - 0 9');
+  const whole = runToEnd(new CooperativeWitnessSession(pos.snapshot(), 'w'));
+  const sliced = new CooperativeWitnessSession(pos.snapshot(), 'w');
+  let res = sliced.getStatus();
+  for (let i = 0; i < 1_000_000 && res.status === 'pending' && res.reason === 'slice_exhausted'; i++) res = sliced.resume(7);
+  assert.equal(whole.status, 'reachable');
+  assert.equal(res.status, 'reachable');
+  if (whole.status !== 'reachable' || res.status !== 'reachable') return;
+  assert.deepEqual(res.witness, whole.witness);
+});
+
+test('playouts: never claim a mate the replay refuses, and give up where no mate exists', () => {
+  // A lone king can never mate: playouts and attempts both end pending, never reachable.
+  const pos = Position.fromFen('4k3/8/8/8/8/8/PPPP4/RNBQK3 w - - 0 1');
+  const res = runToEnd(new CooperativeWitnessSession(pos.snapshot(), 'b'));
+  assert.equal(res.status, 'pending');
+});
+
+test('playouts: options are validated', () => {
+  const pos = Position.fromFen('4k3/8/8/8/8/8/8/R3K3 w - - 0 1');
+  for (const bad of [{ count: 0, maxPlies: 10 }, { count: 2, maxPlies: 0 }, { count: 1.5, maxPlies: 3 }]) {
+    assert.throws(() => new CooperativeWitnessSession(pos.snapshot(), 'w', { playouts: bad }), /playouts\./);
+  }
+});
+
+test('playouts: unsuccessful playouts leave the first depth-first attempt its whole budget', () => {
+  // A cooperative mate exists, but not in one move, so one-ply playouts cannot find it.
+  const pos = Position.fromFen('7k/8/5K2/8/8/8/8/1Q6 w - - 0 1');
+  const attempt = { maxDepth: 4, maxBranching: 40, attemptWorkLimit: 1_000_000 };
+  const alone = runToEnd(new CooperativeWitnessSession(pos.snapshot(), 'w', { playouts: false, attempts: [attempt] }));
+  assert.equal(alone.status, 'reachable');
+  // Exactly the work that attempt needs: any of it charged to the playouts would exhaust it.
+  const exact = { ...attempt, attemptWorkLimit: alone.counters.workUnits };
+  const res = runToEnd(new CooperativeWitnessSession(pos.snapshot(), 'w', { playouts: { count: 50, maxPlies: 1 }, attempts: [exact] }));
+  assert.equal(res.status, 'reachable', 'the single attempt still ran in full after the playouts');
+  assert.ok(res.counters.workUnits > alone.counters.workUnits, 'the playouts did run and count toward the session');
 });

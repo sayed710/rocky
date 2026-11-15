@@ -1337,3 +1337,31 @@ describe('Stage K: Recorded AdjudicationClocksStarted (S) Domain Replay & Contin
     });
   });
 });
+
+describe('Game.prepareClockRelease: the authoritative release producer', () => {
+  test('produces exactly the release replay accepts, and the same game replay rebuilds', () => {
+    const { settledGame, historyEvents } = produceSettledStoppedGame({});
+    const stoppedAt = settledGame.stoppedClock!.basis.stoppedAt!;
+    const { event, game } = settledGame.prepareClockRelease({ releaseRequestId: 'rel-1', at: stoppedAt + 250 });
+    assert.deepEqual(event, buildMatchingReleaseEvent(settledGame, 'rel-1', stoppedAt + 250));
+    assert.equal(game.stoppedClock, null);
+    assert.equal(game.releasedClock?.releaseRequestId, 'rel-1');
+    const replayed = Game.fromEvents([...historyEvents, event]);
+    assert.deepEqual(replayed.snapshot(), game.snapshot());
+    assert.deepEqual(replayStoredHistory(settledGame.id, [...historyEvents, event].map((ev, i) => ({
+      gameId: settledGame.id, seq: i, version: 1, event: ev,
+    }))).game.snapshot(), game.snapshot());
+  });
+
+  test('refuses what replay would refuse, and live withEvents still cannot submit a release', () => {
+    const { baseGame, settledGame } = produceSettledStoppedGame({});
+    const stoppedAt = settledGame.stoppedClock!.basis.stoppedAt!;
+    assert.throws(() => baseGame.prepareClockRelease({ releaseRequestId: 'r', at: 5_000 }), GameError, 'no stop');
+    assert.throws(() => settledGame.prepareClockRelease({ releaseRequestId: '', at: stoppedAt }), GameError, 'empty id');
+    assert.throws(() => settledGame.prepareClockRelease({ releaseRequestId: 'r', at: stoppedAt - 1 }), GameError, 'before the stop');
+    const { game } = settledGame.prepareClockRelease({ releaseRequestId: 'r', at: stoppedAt });
+    assert.throws(() => game.prepareClockRelease({ releaseRequestId: 'r2', at: stoppedAt + 1 }), GameError, 'already released');
+    const raw = buildMatchingReleaseEvent(settledGame, 'r', stoppedAt);
+    assert.throws(() => settledGame.withEvents([raw]), GameError, 'live append stays refused');
+  });
+});
