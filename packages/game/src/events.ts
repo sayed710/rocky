@@ -153,13 +153,23 @@ export type RecordedReachable = {
   readonly witness: readonly string[];
 };
 
+/**
+ * A bounded proof attempt that neither proved nor refuted the question (Issue #124). It never
+ * declares a dead position: settlement applies the ordinary rules, exactly as without proofs.
+ */
+export type RecordedUnresolved = {
+  readonly status: 'unresolved';
+  readonly reason: 'resource_limit';
+};
+
 export type RecordedGlobalOutcome =
   | {
       readonly status: 'dead';
       readonly white: RecordedImpossible;
       readonly black: RecordedImpossible;
     }
-  | RecordedReachable;
+  | RecordedReachable
+  | RecordedUnresolved;
 
 export interface RecordedResolutionEvidence {
   readonly base?: RecordedGlobalOutcome;
@@ -169,7 +179,7 @@ export interface RecordedResolutionEvidence {
   };
   readonly timeout?: {
     readonly winner: Color;
-    readonly outcome: RecordedImpossible | RecordedReachable;
+    readonly outcome: RecordedImpossible | RecordedReachable | RecordedUnresolved;
   };
 }
 
