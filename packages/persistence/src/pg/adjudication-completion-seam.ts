@@ -41,8 +41,12 @@ export class AdjudicationCompletionSeam {
     return this.#controller.createJob(prepared, game);
   }
 
-  stepProofJob(operationId: string, totalWorkBudget: number): JobStepResult {
-    return this.#controller.stepJob(operationId, totalWorkBudget);
+  stepProofJob(
+    operationId: string,
+    totalWorkBudget: number,
+    shouldYield?: () => boolean,
+  ): JobStepResult {
+    return this.#controller.stepJob(operationId, totalWorkBudget, shouldYield);
   }
 
   stepAllProofJobs(totalWorkBudget: number): AllStepResult {

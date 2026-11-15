@@ -281,13 +281,16 @@ function wholeMs(value: number | null): number | null {
 export async function writeRelease(
   client: PoolClient,
   game: Game,
-  params: { readonly releaseRequestId: string; readonly at: number },
+  params: { readonly releaseRequestId: string; readonly at: number; readonly expectedStopOperationId?: string },
 ): Promise<AdjudicationReleaseReceipt> {
   const stop = (await client.query<{ operation_id: string }>(
     'SELECT operation_id FROM game_adjudications WHERE game_id = $1 AND is_current_stop',
     [game.id],
   )).rows[0];
   if (!stop) throw new AdjudicationConflictError('The game has no current managed stop to release');
+  if (params.expectedStopOperationId !== undefined && params.expectedStopOperationId !== stop.operation_id) {
+    throw new AdjudicationConflictError('The current managed stop is not the expected stop to release');
+  }
   const { event, game: released } = game.prepareClockRelease(params);
   const releaseSeq = game.eventSequence + 1;
   const flagDueMs = wholeMs(released.flagDeadline);

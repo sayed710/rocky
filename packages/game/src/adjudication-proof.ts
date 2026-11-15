@@ -917,11 +917,20 @@ export class AdjudicationJobController {
     return true;
   }
 
-  stepJob(operationId: string, totalWorkBudget: number): JobStepResult {
+  stepJob(
+    operationId: string,
+    totalWorkBudget: number,
+    shouldYield?: () => boolean,
+  ): JobStepResult {
     const job = this.#jobs.get(operationId);
     if (!job) throw new GameError(`Job not found: ${operationId}`);
 
-    if (job.status !== 'active' || totalWorkBudget <= 0 || !Number.isSafeInteger(totalWorkBudget)) {
+    if (
+      job.status !== 'active' ||
+      totalWorkBudget <= 0 ||
+      !Number.isSafeInteger(totalWorkBudget) ||
+      shouldYield?.()
+    ) {
       return this.#buildStepResult(job, 0);
     }
 
@@ -931,7 +940,7 @@ export class AdjudicationJobController {
     }
 
     if (job.status === 'active' && budgetRemaining > 0) {
-      budgetRemaining = this.#stepActiveLanes(job, budgetRemaining);
+      budgetRemaining = this.#stepActiveLanes(job, budgetRemaining, shouldYield);
     }
 
     job.slicesExecuted++;
@@ -960,10 +969,15 @@ export class AdjudicationJobController {
     return budget - 1;
   }
 
-  #stepActiveLanes(job: JobRecord, budget: number): number {
+  #stepActiveLanes(
+    job: JobRecord,
+    budget: number,
+    shouldYield?: () => boolean,
+  ): number {
     let remaining = budget;
     let consecutiveZero = 0;
     while (remaining > 0 && job.status === 'active') {
+      if (shouldYield?.()) break;
       const lane = this.#selectLaneToStep(job);
       if (!lane) break;
       const used = lane.step(1);
