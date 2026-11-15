@@ -190,6 +190,50 @@ test('release is idempotent by request id, survives a lost COMMIT reply, and can
   });
 });
 
+test('expectedStopOperationId: a matching replay returns the old receipt after a newer stop; stale expectations never release the newer stop', async () => {
+  await withTestDatabase(async ({ pool }) => {
+    await setup(pool);
+    const store = new PgAdjudicationStore(pool);
+    const gameId = await createGame(pool);
+    const first = await adjudicate(store, gameId, { kind: 'move', uci: 'e7e4' }, 'w', 1100);
+    const oldReceipt = await store.releaseClocks({
+      gameId, releaseRequestId: 'stop-old', at: 1500, expectedStopOperationId: first.operationId,
+    });
+    assert.equal(oldReceipt.stopOperationId, first.operationId);
+
+    const second = await adjudicate(store, gameId, { kind: 'offerDraw' }, 'b', 2000);
+    const currentStop = async (): Promise<number> =>
+      (await pool.query('SELECT count(*)::int AS n FROM game_adjudications WHERE game_id = $1 AND is_current_stop AND operation_id = $2', [gameId, second.operationId])).rows[0].n;
+    assert.equal(await currentStop(), 1);
+
+    // Matching replay (even with a later instant and a newer current stop) returns the exact old receipt.
+    const replayed = await store.releaseClocks({
+      gameId, releaseRequestId: 'stop-old', at: 9999, expectedStopOperationId: first.operationId,
+    });
+    assert.deepEqual(replayed, oldReceipt);
+    // A replay naming a different stop than the receipt's is a definitive conflict.
+    await assert.rejects(
+      store.releaseClocks({ gameId, releaseRequestId: 'stop-old', at: 9999, expectedStopOperationId: second.operationId }),
+      AdjudicationConflictError,
+    );
+    // A new request that expects the stale stop must not release the newer one, and writes nothing.
+    const eventsBefore = (await pool.query('SELECT count(*)::int AS n FROM game_events WHERE game_id = $1', [gameId])).rows[0].n;
+    await assert.rejects(
+      store.releaseClocks({ gameId, releaseRequestId: 'stop-stale', at: 3000, expectedStopOperationId: first.operationId }),
+      AdjudicationConflictError,
+    );
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM game_events WHERE game_id = $1', [gameId])).rows[0].n, eventsBefore);
+    assert.equal(await currentStop(), 1, 'the newer stop stays current');
+
+    // The newer stop is still released by its own valid request.
+    const newer = await store.releaseClocks({
+      gameId, releaseRequestId: 'stop-new', at: 3000, expectedStopOperationId: second.operationId,
+    });
+    assert.equal(newer.stopOperationId, second.operationId);
+    assert.equal(await currentStop(), 0);
+  });
+});
+
 test('racing releases with different request ids: exactly one commits', async () => {
   await withTestDatabase(async ({ pool }) => {
     await setup(pool);
