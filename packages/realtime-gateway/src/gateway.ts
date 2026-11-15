@@ -59,6 +59,14 @@ interface RoomEntry {
   readonly room: Room;
   readonly unsubscribe: Unsubscribe;
   lastFullStateRevision?: number;
+  /**
+   * Move slots (ply) already fanned out to this room. An authority takeover replays the durable
+   * suffix, so a move this very room already received live can arrive again. Identities are the
+   * monotonic per-game move slot, not a high-water mark: every ply that was actually delivered is
+   * recorded individually, so an unseen historical ply in a gap still fans out. Allocated lazily and
+   * bounded by the moves played in this room's lifetime (the entry is discarded when the room empties).
+   */
+  seenMovePlies?: Set<number>;
 }
 
 /** How many times a join's readiness is routed before the failure is reported to the client. */
@@ -664,6 +672,15 @@ export class RealtimeGateway {
     };
     unsub = this.pubsub.subscribe(gameChannel(gameId), (rawMsg) => {
       const msg = rawMsg;
+      if (msg.t === 'move') {
+        // A takeover reload replays the durable move suffix through this same channel. Skip only a
+        // move slot this room already broadcast live; never-seen plies (including ones below the
+        // highest seen ply) still fan out. Non-move frames at the same revision are unaffected.
+        if (roomEntry.seenMovePlies?.has(msg.ply)) return;
+        if (room.size > 0) {
+          (roomEntry.seenMovePlies ??= new Set<number>()).add(msg.ply);
+        }
+      }
       if (isStateMessage(msg)) {
         const currentRev = this.observedRevision.get(gameId);
         if (currentRev !== undefined && msg.state.stateRevision < currentRev) {
