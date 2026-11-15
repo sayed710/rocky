@@ -1024,3 +1024,58 @@ test('authority takeover reload does not re-send already-delivered live move to 
     bobConn.close();
   }
 });
+
+test('pending join flushes duplicate newer STATE revisions once while preserving same-revision MOVE and distinct STATE order', async () => {
+  const store = new InMemoryEventLog();
+  const pubsub = new InMemoryPubSub();
+  const authority = new GameAuthority(pubsub, () => 1000, store);
+  const gateway = new RealtimeGateway(authority, pubsub, new StaticTokenVerifier(), () => 1000);
+  const gameId = 'pending-join-state-dedup-1';
+
+  await authority.createGame({
+    gameId,
+    players: { white: 'user-white', black: 'user-black' },
+    timeControl: TC,
+    rated: false,
+    at: 1000,
+  });
+
+  const origReadRecovery = authority.readRecovery.bind(authority);
+  let snapshotEntered!: () => void;
+  let releaseSnapshot!: () => void;
+  const entered = new Promise<void>((r) => { snapshotEntered = r; });
+  const gate = new Promise<void>((r) => { releaseSnapshot = r; });
+  authority.readRecovery = async (gId, fromPly) => {
+    const res = await origReadRecovery(gId, fromPly);
+    snapshotEntered();
+    await gate;
+    return res;
+  };
+
+  const specConn = new InMemoryConnection('conn-spec');
+  gateway.handleConnection(specConn);
+  try {
+    specConn.deliver({ t: 'join', gameId, token: undefined });
+    await entered;
+
+    const move1 = await authority.apply(gameId, 'user-white', { kind: 'move', uci: 'e2e4' });
+    pubsub.publish(gameChannel(gameId), { t: 'state', gameId, state: move1.state });
+    gateway.sendStateToRoom(gameId, move1.state);
+    const stateRev2 = { ...move1.state, stateRevision: 2 };
+    pubsub.publish(gameChannel(gameId), { t: 'state', gameId, state: stateRev2 });
+    gateway.sendStateToRoom(gameId, stateRev2);
+
+    releaseSnapshot();
+    await waitForMessage(specConn, 'presence');
+
+    const moves = specConn.sent.filter((m): m is MoveBroadcast => m.t === 'move');
+    assert.equal(moves.length, 1);
+    assert.equal(moves[0]?.stateRevision, 1);
+
+    const stateRevs = specConn.sent.filter((m) => m.t === 'state').map((m) => m.state.stateRevision);
+    assert.deepEqual(stateRevs, [1, 2]);
+  } finally {
+    releaseSnapshot();
+    specConn.close();
+  }
+});

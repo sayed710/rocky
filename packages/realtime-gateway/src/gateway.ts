@@ -491,8 +491,13 @@ export class RealtimeGateway {
 
     session.conn.send({ t: 'joined', gameId, role, state });
     this.observe(gameId, { t: 'state', gameId, state });
+    const seenStateRevisions = new Set<number>();
     for (const msg of pending) {
       if (isNewerThanSnapshot(msg, state.stateRevision)) {
+        if (msg.t === 'state') {
+          if (seenStateRevisions.has(msg.state.stateRevision)) continue;
+          seenStateRevisions.add(msg.state.stateRevision);
+        }
         session.conn.send(msg);
       }
     }
