@@ -84,3 +84,28 @@ export class CorruptGameStreamError extends PersistenceError {
     this.name = 'CorruptGameStreamError';
   }
 }
+
+/** Conflict with an active adjudication or incompatible retry. */
+export class AdjudicationConflictError extends PersistenceError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdjudicationConflictError';
+  }
+}
+
+/** Adjudication lease expired during execution or settlement. */
+export class AdjudicationClaimExpiredError extends PersistenceError {
+  constructor(message = 'Adjudication claim lease has expired') {
+    super(message);
+    this.name = 'AdjudicationClaimExpiredError';
+  }
+}
+
+/** Invariant or transaction fence violation during adjudication persistence. */
+export class AdjudicationFenceError extends PersistenceError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AdjudicationFenceError';
+  }
+}
+

@@ -31,7 +31,7 @@ export interface ClockState {
 /** Construct an initial clock for a time control. */
 export function initClock(tc: TimeControl, startedAt: number | null = null): ClockState {
   return {
-    remaining: { w: tc.initialMs, b: tc.initialMs },
+    remaining: Object.freeze({ w: tc.initialMs, b: tc.initialMs }),
     turnStartedAt: startedAt,
   };
 }
@@ -128,4 +128,87 @@ export function hasFlagged(clock: ClockState, sideToMove: Color, now: number, tc
   const elapsed = Math.max(0, now - clock.turnStartedAt);
   const chargeable = Math.max(0, elapsed - (tc.kind === 'delay' ? tc.delayMs : 0));
   return clock.remaining[sideToMove] - chargeable <= 0;
+}
+
+/** Maximum safe timestamp in milliseconds (ECMAScript Date limit). */
+export const MAX_SAFE_TIMESTAMP_MS = 8_640_000_000_000_000;
+
+export class GameError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GameError';
+  }
+}
+
+/** Validates that a timestamp is a safe non-negative integer within Date bounds. */
+export function validateTimestamp(ts: number, name: string): void {
+  if (typeof ts !== 'number' || !Number.isSafeInteger(ts) || ts < 0 || ts > MAX_SAFE_TIMESTAMP_MS) {
+    throw new GameError(`${name} must be a non-negative safe integer <= ${MAX_SAFE_TIMESTAMP_MS}; got ${ts}`);
+  }
+}
+
+/** Validates that a derived deadline is a non-negative finite number within Date bounds. Supports fractional deadlines. */
+export function validateDeadline(dl: number, name: string): void {
+  if (typeof dl !== 'number' || !Number.isFinite(dl) || dl < 0 || dl > MAX_SAFE_TIMESTAMP_MS) {
+    throw new GameError(`${name} must be a non-negative finite number <= ${MAX_SAFE_TIMESTAMP_MS}; got ${dl}`);
+  }
+}
+
+/**
+ * Computes elapsed thinking time and frozen clock balances at suspension instant `atA`.
+ * Clamps exhausted balances to 0, never adds increment, sets turnStartedAt to null.
+ */
+export function freezeClock(
+  clock: ClockState,
+  mover: Color,
+  atA: number,
+  tc: TimeControl,
+): { frozenClock: ClockState; elapsed: number } {
+  if (tc.kind === 'unlimited' || clock.turnStartedAt === null) {
+    return {
+      frozenClock: { remaining: { ...clock.remaining }, turnStartedAt: null },
+      elapsed: 0,
+    };
+  }
+  if (clock.turnStartedAt !== null && atA < clock.turnStartedAt) {
+    throw new GameError(`Suspension timestamp ${atA} cannot precede turn start ${clock.turnStartedAt}`);
+  }
+  const elapsed = Math.max(0, atA - clock.turnStartedAt);
+  const delay = tc.kind === 'delay' ? tc.delayMs : 0;
+  const chargeable = Math.max(0, elapsed - delay);
+  const remainingMover = Math.max(0, clock.remaining[mover] - chargeable);
+  const remaining = mover === 'w'
+    ? { w: remainingMover, b: clock.remaining.b }
+    : { w: clock.remaining.w, b: remainingMover };
+  return {
+    frozenClock: { remaining: Object.freeze({ ...remaining }), turnStartedAt: null },
+    elapsed,
+  };
+}
+
+/**
+ * Resumes clock for the same turn at resolution instant `atR`, restoring pre-pause base balances
+ * and shifting the anchor by (atR - atA).
+ */
+export function resumeClockSameTurn(
+  originalClock: ClockState,
+  atA: number,
+  atR: number,
+): ClockState {
+  if (atR < atA) {
+    throw new GameError(`Resolution timestamp ${atR} cannot precede suspension timestamp ${atA}`);
+  }
+  if (originalClock.turnStartedAt === null) {
+    return {
+      remaining: Object.freeze({ ...originalClock.remaining }),
+      turnStartedAt: null,
+    };
+  }
+  const shift = atR - atA;
+  const resumedAnchor = originalClock.turnStartedAt + shift;
+  validateTimestamp(resumedAnchor, 'Resumed clock anchor');
+  return {
+    remaining: Object.freeze({ ...originalClock.remaining }),
+    turnStartedAt: resumedAnchor,
+  };
 }

@@ -177,7 +177,7 @@ test('PG-F1 runner groups 0050+0051 atomically; a restricted connection cannot s
         'no event was persisted during the window');
 
       g.open();
-      assert.equal(await run, 52, 'the full migration completes');
+      assert.equal(await run, 53, 'the full migration completes');
 
       // Exact ledger rows, canonical checksums.
       assert.deepEqual(await ledgerRows(pool), EXPECTED_LEDGER, 'both ledger rows have exact version/name/state/canonical checksum');
@@ -222,7 +222,7 @@ test('PG-F1 atomic group: an assertion escaping the paused body still releases a
         assert.fail('intentional observer assertion failure');
       } finally {
         g.open();
-        assert.equal(await run, 52);
+        assert.equal(await run, 53);
         settledInFinally = true;
       }
     }, { message: 'intentional observer assertion failure' });
@@ -262,8 +262,8 @@ for (const injectAt of ['before-0051-sql', 'after-ledger50', 'before-ledger51', 
         false, 'the whole fencing schema rolled back');
 
       if (injectAt === 'ledger51-server-error') await pool.query('DROP TRIGGER reject_ledger51 ON public.schema_migrations; DROP FUNCTION public.reject_ledger51()');
-      // Clean retry: 0001..0049 already committed; the rolled-back 0050/0051 pair and subsequent 0052 migration remain.
-      assert.equal(await migrate(pool, migrationsDir()), 3, 'the retry applies the rolled-back fencing pair plus subsequent migrations');
+      // Clean retry: 0001..0049 already committed; the rolled-back 0050/0051 pair and subsequent 0052/0053 migrations remain.
+      assert.equal(await migrate(pool, migrationsDir()), 4, 'the retry applies the rolled-back fencing pair plus subsequent migrations');
       assert.deepEqual(await ledgerRows(pool), EXPECTED_LEDGER, 'retry records both rows with exact canonical checksums');
       assert.equal(await insertBatchIsInvoker(pool), true, 'insert_batch is INVOKER after the retry');
     }, { connectionString, max: 4 });
@@ -279,7 +279,7 @@ test('PG-F1 runner denies a role with migration-DEFAULT EXECUTE after the atomic
     await pool.query(`CREATE ROLE ${dflt} LOGIN PASSWORD '${password}' NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`);
     await pool.query(`ALTER DEFAULT PRIVILEGES GRANT EXECUTE ON FUNCTIONS TO ${dflt}`);
 
-    assert.equal(await migrate(pool, migrationsDir()), 52, 'full migrate applies the atomic pair among the rest');
+    assert.equal(await migrate(pool, migrationsDir()), 53, 'full migrate applies the atomic pair among the rest');
     assert.deepEqual(await ledgerRows(pool), EXPECTED_LEDGER, 'exact canonical ledger rows');
 
     await pool.query(`GRANT USAGE ON SCHEMA game_fencing TO ${dflt}`); // explicit schema USAGE (not implied by the default function ACL)
@@ -453,7 +453,7 @@ for (const incomplete of ['through0050', 'through0049'] as const) {
         }, /already applied.*50.*missing.*51/);
         assert.deepEqual(await ledgerRows(pool),before,'rejection does not fabricate a hardening row');
         assert.equal(await insertBatchIsInvoker(pool),false,'rejection did not pretend to harden the historical helper');
-        assert.equal(await migrate(pool,migrationsDir()),2,'trusted installer with complete tree applies real hardening plus subsequent migrations');
+        assert.equal(await migrate(pool,migrationsDir()),3,'trusted installer with complete tree applies real hardening plus subsequent migrations');
         assert.deepEqual(await ledgerRows(pool),EXPECTED_LEDGER);
         assert.equal(await insertBatchIsInvoker(pool),true);
         assert.equal(await migrate(pool,migrationsDir()),0,'complete hardened tree is idempotent');

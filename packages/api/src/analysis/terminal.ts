@@ -94,6 +94,8 @@ export function fromStatus(status: GameStatus): TerminalOutcome | undefined {
       // Not reachable from `Position.status()` today, and reported honestly regardless: a caller
       // that does know the history gets back the reason it supplied, not a neighbouring draw.
       return { reason: 'threefold', result: '1/2-1/2' };
+    case 'dead_position':
+      return { reason: 'dead_position', result: '1/2-1/2' };
     default:
       // A new `GameStatus` reason must fail to compile here rather than fall through to
       // `undefined`, which would silently report a terminal position as still in play — the exact
