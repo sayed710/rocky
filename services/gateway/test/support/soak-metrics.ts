@@ -599,7 +599,7 @@ export interface StateViewSnapshotLike {
   readonly turnStartedAt: number | null;
   readonly status: { readonly over: boolean };
   readonly drawOffer: string | null;
-  readonly moves?: readonly StateMoveIdentityLike[];
+  readonly moves: readonly StateMoveIdentityLike[];
 }
 
 export interface ReplayedGameLike {
@@ -616,7 +616,7 @@ export interface ReplayedGameLike {
       readonly remaining: { readonly w: number; readonly b: number };
       readonly turnStartedAt: number | null;
     };
-    readonly moves?: readonly StateMoveIdentityLike[];
+    readonly moves: readonly StateMoveIdentityLike[];
   };
 }
 
@@ -638,13 +638,13 @@ function assertCoreStateViewFields(
   assert.equal(view.clock.b, snap.clock.remaining.b, `${label} black clock matches replay snapshot`);
   assert.equal(view.turnStartedAt, snap.clock.turnStartedAt, `${label} turnStartedAt matches replay snapshot`);
 
-  if (view.moves !== undefined && snap.moves !== undefined) {
-    assert.deepEqual(
-      view.moves.map((m) => ({ ply: m.ply, uci: m.uci, san: m.san, by: m.by })),
-      snap.moves.map((m) => ({ ply: m.ply, uci: m.uci, san: m.san, by: m.by })),
-      `${label} moves match replay snapshot`,
-    );
-  }
+  assert.ok(Array.isArray(view.moves), `${label} StateView moves must be an array`);
+  assert.ok(Array.isArray(snap.moves), `${label} replay snapshot moves must be an array`);
+  assert.deepEqual(
+    view.moves.map((m) => ({ ply: m.ply, uci: m.uci, san: m.san, by: m.by })),
+    snap.moves.map((m) => ({ ply: m.ply, uci: m.uci, san: m.san, by: m.by })),
+    `${label} moves match replay snapshot`,
+  );
 }
 
 export function assertStateViewMatchesReplay(

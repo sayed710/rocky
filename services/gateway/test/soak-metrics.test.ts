@@ -1799,10 +1799,12 @@ test('assertStateViewMatchesReplay detects stale clock and turnStartedAt mismatc
         remaining: { w: 300_000, b: 300_000 },
         turnStartedAt: 1_000,
       },
+      moves: [],
     }),
   };
 
   const validView: StateViewSnapshotLike = {
+    moves: [],
     fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
     stateRevision: 0,
     adjudication: undefined,
@@ -1839,6 +1841,26 @@ test('assertStateViewMatchesReplay detects stale clock and turnStartedAt mismatc
   assert.throws(
     () => assertStateViewMatchesReplay({ ...validView, ply: 1 }, baseReplayed, 1),
     /owner ply equals replay ply/,
+  );
+
+  // Missing ledger on either side fails even when empty; valid empty ply-0 arrays pass above
+  assert.throws(
+    // deliberate malformed input: StateView without moves
+    () => assertStateViewMatchesReplay({ ...validView, moves: undefined } as unknown as StateViewSnapshotLike, baseReplayed, 1),
+    /owner StateView moves must be an array/,
+  );
+  assert.throws(
+    () =>
+      assertStateViewMatchesReplay(
+        validView,
+        {
+          ...baseReplayed,
+          // deliberate malformed input: replay snapshot without moves
+          snapshot: () => ({ clock: baseReplayed.snapshot().clock }) as ReturnType<ReplayedGameLike['snapshot']>,
+        },
+        1,
+      ),
+    /owner replay snapshot moves must be an array/,
   );
 });
 
@@ -3056,6 +3078,37 @@ test('assertRecoveryStateMatchesReplayPrefix verifies exact prefix with proving/
         2,
       ),
     /recovery moves match replay snapshot/,
+  );
+  assert.throws(
+    // deliberate malformed inputs: missing ledger on either side
+    () =>
+      assertRecoveryStateMatchesReplayPrefix(
+        { ...baseRecovery, moves: undefined } as unknown as StateViewSnapshotLike,
+        makeReplayed(),
+        2,
+      ),
+    /recovery StateView moves must be an array/,
+  );
+  assert.throws(
+    () =>
+      assertRecoveryStateMatchesReplayPrefix(
+        baseRecovery,
+        makeReplayed({
+          // deliberate malformed input: replay snapshot without moves
+          snapshot: () =>
+            ({ clock: { remaining: { w: 299_500, b: 300_000 }, turnStartedAt: 12_345 } }) as ReturnType<
+              ReplayedGameLike['snapshot']
+            >,
+        }),
+        2,
+      ),
+    /recovery replay snapshot moves must be an array/,
+  );
+  // Valid empty ply-0 prefix
+  assertRecoveryStateMatchesReplayPrefix(
+    { ...baseRecovery, stateRevision: 0, ply: 0, turn: 'w', moves: [] },
+    makeReplayed({ ply: 0, turn: 'w', fen: baseRecovery.fen }, []),
+    1,
   );
 });
 
