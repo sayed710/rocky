@@ -1342,6 +1342,52 @@ test('pass runner: a diagnostic report separates a real V8 fatal from a status t
   }
 });
 
+test('pass runner: node reports generated under the pass exclude the environment', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sigb-report-env-'));
+  try {
+    const keepDir = path.join(dir, 'keep');
+    fs.mkdirSync(keepDir, { recursive: true });
+    const marker = 'SIGB_DUMMY_ENV_MARKER_VALUE_7f3a';
+    const fixture = path.join(dir, 'env.test.cjs');
+    const reportPath = path.join(keepDir, 'report.json');
+    fs.writeFileSync(
+      fixture,
+      `const fs = require('node:fs');\n` +
+        `if (process.env.SIGB_DUMMY_MARKER !== ${JSON.stringify(marker)}) throw new Error('marker missing in child');\n` +
+        `fs.writeFileSync(${JSON.stringify(reportPath)}, JSON.stringify(process.report.getReport()));\n`,
+    );
+    const out = path.join(dir, 'out');
+    const syntheticEnv: NodeJS.ProcessEnv = {
+      SIGB_DUMMY_MARKER: marker,
+      ...(process.platform === 'win32'
+        ? {
+            ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+            ...(process.env.TEMP ? { TEMP: process.env.TEMP } : {}),
+            ...(process.env.TMP ? { TMP: process.env.TMP } : {}),
+          }
+        : {}),
+    };
+    const result = spawnSync(
+      process.execPath,
+      [path.join(DIAGNOSTICS_DIR, 'run-signature-b-pass.mjs'), '--runs', '1', '--max-minutes', '1', '--out', out, '--target', fixture],
+      { cwd: dir, encoding: 'utf8', env: syntheticEnv },
+    );
+    assert.equal(result.status, 0, `the pass must complete cleanly:\n${result.stdout}${result.stderr}`);
+    assert.ok(fs.existsSync(reportPath), `the fixture must have run and written a report:\n${result.stdout}${result.stderr}`);
+    const raw = fs.readFileSync(reportPath, 'utf8');
+    assert.ok(!raw.includes(marker), 'the dummy env value must be absent from the Node report');
+    assert.ok(!raw.includes('SIGB_DUMMY_MARKER'), 'the dummy env name must be absent from the Node report');
+    const report = JSON.parse(raw) as { environmentVariables?: Record<string, unknown> };
+    assert.deepEqual(
+      Object.keys(report.environmentVariables ?? {}),
+      [],
+      'the report environmentVariables object must be absent or empty',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('pass runner: exit 134 alone names nothing, and the capture carries what separates the two', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sigb-capture-reports-'));
   try {

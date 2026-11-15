@@ -109,15 +109,7 @@ function positiveNumber(name, raw, fallback, { integer = false } = {}) {
 // a duration and are legitimately fractional, so the integer rule belongs to the count alone.
 const maxRuns = positiveNumber('runs', flag('runs', 20), 20, { integer: true });
 const maxMs = positiveNumber('max-minutes', flag('max-minutes', 45), 45) * 60_000;
-// The fallback is computed only when --out is absent: an argument is evaluated before the call,
-// so an eager mkdtemp would create an unused directory on every run that supplies its own.
-//
-// Resolved against THIS process's working directory, because the paths derived from it are used by
-// two processes with different ones: this process creates and reads them, while the spawned runner
-// resolves the same strings against the package it was pointed at. Left relative, `--out artifacts`
-// with `--package ../persistence` would have the child write its report into the other package and
-// this process look for it here — a pass that cannot read its own run.
-const outDir = path.resolve(flag('out', null) ?? fs.mkdtempSync(path.join(tmpdir(), 'sigb-pass-')));
+const rawOut = flag('out', null);
 
 // What each run executes. The default is the whole compiled suite, which is what reproducing
 // Signature B requires; `--target` exists so this script's own tests can point a run at one trivial
@@ -129,6 +121,24 @@ const target = flag('target', 'dist-test/test/**/*.test.js');
 // other. Resolved against `packages/api` so `--package ../persistence` reads the way it is written,
 // and defaulting to this package so every existing invocation means exactly what it meant before.
 const packageDir = path.resolve(API_DIR, String(flag('package', '.')));
+
+// Fail closed before any artifact is created: without this flag Node writes the whole environment
+// into every diagnostic report.
+if (!process.allowedNodeEnvironmentFlags.has('--report-exclude-env')) {
+  usageError(
+    `refusing to run: Node ${process.version} lacks --report-exclude-env, so diagnostic reports would leak the environment. Update to the latest Node 22.x or 24.x.`,
+  );
+}
+
+// The fallback is computed only when --out is absent: an argument is evaluated before the call,
+// so an eager mkdtemp would create an unused directory on every run that supplies its own.
+//
+// Resolved against THIS process's working directory, because the paths derived from it are used by
+// two processes with different ones: this process creates and reads them, while the spawned runner
+// resolves the same strings against the package it was pointed at. Left relative, `--out artifacts`
+// with `--package ../persistence` would have the child write its report into the other package and
+// this process look for it here — a pass that cannot read its own run.
+const outDir = path.resolve(rawOut ?? fs.mkdtempSync(path.join(tmpdir(), 'sigb-pass-')));
 
 /**
  * Make the artifact directory owner-only, or refuse to write into it.
@@ -360,7 +370,9 @@ function runOnce(tapPath, logDir, reportDir, budgetMs) {
         // can leave exit code 134. The report is therefore what separates a fault Node suffered
         // from a status something else chose, and unlike the printed banner it is attributable to
         // an exact process rather than to a position in the report stream.
-        '--report-on-fatalerror', `--report-directory=${reportDir}`,
+        // Reports embed the full environment by default; exclude it so inherited secrets never land
+        // in these artifacts.
+        '--report-on-fatalerror', '--report-exclude-env', `--report-directory=${reportDir}`,
         '--test-reporter=spec', '--test-reporter-destination=stdout',
         '--test-reporter=tap', `--test-reporter-destination=${tapPath}`,
         '--test', '--test-concurrency=1', target,
