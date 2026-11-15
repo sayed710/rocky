@@ -1695,3 +1695,68 @@ test('pass runner: an --out that already holds a capture is refused, not quietly
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('pass runner: cleanup tool failure on ceiling is not masked and halts without retrying', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sigb-cleanup-err-'));
+  let workerPid: number | null = null;
+  let runnerPid: number | null = null;
+  try {
+    const pidFile = path.join(dir, 'worker.pid');
+    const runnerPidFile = path.join(dir, 'runner.pid');
+    const target = path.join(dir, 'blocks.test.cjs');
+    fs.writeFileSync(
+      target,
+      `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+        "require('node:test').test('blocks', async () => {\n" +
+        '  await new Promise((r) => setTimeout(r, 30000));\n' +
+        '});\n',
+    );
+    const spy = path.join(dir, 'fail-kill-spy.cjs');
+    fs.writeFileSync(
+      spy,
+      "const cp = require('node:child_process'), fs = require('node:fs');\n" +
+        "const { syncBuiltinESMExports } = require('node:module');\n" +
+        `const runnerPidFile = ${JSON.stringify(runnerPidFile)};\n` +
+        'const origSpawn = cp.spawn, origSpawnSync = cp.spawnSync, origKill = process.kill.bind(process);\n' +
+        'cp.spawn = function patchedSpawn(cmd, args, opts) {\n' +
+        '  const child = origSpawn.call(this, cmd, args, opts);\n' +
+        '  if (child.pid) fs.writeFileSync(runnerPidFile, String(child.pid));\n' +
+        '  return child;\n' +
+        '};\n' +
+        'cp.spawnSync = function patchedSpawnSync(cmd, args, opts) {\n' +
+        "  if (process.platform === 'win32' && cmd === 'taskkill') {\n" +
+        "    return { pid: 0, output: [null, '', 'Access is denied.'], stdout: '', stderr: 'Access is denied.', status: 1, signal: null };\n" +
+        '  }\n' +
+        '  return origSpawnSync.call(this, cmd, args, opts);\n' +
+        '};\n' +
+        'process.kill = (pid, sig) => {\n' +
+        "  if (process.platform !== 'win32' && typeof pid === 'number' && pid < 0 && sig === 'SIGKILL') {\n" +
+        "    throw Object.assign(new Error('Operation not permitted'), { code: 'EPERM' });\n" +
+        '  }\n' +
+        '  return origKill(pid, sig);\n' +
+        '};\n' +
+        'syncBuiltinESMExports();\n',
+    );
+    const out = path.join(dir, 'out');
+    const pass = spawn(
+      process.execPath,
+      ['--require', spy, path.join(DIAGNOSTICS_DIR, 'run-signature-b-pass.mjs'), '--runs', '2', '--max-minutes', '0.03', '--target', target, '--out', out],
+      { cwd: path.resolve(DIAGNOSTICS_DIR, '../..'), env: { ...process.env, NODE_TEST_CONTEXT: undefined }, stdio: 'ignore' },
+    );
+    const exitCode = await new Promise<number | null>((resolve) => pass.on('close', resolve));
+
+    assert.notEqual(exitCode, 0, 'a cleanup failure must fail the pass');
+    const summary = JSON.parse(fs.readFileSync(path.join(out, 'summary.json'), 'utf8')) as {
+      runs: Array<{ timedOut: boolean; collectionError: string | null }>;
+    };
+    assert.equal(summary.runs.length, 1, 'must stop immediately without retrying');
+    assert.equal(summary.runs[0]?.timedOut, true);
+    assert.match(String(summary.runs[0]?.collectionError), /taskkill|EPERM/);
+  } finally {
+    workerPid = await readWorkerPid(path.join(dir, 'worker.pid'), 500);
+    runnerPid = await readWorkerPid(path.join(dir, 'runner.pid'), 500);
+    reap(workerPid);
+    reap(runnerPid);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
