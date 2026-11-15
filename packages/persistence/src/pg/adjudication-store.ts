@@ -66,9 +66,14 @@ import {
   databaseNow,
   loadProvingRowAtHead,
   recoverClaim,
+  loadRelease,
   writeClaim,
+  writeRelease,
   writeSettlement,
+  type AdjudicationReleaseReceipt,
 } from './adjudication-operations';
+
+export type { AdjudicationReleaseReceipt } from './adjudication-operations';
 
 export {
   AdjudicationClaimExpiredError,
@@ -391,6 +396,28 @@ export class PgAdjudicationStore {
     });
     this.#seam.clearRetainedSettlement(params.gameId, params.operationId);
     return receipt;
+  }
+
+  /**
+   * Release the game's current managed stop at `at` (the authoritative instant S). Idempotent by
+   * `releaseRequestId`: a retry after any failure, including a lost COMMIT reply, answers with the
+   * release that committed and never releases twice.
+   */
+  async releaseClocks(params: {
+    readonly gameId: string;
+    readonly releaseRequestId: string;
+    readonly at: number;
+  }): Promise<AdjudicationReleaseReceipt> {
+    if (typeof params.releaseRequestId !== 'string' || params.releaseRequestId.length === 0 || params.releaseRequestId.length > 200) {
+      throw new AdjudicationConflictError('releaseRequestId must be a non-empty string of at most 200 characters');
+    }
+    return this.#inGameTransaction(params.gameId, async (client) => {
+      const existing = await loadRelease(client, params.gameId, params.releaseRequestId);
+      if (existing) return existing;
+      const events = await loadDurableEvents(client, params.gameId);
+      if (events.length === 0) throw new PersistenceError(`Game ${params.gameId} not found`);
+      return writeRelease(client, Game.fromEvents(events.map((e) => e.event)), params);
+    });
   }
 
   /** Read-only status of one operation, for recovery after any uncertain outcome. */

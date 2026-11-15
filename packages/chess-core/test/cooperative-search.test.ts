@@ -754,3 +754,16 @@ test('resume legacy API: detached mutable output behavior is fully preserved', (
     assert.equal(status.witness[0].from, originalFrom, 'Session internal state remains intact');
   }
 });
+
+test('a bare king without pawns of its own can never mate, whatever pawns the other side has', () => {
+  // Black has only its king; White's pawns promote only to White pieces.
+  const pos = Position.fromFen('5B2/1k6/5K2/6PP/8/R1P5/8/8 w - - 3 65');
+  assert.equal(isPawnFreeMaterialUnwinnable(pos.snapshot(), 'b'), true);
+  const session = new CooperativeSearchSession(pos.snapshot(), 'b');
+  const res = session.resumeWork(1_000);
+  assert.equal(res.status, 'impossible');
+  // A bare king with a pawn of its own could promote, so the lemma does not apply.
+  assert.equal(isPawnFreeMaterialUnwinnable(Position.fromFen('8/1k6/1p3K2/6PP/8/R1P5/8/8 w - - 0 1').snapshot(), 'b'), false);
+  // The winner's material still matters: White here can mate.
+  assert.equal(isPawnFreeMaterialUnwinnable(pos.snapshot(), 'w'), false);
+});

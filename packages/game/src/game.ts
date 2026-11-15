@@ -481,6 +481,42 @@ export class Game {
     return Game.applyAll(this, events);
   }
 
+  /**
+   * The authoritative release of the current managed stop at instant `at` (Issue #124): the
+   * `AdjudicationClocksStarted` event and the game after it. The event is derived only from the
+   * stop this game records and is folded through the same reducer replay uses, so a live release
+   * and its replay can never disagree; any precondition replay would refuse is refused here.
+   */
+  prepareClockRelease(params: { readonly releaseRequestId: string; readonly at: number }): {
+    readonly game: Game;
+    readonly event: AdjudicationClocksStartedEvent;
+  } {
+    const stopped = this.state.stoppedClock;
+    if (!stopped || this.state.status.over || this.state.phase === 'proving') {
+      throw new GameError('No managed stop to release');
+    }
+    if (typeof params.releaseRequestId !== 'string' || params.releaseRequestId.length === 0) {
+      throw new GameError('releaseRequestId must be a non-empty string');
+    }
+    const event: AdjudicationClocksStartedEvent = Object.freeze({
+      type: 'AdjudicationClocksStarted',
+      gameId: this.state.gameId,
+      clockPolicy: 'observed-release-v1',
+      rulesVersion: stopped.rulesVersion,
+      releaseRequestId: params.releaseRequestId,
+      stopId: stopped.stopId,
+      originatingOperationId: stopped.originatingOperationId,
+      originatingResolvedSeq: stopped.originatingResolvedSeq,
+      completionHead: stopped.completionHead,
+      expectedHead: this.state.eventSequence,
+      turnLineageId: stopped.turnLineageId,
+      side: this.state.position.turn,
+      ply: this.state.ply,
+      at: params.at,
+    });
+    return { event, game: new Game(Game.reduce(this.state, event, REPLAY_TOKEN)) };
+  }
+
   get id(): string { return this.state.gameId; }
   get variant(): Variant { return this.state.variant; }
   get players(): Players { return this.state.players; }
