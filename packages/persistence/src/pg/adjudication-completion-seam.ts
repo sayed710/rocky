@@ -41,8 +41,12 @@ export class AdjudicationCompletionSeam {
     return this.#controller.createJob(prepared, game);
   }
 
-  stepProofJob(operationId: string, totalWorkBudget: number): JobStepResult {
-    return this.#controller.stepJob(operationId, totalWorkBudget);
+  stepProofJob(
+    operationId: string,
+    totalWorkBudget: number,
+    shouldYield?: () => boolean,
+  ): JobStepResult {
+    return this.#controller.stepJob(operationId, totalWorkBudget, shouldYield);
   }
 
   stepAllProofJobs(totalWorkBudget: number): AllStepResult {
@@ -59,6 +63,14 @@ export class AdjudicationCompletionSeam {
 
   evictProofJob(operationId: string): boolean {
     return this.#controller.evictJob(operationId);
+  }
+
+  escalateProofJob(operationId: string): boolean {
+    return this.#controller.escalate(operationId);
+  }
+
+  concludeUnresolvedProofJob(operationId: string): JobStepResult {
+    return this.#controller.concludeUnresolved(operationId);
   }
 
   getRetainedSettlement(gameId: string, operationId: string): RetainedSettlement | undefined {
