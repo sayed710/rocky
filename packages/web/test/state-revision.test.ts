@@ -75,3 +75,15 @@ test('revisioned Crazyhouse snapshots and moves preserve legal drop origins', ()
   assert.equal(decode(JSON.stringify({ ...frame, legalMoves: { 'X@': ['e4'] } })), null);
   assert.equal(decode(JSON.stringify({ ...frame, legalMoves: { 'P@': ['e9'] } })), null);
 });
+
+test('ADJ-01 an adjudication phase is accepted only as proving or stopped, and absence stays valid', () => {
+  for (const adjudication of ['proving', 'stopped'] as const) {
+    const frame = { t: 'state', gameId: 'g', state: { ...state, stateRevision: 3, adjudication } };
+    assert.deepEqual(decode(JSON.stringify(frame), 'revision'), frame);
+  }
+  for (const adjudication of ['released', '', null, 1, { phase: 'proving' }]) {
+    assert.equal(decode(JSON.stringify({ t: 'state', gameId: 'g', state: { ...state, stateRevision: 3, adjudication } }), 'revision'), null);
+  }
+  const plain = { t: 'state', gameId: 'g', state: { ...state, stateRevision: 3 } };
+  assert.deepEqual(decode(JSON.stringify(plain), 'revision'), plain);
+});

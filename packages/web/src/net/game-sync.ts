@@ -39,6 +39,7 @@ import {
   isInvalidDeadPositionEvent,
   isInvalidDeadPositionStatus,
   isValidDeadPositionOutcome,
+  isValidAdjudication,
 } from './ws-protocol.js';
 import { VARIANTS } from '../api/models.js';
 
@@ -104,6 +105,11 @@ export interface GameSyncState {
    */
   readonly ready: ReadyView | null;
   /**
+   * The server's adjudication phase from the latest snapshot (Issue #124): `proving` while a command
+   * awaits its proof (nothing may be played), `stopped` while the clocks are stopped, else `null`.
+   */
+  readonly adjudication: 'proving' | 'stopped' | null;
+  /**
    * Authoritative legal-move map for the side to move (origin square → legal
    * destination squares), from the latest server snapshot or move broadcast.
    * Refreshed on every MoveBroadcast via the push-based `legalMoves` field;
@@ -162,6 +168,25 @@ function mergeReady(current: ReadyView | null, next: ReadyView | null): ReadyVie
   return { w: current.w || next.w, b: current.b || next.b };
 }
 
+function isValidOptionalStateRevision(value: unknown): boolean {
+  return value === undefined || isStateRevision(value);
+}
+
+function isValidTurnStartedAt(value: unknown): boolean {
+  return value === undefined || value === null || clockAnchor(value) !== null;
+}
+
+function isValidOptionalReady(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (Array.isArray(value)) return false;
+  return readyView(value) !== null;
+}
+
+function isValidChess960StartId(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 959;
+}
+
 function initialState(gameId: string): GameSyncState {
   return {
     gameId,
@@ -181,6 +206,7 @@ function initialState(gameId: string): GameSyncState {
     fenHash: null,
     presence: null,
     ready: null,
+    adjudication: null,
     legalMoves: {},
     pending: null,
     lastReject: null,
@@ -466,6 +492,7 @@ export class GameSync {
   private canCommand(): boolean {
     if (!this.state.connected) return false;
     if (this.hasIncompleteRecovery()) return false;
+    if (this.state.adjudication === 'proving') return false;
     if (!this.session) return true;
     this.session.captureGeneration(); // Observe persisted cross-tab logout barriers too.
     return this.session.current?.user.id === this.authorizedUserId;
@@ -637,6 +664,9 @@ export class GameSync {
 
   private handleMessage(msg: ServerMessage): void {
     if (this.hasInvalidDeadPosition(msg)) return;
+    if ((msg.t === 'joined' || msg.t === 'state' || msg.t === 'resumed') && !isValidAdjudication(msg.state?.adjudication)) {
+      return;
+    }
     if ('gameId' in msg && msg.gameId !== this.gameId) return;
     if (msg.t !== 'joined' && msg.t !== 'reject' && !this.state.connected) return;
     switch (msg.t) {
@@ -862,6 +892,7 @@ export class GameSync {
       // A snapshot from a gateway older than ADR-0148 has no field at all: keep what is known rather
       // than reopening the board. An explicit `null` means the game has no readiness.
       ready,
+      adjudication: view.adjudication ?? null,
       legalMoves: view.legalMoves,
       // Reconcile the displayed position and release the optimistic input gate.
       // An unchanged snapshot cannot prove cancellation: retain the uncertainty
@@ -930,6 +961,7 @@ export class GameSync {
       drawOffer: view.drawOffer,
       fenHash: view.fenHash,
       ready,
+      adjudication: view.adjudication ?? null,
       legalMoves: view.legalMoves,
       pending: null,
       pendingAction: null,
@@ -1296,24 +1328,11 @@ export class GameSync {
   }
 
   private isValidOptionalFields(v: Record<string, unknown>): boolean {
-    if (v.stateRevision !== undefined && !isStateRevision(v.stateRevision)) return false;
-    if (v.turnStartedAt !== undefined && v.turnStartedAt !== null && (typeof v.turnStartedAt !== 'number' || !Number.isFinite(v.turnStartedAt))) return false;
-    if (v.ready !== undefined && v.ready !== null) {
-      if (typeof v.ready !== 'object' || Array.isArray(v.ready)) return false;
-      const ready = v.ready as Record<string, unknown>;
-      if (typeof ready.w !== 'boolean' || typeof ready.b !== 'boolean') return false;
-    }
-    if (
-      v.chess960StartId !== undefined &&
-      v.chess960StartId !== null &&
-      (typeof v.chess960StartId !== 'number' ||
-        !Number.isInteger(v.chess960StartId) ||
-        v.chess960StartId < 0 ||
-        v.chess960StartId > 959)
-    ) {
-      return false;
-    }
-    return true;
+    if (!isValidOptionalStateRevision(v.stateRevision)) return false;
+    if (!isValidTurnStartedAt(v.turnStartedAt)) return false;
+    if (!isValidOptionalReady(v.ready)) return false;
+    if (!isValidChess960StartId(v.chess960StartId)) return false;
+    return isValidAdjudication(v.adjudication);
   }
 
   private isValidRecoverySnapshot(view: unknown): view is StateView {

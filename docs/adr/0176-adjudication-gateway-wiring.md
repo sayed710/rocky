@@ -2,7 +2,7 @@
 
 - **Status**: Proposed / Bounded Scope (Issue #124). Behind `ADJUDICATION_ENABLED`, off by default; no rollout authority.
 - **Date**: 2026-11-05
-- **References**: Issue #124, [ADR 0174](0174-durable-adjudication-persistence.md), [ADR 0175](0175-adjudication-worker.md), [ADR 0149](0149-autonomous-flag-expiry.md), `packages/realtime-gateway/src/authority.ts`, `packages/realtime-gateway/src/protocol.ts`, `services/gateway/src/adjudication-worker.ts`, `services/gateway/src/serve.ts`, `services/gateway/src/adjudication-resync.ts`, `packages/realtime-gateway/test/adjudication-authority.test.ts`, `services/gateway/test/adjudication-gateway.integration.test.ts`.
+- **References**: Issue #124, [ADR 0174](0174-durable-adjudication-persistence.md), [ADR 0175](0175-adjudication-worker.md), [ADR 0149](0149-autonomous-flag-expiry.md), `packages/realtime-gateway/src/authority.ts`, `packages/realtime-gateway/src/protocol.ts`, `services/gateway/src/adjudication-worker.ts`, `services/gateway/src/serve.ts`, `services/gateway/src/adjudication-resync.ts`, `packages/realtime-gateway/test/adjudication-authority.test.ts`, `services/gateway/test/adjudication-gateway.integration.test.ts`, `packages/web/src/net/game-sync.ts`, `packages/web/src/app/game-controller.ts`.
 
 ## Context
 
@@ -41,6 +41,13 @@ and when it is on, the owner of a game must remain the only writer of its hot co
 5. **Protocol.** `StateView.adjudication` is optional and present only for a proving or stopped game.
 6. **Service.** `ADJUDICATION_ENABLED=1` (requires `DATABASE_URL`) constructs the store, the admission
    and the worker on every replica; `ADJUDICATION_RULES_VERSION` names the rules lineage.
+
+7. **Web client.** `decodeServer` accepts `adjudication` only as `proving` or `stopped` (absent stays
+   valid). `GameSync` carries it from every snapshot, including an equal-revision one (the settlement's
+   state arrives at the revision of its move). The board is nobody's turn while `proving`, and the
+   ordinary status line reads *Checking the position…* / *Clocks paused. Play resumes in a moment.*
+   (English and Arabic). No new chrome is added; the clocks stop because the server sends no running
+   anchor while stopped.
 
 ## Consequences
 

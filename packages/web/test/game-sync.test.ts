@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { WsClient } from '../src/net/ws-client.js';
+import { WsClient, type WsClientListeners } from '../src/net/ws-client.js';
 import { GameSync, isStateRevision } from '../src/net/game-sync.js';
 import { AuthoritativeMoveOracle } from '../src/net/authoritative-oracle.js';
-import type { LegalMoves, StateView, WsColor } from '../src/net/ws-protocol.js';
+import type { LegalMoves, ServerMessage, StateView, WsColor } from '../src/net/ws-protocol.js';
 import { FakeSocketFactory, ManualScheduler } from './support/fake-socket.js';
 
 function setup() {
@@ -1772,4 +1772,80 @@ test('regression Greptile P2: equal-head reconnect clears ordinary command error
     state: { ...stateView(0, 'w'), ready: null, stateRevision: 0 },
   });
   assert.ok(sync.getState().lastReject?.message.includes('Cannot move while uncertain.'), 'refusal received during uncertainty preserved across reconnect');
+});
+
+test('direct non-wire ordinary legacy snapshots with invalid phase are ignored, preserving state and command gating', () => {
+  const { factory, client, sync } = setup();
+  let capturedMessageListener: ((msg: ServerMessage) => void) | undefined;
+  const originalOn = client.on.bind(client);
+  client.on = (listeners: WsClientListeners) => {
+    if (listeners.message) {
+      capturedMessageListener = listeners.message;
+    }
+    return originalOn(listeners);
+  };
+
+  sync.start();
+  factory.last.open();
+  assert.ok(capturedMessageListener, 'GameSync registered message listener via client.on');
+
+  // Valid legacy joined frame with legal moves for White delivered directly to captured listener
+  capturedMessageListener({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: stateView(0, 'w', [], { e2: ['e4'] }),
+  });
+  assert.equal(sync.getState().connected, true);
+  assert.equal(sync.getState().adjudication, null);
+  assert.equal(sync.getState().turn, 'w');
+
+  // Direct transport delivers ordinary legacy state snapshot with invalid adjudication phase
+  const malformedState = {
+    ...stateView(0, 'w', [], { e2: ['e4'] }),
+    adjudication: 'bogus_phase',
+  } as unknown as StateView;
+  capturedMessageListener({
+    t: 'state',
+    gameId: 'g1',
+    state: malformedState,
+  });
+
+  // State is ignored: adjudication remains null, not corrupted to bogus_phase
+  assert.equal(sync.getState().adjudication, null);
+  assert.equal(sync.getState().snapshot?.adjudication, undefined);
+
+  // Command gating is preserved: valid move can still be submitted through open socket
+  const pending = sync.submitMove('e2e4');
+  assert.ok(pending, 'move can be submitted because malformed phase was ignored');
+  assert.equal(sync.getState().pending?.uci, 'e2e4');
+
+  // Assert actual outgoing command was sent over the socket
+  const sentMoves = factory.last.sent
+    .map((frame) => JSON.parse(frame) as { t: string; uci?: string })
+    .filter((msg) => msg.t === 'move');
+  assert.equal(sentMoves.length, 1);
+  assert.equal(sentMoves[0]?.uci, 'e2e4');
+
+  // Ensure fresh unconnected fixture captures its own listener
+  const fresh = setup();
+  let freshCapturedListener: ((msg: ServerMessage) => void) | undefined;
+  const freshOriginalOn = fresh.client.on.bind(fresh.client);
+  fresh.client.on = (listeners: WsClientListeners) => {
+    if (listeners.message) {
+      freshCapturedListener = listeners.message;
+    }
+    return freshOriginalOn(listeners);
+  };
+  fresh.sync.start();
+  // Socket remains unopened (unconnected)
+  assert.ok(freshCapturedListener, 'Fresh GameSync registered its own message listener');
+  freshCapturedListener({
+    t: 'joined',
+    gameId: 'g1',
+    role: 'white',
+    state: malformedState,
+  });
+  assert.equal(fresh.sync.getState().connected, false, 'malformed joined snapshot is ignored');
+  assert.equal(fresh.sync.submitMove('e2e4'), null, 'cannot command on unconnected sync');
 });

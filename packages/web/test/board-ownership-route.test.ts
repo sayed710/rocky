@@ -536,3 +536,71 @@ test('route: gap recovery lifecycle disables input, clears premoves, manages ret
     }
   }
 });
+
+test('route: proving phase disables board input, clears queued premove, blocks gestures, and restores input after phase update', () => {
+  const r = setup();
+  try {
+    const players = { white: 'u1', black: 'u2' };
+    const stateOffTurn: StateView = {
+      ...live(AFTER_E4, 'b', { e7: ['e6', 'e5'] }),
+      players,
+    };
+    r.join('white', stateOffTurn);
+    assert.equal(r.enabled.at(-1), true, 'ordinary live player gets input');
+
+    // 1. Ordinary off-turn premove works
+    r.click('d2');
+    assert.deepEqual(r.selected(), ['d2'], 'own-colour piece selectable off-turn');
+    r.click('d4');
+    assert.deepEqual(r.premoves().sort(), ['d2', 'd4'], 'off-turn premove queues');
+    assert.deepEqual(r.submitted, []);
+
+    // 2. Authoritative proving snapshot lands: proving blocks real input/queued premove
+    const stateProving: StateView = {
+      ...stateOffTurn,
+      adjudication: 'proving',
+    };
+    r.sync(stateProving);
+    assert.equal(r.enabled.at(-1), false, 'board input disabled while proving');
+    assert.deepEqual(r.premoves(), [], 'proving clears previously queued premove');
+    assert.deepEqual(r.selected(), [], 'proving clears active selection');
+
+    // Gestures while proving are completely blocked (cannot select, cannot premove, cannot submit)
+    r.click('d2');
+    assert.deepEqual(r.selected(), [], 'pieces not selectable while proving');
+    r.click('d4');
+    assert.deepEqual(r.premoves(), [], 'premoves cannot queue while proving');
+    assert.deepEqual(r.submitted, []);
+
+    // 3. Stopped state restores input while clocks remain stopped
+    const stateStopped: StateView = {
+      ...stateOffTurn,
+      adjudication: 'stopped',
+    };
+    r.sync(stateStopped);
+    assert.equal(r.enabled.at(-1), true, 'board input re-enabled in stopped state');
+
+    r.click('d2');
+    assert.deepEqual(r.selected(), ['d2']);
+    r.click('d4');
+    assert.deepEqual(r.premoves().sort(), ['d2', 'd4'], 'premove queues in stopped state');
+    assert.deepEqual(r.submitted, []);
+
+    // Proving again disables and clears
+    r.sync(stateProving);
+    assert.equal(r.enabled.at(-1), false, 'board input disabled on re-entering proving');
+    assert.deepEqual(r.premoves(), [], 're-entering proving clears queued premove again');
+
+    // 4. Released / ordinary state (adjudication cleared) restores input
+    r.sync(stateOffTurn);
+    assert.equal(r.enabled.at(-1), true, 'board input re-enabled after proving release');
+
+    r.click('d2');
+    assert.deepEqual(r.selected(), ['d2']);
+    r.click('d4');
+    assert.deepEqual(r.premoves().sort(), ['d2', 'd4'], 'premove queues again once released');
+    assert.deepEqual(r.submitted, []);
+  } finally {
+    r.dispose();
+  }
+});

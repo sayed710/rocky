@@ -1,7 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AccessTokenService } from '@chess-platform/api';
-import { GameAuthority, InMemoryPubSub, InMemoryConnection, RealtimeGateway } from '@chess-platform/realtime-gateway';
+import {
+  AdjudicationJobController,
+  Game,
+  prepareAuthoritativeCommand,
+  type AdjudicationStartedEvent,
+  type PreparedOperation,
+} from '@chess-platform/game';
+import {
+  ADJUDICATION_ACTOR,
+  GameAuthority,
+  InMemoryEventLog,
+  InMemoryPubSub,
+  InMemoryConnection,
+  RealtimeGateway,
+  decode,
+  type AdjudicationAdmission,
+  type ClientMessage,
+} from '@chess-platform/realtime-gateway';
 import { GameSync } from '../src/net/game-sync.js';
 import { WsClient } from '../src/net/ws-client.js';
 import { MemoryTokenStore, SessionManager } from '../src/net/session.js';
@@ -12,7 +29,77 @@ import { NetworkError, httpErrorFrom } from '../src/net/errors.js';
 
 const flush = async (): Promise<void> => { await new Promise<void>((resolve) => setImmediate(resolve)); };
 
-async function harness(anonymous = false) {
+function startedFor(op: PreparedOperation): AdjudicationStartedEvent {
+  return {
+    type: 'AdjudicationStarted',
+    gameId: op.gameId,
+    operationId: op.operationId,
+    baseRevision: op.baseRevision,
+    at: op.at,
+    rulesVersion: op.rulesVersion,
+    prepared: op,
+    ...(op.clockPolicy ? { clockPolicy: op.clockPolicy } : {}),
+  };
+}
+
+class FakeAdmission implements AdjudicationAdmission {
+  readonly rulesVersion = 'rocky-adjudication@1';
+  readonly clockPolicy = 'observed-release-v1' as const;
+  readonly requests: Array<Parameters<AdjudicationAdmission['start']>[0]> = [];
+  failWith: Error | undefined;
+  constructor(private readonly log: InMemoryEventLog) {}
+  async start(params: Parameters<AdjudicationAdmission['start']>[0]): Promise<{ status: 'started' | 'noop' }> {
+    this.requests.push(params);
+    if (this.failWith) throw this.failWith;
+    const logged = await this.log.load(params.gameId);
+    const game = Game.fromEvents(logged.map((e) => e.event));
+    let op: PreparedOperation;
+    if ('prepared' in params) {
+      op = params.prepared;
+    } else {
+      const adm = prepareAuthoritativeCommand(game, params.command, params.context);
+      if (adm.kind === 'noop') return { status: 'noop' };
+      op = adm.operation;
+    }
+    await this.log.append(params.gameId, logged.length - 1, [startedFor(op)]);
+    return { status: 'started' };
+  }
+}
+
+async function settleAndRelease(
+  log: InMemoryEventLog,
+  gameId: string,
+  at: number,
+  releaseAt?: number,
+): Promise<void> {
+  const logged = await log.load(gameId);
+  const game = Game.fromEvents(logged.map((e) => e.event));
+  const pending = game.adjudication;
+  if (!pending) throw new Error('No pending adjudication to settle');
+  const ctrl = new AdjudicationJobController();
+  ctrl.createJob(pending.prepared, game);
+  while (ctrl.getJob(pending.operationId)!.status === 'active') {
+    ctrl.stepJob(pending.operationId, 1000);
+  }
+  const settled = ctrl.settleJob(game, pending.operationId, at);
+  await log.append(gameId, logged.length - 1, settled.batch);
+  if (releaseAt !== undefined) {
+    const released = settled.game.prepareClockRelease({
+      releaseRequestId: `stop:${pending.operationId}`,
+      at: releaseAt,
+    });
+    await log.append(gameId, logged.length - 1 + settled.batch.length, [released.event]);
+  }
+}
+
+interface HarnessOptions {
+  readonly anonymous?: boolean;
+  readonly adjudication?: boolean;
+}
+
+async function harness(param: boolean | HarnessOptions = false) {
+  const options = typeof param === 'boolean' ? { anonymous: param } : param;
+  const anonymous = options.anonymous ?? false;
   let now = 1_000;
   let serverNow: number | null = null;
   let sequence = 0;
@@ -32,7 +119,11 @@ async function harness(anonymous = false) {
   const tokenA = issue();
   if (!anonymous) session.adopt(tokenA, false);
   const pubsub = new InMemoryPubSub();
-  const authority = new GameAuthority(pubsub, () => now);
+  const log = new InMemoryEventLog();
+  const admission = options.adjudication ? new FakeAdmission(log) : undefined;
+  const authority = new GameAuthority(pubsub, () => now, log, {
+    ...(admission ? { adjudication: admission } : {}),
+  });
   await authority.createGame({ gameId: 'g1', players: { white: 'alice', black: 'bob' }, rated: false,
     timeControl: { initialMs: 300_000, incrementMs: 0, delayMs: 0, kind: 'sudden_death' } });
   const gateway = new RealtimeGateway(authority, pubsub, { verify: (token) => {
@@ -45,19 +136,44 @@ async function harness(anonymous = false) {
   const sync = new GameSync(client, { gameId: 'g1', session, scheduler,
     ...(!anonymous ? { token: tokenA.tokens.accessToken } : {}) });
   let serverConnection: InMemoryConnection | null = null;
+  let emittedFrames = 0;
   const exchange = async (): Promise<InMemoryConnection> => {
     const connection = new InMemoryConnection();
     serverConnection = connection;
+    emittedFrames = 0;
     gateway.handleConnection(connection);
     for (const frame of factory.last.sent) connection.deliver(JSON.parse(frame));
     await flush();
-    for (const frame of connection.sent) factory.last.emit(frame);
+    while (emittedFrames < connection.sent.length) {
+      factory.last.emit(connection.sent[emittedFrames++]);
+    }
     return connection;
+  };
+  const deliverLast = async (): Promise<void> => {
+    const raw = factory.last.sent.at(-1);
+    if (!raw) throw new Error('No sent frame');
+    const decoded = decode(raw);
+    if (!decoded) throw new Error('Failed to decode frame');
+    if (!serverConnection) throw new Error('No active server connection');
+    serverConnection.deliver(decoded);
+    await flush();
+    while (emittedFrames < serverConnection.sent.length) {
+      factory.last.emit(serverConnection.sent[emittedFrames++]);
+    }
+  };
+  const deliver = async (msg: ClientMessage): Promise<void> => {
+    if (!serverConnection) throw new Error('No active server connection');
+    serverConnection.deliver(msg);
+    await flush();
+    while (emittedFrames < serverConnection.sent.length) {
+      factory.last.emit(serverConnection.sent[emittedFrames++]);
+    }
   };
   sync.start(); factory.last.open(); await flush();
   const first = await exchange();
   assert.equal(first.last('joined')?.role, anonymous ? 'spectator' : 'white', 'initial server-assigned role');
   return { session, sync, factory, scheduler, client, tokens, tokenA, issue, exchange, first,
+    authority, log, admission, deliverLast, deliver,
     closeServer: () => serverConnection?.close(),
     peerAdopt: (auth: AuthResponse) => channel.onmessage?.({ data: { type: 'session_adopted', auth } } as MessageEvent),
     refreshes: () => refreshes, advance: (ms: number) => { now += ms; },
@@ -66,7 +182,18 @@ async function harness(anonymous = false) {
     reconnect: async () => {
       serverConnection?.close(); serverConnection = null;
       factory.last.serverClose(); scheduler.runNext(); factory.last.open(); await flush();
-    } };
+    },
+    settleAndReport: async (at: number, releaseAt?: number) => {
+      await settleAndRelease(log, 'g1', at, releaseAt);
+      await authority.apply('g1', ADJUDICATION_ACTOR, { kind: 'adjudicationChanged' });
+      await flush();
+      if (serverConnection) {
+        while (emittedFrames < serverConnection.sent.length) {
+          factory.last.emit(serverConnection.sent[emittedFrames++]);
+        }
+      }
+    },
+  };
 }
 
 test('R-04 control: reconnect before token expiry restores the player without refresh', async () => {
@@ -589,4 +716,193 @@ test('a permanently refused hydration (a pre-#127 atomic game, option ii) stops 
   assert.equal(h.factory.sockets.length, sockets, 'no reconnect storm: no new socket is opened');
   assert.equal(h.sync.getState().connected, false);
   assert.equal(h.sync.getState().recoveryAvailable, true, 'the player can retry explicitly');
+});
+
+// ── Adjudication Reconnect & Recovery (Issue #124, ADR-0176) ────────────────
+
+test('ADJ-REC-01: proving phase survives socket disconnect, reconnect, and resubscribe with actions gated and no command replay', async (t) => {
+  const h = await harness({ adjudication: true }); t.after(() => dispose(h));
+  const pending = h.sync.submitMove('e2e4');
+  assert.ok(pending);
+  await h.deliverLast();
+  assert.equal(h.sync.getState().adjudication, 'proving');
+  assert.equal(h.sync.getState().connected, true);
+
+  // While proving, commands are gated
+  assert.equal(h.sync.submitMove('d2d4'), null);
+  assert.equal(h.sync.offerDraw(), false);
+  assert.equal(h.sync.resign(), false);
+  assert.equal(h.sync.abort(), false);
+  assert.equal(h.sync.claimFlag(), false);
+
+  const obsolete = h.factory.last;
+  await h.reconnect();
+  assert.equal(h.sync.getState().connected, false);
+  assert.equal(h.sync.getState().adjudication, 'proving', 'proving phase retained through disconnect');
+
+  // Obsolete socket delivery cannot alter active state
+  obsolete.emit({ t: 'state', gameId: 'g1', state: { ...h.sync.getState().snapshot!, adjudication: undefined } });
+  assert.equal(h.sync.getState().adjudication, 'proving');
+
+  const conn2 = await h.exchange();
+  assert.equal(conn2.last('joined')?.role, 'white');
+  assert.equal(h.sync.getState().connected, true);
+  assert.equal(h.sync.getState().adjudication, 'proving', 'proving phase restored from authoritative joined snapshot');
+
+  // After reconnect, commands remain gated
+  assert.equal(h.sync.submitMove('d2d4'), null);
+  assert.equal(h.sync.offerDraw(), false);
+  assert.equal(h.sync.resign(), false);
+
+  assertNoReplay(h);
+});
+
+test('ADJ-REC-02: stopped phase survives disconnect and reconnect with null clock anchor (paused clocks)', async (t) => {
+  const h = await harness({ adjudication: true }); t.after(() => dispose(h));
+  assert.ok(h.sync.submitMove('e2e4'));
+  await h.deliverLast();
+  assert.equal(h.sync.getState().adjudication, 'proving');
+
+  // Settle adjudication without clock release -> enters stopped clocks phase
+  await h.settleAndReport(2100);
+  assert.equal(h.sync.getState().adjudication, 'stopped');
+  assert.equal(h.sync.getState().turnStartedAt, null, 'turnStartedAt is null when clocks are paused');
+  assert.ok(h.sync.getState().clock !== null);
+
+  await h.reconnect();
+  assert.equal(h.sync.getState().connected, false);
+  assert.equal(h.sync.getState().adjudication, 'stopped', 'stopped phase retained during disconnect');
+
+  const conn2 = await h.exchange();
+  assert.equal(conn2.last('joined')?.role, 'white');
+  assert.equal(h.sync.getState().connected, true);
+  assert.equal(h.sync.getState().adjudication, 'stopped', 'stopped phase restored from joined snapshot');
+  assert.equal(h.sync.getState().turnStartedAt, null, 'turnStartedAt remains null after reconnect');
+});
+
+test('ADJ-REC-03: missed adjudication settlement and release recover via authoritative resume on reconnect', async (t) => {
+  const h = await harness({ adjudication: true }); t.after(() => dispose(h));
+  assert.ok(h.sync.submitMove('e2e4'));
+  await h.deliverLast();
+  assert.equal(h.sync.getState().adjudication, 'proving');
+  assert.equal(h.sync.getState().ply, 0);
+
+  // Disconnect socket while proving
+  h.closeServer();
+  h.factory.last.serverClose();
+  h.scheduler.runNext();
+
+  // While disconnected, worker settles and releases the clock
+  await h.settleAndReport(2100, 2200);
+
+  // Reconnect transport
+  h.factory.last.open();
+  await flush();
+
+  // Server responds to join with updated state at ply 1 and cleared adjudication
+  const connection = await h.exchange();
+  assert.equal(connection.last('joined')?.role, 'white');
+
+  // Because client missed ply 0 -> 1, client sends resume
+  const lastRaw = h.factory.last.sent.at(-1)!;
+  const resume = decode(lastRaw);
+  assert.ok(resume !== null && resume.t === 'resume');
+  assert.equal(resume.lastPly, 0);
+
+  connection.deliver(resume);
+  await flush();
+  const resumed = connection.last('resumed');
+  assert.ok(resumed);
+  h.factory.last.emit(resumed);
+
+  assert.equal(h.sync.getState().ply, 1);
+  assert.equal(h.sync.getState().turn, 'b');
+  assert.equal(h.sync.getState().adjudication, null);
+  assert.equal(h.sync.getState().connected, true);
+
+  // Pending move and uncertainty notices are cleared upon recovery
+  assert.equal(h.sync.getState().pending, null);
+  assert.equal(h.sync.getState().lastReject, null);
+
+  // While turn is black, move is gated by turn, but non-move player action is unblocked
+  assert.equal(h.sync.submitMove('d2d4'), null, 'cannot move when it is opponent turn');
+  assert.equal(h.sync.offerDraw(), true, 'new player action is accepted once adjudication settles');
+  assert.equal(h.sync.getState().pendingAction, 'offerDraw');
+
+  // Verify the action was transmitted once over the wire
+  const lastSent = JSON.parse(h.factory.last.sent.at(-1)!);
+  assert.deepEqual(lastSent, { t: 'offerDraw', gameId: 'g1' });
+  assert.equal(h.sync.offerDraw(), false, 'cannot send second action while previous action is pending');
+});
+
+test('ADJ-REC-04: stale socket frames and stale revisions cannot revert active proving phase on reconnect', async (t) => {
+  const h = await harness({ adjudication: true }); t.after(() => dispose(h));
+  assert.ok(h.sync.submitMove('e2e4'));
+  await h.deliverLast();
+  assert.equal(h.sync.getState().adjudication, 'proving');
+  const provingRevision = h.sync.stateRevision;
+  assert.ok(provingRevision !== null && provingRevision > 0);
+
+  await h.reconnect();
+
+  const staleSnapshot = {
+    ...h.sync.getState().snapshot!,
+    stateRevision: 0,
+    adjudication: undefined,
+  };
+  h.factory.last.emit({ t: 'state', gameId: 'g1', state: staleSnapshot });
+  assert.equal(h.sync.getState().adjudication, 'proving');
+  assert.equal(h.sync.stateRevision, provingRevision);
+
+  await h.exchange();
+  assert.equal(h.sync.getState().adjudication, 'proving');
+});
+
+test('ADJ-REC-05: malformed adjudication value in snapshot is rejected by recovery snapshot validation', async (t) => {
+  const h = await harness({ adjudication: true }); t.after(() => dispose(h));
+  await h.reconnect();
+  await h.exchange();
+
+  h.factory.last.emit({
+    t: 'move',
+    gameId: 'g1',
+    ply: 3,
+    uci: 'g1f3',
+    san: 'Nf3',
+    by: 'w',
+    clock: { w: 300_000, b: 300_000 },
+    serverTs: 1000,
+    stateRevision: 5,
+    fenHash: 'hash',
+    legalMoves: {},
+  });
+  assert.equal(h.sync.getState().recovering, true);
+
+  const mockMoves = [
+    { ply: 1, uci: 'e2e4', san: 'e4', by: 'w' as const },
+    { ply: 2, uci: 'e7e5', san: 'e5', by: 'b' as const },
+    { ply: 3, uci: 'g1f3', san: 'Nf3', by: 'w' as const },
+  ];
+
+  const malformedSnapshot = {
+    ...h.sync.getState().snapshot!,
+    ply: 3,
+    moves: mockMoves,
+    stateRevision: 5,
+    adjudication: 'unsupported_phase' as unknown as 'proving',
+  };
+  h.factory.last.emit({ t: 'resumed', gameId: 'g1', state: malformedSnapshot, missed: [] });
+  assert.equal(h.sync.getState().recovering, true, 'debt persists when snapshot is malformed');
+  assert.notEqual(h.sync.getState().adjudication, 'unsupported_phase');
+
+  const validSnapshot = {
+    ...h.sync.getState().snapshot!,
+    ply: 3,
+    moves: mockMoves,
+    stateRevision: 5,
+    adjudication: 'proving' as const,
+  };
+  h.factory.last.emit({ t: 'resumed', gameId: 'g1', state: validSnapshot, missed: [] });
+  assert.equal(h.sync.getState().recovering, false, 'debt discharged with valid snapshot');
+  assert.equal(h.sync.getState().adjudication, 'proving');
 });

@@ -60,3 +60,63 @@ test('colorForRole maps roles to wire colors', () => {
   assert.equal(colorForRole('black'), 'b');
   assert.equal(colorForRole('spectator'), null);
 });
+
+test('decodeServer rejects invalid adjudication on legacy snapshots across joined, state, and resumed', () => {
+  const invalidPhases: readonly unknown[] = ['invalid_phase', 'random', null, 123, true, {}];
+  for (const phase of invalidPhases) {
+    const legacyStateWithPhase = {
+      fen: 'startpos',
+      turn: 'w',
+      legalMoves: { e2: ['e4'] },
+      adjudication: phase,
+    };
+
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'joined', gameId: 'g', role: 'white', state: legacyStateWithPhase })),
+      null,
+      `legacy joined with adjudication=${String(phase)} must be rejected`,
+    );
+
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'state', gameId: 'g', state: legacyStateWithPhase })),
+      null,
+      `legacy state with adjudication=${String(phase)} must be rejected`,
+    );
+
+    assert.equal(
+      decodeServer(JSON.stringify({ t: 'resumed', gameId: 'g', state: legacyStateWithPhase, missed: [] })),
+      null,
+      `legacy resumed with adjudication=${String(phase)} must be rejected`,
+    );
+  }
+});
+
+test('decodeServer accepts allowed legacy snapshots with undefined, proving, or stopped adjudication', () => {
+  const allowedPhases: readonly (string | undefined)[] = [undefined, 'proving', 'stopped'];
+  for (const phase of allowedPhases) {
+    const legacyState = {
+      fen: 'startpos',
+      turn: 'w',
+      legalMoves: { e2: ['e4'] },
+      ...(phase !== undefined ? { adjudication: phase } : {}),
+    };
+
+    const joined = decodeServer(JSON.stringify({ t: 'joined', gameId: 'g', role: 'white', state: legacyState }));
+    assert.equal(joined?.t, 'joined');
+    if (joined?.t === 'joined') {
+      assert.equal(joined.state.adjudication, phase);
+    }
+
+    const state = decodeServer(JSON.stringify({ t: 'state', gameId: 'g', state: legacyState }));
+    assert.equal(state?.t, 'state');
+    if (state?.t === 'state') {
+      assert.equal(state.state.adjudication, phase);
+    }
+
+    const resumed = decodeServer(JSON.stringify({ t: 'resumed', gameId: 'g', state: legacyState, missed: [] }));
+    assert.equal(resumed?.t, 'resumed');
+    if (resumed?.t === 'resumed') {
+      assert.equal(resumed.state.adjudication, phase);
+    }
+  }
+});
