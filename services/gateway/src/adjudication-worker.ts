@@ -68,8 +68,10 @@ export interface AdjudicationWorkerOptions {
    * promptly. A failed notice is retried every pass while this process runs, and a stop is not
    * released while its game has one outstanding. Delivery does not depend on it: an owner whose copy
    * shows a game proving or stopped re-reads the log on its own (ADR-0176).
+   *
+   * The callback should honor AbortSignal. Its idempotent durable notice may be retried after timeout.
    */
-  readonly publish: (change: AdjudicationChange) => Promise<void>;
+  readonly publish: (change: AdjudicationChange, signal: AbortSignal) => Promise<void>;
   /** Lease length per claim and renewal (default 30 s; minimum 2 ms). */
   readonly leaseMs?: number;
   /** Proof work per slice; the loop yields to other work between slices (default 2 000). */
@@ -143,6 +145,8 @@ interface InFlightJob {
 interface GameNoticeQueue {
   readonly items: AdjudicationChange[];
   drainer?: Promise<boolean>;
+  retryAt?: number;
+  timeoutCount?: number;
 }
 
 /** The release request id for a stop: one per stop, so every racing or retried release is the same. */
@@ -638,22 +642,34 @@ export class AdjudicationWorker {
 
   /** Drain a single game's FIFO queue of unpublished changes; returns true if the queue is now empty. */
   async #drainGame(gameId: string, queue: GameNoticeQueue): Promise<boolean> {
-    if (this.#halting || queue.drainer) {
+    if (this.#halting || queue.drainer || (queue.retryAt !== undefined && this.#now() < queue.retryAt)) {
       return false;
     }
-    let expired = false;
     let task!: Promise<boolean>;
     queue.drainer = task = Promise.resolve().then(async () => {
       try {
-        while (queue.items.length > 0 && !expired) {
+        while (queue.items.length > 0) {
           if (this.#halting || this.#pendingReleases.has(gameId)) return false;
           const next = queue.items[0]!;
+          const controller = new AbortController();
+          let published = false;
           try {
-            await this.options.publish(next);
+            const publishTask = Promise.resolve(this.options.publish(next, controller.signal)).then(() => true);
+            publishTask.catch(() => {});
+            published = await this.#awaitDrain(gameId, publishTask, () => controller.abort());
           } catch (error) {
             this.#fail('Publication of an adjudication change failed; it is retried every pass', error, { gameId });
             return false;
           }
+          if (!published) {
+            const timeoutCount = (queue.timeoutCount ?? 0) + 1;
+            queue.timeoutCount = timeoutCount;
+            const now = this.#now();
+            queue.retryAt = now + Math.min(this.#maxBackoffMs, this.#pollMs * 2 ** Math.min(timeoutCount, 20));
+            return false;
+          }
+          queue.timeoutCount = undefined;
+          queue.retryAt = undefined;
           const index = queue.items.indexOf(next);
           if (index !== -1) {
             queue.items.splice(index, 1);
@@ -670,20 +686,18 @@ export class AdjudicationWorker {
         }
       }
     });
-    return this.#awaitDrain(gameId, task, () => {
-      expired = true;
-    });
+    return task;
   }
 
-  async #awaitDrain(gameId: string, task: Promise<boolean>, onExpire: () => void): Promise<boolean> {
+  async #awaitDrain(gameId: string, task: Promise<boolean>, onExpire?: () => void): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     const timeout = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => {
         timer = undefined;
         timedOut = true;
-        onExpire();
         resolve(false);
+        onExpire?.();
       }, this.#publishWaitMs);
       timer.unref?.();
     });

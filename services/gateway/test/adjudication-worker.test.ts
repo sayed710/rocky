@@ -3416,7 +3416,7 @@ test('slot remains usable after failed or interrupted claims', async () => {
   }
 });
 
-test('publishWaitMs bounds hung per-game notice drain while other games publish, retains active drainer across passes, and detached drainer does not start queued notice after stop/restart', async () => {
+test('a hung publisher retries the same head after restart and ignores old completion', async () => {
   mock.timers.enable({ apis: ['setTimeout'] });
   const OTHER_GAME = '018f2780-0000-7000-8000-0000000000a1';
   const OTHER_OP = '018f2780-0000-7000-8000-0000000000a2';
@@ -3431,6 +3431,8 @@ test('publishWaitMs bounds hung per-game notice drain while other games publish,
   store.stepProofJob = () => step('ready');
 
   const firstGamePublishBarrier = createBarrier();
+  let firstSignal: AbortSignal | undefined;
+  let lateFlag = false;
   const invokedOps: string[] = [];
   const completedOps: string[] = [];
   const gameInvokedOps: string[] = [];
@@ -3441,15 +3443,18 @@ test('publishWaitMs bounds hung per-game notice drain while other games publish,
     executorId: EXECUTOR,
     concurrency: 2,
     publishWaitMs: 20,
-    publish: async (change) => {
+    publish: async (change, signal) => {
       if (change.kind !== 'settled') return;
       const opId = change.receipt.operationId;
       invokedOps.push(opId);
       if (change.gameId === GAME) {
         gameInvokedOps.push(opId);
       }
-      if (change.gameId === GAME && opId === OP) {
+      if (change.gameId === GAME && opId === OP && gameInvokedOps.length === 1) {
+        firstSignal = signal;
         await firstGamePublishBarrier.promise;
+        lateFlag = true;
+        return;
       }
       completedOps.push(opId);
       if (change.gameId === GAME) {
@@ -3481,6 +3486,7 @@ test('publishWaitMs bounds hung per-game notice drain while other games publish,
     mock.timers.tick(20);
     const pass1ResolvedAfterTick = await pumpUntil(() => pass1Done);
     assert.equal(pass1ResolvedAfterTick, true, 'first pass resolves after publishWaitMs despite hung barrier');
+    assert.equal(firstSignal?.aborted, true, 'first signal aborted immediately after pass1 timeout');
     const pass1 = await pass1Promise;
     assert.equal(pass1.settled, 2);
     assert.equal(pass1.failed, 0);
@@ -3512,27 +3518,26 @@ test('publishWaitMs bounds hung per-game notice drain while other games publish,
     await worker.stop();
     worker.start();
 
-    // Resolve the first barrier after restart and drain microtasks.
-    firstGamePublishBarrier.resolve();
-    const firstCompleted = await pumpUntil(() => gameCompletedOps.includes(OP) && worker.unpublishedCount === 1);
-    assert.equal(firstCompleted, true, 'detached drainer finishes in-flight first notice and removes it');
-    await pumpUntil(() => gameInvokedOps.includes(OP_2), 5);
-    assert.deepEqual(
-      gameInvokedOps,
-      [OP],
-      'detached drainer does not start the second queued notice after restart',
-    );
-    assert.deepEqual(gameCompletedOps, [OP]);
-
-    // Explicit next live runPass delivers only the second notice in order.
+    // Advance fake injected clock by 1_000 and explicitly run pass3 while original barrier still unresolved.
+    clock.now += 1_000;
     const pass3 = await worker.runPass();
     assert.equal(pass3.settled, 0);
     assert.equal(pass3.failed, 0);
     assert.equal(pass3.pending, 0);
     assert.equal(worker.unpublishedCount, 0);
-    assert.deepEqual(gameInvokedOps, [OP, OP_2], 'live pass delivers only the second notice in order');
+    assert.deepEqual(gameInvokedOps, [OP, OP, OP_2], 'invoked GAME sequence [OP,OP,OP_2]');
+    assert.deepEqual(gameCompletedOps, [OP, OP_2], 'completed GAME [OP,OP_2]');
+    assert.deepEqual(invokedOps, [OP, OTHER_OP, OP, OP_2]);
+
+    // Only after successful retry resolve old barrier, pump microtasks and assert late flag and that invocation/order/empty queue have not changed.
+    firstGamePublishBarrier.resolve();
+    const pumped = await pumpUntil(() => lateFlag);
+    assert.equal(pumped, true);
+    assert.equal(lateFlag, true);
+    assert.deepEqual(gameInvokedOps, [OP, OP, OP_2]);
     assert.deepEqual(gameCompletedOps, [OP, OP_2]);
-    assert.deepEqual(invokedOps, [OP, OTHER_OP, OP_2]);
+    assert.equal(worker.unpublishedCount, 0);
+    assert.deepEqual(invokedOps, [OP, OTHER_OP, OP, OP_2]);
   } finally {
     try {
       firstGamePublishBarrier.resolve();
