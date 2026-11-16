@@ -37,9 +37,19 @@ export class Room {
     return this.members.size;
   }
 
+  private fanout(msg: ServerMessage): void {
+    for (const m of this.members.values()) {
+      try {
+        m.conn.send(msg);
+      } catch {
+        console.error(`[Room] Failed to send to member ${m.conn.id} in game ${this.gameId}`);
+      }
+    }
+  }
+
   /** Fan a broadcast out to every member of the room. */
   broadcast(msg: Broadcast | StateMessage): void {
-    for (const m of this.members.values()) m.conn.send(msg);
+    this.fanout(msg);
   }
 
   /** Send a point-to-point message to one member, if present. */
@@ -49,7 +59,7 @@ export class Room {
 
   /** Send an arbitrary server message to every member of the room. */
   sendAll(msg: ServerMessage): void {
-    for (const m of this.members.values()) m.conn.send(msg);
+    this.fanout(msg);
   }
 
   /** Current presence snapshot for this game. */
@@ -67,7 +77,6 @@ export class Room {
 
   /** Broadcast the current presence to every member. */
   broadcastPresence(): void {
-    const p = this.presence();
-    for (const m of this.members.values()) m.conn.send(p);
+    this.fanout(this.presence());
   }
 }

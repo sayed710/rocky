@@ -547,8 +547,8 @@ test('createGame with throwing subscriber: logs contextual console.error with ch
 
     // Inspect ALL arguments across all logged calls
     const allArgs = loggedErrors.flat().map((arg) => String(arg));
-    assert.ok(allArgs.some((arg) => arg.includes('[GameAuthority]')), 'Must contain [GameAuthority] tag');
-    assert.ok(allArgs.some((arg) => arg.includes('game channel')), 'Must identify channel');
+    assert.ok(allArgs.some((arg) => arg.includes('[InMemoryPubSub]')), 'Must contain [InMemoryPubSub] tag');
+    assert.ok(allArgs.some((arg) => arg.includes('channel')), 'Must identify channel');
     assert.ok(allArgs.some((arg) => arg.includes(id)), 'Must include gameId');
     assert.ok(
       allArgs.every((arg) => !arg.includes(syntheticSentinel) && !arg.includes(BLOCKED_DEAD_FEN)),

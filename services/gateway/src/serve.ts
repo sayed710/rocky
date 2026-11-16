@@ -62,6 +62,12 @@
  *   has run out (ADR-0149). Every replica with `DATABASE_URL` runs it. It bounds how long an
  *   untouched flagged game stays open, never the outcome: any command reaching the owner after the
  *   flag records the timeout itself.
+ * - `ADJUDICATION_ENABLED` (default off; `1` enables, requires `DATABASE_URL`) — Issue #124 durable
+ *   adjudication (ADR-0176): every command is accepted as an adjudication obligation, settled by the
+ *   adjudication worker on every replica, and published by the game's owner. Off by default; enabling
+ *   it requires migrations 0053/0054 and the owner's rollout approval.
+ * - `ADJUDICATION_RULES_VERSION` (default `rocky-adjudication@1`) — the rules lineage recorded on
+ *   every adjudication; changing it mid-game is refused by the domain.
  *
  * Durable event log: ADR-0007 (M14 inc 2).
  * Redis pub/sub: ADR-0008 (M14 inc 3).
@@ -305,7 +311,26 @@ async function main(): Promise<void> {
   // A failed Redis publish loses that broadcast for other nodes; make it visible (throttled).
   pubsub.onPublishFailed?.(createPublishFailureLogger((channel) => logger.warn('Redis publish failed', { channel })));
 
+  // --- Durable adjudication (Issue #124, ADR-0176): off unless ADJUDICATION_ENABLED=1 ---
+  let adjudicationStore: import('@chess-platform/persistence/pg').PgAdjudicationStore | undefined;
+  if (process.env['ADJUDICATION_ENABLED'] === '1') {
+    if (!pgPool) throw new Error('ADJUDICATION_ENABLED requires DATABASE_URL');
+    const { PgAdjudicationStore } = await import('@chess-platform/persistence/pg');
+    adjudicationStore = new PgAdjudicationStore(pgPool);
+    logger.info('Durable adjudication is enabled');
+  }
+  const adjudicationRulesVersion = process.env['ADJUDICATION_RULES_VERSION'] ?? 'rocky-adjudication@1';
+
   const authority = new GameAuthority(pubsub, () => Date.now(), store, {
+    ...(adjudicationStore
+      ? {
+          adjudication: {
+            rulesVersion: adjudicationRulesVersion,
+            clockPolicy: 'observed-release-v1' as const,
+            start: (params) => adjudicationStore.startAdjudication(params),
+          },
+        }
+      : {}),
     durableReadTimeoutMs,
     durableWriteTimeoutMs,
     onDurableWriteStalled: (gameId, op) => logger.warn('Durable write stalled', { gameId, op }),
@@ -685,6 +710,43 @@ async function main(): Promise<void> {
     logger.info('Flag expiry is enabled');
   }
 
+  // --- Adjudication worker (Issue #124, ADR-0175/0176) ---
+  // Every replica with adjudication enabled: correctness comes from the database leases and permits.
+  let adjudicationWorker: { stop(): Promise<void> } | undefined;
+  let adjudicationResync: { stop(): Promise<void> } | undefined;
+  if (adjudicationStore) {
+    const { AdjudicationWorker, routedAdjudicationChange } = await import('./adjudication-worker.js');
+    const worker = new AdjudicationWorker({
+      store: adjudicationStore,
+      executorId: randomUUID(),
+      publish: routedAdjudicationChange({
+        authority,
+        router: commandRouter,
+        ...(ownershipRegistry ? { ownership: ownershipRegistry } : {}),
+        hasLocalSessions: (gameId) => gateway.hasLocalSessions(gameId),
+      }),
+      logger,
+      settledCounter: metrics.counter('gateway_adjudication_settled_total'),
+      releasedCounter: metrics.counter('gateway_adjudication_released_total'),
+      failuresCounter: metrics.counter('gateway_adjudication_failures_total'),
+    });
+    worker.start();
+    adjudicationWorker = worker;
+    // Delivery does not rest on the worker's notices: the owner re-reads every game it shows
+    // proving or stopped (ADR-0176).
+    const { AdjudicationResync } = await import('./adjudication-resync.js');
+    const resync = new AdjudicationResync({
+      authority,
+      router: commandRouter,
+      watched: gateway,
+      logger,
+      failuresCounter: metrics.counter('gateway_adjudication_resync_failures_total'),
+    });
+    resync.start();
+    adjudicationResync = resync;
+    logger.info('Adjudication worker is enabled');
+  }
+
   // --- HTTP health server ---
   const healthServer = createServer((req, res) => {
     if (req.url === '/health') {
@@ -858,6 +920,8 @@ async function main(): Promise<void> {
     // through Redis and the database, so it is awaited below before either closes.
     const noShowStopped = noShowWorker?.stop();
     const flagStopped = flagWorker?.stop();
+    const adjudicationStopped = adjudicationWorker?.stop();
+    const resyncStopped = adjudicationResync?.stop();
     // No new projection batch starts from here. The in-flight one is awaited before the wake consumers
     // unsubscribe and before pub/sub and the pool close, so a wake it publishes still has listeners.
     const projectionStopped = gamesProjection?.stop();
@@ -877,6 +941,8 @@ async function main(): Promise<void> {
         await engineShutdown; // ensure engine subprocesses are cleaned up before exit
         await noShowStopped;
         await flagStopped;
+        await adjudicationStopped;
+        await resyncStopped;
         await arenaDeadlinesStopped;
         if (commandConsumer) commandConsumer.stop();
         if (ownershipRegistry) {

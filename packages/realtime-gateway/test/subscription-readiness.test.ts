@@ -171,7 +171,12 @@ class FakeRedisBroker {
     this.publishError = err;
   }
 
+  publishThrowsSync = false;
+
   clientPublish(_client: FakeRedisClient, channel: string, message: string): Promise<number> {
+    if (this.publishError && this.publishThrowsSync) {
+      throw this.publishError;
+    }
     if (this.publishError) {
       return Promise.reject(this.publishError);
     }
@@ -778,6 +783,81 @@ test('SB10: publish rejection', async () => {
 
   unsub?.();
 });
+
+const SECRET_MARKER = 'redis://user:hunter2@internal-host:6379 rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR';
+
+async function publishFailureLogs(
+  err: Error,
+  opts: { sync: boolean },
+): Promise<{ logs: unknown[][]; failed: string[]; localDelivered: number }> {
+  const broker = new FakeRedisBroker();
+  const pubsub = new RedisPubSub(broker.createClient('pub'), broker.createClient('sub'), 'node-1');
+  const failed: string[] = [];
+  pubsub.onPublishFailed((ch) => failed.push(ch));
+  let localDelivered = 0;
+  pubsub.subscribe('game:sbx', () => {
+    localDelivered++;
+  });
+  broker.publishThrowsSync = opts.sync;
+  broker.failPublish(err);
+  const logs: unknown[][] = [];
+  const orig = console.error;
+  console.error = (...args: unknown[]) => {
+    logs.push(args);
+  };
+  try {
+    const msg = {
+      t: 'ended' as const,
+      gameId: 'sbx',
+      stateRevision: 1,
+      result: '1-0' as const,
+      termination: 'resignation' as const,
+      winner: 'w' as const,
+      serverTs: 1000,
+    };
+    pubsub.publish('game:sbx', msg);
+    await flush();
+    // the second failing publish still reaches local listeners and reports recovery (not that Redis recovered)
+    pubsub.publish('game:sbx', msg);
+    await flush();
+  } finally {
+    console.error = orig;
+    await pubsub.close();
+  }
+  return { logs, failed, localDelivered };
+}
+
+for (const sync of [false, true]) {
+  const mode = sync ? 'synchronous throw' : 'promise rejection';
+
+  test(`SB10b: publish failure (${mode}) logs only allow-listed transport code`, async () => {
+    const err = Object.assign(new Error(`boom ${SECRET_MARKER}`), { code: 'ECONNREFUSED' });
+    err.stack = `stack ${SECRET_MARKER}`;
+    const r = await publishFailureLogs(err, { sync });
+    const publishLogs = r.logs.filter((a) => String(a[0]).includes('Publish failed'));
+    assert.equal(publishLogs.length, 2);
+    assert.match(String(publishLogs[0]![0]), /game:sbx.*ECONNREFUSED/);
+    assert.equal(JSON.stringify(r.logs).includes('hunter2'), false);
+    assert.equal(JSON.stringify(r.logs).includes('rnbqkbnr'), false);
+    assert.deepEqual(r.failed, ['game:sbx', 'game:sbx'], 'recovery callback still fires');
+    assert.equal(r.localDelivered, 2, 'local listeners keep running');
+  });
+
+  test(`SB10c: publish failure (${mode}) with untrusted code/message falls back to unknown`, async () => {
+    const err = Object.assign(new Error(`boom ${SECRET_MARKER}`), {
+      code: `CUSTOM_${SECRET_MARKER}`,
+      name: `Evil ${SECRET_MARKER}`,
+    });
+    const r = await publishFailureLogs(err, { sync });
+    const flat = JSON.stringify(r.logs);
+    assert.equal(flat.includes('hunter2'), false);
+    assert.equal(flat.includes('rnbqkbnr'), false);
+    assert.equal(flat.includes('CUSTOM_'), false);
+    assert.match(String(r.logs[0]![0]), /cause: unknown/);
+    assert.equal(r.logs.every((a) => a.length === 1 && typeof a[0] === 'string'), true);
+    assert.equal(r.failed.length, 2);
+  });
+}
 
 test('SB11: a ready() waiter on a pending SUBSCRIBE; reconnect replaces the entry; acknowledge the new SUBSCRIBE; the old waiter resolves', async () => {
   const broker = new FakeRedisBroker();

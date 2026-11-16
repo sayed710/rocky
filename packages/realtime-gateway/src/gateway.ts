@@ -59,6 +59,14 @@ interface RoomEntry {
   readonly room: Room;
   readonly unsubscribe: Unsubscribe;
   lastFullStateRevision?: number;
+  /**
+   * Move slots (ply) already fanned out to this room. An authority takeover replays the durable
+   * suffix, so a move this very room already received live can arrive again. Identities are the
+   * monotonic per-game move slot, not a high-water mark: every ply that was actually delivered is
+   * recorded individually, so an unseen historical ply in a gap still fans out. Allocated lazily and
+   * bounded by the moves played in this room's lifetime (the entry is discarded when the room empties).
+   */
+  seenMovePlies?: Set<number>;
 }
 
 /** How many times a join's readiness is routed before the failure is reported to the client. */
@@ -108,6 +116,7 @@ export class RealtimeGateway {
   private readonly loadedGames = new Set<string>();
   private readonly joinBuffers = new Map<string, Set<ServerMessage[]>>();
   private readonly observedRevision = new Map<string, number>();
+  private readonly observedAdjudications = new Set<string>();
   private readonly stateRefreshes = new Map<string, { again: boolean }>();
   private readonly unconfirmedSubscriptionsSet = new Set<string>();
   /**
@@ -158,7 +167,7 @@ export class RealtimeGateway {
   }
 
   /** Games with a room or a pending join buffer on this node. */
-  private localGameIds(): Set<string> {
+  localGameIds(): Set<string> {
     const ids = new Set(this.rooms.keys());
     for (const [gameId, buffers] of this.joinBuffers) {
       if (buffers.size > 0) ids.add(gameId);
@@ -244,6 +253,14 @@ export class RealtimeGateway {
     return this.observedRevision.get(gameId);
   }
 
+  /**
+   * Games with active local rooms observed in proving or stopped adjudication states.
+   * Ephemeral hint for recovery passes; cleared when room closes or adjudication releases.
+   */
+  watchedAdjudicatingGames(): string[] {
+    return [...this.observedAdjudications];
+  }
+
   private onMessage(session: Session, msg: ClientMessage): void {
     switch (msg.t) {
       case 'join':
@@ -311,6 +328,7 @@ export class RealtimeGateway {
           this.joinBuffers.delete(gameId);
           if (!this.rooms.has(gameId)) {
             this.observedRevision.delete(gameId);
+            this.observedAdjudications.delete(gameId);
             this.unconfirmedSubscriptionsSet.delete(gameId);
           }
         }
@@ -473,8 +491,13 @@ export class RealtimeGateway {
 
     session.conn.send({ t: 'joined', gameId, role, state });
     this.observe(gameId, { t: 'state', gameId, state });
+    const seenStateRevisions = new Set<number>();
     for (const msg of pending) {
       if (isNewerThanSnapshot(msg, state.stateRevision)) {
+        if (msg.t === 'state') {
+          if (seenStateRevisions.has(msg.state.stateRevision)) continue;
+          seenStateRevisions.add(msg.state.stateRevision);
+        }
         session.conn.send(msg);
       }
     }
@@ -633,6 +656,7 @@ export class RealtimeGateway {
         const buffers = this.joinBuffers.get(gameId);
         if (!buffers || buffers.size === 0) {
           this.observedRevision.delete(gameId);
+          this.observedAdjudications.delete(gameId);
           this.unconfirmedSubscriptionsSet.delete(gameId);
         }
       } else {
@@ -653,6 +677,15 @@ export class RealtimeGateway {
     };
     unsub = this.pubsub.subscribe(gameChannel(gameId), (rawMsg) => {
       const msg = rawMsg;
+      if (msg.t === 'move') {
+        // A takeover reload replays the durable move suffix through this same channel. Skip only a
+        // move slot this room already broadcast live; never-seen plies (including ones below the
+        // highest seen ply) still fan out. Non-move frames at the same revision are unaffected.
+        if (roomEntry.seenMovePlies?.has(msg.ply)) return;
+        if (room.size > 0) {
+          (roomEntry.seenMovePlies ??= new Set<number>()).add(msg.ply);
+        }
+      }
       if (isStateMessage(msg)) {
         const currentRev = this.observedRevision.get(gameId);
         if (currentRev !== undefined && msg.state.stateRevision < currentRev) {
@@ -681,13 +714,29 @@ export class RealtimeGateway {
     }
     if (rev !== undefined) {
       const current = this.observedRevision.get(gameId);
-      if (current === undefined || rev > current) {
-        this.observedRevision.set(gameId, rev);
+      if (current === undefined || rev >= current) {
+        if (current === undefined || rev > current) {
+          this.observedRevision.set(gameId, rev);
+        }
+        this.updateObservedAdjudication(gameId, msg);
       }
     }
   }
 
-  private sendStateToRoom(gameId: string, state: StateView): void {
+  private updateObservedAdjudication(gameId: string, msg: ServerMessage): void {
+    if (msg.t === 'state') {
+      if (msg.state.adjudication === 'proving' || msg.state.adjudication === 'stopped') {
+        this.observedAdjudications.add(gameId);
+      } else {
+        this.observedAdjudications.delete(gameId);
+      }
+    } else if (msg.t === 'ended') {
+      this.observedAdjudications.delete(gameId);
+    }
+  }
+
+  /** Send authoritative state to the local room and any pending join buffers. */
+  sendStateToRoom(gameId: string, state: StateView): void {
     const highest = this.observedRevision.get(gameId) ?? -1;
     if (state.stateRevision >= highest) {
       this.deliverState(gameId, state);

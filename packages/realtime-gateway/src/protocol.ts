@@ -86,6 +86,12 @@ export interface StateView {
       };
   /** The side with an open draw offer, if any. */
   readonly drawOffer: Color | null;
+  /**
+   * Present only for an adjudicated game that is not running normally (Issue #124): `proving` while a
+   * command awaits its proof (nothing may be played), `stopped` while both clocks are stopped after a
+   * settlement and before the server releases them. Absent otherwise, so legacy views are unchanged.
+   */
+  readonly adjudication?: 'proving' | 'stopped';
   readonly moves: readonly MoveView[];
   /** Legal destinations for the side to move (authoritative; empty once over). */
   readonly legalMoves: LegalMoves;
